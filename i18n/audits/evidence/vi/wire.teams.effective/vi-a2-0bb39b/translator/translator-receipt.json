@@ -1,0 +1,228 @@
+{
+  "locale": "vi",
+  "namespace": "wire.teams.effective",
+  "status": "translated",
+  "audited": false,
+  "key_count": 9,
+  "created_at": "2026-11-19T19:06:14.201363+00:00",
+  "frozen_commit": "e70bc818b8553dca1fad007705257817be49ee37",
+  "agent": {
+    "name": "i18n-translator",
+    "task": "effective-reasons-vi",
+    "session": "bdce0d00e792",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session system runtime model declaration",
+    "fallback_used": false,
+    "translation_method": "Direct LLM reasoning; no translation service/API/SDK"
+  },
+  "input_hashes": [
+    {
+      "path": "local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    {
+      "path": "local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  ],
+  "output": {
+    "path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/wire.teams.effective.json",
+    "sha256": "4d510633cda89708fa842a0812dc9fff2836383e93e1322c6a6d532cf52cc057"
+  },
+  "checks": {
+    "kind": "mechanical_translation_checks_not_audit",
+    "status": "translated",
+    "key_count": 9,
+    "same_key_order": true,
+    "exact_placeholders": true,
+    "technical_tokens": true,
+    "NFC": true,
+    "bidi_controls": 0,
+    "catalogue_validator_exit_code": 0,
+    "rows": [
+      {
+        "key": "wire.teams.effective.team_missing",
+        "arguments": [
+          [
+            "role",
+            "simple"
+          ]
+        ],
+        "placeholder_sequence": [
+          "{role}"
+        ],
+        "plural_selectors": [],
+        "NFC": true
+      },
+      {
+        "key": "wire.teams.effective.registry_unreadable",
+        "arguments": [],
+        "placeholder_sequence": [],
+        "plural_selectors": [],
+        "NFC": true
+      },
+      {
+        "key": "wire.teams.effective.config_unreadable",
+        "arguments": [],
+        "placeholder_sequence": [],
+        "plural_selectors": [],
+        "NFC": true
+      },
+      {
+        "key": "wire.teams.effective.tier_invalid_value",
+        "arguments": [
+          [
+            "tier",
+            "simple"
+          ]
+        ],
+        "placeholder_sequence": [
+          "{tier}"
+        ],
+        "plural_selectors": [],
+        "NFC": true
+      },
+      {
+        "key": "wire.teams.effective.tier_invalid_mapping",
+        "arguments": [
+          [
+            "tier",
+            "simple"
+          ]
+        ],
+        "placeholder_sequence": [
+          "{tier}"
+        ],
+        "plural_selectors": [],
+        "NFC": true
+      },
+      {
+        "key": "wire.teams.effective.tier_unconfigured",
+        "arguments": [
+          [
+            "tier",
+            "simple"
+          ]
+        ],
+        "placeholder_sequence": [
+          "{tier}"
+        ],
+        "plural_selectors": [],
+        "NFC": true
+      },
+      {
+        "key": "wire.teams.effective.tier_invalid_selector",
+        "arguments": [
+          [
+            "tier",
+            "simple"
+          ]
+        ],
+        "placeholder_sequence": [
+          "{tier}"
+        ],
+        "plural_selectors": [],
+        "NFC": true
+      },
+      {
+        "key": "wire.teams.effective.model_unresolvable",
+        "arguments": [
+          [
+            "selector",
+            "simple"
+          ]
+        ],
+        "placeholder_sequence": [
+          "{selector}"
+        ],
+        "plural_selectors": [],
+        "NFC": true
+      },
+      {
+        "key": "wire.teams.effective.unavailable",
+        "arguments": [],
+        "placeholder_sequence": [],
+        "plural_selectors": [],
+        "NFC": true
+      }
+    ]
+  },
+  "validator": {
+    "command": "/Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/validate.py",
+    "scope": "Repo check.main([\"--catalogues-only\"]) against scratch en/context/vi namespace fixture via patched catalogue_root; no repository edits. Not a whole-repository gate.",
+    "exit_code": 0,
+    "actual_stdout": "check.py: catalogue checks: 0 problem(s)\n9/9 keys: exact key order, argument types and placeholder sequence; technical tokens preserved; NFC; no bidi controls\nNo plural/select messages; vi CLDR category is other only. No render or independent audit attempted.\n"
+  },
+  "choices": {
+    "register": "Terse, direct diagnostic prose; no added please, no routine pronouns.",
+    "agent": "tác nhân, consistent with existing vi/wire.errors.agents.json",
+    "model": "mô hình; provider prose: nhà cung cấp; reasoning effort: mức suy luận, consistent with vi/wire.settings.json",
+    "mapping": "đối tượng cấu hình; denotes the configuration object, not a model-name string.",
+    "selector": "chuỗi định danh mô hình; distinguishes the configured selector string from a UI selection widget.",
+    "optional_effort": "model is required; effort can additionally be set. Both literal config keys are preserved.",
+    "role": "{role} is the opaque team name, not a translated role.",
+    "CLDR": "vi uses other only. No source or target messages contain plural/select branches; none added.",
+    "bidi": "Vietnamese is LTR; preserve logical order and literal Latin technical tokens. No bidi controls inserted.",
+    "normalization": "All values verified NFC.",
+    "width": "Context explicitly has no fixed cell-width limit; natural wrapping. No truncation or width exception."
+  },
+  "glossary_proposals": [
+    {
+      "term": "agent registry",
+      "vi": "danh mục tác nhân",
+      "reason": "Registry is the collection of named definitions, not a user registration flow."
+    },
+    {
+      "term": "model selector",
+      "vi": "chuỗi định danh mô hình",
+      "reason": "Opaque provider/model configuration string; not a UI widget."
+    },
+    {
+      "term": "model mapping",
+      "vi": "đối tượng cấu hình mô hình",
+      "reason": "Explicit configuration object; avoids ambiguous literal mapping terminology."
+    }
+  ],
+  "ambiguities": [
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "decision": "Generic read failure, without invented corrupted-file diagnosis."
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "decision": "Không xác định được reports inability to resolve the model, without implying network failure."
+    }
+  ],
+  "not_performed": [
+    "Independent audit",
+    "Rendered/client proof",
+    "Target self-audit",
+    "Repository changes, ledger updates, generation, build, installation, PR or commit"
+  ],
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/wire.teams.effective.json",
+      "sha256": "4d510633cda89708fa842a0812dc9fff2836383e93e1322c6a6d532cf52cc057"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/mechanical-checks.json",
+      "sha256": "f86802f318c71a7fdd8eca4d3289fa8c6dd1b9980a0568f27295696618abdec7"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/validator.log",
+      "sha256": "8b7430e77bf6c890acaaf27d0eb61905165cd42eb5b0b8a7dc60ba2efa5e1041"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/validate.py",
+      "sha256": "bd075639ed8a6009d71e3501bca2335681915ee1113a2b30ae3b0e2b74179a84"
+    }
+  ]
+}

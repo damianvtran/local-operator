@@ -95,14 +95,114 @@ on:
 # false` matters most here: a queued gate run must never be evicted by the
 # nightly schedule or by a later merge onto main — an evicted run reports no
 # verdict, and the PR's required check would sit "Expected".
+#
+# THE NIGHTLY HAS ITS OWN GROUP (GH #4074). It runs on refs/heads/main, so it
+# used to share `full-suite-main` with push runs, where a newer push could
+# replace it while pending (5 of 8 nightly runs in 2026-11-08..15 ended
+# cancelled; the canceller is not named in run metadata, so this is the
+# plausible cause, not a proven one). The nightly is the full-coverage
+# backstop for the affected-only/superseded savings below, so it must never be
+# coalesced. Cost: at most one extra concurrent run per day.
 concurrency:
-  group: ${{ github.ref == 'refs/heads/main' && 'full-suite-main' || format('full-suite-{0}', github.ref) }}
+  group: >-
+    ${{ github.event_name == 'schedule' && 'full-suite-nightly'
+    || github.ref == 'refs/heads/main' && 'full-suite-main'
+    || format('full-suite-{0}', github.ref) }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  # THE COST GATE (GH #4074): runs before every heavy job and decides, by
+  # event, whether the full suite may spend ~380 runner-minutes. Logic and the
+  # fail-closed rules live in scripts/fast_gate_check.py; read its docstring.
+  # In short: a labeled PR head or a dispatched ref needs a GREEN fast `CI Gate`
+  # on that exact head, and a push to main yields to a newer tested main tip.
+  # schedule is never gated: the nightly and every un-superseded main push
+  # still run EVERY test, so skipped work here is only ever a redundant run.
+  #
+  # The helper is downloaded from a TRUSTED tree rather than checked out from
+  # the PR merge ref, so a PR cannot rewrite its own gate while holding the
+  # token. For a PR that tree is `needs.changes.outputs.gate_base`: the live
+  # main tip `changes` resolved and the heavy jobs will actually test against
+  # (NOT `pull_request.base.sha`, which is the stale base the PR was opened or
+  # last updated on and may predate the helper). `changes` runs no heavy tested
+  # code: it checks out, proves the merge base and classifies, and does not
+  # depend on this job (that would be a cycle). Other events use the run's own
+  # SHA. If the trusted tree has no helper the download fails and the job goes
+  # RED: fail closed, with no inline fallback and no future allowance.
+  #
+  # ROLLOUT (two steps, no workflow flag in between): (1) a tests-only PR adds
+  # scripts/fast_gate_check.py to main; (2) only then does a PR carrying this
+  # workflow pass its own gate, because its gate_base now contains the helper.
+  #
+  # Every heavy job below needs this job AND tests BOTH `result == 'success'`
+  # and `outputs.ok == 'true'`: their `!cancelled()` overrides the implicit
+  # success() of `needs`, so a failed precondition would NOT stop them without
+  # the explicit tests, and `ok` alone could survive a late post-step failure.
+  # This is a COST GATE (scripts/ci_scope.py COST_GATES), deliberately
+  # FAIL-CLOSED, unlike the fail-open scope flags of `changes`.
+  precondition:
+    needs: [changes]
+    runs-on: ubuntu-latest
+    # Settle (300 s) plus bounded tag/API lookups (120 s tag budget) on a push;
+    # PR/dispatch paths finish in seconds.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      ok: ${{ steps.gate.outputs.ok }}
+      superseded: ${{ steps.gate.outputs.superseded }}
+    steps:
+      - name: Fetch the cost-gate helper from a trusted tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_SHA: ${{ github.event_name == 'pull_request' && needs.changes.outputs.gate_base || github.sha }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TRUSTED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error title=Fast-CI precondition::no trusted 40-hex commit to fetch the helper from (gate_base unresolved); failing closed"
+            exit 1
+          fi
+          curl -fsS --retry 3 --max-time 30 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github.raw" \
+            -o "$RUNNER_TEMP/fast_gate_check.py" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/scripts/fast_gate_check.py?ref=$TRUSTED_SHA" \
+            || { echo "::error title=Fast-CI precondition::scripts/fast_gate_check.py is not at $TRUSTED_SHA; failing closed"; exit 1; }
+          # Provenance for the run log: the full trusted commit and the git
+          # blob id of the helper that decided (sha1 of "blob <n>\0<bytes>"),
+          # comparable with `git rev-parse <commit>:scripts/fast_gate_check.py`.
+          blob="$(python3 - "$RUNNER_TEMP/fast_gate_check.py" <<'PY'
+          import hashlib, sys
+          data = open(sys.argv[1], "rb").read()
+          print(hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest())
+          PY
+          )"
+          {
+            echo "### Fast-CI helper provenance"
+            echo
+            echo "trusted commit: \`$TRUSTED_SHA\`  helper blob: \`$blob\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "fast-gate helper trusted=$TRUSTED_SHA blob=$blob"
+
+      - name: Decide whether the full suite may run
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          python3 "$RUNNER_TEMP/fast_gate_check.py" \
+            --event "$EVENT" --repo "$GITHUB_REPOSITORY" \
+            --pr "${PR_NUMBER:-0}" --head-sha "$PR_HEAD_SHA" --head-repo "$PR_HEAD_REPO" \
+            --ref "$GITHUB_REF" --ref-name "$GITHUB_REF_NAME" --sha "$GITHUB_SHA" \
+            --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
   # Same classifier job as ci.yml (kept identical; a hygiene test compares the
   # two). Off `pull_request` every flag is true, so a push/schedule/dispatch
   # run never skips anything. A labeled PR is a real PR diff, and classifying
@@ -159,6 +259,11 @@ jobs:
       server: ${{ steps.classify.outputs.server }}
       i18n: ${{ steps.classify.outputs.i18n }}
       gate_base: ${{ steps.gate_base.outputs.gate_base }}
+      lane: ${{ steps.lane.outputs.lane }}
+      lane_targets: ${{ steps.lane.outputs.targets }}
+      lane_reason: ${{ steps.lane.outputs.reason }}
+      lane_planner_base: ${{ steps.lane.outputs.planner_base }}
+      lane_planner_blob: ${{ steps.lane.outputs.planner_blob }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -183,6 +288,40 @@ jobs:
         with:
           python-version: "3.12"
 
+      # THE AFFECTED LANE (#4074). Plans whether this PR's diff is the narrow,
+      # proven shape (1..10 in-place body edits of existing, self-contained unit
+      # test modules) that may run just those files instead of the 6x2 shards.
+      # Anything else, any error, and every non-PR event is `full`: the empty or
+      # unknown value is also FULL downstream, so a planner that dies can only
+      # cost time, never skip coverage. Like the classifier, the planner and the
+      # two modules it imports come from the TESTED BASE (HEAD^1 after `apply`),
+      # never from the PR: a PR cannot grant itself the lane, and a base without
+      # the planner (the PR that introduces it) gets the full suite. The
+      # ci.yml-parity test strips exactly this step and its `lane_*` outputs.
+      - name: Plan the affected lane
+        id: lane
+        run: |
+          set -uo pipefail
+          base="$(git rev-parse HEAD^1 2>/dev/null || true)"
+          if [ -n "$base" ] && git cat-file -e "$base:scripts/fixture_lane.py" 2>/dev/null; then
+            plan="$RUNNER_TEMP/lane-planner"
+            mkdir -p "$plan"
+            for f in fixture_lane ci_scope affected_tests; do
+              git show "$base:scripts/$f.py" > "$plan/$f.py"
+            done
+            blob="$(git rev-parse "$base:scripts/fixture_lane.py")"
+            python "$plan/fixture_lane.py" --event "$GITHUB_EVENT_NAME" \
+              --base "$base" --head HEAD --root "$GITHUB_WORKSPACE" \
+              --planner-blob "$blob" \
+              --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY" \
+              || echo "lane=full" >> "$GITHUB_OUTPUT"
+          else
+            echo "lane=full" >> "$GITHUB_OUTPUT"
+            echo "reason=no planner at the tested base" >> "$GITHUB_OUTPUT"
+            echo "### Test lane: FULL" >> "$GITHUB_STEP_SUMMARY"
+            echo "No planner at the tested base ($base): running the full suite." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Classify the change
         id: classify
         # No `pip install`: the classifier imports stdlib only, so a broken
@@ -205,9 +344,11 @@ jobs:
           fi
 
   test:
-    needs: [changes]
+    needs: [changes, precondition]
     if: >-
       !cancelled() &&
+      needs.precondition.result == 'success' &&
+      needs.precondition.outputs.ok == 'true' &&
       needs.changes.outputs.unit != 'false'
     runs-on: ubuntu-latest
     # Keep six shards within the 20-job concurrency budget. PR #643 job
@@ -301,16 +442,27 @@ jobs:
     # last-leg-wins rule for matrix outputs cannot pick a different base.
     outputs:
       gate_base: ${{ needs.changes.outputs.gate_base }}
+      lane: ${{ needs.changes.outputs.lane }}
     strategy:
-      fail-fast: false
+      # Stop burning sibling PR shards once one fails; keep false on push,
+      # schedule, and workflow_dispatch so main/nightly/dispatches collect the
+      # full failure picture and complete junit timing artifacts across shards.
+      fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        # BOTH ends of `requires-python`, always: this workflow runs only on
-        # `main` (post-merge, nightly, dispatch), so the version-class
-        # regressions a 3.12-only PR run cannot see (a 3.13-only deterministic
-        # failure was caught exactly this way) are caught here.
-        python-version: ["3.12", "3.13"]
+        # PR merge gates run Python 3.13 only (the strict upper version where
+        # 3.13-only regressions surface; Python 3.12 compatibility is already
+        # verified on every PR push by ci.yml `guards`/`install-smoke` and
+        # before every release by release-gate.yml). Main pushes, nightly
+        # schedules, and workflow_dispatch runs keep BOTH ends of
+        # `requires-python` (["3.12", "3.13"]).
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.13"]' || '["3.12", "3.13"]') }}
         shard: [0, 1, 2, 3, 4, 5]
     env:
+      # AFFECTED LANE (#4074): the six-shard matrix stays static, so on an
+      # `affected` run the legs other than shard 0 stay in the matrix but every
+      # step except the checkout is skipped (`env.LEG_IDLE`). Only an exact
+      # 'affected' idles legs; empty/unknown/full runs every shard as before.
+      LEG_IDLE: ${{ needs.changes.outputs.lane == 'affected' && matrix.shard != 0 }}
       # Seconds of no completed test before the controller reports which tests
       # are still in flight, and the per-item bound after which a worker dumps
       # every thread's stacks. Four shards have been cancelled at the 20-minute
@@ -358,6 +510,7 @@ jobs:
         run: python3 scripts/gate_merge_base.py apply
 
       - name: Set up Python ${{ matrix.python-version }}
+        if: env.LEG_IDLE != 'true'
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
@@ -365,11 +518,13 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
+        if: env.LEG_IDLE != 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
       - name: Install ripgrep
+        if: env.LEG_IDLE != 'true'
         # The ubuntu runner image ships no `rg`, and grep's real-ripgrep tests
         # (`_grep_on_engine(..., "rg", ...)` in tests/unit/tools/test_builtin_tools.py)
         # SKIP without it, so the engine most users run went untested in CI while
@@ -395,6 +550,7 @@ jobs:
         run: bash scripts/ci_install_ripgrep.sh
 
       - name: Partition test suite
+        if: env.LEG_IDLE != 'true'
         # Balanced by MEASURED per-file duration (tests/durations.json), not by
         # sort position. The old `i % 5` split balanced the file COUNT, which in
         # a suite whose per-file cost spans four orders of magnitude produced a
@@ -412,11 +568,37 @@ jobs:
         # before pytest starts. The full reasoning, the determinism argument,
         # and why a file missing from the manifest still runs are in
         # scripts/shard_tests.py.
+        #
+        # AFFECTED LANE (#4074): shard 0 of an `affected` run writes the
+        # planner's exact target files instead of its slice. The targets then go
+        # through the SAME pytest step, flags, timeouts and junit as a full
+        # shard; zero collected files is pytest exit 5, which fails the leg.
+        env:
+          LANE: ${{ needs.changes.outputs.lane }}
+          LANE_TARGETS: ${{ needs.changes.outputs.lane_targets }}
         run: |
-          python scripts/shard_tests.py \
-            --shard ${{ matrix.shard }} --total 6 --out shard_tests.txt
+          if [ "$LANE" = affected ]; then
+            # A non-empty list of .py node ids is REQUIRED here: the test runner
+            # given no path arguments collects the WHOLE suite (exit 5 only when
+            # nothing is found), so an empty list would silently run
+            # everything on one leg under load instead of failing.
+            python3 -c '
+          import json, os, re, sys
+          t = json.loads(os.environ["LANE_TARGETS"])
+          ok = isinstance(t, list) and t and all(
+              isinstance(x, str) and re.fullmatch(r"tests/unit/[\w./\-]+\.py(::\w+)?", x) for x in t)
+          if not ok:
+              sys.exit("affected lane needs a non-empty list of unit test node ids")
+          print("\n".join(t))' > shard_tests.txt
+            [ -s shard_tests.txt ] || { echo "::error::affected lane produced no targets"; exit 1; }
+            cat shard_tests.txt
+          else
+            python scripts/shard_tests.py \
+              --shard ${{ matrix.shard }} --total 6 --out shard_tests.txt
+          fi
 
       - name: Run test shard with coverage
+        if: env.LEG_IDLE != 'true'
         id: shard_pytest
         # `LOCAL_OPERATOR_SHARD_MEMORY_DIR` is where `tests/shard_memory_dump.py`
         # writes an ENOMEM snapshot when a cell dies of `OSError: [Errno 12]`.
@@ -493,7 +675,14 @@ jobs:
         # COVERAGE: the exact source of the ordinary run, appended to its data.
         # A bare `--cov` would reset the selection; `--cov-fail-under=0` and the
         # empty report keep the gate where it already is (the combine job).
-        if: matrix.shard == 0
+        #
+        # AFFECTED LANE (#4074): these six cases are unrelated to the planner's
+        # targets and cost up to 7 minutes, so an exact 'affected' skips them
+        # (the `serial_proof` step is already skipped when this one is). Empty/
+        # unknown/full lanes keep running them exactly as before. The ordinary
+        # step's `--deselect` still applies, so the affected targets never run
+        # a serial control either.
+        if: matrix.shard == 0 && needs.changes.outputs.lane != 'affected'
         timeout-minutes: 7
         # Same dump directory as the ordinary shard run, so an ENOMEM in this
         # -n0 stage lands in the one artifact the shard job uploads. `runner` is
@@ -519,6 +708,7 @@ jobs:
             --ids "$SERIAL_CONTROLS"
 
       - name: Finalise shard coverage data
+        if: env.LEG_IDLE != 'true'
         # AFTER the serial step: the rename that used to end the ordinary run.
         # Default `success()`, as before: a failed shard uploads no coverage and
         # the combine job is skipped, exactly as when pytest alone failed.
@@ -594,7 +784,7 @@ jobs:
         # number is in both: a re-run must be distinguishable from the run it
         # replaces, because the memory reading of one attempt is not evidence
         # about another.
-        if: always()
+        if: always() && env.LEG_IDLE != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: shard-memory-${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
@@ -604,7 +794,7 @@ jobs:
 
       - name: Stage current-invocation timeout files
         id: stage_stall
-        if: always()
+        if: always() && env.LEG_IDLE != 'true'
         env:
           LOCAL_OPERATOR_SHARD_STALL_REGISTRY: ${{ steps.shard_pytest.outputs.stall_registry }}
           LOCAL_OPERATOR_SHARD_STALL_INVOCATION: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}-${{ matrix.shard }}
@@ -626,7 +816,7 @@ jobs:
           echo "artifact=$staging/artifact" >> "$GITHUB_OUTPUT"
 
       - name: Upload current-invocation timeout files
-        if: always() && steps.stage_stall.outcome == 'success' && steps.stage_stall.outputs.artifact != ''
+        if: always() && env.LEG_IDLE != 'true' && steps.stage_stall.outcome == 'success' && steps.stage_stall.outputs.artifact != ''
         uses: actions/upload-artifact@v7
         with:
           name: shard-timeout-files-${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
@@ -651,11 +841,12 @@ jobs:
         # one real timeout buried among them. The module's FIRED_MARKER filter
         # is the single source of truth for "this is evidence", so the step asks
         # for the filtered report instead of re-implementing the rule in YAML.
-        if: always()
+        if: always() && env.LEG_IDLE != 'true'
         run: |
           python -m tests.shard_stall_watchdog "${TMPDIR:-/tmp}/lo-shard-stall"
 
       - name: Upload shard coverage data
+        if: env.LEG_IDLE != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: coverage-data-${{ matrix.python-version }}-${{ matrix.shard }}
@@ -669,14 +860,23 @@ jobs:
   # exactly right here: a docs-only PR must not run a coverage combine over
   # zero shard artifacts. An `always()` would do precisely that and go red on a
   # PR that changed nothing the test job reads.
+  #
+  # AFFECTED LANE (#4074): the one `if:` it has. Combining coverage over the
+  # single shard-0 artifact per Python would fail `--fail-under=80` on a lane
+  # that deliberately ran a handful of files, and publishing that partial
+  # figure as the suite's coverage would be dishonest. Only an exact
+  # 'affected' skips; empty/unknown/full combines every shard receipt for each
+  # Python in the active matrix (3.13 on pull_request; 3.12 + 3.13 on main,
+  # nightly, and workflow_dispatch).
   coverage-report:
+    if: needs.test.outputs.lane != 'affected'
     runs-on: ubuntu-latest
     needs: test
     timeout-minutes: 10
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.13"]' || '["3.12", "3.13"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -725,7 +925,7 @@ jobs:
     # Moved from ci.yml with `needs: [changes, lint, type-check]`; lint and
     # type-check stay on PR CI and do not exist in this workflow, and every
     # commit reaching `main` already passed them on its PR.
-    needs: [changes]
+    needs: [changes, precondition]
     # `!cancelled()` is required, not decoration: `needs` skips a job when a
     # needed job was SKIPPED, and GitHub applies an implicit `success()` to any
     # `if` that contains no status-check function. Without it, lint's deliberate
@@ -759,14 +959,19 @@ jobs:
     # (boot, the write-turn artifacts, the transcript replay and the
     # interactivity assertion) and it is the faster, always-available runner.
     #
-    # `fail-fast: false` so a macOS queue delay or a Linux-only regression each
-    # report on their own rather than cancelling the other leg's evidence.
+    # On main, nightly, and workflow_dispatch runs, `fail-fast: false` ensures
+    # a macOS queue delay or a Linux-only regression each report on their own
+    # rather than cancelling the other leg's evidence; PR merge gates enable
+    # `fail-fast` so a red Linux shard stops burning its sibling.
     #
     # TWO axes, and each one answers a different requirement.
     #
     # `os` is the guard's own requirement: macOS is the only platform where the
     # #401 event-loop freeze can go red at all (see the long note above), so
-    # dropping the leg disarms the stage. Both OSes run every shard.
+    # main pushes, nightly schedules, and workflow_dispatch runs keep BOTH
+    # `ubuntu-latest` and `macos-latest` across every shard. Pull-request merge
+    # gates run `ubuntu-latest` only to eliminate the 10x macOS billing
+    # multiplier and the 5-job account-wide macOS concurrency bottleneck on PRs.
     #
     # `shard` is how this stage stopped being the longest job in the run. The
     # whole tree ran serially on each leg — `-n0` is required (a hang cannot be
@@ -826,9 +1031,18 @@ jobs:
     # does. The coverage is unchanged either way: the same e2e tree, the same
     # two platforms, the same test files -- only the partition differs.
     strategy:
-      fail-fast: false
+      # Fail fast on PR merge gates to avoid burning the sibling shard after
+      # a failure; keep false on push/schedule/workflow_dispatch so Linux and
+      # macOS each report their own evidence independently.
+      fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # PR merge gates run ubuntu-latest only (10x macOS cost multiplier +
+        # 5-job account-wide macOS concurrency cap that starved PR queues).
+        # Main pushes, nightly schedules, and workflow_dispatch runs keep BOTH
+        # ["ubuntu-latest", "macos-latest"] so the Darwin #401 freeze guard
+        # runs post-merge, nightly, and on-demand via workflow_dispatch
+        # (including WIDE: branch dispatches).
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest"]') }}
         shard: [0, 1]
     runs-on: ${{ matrix.os }}
     # NO fork gate, deliberately, unlike cli-sanity/server-sanity below. Those
@@ -837,10 +1051,8 @@ jobs:
     # — so it runs on every pull request whose diff is NOT INERT, forks included.
     # It still carries no fork gate; what changed with scope gating is only that
     # a diff touching nothing but `docs/**` (or the mobile-web subproject) does
-    # not run it — and because the matrix includes macOS, a fork contributor
-    # reintroducing the deadlock sees it go red on their own PR on the macOS
-    # leg. Both halves are load-bearing: a secrets-gated job could not reach
-    # forks at all, and a Linux-only job would reach them and report green.
+    # not run it. PR merge gates run ubuntu-latest across both shards; macOS
+    # runs post-merge on main, nightly, and via workflow_dispatch.
     #
     # Headless in the sense this job depends on: no display server, no window
     # and no `xvfb`. Most of the stage drives Textual's `run_test()` pilot into
@@ -874,6 +1086,8 @@ jobs:
     # broken it.
     if: >-
       !cancelled() &&
+      needs.precondition.result == 'success' &&
+      needs.precondition.outputs.ok == 'true' &&
       needs.changes.outputs.tui != 'false'
     # Generous relative to the ~11 s the stage takes when healthy (~14 s on a
     # macOS runner, which is slower and queues longer). The failure mode under
@@ -907,7 +1121,13 @@ jobs:
     # weighed at its measured 22.714s, so the guard's minimum is
     # ceil((1264.919 + 60)/60) = 23 minutes, leaving +55.081s. Still below
     # the unit shard's projection, so the freeze guard keeps landing first.
-    timeout-minutes: 23
+    # 23 -> 24 on 2026-11-20: #4307 added the voice take-binding E2E file,
+    # charged the manifest's existing 50.058s fallback. On main 598880786039,
+    # the unchanged two-shard partition projects 1339.975s / 1339.328s.
+    # ceil((1339.975 + 60 overhead)/60) = 24 minutes: 1380s for tests,
+    # leaving +40.025s. Keep the measured weights and runner count unchanged;
+    # the old 1320s test budget could not fit the scheduled projection.
+    timeout-minutes: 24
     steps:
       - uses: actions/checkout@v7
       # Both platforms test the same fresh merge as the unit shards.
@@ -1013,7 +1233,15 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: junit-timings-e2e-${{ matrix.os }}-${{ matrix.shard }}
-          path: junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
+          # Signal cases run in this job, not `test`: jobs have separate working
+          # trees, so a unit-job allowlist cannot collect their shutdown witnesses.
+          # Preserve only diagnostic JSON, bounded stderr and the owned child's
+          # complete stall dump staged before pytest removes its temporary config.
+          path: |
+            junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
+            test-artifacts/process-proof/*.json
+            test-artifacts/signal-shutdown/*/runtime-stderr-*.stderr
+            test-artifacts/signal-shutdown/*/runtime-stall-*.log
           # 7 days, not 1: same post-hoc evidence rationale as the unit-shard
           # junit artifact (PR #2470: expired XML forced a full re-run).
           retention-days: 7
@@ -1079,8 +1307,15 @@ jobs:
   # go red, and still passes the gate.
   merge-gate:
     name: Merge gate (full suite)
-    if: always()
+    # `always()` so a red precondition still REPORTS red. The one exception is a
+    # push to main that a newer tip superseded (`superseded` is only ever true
+    # there): that SHA gets NO verdict, shown grey/skipped with the summary
+    # `SUPERSEDED by <tip>` from the precondition, rather than a green nobody
+    # earned. A main push SHA is not a PR required-check subject, so grey cannot
+    # satisfy a PR's gate. Data-gated, not event-gated (see the hygiene test).
+    if: always() && needs.precondition.outputs.superseded != 'true'
     needs:
+      - precondition
       - changes
       - test
       - coverage-report
@@ -1088,6 +1323,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # AFFECTED LANE (#4074): say which lane produced this verdict, and refuse
+      # a green `affected` verdict that is not backed by the work it names. The
+      # check name stays `Merge gate (full suite)` (it is the pinned required
+      # check); an `affected` pass is labelled here, in the summary, because the
+      # workflow's `run-name` cannot read job outputs. The lane value is
+      # untrusted text: it is only compared, never executed.
+      - name: Report the test lane and verify an affected pass
+        env:
+          LANE: ${{ needs.changes.outputs.lane }}
+          UNIT: ${{ needs.changes.outputs.unit }}
+          TARGETS: ${{ needs.changes.outputs.lane_targets }}
+          REASON: ${{ needs.changes.outputs.lane_reason }}
+          PLANNER_BASE: ${{ needs.changes.outputs.lane_planner_base }}
+          PLANNER_BLOB: ${{ needs.changes.outputs.lane_planner_blob }}
+          TEST_RESULT: ${{ needs.test.result }}
+          COVERAGE_RESULT: ${{ needs.coverage-report.result }}
+        run: |
+          set -euo pipefail
+          if [ "$LANE" != affected ]; then
+            echo "lane=${LANE:-unknown} -> treated as FULL; every needed job was judged above"
+            echo "### Merge gate: FULL suite (lane=${LANE:-unknown})" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "### Merge gate: AFFECTED lane (not the full suite)"
+            echo "- reason: $REASON"
+            echo "- targets: $TARGETS"
+            echo "- Python versions: the configured matrix; shards run: 0 (shards 1-5 idle by design)"
+            echo "- planner base: $PLANNER_BASE blob: $PLANNER_BLOB"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # An affected lane that ran no tests is not a pass. `unit == false`
+          # (nothing to run) is the one legitimate skip.
+          if [ "$UNIT" != false ] && [ "$TEST_RESULT" != success ]; then
+            echo "::error title=Merge gate (full suite)::lane=affected but test=$TEST_RESULT"
+            exit 1
+          fi
+          if [ "$COVERAGE_RESULT" != skipped ]; then
+            echo "::error title=Merge gate (full suite)::lane=affected but coverage-report=$COVERAGE_RESULT (expected skipped)"
+            exit 1
+          fi
+
       # FAIL CLOSED: an ALLOWLIST of passing results, never a denylist of bad
       # ones. A need passes only when its result is exactly `success` or
       # `skipped` (skipped stays a pass: path-filtered jobs legitimately skip on
@@ -1099,13 +1375,29 @@ jobs:
       # (PR #3804: `CI Gate` job 130798073631, `Merge gate (full suite)` job
       # 130788458667). tests/unit/test_ci_hygiene.py runs this exact step
       # script against such a NEEDS payload.
+      #
+      # PRECONDITION NOT MET is named separately (GH #4194/#4215/#4145): a red
+      # cost gate skips every heavy job, so this check goes red with NO test
+      # having run. Before, that red read exactly like a failed suite; 21 of 92
+      # red gate runs 2026-11-15..18 were a label armed while ci.yml was still
+      # queued. The verdict is unchanged (still exit 1, still fail-closed);
+      # only the words differ so a reader re-arms instead of hunting a test.
       - name: Fail unless every needed job succeeded or was skipped
         env:
           NEEDS: ${{ toJSON(needs) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"')"
+          if [ "$(echo "$NEEDS" | jq -r '.precondition.result // "absent"')" = failure ]; then
+            msg="PRECONDITION NOT MET (not a test failure): fast CI (ci.yml CI Gate) was not green on this head when the gate armed, so the full suite did not run; the precondition job's FAST-CI line says why. Next: after CI Gate is green: make merge-gate PR=${PR_NUMBER:-<n>}"
+            echo "::error title=Merge gate: precondition not met::$msg"
+            echo "### Merge gate: $msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
+          # `precondition` is the cost gate, not a path-filtered job: only
+          # `success` is a pass for it. A skipped one would leave every heavy
+          # job skipped (`ok` unset) and the gate green with nothing run.
+          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select((.value.result != "success" and .value.result != "skipped") or (.key == "precondition" and .value.result != "success")) | "\(.key)=\(.value.result)"')"
           if [ -n "$bad" ]; then
             echo "::error title=Merge gate (full suite)::needed jobs not success or skipped: $(echo "$bad" | tr '\n' ' ')"
             exit 1

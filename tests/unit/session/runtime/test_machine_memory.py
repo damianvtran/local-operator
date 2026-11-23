@@ -836,3 +836,47 @@ def test_the_default_identity_probe_never_signals_a_process() -> None:
 
     source = inspect.getsource(mm._default_identity_probe)
     assert "os.kill" not in source.replace("``os.kill(pid, 0)``", "")
+
+
+def _act_runner() -> Any:
+    return _fake_runner(
+        topology=_table([(_ROOT, 1), (9900002, _ROOT), (9900003, 9900002)]),
+        rss={_ROOT: 50, 9900002: 500, 9900003: 600},
+    )
+
+
+def test_act_parks_idle_sessions_before_it_ends_a_fragment() -> None:
+    """PARK BEFORE KILL (2026-11-12): a park withholds THIS pass's kill."""
+    killer = _Killer()
+    reasons: list[str] = []
+    report = _pass(
+        runner=_act_runner(), kill=killer, relieve=lambda reason: reasons.append(reason) or 2
+    )
+    assert report.state == "act"
+    assert report.withheld_cause == "parked" and report.parked == 2
+    assert killer.pids == []
+    assert reasons and "parked 2 idle session(s) first" in report.summary()
+
+
+def test_act_kills_as_before_when_nothing_could_be_parked() -> None:
+    killer = _Killer()
+    report = _pass(runner=_act_runner(), kill=killer, relieve=lambda _reason: 0)
+    assert killer.pids == [9900002]
+    assert report.killed is not None
+
+
+def test_a_raising_park_rung_falls_through_to_the_kill() -> None:
+    killer = _Killer()
+
+    def _boom(_reason: str) -> int:
+        raise RuntimeError("park rung broke")
+
+    report = _pass(runner=_act_runner(), kill=killer, relieve=_boom)
+    assert killer.pids == [9900002] and report.killed is not None
+
+
+def test_a_measuring_pass_never_parks() -> None:
+    called: list[str] = []
+    _pass(runner=_act_runner(), kill=_Killer(), apply=False, relieve=called.append)
+    _pass(runner=_act_runner(), kill=_Killer(), kill_allowed=False, relieve=called.append)
+    assert called == []

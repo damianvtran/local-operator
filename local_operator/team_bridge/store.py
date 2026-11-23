@@ -47,6 +47,7 @@ from local_operator.team_bridge.settings import (
 )
 from local_operator.team_bridge.types import (
     ACK_TARGETS,
+    RECEIPT_ACK_TARGETS,
     SCREENING_CATEGORIES,
     AckTarget,
     FeedSeq,
@@ -200,11 +201,46 @@ _BUSY_TIMEOUT_MS = 2_000
 
 
 class StoreRefused(RuntimeError):
-    """A store mutation refused. ``code`` is a stable machine-readable tag."""
+    """A store mutation refused. ``code`` is a stable machine-readable tag.
 
-    def __init__(self, code: str, message: str = "") -> None:
+    ``cause`` is an optional CLOSED sub-tag for a ``policy_stale`` authority
+    refusal (``scheduler.AUTHORITY_CAUSES``): the connector needs to tell "the hub
+    says messaging is unavailable" (it ages into the owner's review) from "only
+    the owner can fix this" (sign in, consent, eligibility — never a Deliver)
+    without reading the prose ``message``. Empty means unclassified.
+    """
+
+    def __init__(self, code: str, message: str = "", *, cause: str = "") -> None:
         super().__init__(message or code)
         self.code = code
+        self.cause = cause
+
+
+#: ``StoreRefused.cause`` values for a ``policy_stale`` AUTHORITY refusal (PR #4212,
+#: Q1). ``hub_unavailable``: the hub's status says messaging is not available —
+#: nobody local can fix it, so the hold ages into the owner's review like a
+#: provider outage. The other three are the OWNER's to fix and never become a
+#: Deliver item: ``sign_in`` (no usable / not the enrolled sign-in), ``consent``
+#: (no current consent receipt), ``ineligible`` (organization or endpoint not
+#: eligible/active). Anything else stays an unclassified ``policy_stale``.
+AUTHORITY_CAUSE_HUB_UNAVAILABLE = "hub_unavailable"
+AUTHORITY_CAUSE_SIGN_IN = "sign_in"
+AUTHORITY_CAUSE_CONSENT = "consent"
+AUTHORITY_CAUSE_INELIGIBLE = "ineligible"
+#: No screening chain resolved at all (round 2, S-8 / Q2): no evaluated screener
+#: is configured or credentialed. Like the three above it is the OWNER's to fix
+#: ("configure a screener"), so it never becomes a Deliver item — it used to be
+#: tagged ``hub_unavailable``, which mislabelled it and handed out an
+#: unscreened Deliver for what is the owner's own configuration.
+AUTHORITY_CAUSE_NO_SCREENER = "no_screener"
+
+#: The two independent ageing clocks a held message can run (round 2, R2-1).
+#: ``review``: time held under a code that may age into the unscreened owner
+#: review (screening outage). ``owner_action``: time held because the OWNER must
+#: act (sign in, consent, eligibility, configure a screener). Kept apart so the
+#: hours a message waited on the owner are never charged as screening delay.
+HOLD_CLOCK_REVIEW = "review"
+HOLD_CLOCK_OWNER_ACTION = "owner_action"
 
 
 def state_db_path(config_dir: Path) -> Path:
@@ -212,6 +248,13 @@ def state_db_path(config_dir: Path) -> Path:
 
     return Path(config_dir) / "team_bridge" / "state.sqlite3"
 
+
+#: The ``owner_releases.outcome`` of a signed Discard settled on THIS machine
+#: only (:meth:`Store.record_owner_release_local_terminal`): the hub could not
+#: confirm the message, so nothing was posted, delivered or sent to anyone. A
+#: sibling of the connector's ``admitted``/``rejected``, deliberately named so
+#: it can never be read as a hub or sender outcome.
+OWNER_RELEASE_LOCAL_TERMINAL = "discarded_local_unconfirmed"
 
 #: The same-account credential heal's audit receipt (``team_bridge.heal``): one
 #: row per re-point, old row -> new row, which enrollment, which trigger, when.
@@ -610,6 +653,47 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
             "ALTER TABLE screening_answer_holds "
             "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
         )
+
+
+def _ensure_aged_hold_table(conn: sqlite3.Connection) -> None:
+    """Create the hold-clock stamps on a store that predates them (PR #4212, S-5).
+
+    One row per (message, clock): WHEN it was first held under a code that may
+    age on that clock (:data:`HOLD_CLOCK_REVIEW` — ``screening.AGED_REVIEW_CODES``;
+    :data:`HOLD_CLOCK_OWNER_ACTION` — the owner-action causes). The hold row's own
+    ``created_at`` is not that fact — it survives code changes, so a message
+    parked for hours under ``bridge_off`` would convert on its first transient
+    pass. Same additive, authority-free rule as :func:`_ensure_unusable_pass_table`:
+    a lost row only restarts the clock, never admits anything.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_hold_clocks ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, clock TEXT NOT NULL, "
+        "first_at REAL NOT NULL, PRIMARY KEY (owner_key, message_id, clock))"
+    )
+
+
+def _ensure_last_success_table(conn: sqlite3.Connection) -> None:
+    """Create the account's route-evidence stamps (PR #4212, S-6 / S-9).
+
+    The breaker row is DELETED on success, so it cannot answer "did anything
+    screen since this message's hold began?". One row per account scope:
+    ``success_at`` — the last provider response to ANY screen or to the
+    content-free route canary; ``canary_failed_at`` — the last time that canary
+    ALSO failed after a message's whole chain did. An outage is corroborated
+    only by a canary failure with no success since (``screening`` reads both):
+    the canary carries no sender bytes, so a crafted message cannot fake it.
+    Additive and authority-free: a lost row means "no evidence", which never
+    corroborates an outage — the hold then ends in the Discard-only
+    ``screening_failed`` (or, for a Deliver already given, stays pending);
+    nothing is ever delivered on it.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_route_evidence ("
+        "account_scope TEXT PRIMARY KEY, success_at REAL, canary_failed_at REAL)"
+    )
 
 
 def _ensure_unusable_pass_table(conn: sqlite3.Connection) -> None:
@@ -1235,8 +1319,17 @@ def receipt_authority(
     *,
     release: Mapping[str, Any] | None = None,
     principal: tuple[str, str] | None = None,
+    epoch_bound: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None, str]:
     """The PURE authority checks a stored receipt must pass (S-RSA-3).
+
+    ``epoch_bound=False`` waives ONLY the epoch equality, keeping every other
+    check (template, serving model, admission revision, creator generation and
+    the whole integrity half). Its one caller is
+    :meth:`Store.write_once_resolution`: the epoch also advances on changes
+    that leave the receipt's substance current (holds triage 2026-11-18: H5's
+    receipt is epoch 10 under a live epoch 12 with the same template, revision
+    and serving model), and that caller checks the privacy pass itself.
 
     ``principal`` is the validated envelope's ``(sender_account, sender_kind)``;
     only an :data:`OWNER_PRINCIPAL_SHA256` receipt reads it (see
@@ -1325,7 +1418,9 @@ def receipt_authority(
         # longer be ESTABLISHED at all, which is damage rather than a miss — a
         # miss would invite a caller to re-screen behind a row nobody can read.
         return None, RECEIPT_CORRUPT, "epoch or creator generation is not a number"
-    if policy_epoch != receipt_epoch or creator_generation != owner.enrollment_generation:
+    if (
+        epoch_bound and policy_epoch != receipt_epoch
+    ) or creator_generation != owner.enrollment_generation:
         return None, RECEIPT_STALE, ""
     try:
         decoded = _decode_categories_text(receipt.get("categories"))
@@ -1491,6 +1586,7 @@ _DELIVERY_HOLD_CODES = frozenset(
         "ack_tuple_mismatch",
         "attachments_malformed",
         "attachments_unbound",
+        "files_unbound",
         "body_invalid",
         "body_unavailable",
         "bounce_receipt_missing",
@@ -1512,6 +1608,19 @@ _DELIVERY_HOLD_CODES = frozenset(
         # body reservation failures (conversation._record_body_reservation)
         "receipt_unavailable",
         "reservation_refused",
+        # card hand-off identity (Store.bind_card_handoff / _deliver_card).
+        # ``card_provenance_unknown`` is DELIBERATELY not delivery_pending: a
+        # legacy (NULL) row's earlier card, if any, went out under an id nothing
+        # recorded, so no automatic replay may run for it (it could only
+        # duplicate). On upgrade every unposted legacy reservation therefore
+        # shows as ``awaiting_review`` and is never auto-re-driven; the message
+        # stays readable in the channel history, and it clears through the
+        # owner's existing hold review, never by an automatic probe or replay
+        # (PR #4348 review r1 R4 / security S-3).
+        "card_unconfirmed",
+        "card_provenance_unknown",
+        "card_handoff_split",
+        "card_binding_mismatch",
         # the loop's own defaults (connector/loop.py)
         "hold",
         "retry_failed",
@@ -1643,12 +1752,105 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         # nothing judged the message, so the sender is told screening is
         # unavailable -- never that a human is reviewing it.
         "screening_model_unavailable",
+        # SPINE CODES (holds trace 2026-11-18). Before this they fell through to
+        # ``awaiting_review``: during the 19:13-19:46Z hub outage every
+        # ``conversation_failed`` was published as a review hold and members
+        # saw "Held for review" for a transient exception nobody was looking
+        # at. Each below is written BEFORE any verdict exists, by a failure of
+        # this machine or of the hub's answer, and the row is re-driven on the
+        # loop's retry backoff (``connector.loop.retry_due_holds``):
+        #
+        # an unexpected exception in the conversation spine, and the retry
+        # pass's own catch-all and default;
+        "conversation_failed",
+        "retry_failed",
+        "hold",
+        # the body read failed or the hub's answer could not be validated for
+        # this build (``conversation.py``: "keep it retryable");
+        "body_unavailable",
+        "body_hash_mismatch",
+        "mismatched_id",
+        "sender_malformed",
+        "attachments_malformed",
+        "envelope_missing",
+        "bridge_meta_invalid",
+        "display_context_invalid",
+        # a verdict that lost the image or file set it screened: held and
+        # RE-SCREENED, so nothing has judged those bytes yet;
+        "attachments_unbound",
+        "files_unbound",
+        # a dead connector's claim waiting out its lease, and its re-drive;
+        "stale_claim",
+        "stale_claim_retry",
+        # this machine's own store or identity read failing for the moment
+        # (``owner_changed`` and ``stale_generation`` are already above);
+        "state_unreadable",
+        "not_enrolled",
+        "owner_mismatch",
+        # A8: another live owner holds the privacy stage (bounded retry), or the
+        # privacy authority could not be read consistently this pass.
+        "privacy_pending",
+        "privacy_control_unavailable",
     }
 )
 
 #: Codes written AFTER screening admitted the message: delivery, not moderation,
 #: is what is pending.
-_HOLD_CLASS_DELIVERY_PENDING = frozenset({"delivery_failed", "bridge_off", "phase_refused"})
+#:
+#: ``write_once_conflict`` is deliberately NOT here any more (security review
+#: S-4 on #4249). It was moved here from the ``awaiting_review`` fall-through
+#: because a verdict is already committed. But since the S-1 fix, a conflict the
+#: resolver keeps is one whose committed verdict the LIVE policy no longer
+#: supports, and no retry can clear it. Publishing it as ``delivery_pending``
+#: would tell readers the delay is transient. It falls to ``awaiting_review``,
+#: the conservative class for a terminal hold only the owner can move. An
+#: owner-review release for it is a recorded follow-up.
+#:
+#: Also here (holds trace 2026-11-18), each a delivery-side wait that clears
+#: without anyone reviewing the content:
+#:
+#: * the hub ACK/admission families, written after the verdict;
+#: * a body reservation the store refused or could not prove for an ADMITTED
+#:   message ("the message stays pending");
+#: * the producer fences and owner-setup waits, the same kind of wait as
+#:   ``bridge_off``: the recipient's own designation, consent, credential or
+#:   chief-of-staff session must be in place before delivery, and the owner is
+#:   not judging the message;
+#: * another spine or session already holding the delivery claim.
+#:
+#: WHAT STAYS ``awaiting_review`` (the default arm, never listed): the owner-
+#: review codes (``hold_release.REVIEW_HOLD_CODES``, ``work_scope_hold``) and
+#: the TERMINAL fail-closed holds no retry can clear — content this build can
+#: never screen (``size_exceeded``, ``invalid_content*``, ``body_invalid``,
+#: ``envelope_malformed``/``_unbound``), damaged proof or schema, identity and
+#: ACK-binding anomalies, a local quarantine, and the settled A8 privacy holds
+#: (a completed privacy stage is reused, never re-run). Only the owner can move
+#: those, and both other classes tell a reader the delay is TRANSIENT
+#: (``tool._DELAYED_HOLD_CLASSES``), which for them would be false.
+_HOLD_CLASS_DELIVERY_PENDING = frozenset(
+    {
+        "delivery_failed",
+        "bridge_off",
+        "phase_refused",
+        "ack_recovery",
+        "ack_refused",
+        "ack_not_confirmed",
+        "envelope_refused",
+        "receipt_unavailable",
+        "reservation_refused",
+        # card hand-off identity (conversation._deliver_card, PR #3478 QA r1): a
+        # replayed id still IN FLIGHT at the receiver, or no answer. The SAME id
+        # is re-sent on the retry backoff, so this is transient, never review.
+        "card_unconfirmed",
+        "invalid_body_reservation",
+        "credential_changed",
+        "consent_revoked",
+        "no_designation",
+        "open_chief_of_staff",
+        "badge_only",
+        "claimed_elsewhere",
+    }
+)
 
 #: Screening category → the ONE coarse class that may leave this machine.
 #: Keyed by the closed :data:`SCREENING_CATEGORIES`; a category added there
@@ -1664,6 +1866,33 @@ _REFUSAL_CLASS_BY_CATEGORY = {
     "out_of_scope_work": "out_of_scope",
     "new_work_request": "out_of_scope",
 }
+
+
+#: The most of a screener's private REASON a decision row keeps (holds triage
+#: 2026-11-18, finding d). Enough for the one or two sentences a screener gives
+#: ("bids for new work: asks to start …"), short enough that the row can never
+#: become a second copy of the message body.
+SCREENER_REASON_MAX = 200
+
+#: A review hold (``hold_release.REVIEW_HOLD_CODES``) enters the long-hold
+#: rollup only after this long (holds triage 2026-11-18, finding b). Source: the
+#: operator's 2026-11-10 report, "the sidebar badge is sufficient", at most one
+#: DAILY rollup — so a day, not a measured distribution.
+_REVIEW_ROLLUP_AFTER_S = 24 * 3600.0
+
+
+def capped_screener_reason(reason: Any) -> str | None:
+    """The reason as stored: a stripped string of at most ``SCREENER_REASON_MAX`` chars.
+
+    ``None`` (and a blank or non-string reason) stores NULL, so "no reason" and
+    "an empty reason" read the same. NUL characters are dropped: SQLite keeps
+    them, but every reader that renders a row as text would cut at one.
+    """
+
+    if not isinstance(reason, str):
+        return None
+    text = reason.replace("\x00", "").strip()
+    return text[:SCREENER_REASON_MAX] or None
 
 
 def closed_hold_code(hold_code: Any) -> str:
@@ -1860,6 +2089,7 @@ CREATE TABLE IF NOT EXISTS body_reservations (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     card_posted_at REAL,
+    routed_session TEXT,
     PRIMARY KEY (owner_key, conversation_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS body_reservations_eligible
@@ -1902,7 +2132,28 @@ _BODY_RESERVATION_COLUMNS = frozenset(
 #: Closed lifecycle vocabulary. ``completed`` and ``retired`` are terminal;
 #: every other transition is retryable by a later turn, so a refusal never
 #: silently consumes an admitted message.
-BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired")
+BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired", "deferred")
+
+#: Why a row was written ``deferred`` instead of ``pending`` (the additive
+#: ``wake_class`` column; see :meth:`Store._ensure_wake_class_column`).
+#: ``passive``: the hub marked the delivery non-waking. ``ambient``: unaddressed
+#: channel traffic triage chose not to wake for. ``staggered``: an urgent ambient
+#: message whose failover slot may still wake this agent if nobody answers first
+#: (:meth:`Store.promote_staggered_reservation`). NULL = an ordinary woken row.
+WAKE_CLASSES = ("passive", "ambient", "staggered")
+
+#: How long a ``deferred`` row stays readable before the sweep retires it as
+#: ``ambient_not_shown``. Deferred rows are never served as turns in this build
+#: (the next-turn digest is a later, session-side change), so this only bounds
+#: table growth; 24 h covers a working day of catch-up reads.
+DEFERRED_RESERVATION_TTL_S = 24 * 3600.0
+
+#: How many times an ambient-digest row may be CLAIMED for a multi-frame turn
+#: before a failed showing retires it ``ambient_not_shown`` instead of putting
+#: it back to ``deferred`` (:meth:`Store.release_digest_claim`). Two: one retry
+#: covers a transient drift; a row that fails twice is not worth re-billing on
+#: every later turn — it stays readable through ``channel_history``.
+DIGEST_MAX_ATTEMPTS = 2
 
 #: The hold-row upsert every writer shares (PR #3063 review m10): a hold
 #: re-written for the same message keeps the row's FIRST ``created_at`` — the
@@ -1952,6 +2203,12 @@ _HOLD_UPSERT_CLASSED = _HOLD_UPSERT + ", failure_class = excluded.failure_class"
 #: will never be, so a card now would wake the agent for nothing; record it
 #: and stop.
 CARD_OWED = "owed"
+
+#: :meth:`Store.card_handoff_bindings` answers for a message with no reservation
+#: row, and for a legacy row whose ``card_handoff_id`` is NULL (written before
+#: the hand-off identity existed). Sentinels outside the ``peer-`` grammar.
+CARD_HANDOFF_UNRESERVED = "<unreserved>"
+CARD_HANDOFF_LEGACY = "<legacy>"
 CARD_POSTED = "posted"
 CARD_SETTLED = "settled"
 
@@ -1997,6 +2254,11 @@ BODY_TERMINAL_CODES = (
     "consent_revoked",
     "binding_mismatch",
     "admission_drift_terminal",
+    # A ``deferred`` row (non-waking by triage or by the hub's passive bit) that
+    # aged out unread as a turn. Distinct from ``expired_unconsumed``, which means
+    # a WOKEN row nobody consumed — a missed delivery; this one was never meant
+    # to wake anyone, so counting it as missed would be a false alarm.
+    "ambient_not_shown",
 )
 
 
@@ -3299,14 +3561,27 @@ class Store:
         zero. ``now`` defaults to the wall clock.
         """
 
+        from local_operator.team_bridge import hold_release as _hr
         from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
-        from local_operator.team_bridge.hold_release import REVIEW_HOLD_CODES
         from local_operator.team_bridge.types import is_conversation_message_id
 
-        review_codes = sorted(REVIEW_HOLD_CODES)
-
         empty: dict[str, Any] = {"count": 0}
-        cutoff = (time.time() if now is None else float(now)) - float(older_than_s)
+        now_v = time.time() if now is None else float(now)
+        cutoff = now_v - float(older_than_s)
+        # A review hold with a decision row counts only once it is at least a
+        # DAY old (or older than the owner's own threshold, if that is longer):
+        # the operator's 2026-11-10
+        # rule was "at most one daily rollup" for review holds, so a model_hold
+        # flood does not move this count (and re-revision the alert) every few
+        # minutes, while a review hold nobody has acted on still surfaces.
+        #
+        # QUANTIZED to a UTC day boundary (agent review m1 on #4249): a plain
+        # 24 h age floor still moved the count once per held message, a day
+        # after the flood, at the cadence it arrived. Holds created before the
+        # start of YESTERDAY all enter together at midnight, so review holds
+        # move this count (and revise the alert) at most once a day.
+        day = _REVIEW_ROLLUP_AFTER_S
+        review_cutoff = min(cutoff, math.floor((now_v - day) / day) * day)
         with self._connect_readonly() as conn:
             if conn is None:
                 return empty
@@ -3322,43 +3597,87 @@ class Store:
             # recorded (``notified_at``). A refused notice keeps it here, so no
             # held message can be invisible to both alerts.
             #
-            # A REVIEW hold (``hold_release.REVIEW_HOLD_CODES``) with a decision
-            # row leaves it too (operator report 2026-11-10: "the sidebar badge
-            # is sufficient", at most one daily rollup). Its decision row IS the
-            # Deliver/Discard item the Agent messages badge and holds list show,
-            # so the owner already sees it; counting it here made this keyed
-            # rollup re-revision (re-banner) on every count change during a
-            # model_hold flood. Keyed on the DECISION, not the hold code alone:
-            # with ``review_held: false`` no decision is written, the hold has no
-            # badge exit, and it stays counted here so it is never invisible to
-            # every alert. Work-scope holds and screening-unavailable codes
-            # (provider errors, parse failures) are unaffected.
+            # A REVIEW hold (``hold_release.REVIEW_HOLD_CODES``) STAYS in this
+            # count (holds triage 2026-11-18, finding b), reversing the
+            # 2026-11-10 exclusion. That exclusion assumed the decision row was
+            # already visible as a Deliver/Discard item in a desktop holds list,
+            # but no such list ships (the owner-audit view has no holds tab), and
+            # a review hold gets no per-message notice either
+            # (``hold_release`` notices only the work-scope class). Excluded
+            # here, nine review holds sat for up to 18 days invisible to every
+            # alert. The re-banner concern that drove the exclusion is bounded by
+            # this rollup's own contract: it moves only when the COUNT of holds
+            # older than ``older_than_s`` moves (and see ``review_cutoff``).
+            #
+            # ``notified_at`` exempts ONLY a work-scope hold. A review hold's
+            # ``notified_at`` is the legacy per-message notice of 2026-11-09,
+            # which ``hold_release.retire_review_notices`` has since DISMISSED
+            # (setting ``cleared_at``, leaving ``notified_at``): measured on the
+            # operator's store, the four oldest holds (11.6-18 days) carried it
+            # and so stayed invisible even with the code exclusion removed.
             try:
                 noticed = {
                     str(r["message_id"])
                     for r in conn.execute(
                         "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
-                        "AND (notified_at IS NOT NULL OR hold_code IN ({}))".format(
-                            ",".join("?" * len(review_codes))
-                        ),
+                        "AND notified_at IS NOT NULL AND hold_code = ?",
+                        (_owner_key(owner), _hr.WORK_SCOPE_HOLD),
+                    ).fetchall()
+                }
+                review_codes = sorted(_hr.REVIEW_HOLD_CODES)
+                reviewed = {
+                    str(r["message_id"])
+                    for r in conn.execute(
+                        "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
+                        "AND hold_code IN ({})".format(",".join("?" * len(review_codes))),
                         (_owner_key(owner), *review_codes),
                     ).fetchall()
                 }
             except sqlite3.OperationalError:
                 noticed = set()  # a store that predates B4b has no such notice
+                reviewed = set()
+            # #4371 QA Q1: a hold whose owner release is SETTLED LOCALLY
+            # (``OWNER_RELEASE_LOCAL_TERMINAL``) is something the person already
+            # answered and nothing else will move, so alerting "long-held" for
+            # it nags about a decision already taken. Keyed exactly as the
+            # holds list keys ``actionable`` (``owner_releases`` by owner and
+            # bare message id). Only that outcome leaves: a ``pending`` or
+            # refused release keeps counting, since that hold has not settled.
+            # Its own try so a store without the table (created lazily with the
+            # first work-scope write) keeps the two exemptions read above.
+            try:
+                settled = {
+                    str(r["message_id"])
+                    for r in conn.execute(
+                        "SELECT message_id FROM owner_releases WHERE owner_key = ? "
+                        "AND outcome = ?",
+                        (_owner_key(owner), OWNER_RELEASE_LOCAL_TERMINAL),
+                    ).fetchall()
+                }
+            except sqlite3.OperationalError:
+                settled = set()
         excluded = {HOLD_OPEN_CHIEF_OF_STAFF, "bridge_off"}
         held: dict[str, float] = {}
         for row in rows:
             if row["hold_code"] in excluded:
                 continue
             bare = screening_hold_message_id(str(row["message_id"]))
-            if bare in noticed:
+            if bare in noticed or bare in settled:
                 continue
             if not is_conversation_message_id(bare):
                 continue
             created = _status_timestamp(row["created_at"])
             if created is None:
                 continue
+            if bare in reviewed and row["hold_code"] in _hr.REVIEW_HOLD_CODES:
+                # Only a review hold WITH its decision row is delayed: with
+                # ``review_held: false`` none is written, the hold has no exit
+                # at all, and it keeps the ordinary threshold.
+                #
+                # Shift a review hold's age onto the review cutoff, so ONE
+                # comparison below serves both classes and a message seen under
+                # both spellings still counts once, by its earliest stamp.
+                created += cutoff - review_cutoff
             prior = held.get(bare)
             if prior is None or created < prior:
                 held[bare] = created
@@ -3428,12 +3747,25 @@ class Store:
         consent_version: str | None,
         designated_session: str,
         now: float,
+        routed_session: str | None = None,
+        wake_class: str | None = None,
     ) -> bool:
         """Record one admitted message. Idempotent by primary key.
+
+        ``wake_class`` (one of :data:`WAKE_CLASSES`) writes the row ``deferred``:
+        admitted and readable through the channel reads, but NOT a turn — no
+        pending lookup selects it and its card status reads ``settled``. ``None``
+        is the ordinary ``pending`` row. A replay never rewrites it either.
 
         Returns True only when THIS call created the row. The connector's own
         retry path may emit the same reservation again after a crash; a second
         insert must be a no-op rather than a duplicate promise.
+
+        ``routed_session`` names the session the CONNECTOR decided should read
+        this message instead of the designated one (``connector/routing.py``).
+        Only the connector writes it; a value equal to the designation is
+        stored as NULL, so "routed" always means "not the designated session".
+        A replay never rewrites it (``DO NOTHING``): the first decision stands.
         """
 
         from local_operator.team_bridge.types import (
@@ -3450,22 +3782,36 @@ class Store:
         self._reservation_field("designated_session", designated_session, _SESSION_TOKEN)
         if consent_version is not None:
             self._reservation_field("consent_version", consent_version, _CONSENT_TOKEN)
+        if routed_session is not None:
+            self._reservation_field("routed_session", routed_session, _SESSION_TOKEN)
+            if routed_session == designated_session:
+                routed_session = None
         if not isinstance(conversation_seq, int) or isinstance(conversation_seq, bool):
             raise StoreRefused("invalid_body_reservation", "conversation_seq")
         if conversation_seq < 1:
             raise StoreRefused("invalid_body_reservation", "conversation_seq")
+        if wake_class is not None and wake_class not in WAKE_CLASSES:
+            raise StoreRefused("invalid_body_reservation", "wake_class")
 
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_routed_session_column(conn)
+            self._ensure_card_handoff_column(conn)
+            self._ensure_wake_class_column(conn)
+            # ``card_handoff_id = ''`` is the PROVENANCE mark: this row was
+            # written by a build that binds a card identity before dispatch, so
+            # an unbound value later means "no card attempted yet". A NULL can
+            # only come from an older writer and is held as unknown (see
+            # :meth:`card_handoff_bindings`).
             cursor = conn.execute(
                 "INSERT INTO body_reservations (owner_key, account_id, tenant_id, "
                 "endpoint_id, credential_id, canonical_base_url, enrollment_generation, "
                 "conversation_id, message_id, conversation_seq, mention, body_sha256, "
                 "screening_fingerprint, policy_epoch, consent_version, designated_session, "
-                "state, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?) "
+                "state, created_at, updated_at, card_handoff_id, routed_session, "
+                "wake_class) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'',?,?) "
                 "ON CONFLICT(owner_key, conversation_id, message_id) DO NOTHING",
                 (
                     _owner_key(owner),
@@ -3484,9 +3830,156 @@ class Store:
                     int(policy_epoch),
                     consent_version,
                     designated_session,
+                    "pending" if wake_class is None else "deferred",
                     float(now),
                     float(now),
+                    routed_session,
+                    wake_class,
                 ),
+            )
+            return cursor.rowcount == 1
+
+    def promote_staggered_reservation(
+        self, owner: OwnerSnapshot, *, conversation_id: str, message_id: str, now: float
+    ) -> bool:
+        """CAS one ``deferred``/``staggered`` row into an ordinary ``pending`` one.
+
+        The urgent-failover wake (``connector/conversation.py``): a standby agent
+        whose slot came due and found the message still unanswered takes it as a
+        normal woken row. ``wake_class`` is cleared so the row is exactly what an
+        immediate wake would have written (and the expired-claim arm, which skips
+        classed rows, treats it as one). False when anything else moved it first.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_wake_class_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET state = 'pending', wake_class = NULL, "
+                "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
+                "AND message_id = ? AND state = 'deferred' AND wake_class = 'staggered' "
+                "AND card_posted_at IS NULL",
+                (float(now), _owner_key(owner), conversation_id, message_id),
+            )
+            return cursor.rowcount == 1
+
+    def retire_deferred_reservations(
+        self, owner: OwnerSnapshot, *, older_than: float, now: float | None = None
+    ) -> int:
+        """Retire ``deferred`` rows admitted at or before ``older_than``.
+
+        Bounds the table: a deferred row is never served as a turn, so without a
+        sweep it would sit forever. Read-first on a read-only handle, like
+        :meth:`reclaim_routed`, so an idle connector never takes the write lock.
+        """
+
+        moment = time.time() if now is None else float(now)
+        with self._connect_readonly() as probe:
+            if probe is None:
+                return 0
+            due = probe.execute(
+                "SELECT 1 FROM body_reservations WHERE owner_key = ? "
+                "AND state = 'deferred' AND created_at <= ? LIMIT 1",
+                (_owner_key(owner), float(older_than)),
+            ).fetchone()
+            if due is None:
+                return 0
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET state = 'retired', "
+                "terminal_code = 'ambient_not_shown', updated_at = ? "
+                "WHERE owner_key = ? AND state = 'deferred' AND created_at <= ?",
+                (moment, _owner_key(owner), float(older_than)),
+            )
+            return int(cursor.rowcount)
+
+    def reclaim_routed(
+        self, owner: OwnerSnapshot, *, older_than: float, now: float | None = None
+    ) -> int:
+        """Hand routed rows nobody picked up back to the designated session.
+
+        A routed session that dies, or never reads its inbox, would strand its
+        message: the designated session is blind to a routed row by design. This
+        clears ``routed_session`` — which makes the row the designated session's
+        again — with a compare-and-set that holds only while the row is STILL
+        unclaimed (``pending``, or a claim whose lease expired: the same
+        eligibility the reader uses). A row a live turn has claimed is never
+        touched, so a slow but alive routed session cannot lose a message it is
+        mid-way through. Returns the number of rows handed back.
+
+        There is no local re-card: a card replay needs a hub re-delivery, so the
+        designated session finds the row on its next turn through the ordinary
+        pending lookup.
+        """
+
+        moment = time.time() if now is None else float(now)
+        # The loop calls this every minute: look first, with a read-only handle
+        # that creates and migrates nothing, and take the write lock only when a
+        # row is actually due. A store with no routed column has none.
+        with self._connect_readonly() as probe:
+            if probe is None or not self._has_routed_session_column(probe):
+                return 0
+            due = probe.execute(
+                "SELECT 1 FROM body_reservations WHERE owner_key = ? "
+                "AND routed_session IS NOT NULL AND created_at <= ? LIMIT 1",
+                (_owner_key(owner), float(older_than)),
+            ).fetchone()
+            if due is None:
+                return 0
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_routed_session_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET routed_session = NULL, updated_at = ? "
+                "WHERE owner_key = ? AND enrollment_generation = ? "
+                "AND routed_session IS NOT NULL AND created_at <= ? "
+                "AND (state = 'pending' OR (state = 'claimed' "
+                "AND claim_expires_at IS NOT NULL AND claim_expires_at < ?))",
+                (
+                    moment,
+                    _owner_key(owner),
+                    owner.enrollment_generation,
+                    float(older_than),
+                    moment,
+                ),
+            )
+            return int(cursor.rowcount)
+
+    def unroute_reservation(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        routed_session: str,
+    ) -> bool:
+        """Take ONE row back from ``routed_session`` while nobody has claimed it.
+
+        The connector's own undo: it routed a message, then found just before
+        the wake that the target was gone. Compare-and-set on both the named
+        session and an unclaimed state, so it can never strip a row a live turn
+        holds or one routed elsewhere in the meantime. True when the row is the
+        designated session's again.
+        """
+
+        self._reservation_field("routed_session", routed_session, _SESSION_TOKEN)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_routed_session_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET routed_session = NULL, updated_at = ? "
+                "WHERE owner_key = ? AND conversation_id = ? AND message_id = ? "
+                "AND routed_session = ? AND state = 'pending'",
+                (time.time(), _owner_key(owner), conversation_id, message_id, routed_session),
             )
             return cursor.rowcount == 1
 
@@ -3538,22 +4031,40 @@ class Store:
             if len(enrollments) != 1:
                 return None
             enrollment = enrollments[0]
-            if (
-                enrollment["designated_session"] != designated_session
-                or not enrollment["consent_version"]
-                or not enrollment["consent_ref"]
-            ):
+            if not enrollment["consent_version"] or not enrollment["consent_ref"]:
                 return None
+            routed_column = (
+                "routed_session"
+                if self._has_routed_session_column(conn)
+                else "NULL AS routed_session"
+            )
             rows = conn.execute(
                 "SELECT conversation_id, message_id, account_id, tenant_id, endpoint_id, "
                 "credential_id, canonical_base_url, enrollment_generation, "
-                "designated_session, consent_version, state FROM body_reservations "
+                f"designated_session, consent_version, state, {routed_column} "
+                "FROM body_reservations "
                 "WHERE owner_key = ? AND message_id = ? LIMIT 2",
                 (_owner_key(owner), in_reply_to_message_id),
             ).fetchall()
             if len(rows) != 1:
                 return None
             row = rows[0]
+            # WHO MAY ANSWER A ROW. An ordinary row: the designated session, and
+            # the row was reserved for that same designation. A ROUTED row: only
+            # the session it was routed to, and only while the designation the
+            # connector stamped on it is still the live one — a designation move
+            # kills the row's authority exactly as it does for an ordinary row.
+            # Never both: the designated session is blind to a routed row, so a
+            # reply bound to it is refused like any unknown message id.
+            routed = row["routed_session"]
+            if routed:
+                if routed != designated_session:
+                    return None
+                reserved_for = enrollment["designated_session"]
+            else:
+                if enrollment["designated_session"] != designated_session:
+                    return None
+                reserved_for = designated_session
             expected = {
                 "account_id": owner.account_id,
                 "tenant_id": owner.tenant_id,
@@ -3561,14 +4072,67 @@ class Store:
                 "credential_id": owner.credential_id,
                 "canonical_base_url": owner.canonical_base_url,
                 "enrollment_generation": owner.enrollment_generation,
-                "designated_session": designated_session,
+                "designated_session": reserved_for,
                 "consent_version": enrollment["consent_version"],
             }
             if any(row[key] != value for key, value in expected.items()):
                 return None
-            if row["state"] not in ("pending", "claimed", "completed"):
+            # ``deferred`` is admitted exactly like ``pending`` (screened, hub-
+            # accepted, reserved for this session); triage only withheld the wake.
+            # An agent that reads it in channel history may answer it, as it could
+            # a passive reply before deferral existed.
+            if row["state"] not in ("pending", "claimed", "completed", "deferred"):
                 return None
             return {"conversation_id": row["conversation_id"], "message_id": row["message_id"]}
+
+    def previous_delivery_seq(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        before_seq: int,
+        session_id: str,
+    ) -> int | None:
+        """The seq of the latest earlier message reserved for ``session_id`` here.
+
+        Read-only and advisory: it feeds one card line ("N messages since your
+        last delivery"), never a decision, so a store that cannot answer returns
+        None and the line is simply absent. Scoped to this owner's live
+        generation like every other read; no body, label or id escapes.
+        """
+
+        if not session_id or owner.enrollment_generation <= 0:
+            return None
+        try:
+            with self._connect_readonly() as conn:
+                if conn is None:
+                    return None
+                if self._live_generation(conn, owner) != owner.enrollment_generation:
+                    return None
+                # "Delivered to this session" is the SERVING session, the same
+                # predicate the pending lookup uses: a row routed to another
+                # session was never this one's delivery, and a row routed TO it
+                # was. Old-shape files (no column) fall back to the designation.
+                serving = (
+                    "COALESCE(routed_session, designated_session)"
+                    if self._has_routed_session_column(conn)
+                    else "designated_session"
+                )
+                # A row triage DEFERRED (or the sweep later retired as never
+                # shown) woke nobody, so it is not a delivery: counting it would
+                # shrink the "N messages since your last delivery" line exactly
+                # when it matters most, after ambient traffic was skipped.
+                row = conn.execute(
+                    "SELECT MAX(conversation_seq) FROM body_reservations "
+                    "WHERE owner_key = ? AND conversation_id = ? AND conversation_seq < ? "
+                    "AND state != 'deferred' "
+                    "AND COALESCE(terminal_code, '') != 'ambient_not_shown' "
+                    f"AND {serving} = ?",
+                    (_owner_key(owner), conversation_id, before_seq, session_id),
+                ).fetchone()
+        except (StoreRefused, sqlite3.Error, OSError):
+            return None
+        return int(row[0]) if row is not None and row[0] is not None else None
 
     def conversation_of_reserved_message(self, owner: OwnerSnapshot, message_id: str) -> str | None:
         """The ``bcv_`` id an ADMITTED conversation message belongs to, or None.
@@ -3606,6 +4170,100 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
         if "card_posted_at" not in columns:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_posted_at REAL")
+
+    @staticmethod
+    def _ensure_wake_class_column(conn: sqlite3.Connection) -> None:
+        """Add ``wake_class`` to a carrying table that predates it.
+
+        WHY A NEW STATE PLUS A COLUMN (channel-wake triage, 2026-11-21): a row the
+        connector chose NOT to wake for is written ``deferred``, a state no older
+        binary selects — every older reader asks for ``pending`` or an expired
+        ``claimed`` row — so a rollback or a mixed-version session can never drain
+        a deferred row as a full turn (the leak the passive bit had: its rows sat
+        ``pending`` and a session's follow-up re-arm served each one). The column
+        records WHY (:data:`WAKE_CLASSES`). ADDITIVE AND NULLABLE, no schema stamp
+        moves, NOT in ``_BODY_RESERVATION_COLUMNS`` — the same rule as
+        :meth:`_ensure_card_posted_column`.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if "wake_class" not in columns:
+            conn.execute("ALTER TABLE body_reservations ADD COLUMN wake_class TEXT")
+
+    @staticmethod
+    def _has_wake_class_column(conn: sqlite3.Connection) -> bool:
+        return any(
+            row[1] == "wake_class" for row in conn.execute("PRAGMA table_info(body_reservations)")
+        )
+
+    @staticmethod
+    def _ensure_card_handoff_column(conn: sqlite3.Connection) -> None:
+        """Add ``card_handoff_id`` to a carrying table that predates it.
+
+        WHY (PR #3478 QA r1): the card's peer message id is the ONLY thing the
+        receiver can deduplicate a re-posted card on, and it used to be minted
+        afresh per hand-off, so a failed posted-marker write followed by a replay
+        produced a second card. The id is now bound to the row BEFORE dispatch
+        and re-used by every replay; rows sharing one id are the exact
+        membership of the card that carried it (a coalesced group's membership
+        is persisted, never recomputed).
+
+        Values: ``NULL`` = legacy row (written before this column; its earlier
+        card, if any, went out under an id nothing recorded); ``''`` = bound to
+        nothing yet; ``peer-<32 hex>`` = the hand-off identity. A REFERENCE
+        only — no body, label or digest of content. ADDITIVE AND NULLABLE like
+        :meth:`_ensure_card_posted_column`, so no schema stamp moves and an older
+        binary never names it.
+
+        ``card_handoff_card`` (PR #4348 r2: R5/S-4/Q2) is the WRITE-ONCE record
+        of the card first sent under that id: its CONTENTLESS presentation
+        metadata (ids, seq, closed-vocabulary kinds, flags, counts and the
+        fixed-template withheld notes; never a body, never the conversation
+        subject or a sender label, which the rebuild takes live — see
+        ``conversation._card_record``). The table stays contentless (B1).
+        It is written only in the same UPDATE that mints the id and never
+        rewritten, so any later replay of the id — whichever subset of its
+        members re-entered a flush — re-sends the identical card with the
+        identical membership. NULL = bound before the record existed.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if "card_handoff_id" not in columns:
+            conn.execute("ALTER TABLE body_reservations ADD COLUMN card_handoff_id TEXT")
+        if "card_handoff_card" not in columns:
+            conn.execute("ALTER TABLE body_reservations ADD COLUMN card_handoff_card TEXT")
+
+    @staticmethod
+    def _ensure_routed_session_column(conn: sqlite3.Connection) -> None:
+        """Add ``routed_session`` to a carrying table that predates it.
+
+        ADDITIVE AND NULLABLE, with NO schema-version bump (same rule as
+        :meth:`_ensure_card_posted_column`): NULL means "delivered to the
+        designated session", which is what every earlier row and every earlier
+        writer meant. NOT in ``_BODY_RESERVATION_COLUMNS``. A version bump was
+        considered and rejected: the session-side readers open read-only and
+        would not refuse, while a bump WOULD make an older connector refuse the
+        store and block a rollback. Routing is instead gated on the receiving
+        session advertising ``team-bridge-routed-inbox-v1``.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if "routed_session" not in columns:
+            conn.execute("ALTER TABLE body_reservations ADD COLUMN routed_session TEXT")
+
+    @staticmethod
+    def _has_routed_session_column(conn: sqlite3.Connection) -> bool:
+        """Whether a (possibly old-shape) reservation table carries ``routed_session``.
+
+        The read-only readers cannot ALTER, and an old-shape file read before
+        any new writer touched it has no such column: they fall back to the
+        designated-session-only predicate rather than failing on the name.
+        """
+
+        return any(
+            row[1] == "routed_session"
+            for row in conn.execute("PRAGMA table_info(body_reservations)")
+        )
 
     @staticmethod
     def _ensure_receipt_rendered_template_column(conn: sqlite3.Connection) -> None:
@@ -3747,6 +4405,17 @@ class Store:
             "DELETE FROM screening_unusable_passes WHERE owner_key = ? AND message_id = ?",
             (owner_key, message_id),
         )
+        # The aged-hold stamp shares this lifecycle; it is keyed by the BARE id
+        # (the screener's spelling), so a composite delete clears that too.
+        _ensure_aged_hold_table(conn)
+        try:
+            bare = screening_hold_message_id(message_id)
+        except Exception:  # noqa: BLE001 — a malformed key clears its raw spelling only
+            bare = message_id
+        conn.executemany(
+            "DELETE FROM screening_hold_clocks WHERE owner_key = ? AND message_id = ?",
+            [(owner_key, key) for key in {message_id, bare}],
+        )
 
     @staticmethod
     def _ensure_hold_failure_class_column(conn: sqlite3.Connection) -> None:
@@ -3868,7 +4537,209 @@ class Store:
             # that failed). Only a ``pending`` reservation can still owe one.
             if row["state"] == "claimed":
                 return CARD_POSTED
+            # ``deferred`` (channel-wake triage) reads SETTLED on purpose: the
+            # connector chose not to wake for it, so a replay or hold re-drive of
+            # its ref must post no card either. A staggered failover wake goes
+            # through :meth:`promote_staggered_reservation` first, which makes the
+            # row ``pending`` (owed) before its card is handed off.
             return CARD_OWED if row["state"] == "pending" else CARD_SETTLED
+
+    def card_handoff_bindings(
+        self, owner: OwnerSnapshot, conversation_id: str, message_ids: list[str]
+    ) -> dict[str, str | None]:
+        """Each message's card hand-off binding, for partitioning one flush.
+
+        Answers, per id: :data:`CARD_HANDOFF_UNRESERVED` (no row — e.g. the
+        unadmitted recovery card, which has never had a reservation),
+        :data:`CARD_HANDOFF_LEGACY` (NULL: provenance unknown), ``''`` (bound to
+        nothing yet) or the bound ``peer-`` id. Live-owner fenced: a fenced
+        owner reads every id as unreserved, so ``_deliver_card`` takes the
+        historical minted-id path and :meth:`bind_card_handoff` never runs for
+        it (PR #4348 security r1 S-2: this is NOT a refusal). That grants
+        nothing new — base sent this card unconditionally, and the receiving
+        session re-checks its own live owner fence (see ``wake.deliver_wake``) —
+        it only means the identity guarantee does not cover a fenced owner.
+        Takes the write lock for the guarded additive ``ALTER`` (as
+        :meth:`body_card_status` does).
+        """
+
+        answer: dict[str, str | None] = {mid: CARD_HANDOFF_UNRESERVED for mid in message_ids}
+        with self._connect() as conn:
+            self._init(conn)
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return answer
+            self._begin_write(conn)
+            self._ensure_card_handoff_column(conn)
+            for mid in message_ids:
+                row = conn.execute(
+                    "SELECT card_handoff_id FROM body_reservations WHERE owner_key = ? "
+                    "AND conversation_id = ? AND message_id = ?",
+                    (_owner_key(owner), conversation_id, mid),
+                ).fetchone()
+                if row is not None:
+                    value = row["card_handoff_id"]
+                    answer[mid] = CARD_HANDOFF_LEGACY if value is None else str(value)
+        return answer
+
+    def bind_card_handoff(
+        self,
+        owner: OwnerSnapshot,
+        conversation_id: str,
+        message_ids: list[str],
+        *,
+        designated_session: str,
+        minted_id: str,
+        card_record: str | None = None,
+    ) -> tuple[str, bool]:
+        """Bind ONE card's identity to its exact membership, before dispatch.
+
+        Returns ``(handoff_id, replay)``. All rows unbound (``''``) → every row
+        takes ``minted_id`` in this one transaction and ``replay`` is False. All
+        rows already bound to the SAME id AND they are every still-owed row
+        bound to it → that id, ``replay`` True; the membership is whatever rows
+        carry it, so a replay can never re-label a different logical card. A
+        STRICT SUBSET of an id's still-owed rows also replays that id, and the
+        caller must WIDEN the card to the original one recorded at mint time
+        (``card_record``, read back via :meth:`card_handoff_record`); no row is
+        ever rebound to another id (see the comment in the body). Anything else
+        REFUSES with a closed code and nothing is dispatched:
+
+        * ``card_provenance_unknown`` — a legacy (NULL) row: its earlier card,
+          if any, went out under an id nothing recorded, so a new id proves
+          nothing and no automatic replay may run on its behalf; also a strict
+          subset of an id whose original card was never recorded;
+        * ``card_handoff_split`` — mixed bindings (the caller partitions first);
+        * ``card_binding_mismatch`` — a row missing, not this owner's live
+          credential/generation, not designated to ``designated_session``, no
+          longer ``pending``, or already posted — or a still-owed SIBLING of a
+          bound id that fails the same fence (widening may not carry it). The
+          CURRENT bindings are checked here, at bind time, not trusted from
+          when the card was buffered.
+
+        ``minted_id`` must already be a valid ``peer-<32 hex>``; the store does
+        not import the transport, so it enforces the same closed grammar itself.
+        """
+
+        if not message_ids or re.fullmatch(r"peer-[0-9a-f]{32}", minted_id or "") is None:
+            raise StoreRefused("card_binding_mismatch", "handoff id")
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_card_posted_column(conn)
+            self._ensure_card_handoff_column(conn)
+            bound: set[str | None] = set()
+            for mid in message_ids:
+                row = conn.execute(
+                    "SELECT credential_id, enrollment_generation, designated_session, state, "
+                    "card_posted_at, card_handoff_id FROM body_reservations WHERE "
+                    "owner_key = ? AND conversation_id = ? AND message_id = ?",
+                    (_owner_key(owner), conversation_id, mid),
+                ).fetchone()
+                if (
+                    row is None
+                    or row["credential_id"] != owner.credential_id
+                    or row["enrollment_generation"] != owner.enrollment_generation
+                    or row["designated_session"] != designated_session
+                    or row["state"] != "pending"
+                    or row["card_posted_at"] is not None
+                ):
+                    raise StoreRefused("card_binding_mismatch")
+                if row["card_handoff_id"] is None:
+                    raise StoreRefused("card_provenance_unknown")
+                bound.add(str(row["card_handoff_id"]))
+            if len(bound) != 1:
+                raise StoreRefused("card_handoff_split")
+            (current,) = bound
+            placeholders = ",".join("?" for _ in message_ids)
+            if current:
+                # WIDEN, NEVER SPLIT OR REKEY (PR #4348 r2: R5 / S-4 / Q2; r1:
+                # R1/R2, S-1, Q1). The receiver dedups on the id alone and the
+                # sender cannot know whether an earlier send under ``current``
+                # committed (a refused posted marker, a kill between accept and
+                # marker, a queued/timeout answer). Both earlier remedies failed
+                # one side of that unknown: replaying the id for a subset could
+                # commit it WITHOUT the omitted siblings (lost wake, r1), and
+                # rekeying the subset to a fresh id re-sent members the first
+                # card already carried (duplicate, r2). The only move that is
+                # correct in BOTH worlds is to re-send the ORIGINAL card under
+                # its ORIGINAL id with its ORIGINAL membership, whatever subset
+                # re-entered this flush: committed -> the receiver answers
+                # duplicate, truthfully covering every member; never committed
+                # -> the first accept carries every member. The caller rebuilds
+                # that card from the immutable ``card_handoff_card`` record
+                # written when the id was minted (see
+                # :meth:`card_handoff_record`), so it never waits for siblings
+                # to re-buffer (a held group of 20 against a retry batch of 8
+                # could otherwise never re-form) and never re-derives anything
+                # from body content.
+                #
+                # Widening must not replay a member this owner no longer has
+                # authority for: every still-pending, unposted row bound to the
+                # id must pass the SAME current-authority fence the requested
+                # rows just passed, or the whole card is refused (an honest
+                # hold, nothing dispatched). Rows that left ``pending`` need no
+                # card and do not block it; posted rows are already settled.
+                siblings = conn.execute(
+                    "SELECT message_id, credential_id, enrollment_generation, "
+                    "designated_session, card_handoff_card FROM body_reservations "
+                    "WHERE owner_key = ? AND conversation_id = ? AND card_handoff_id = ? "
+                    "AND state = 'pending' AND card_posted_at IS NULL",
+                    (_owner_key(owner), conversation_id, current),
+                ).fetchall()
+                for sib in siblings:
+                    if (
+                        sib["credential_id"] != owner.credential_id
+                        or sib["enrollment_generation"] != owner.enrollment_generation
+                        or sib["designated_session"] != designated_session
+                    ):
+                        raise StoreRefused("card_binding_mismatch")
+                owed = {str(sib["message_id"]) for sib in siblings}
+                records = {sib["card_handoff_card"] for sib in siblings}
+                if not owed <= set(message_ids) and (len(records) != 1 or None in records):
+                    # A strict subset whose original card cannot be rebuilt (a
+                    # row bound before the record existed): neither replaying a
+                    # narrower card nor minting a replacement is provably safe,
+                    # so hold it visibly for the owner instead of guessing.
+                    raise StoreRefused("card_provenance_unknown")
+                return current, True
+            conn.execute(
+                "UPDATE body_reservations SET card_handoff_id = ?, card_handoff_card = ? "
+                f"WHERE owner_key = ? AND conversation_id = ? AND message_id IN ({placeholders}) "
+                "AND card_handoff_id = ''",
+                (minted_id, card_record, _owner_key(owner), conversation_id, *message_ids),
+            )
+            return minted_id, False
+
+    def card_handoff_record(
+        self, owner: OwnerSnapshot, conversation_id: str, handoff_id: str
+    ) -> str | None:
+        """The immutable card recorded when ``handoff_id`` was minted, or None.
+
+        Read AFTER :meth:`bind_card_handoff` answered ``replay`` (a separate
+        read is safe: the record is written once, in the minting UPDATE, and no
+        code path rewrites it). None when no row carries a record, or when rows
+        bound to the id disagree \u2014 drift the caller must not paper over.
+        Live-owner fenced like the bind itself.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_card_handoff_column(conn)
+            values = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT DISTINCT card_handoff_card FROM body_reservations "
+                    "WHERE owner_key = ? AND conversation_id = ? AND card_handoff_id = ?",
+                    (_owner_key(owner), conversation_id, handoff_id),
+                )
+            }
+        if len(values) != 1 or None in values:
+            return None
+        (value,) = values
+        return str(value)
 
     def mark_body_card_posted(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str, *, now: float
@@ -3879,6 +4750,13 @@ class Store:
         the card owed (re-posted once on the replay — at-least-once, never a
         loss). Conditional on the column still being unset, so a replay never
         moves the original time. Live-owner fenced.
+
+        NEVER on a ``deferred`` row (review r1 m1/n1): no card went out for it, and
+        its card status already reads settled without the mark. Marking it used
+        to break the urgent failover — a replay of a parked standby set the column
+        and :meth:`promote_staggered_reservation` (which requires it unset) then
+        refused, so the standby never woke — and it made ``card_posted_at`` claim a
+        card the failover measurement would count.
         """
 
         with self._connect() as conn:
@@ -3888,7 +4766,8 @@ class Store:
             self._ensure_card_posted_column(conn)
             updated = conn.execute(
                 "UPDATE body_reservations SET card_posted_at = ? WHERE owner_key = ? "
-                "AND conversation_id = ? AND message_id = ? AND card_posted_at IS NULL",
+                "AND conversation_id = ? AND message_id = ? AND card_posted_at IS NULL "
+                "AND state != 'deferred'",
                 (float(now), _owner_key(owner), conversation_id, message_id),
             )
             return bool(updated.rowcount)
@@ -3903,7 +4782,40 @@ class Store:
         exclude: frozenset[tuple[str, str]] = frozenset(),
         admitted_before: float | None = None,
     ) -> dict[str, Any] | None:
-        """The OLDEST pending reservation this session is designated to serve.
+        """The OLDEST eligible row: :meth:`pending_body_reservations_for` LIMIT 1."""
+
+        rows = self.pending_body_reservations_for(
+            owner,
+            designated_session,
+            now=now,
+            selected=selected,
+            exclude=exclude,
+            admitted_before=admitted_before,
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    def pending_body_reservations_for(
+        self,
+        owner: OwnerSnapshot,
+        designated_session: str,
+        *,
+        now: float | None = None,
+        selected: tuple[str, str] | None = None,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+        admitted_before: float | None = None,
+        limit: int = 1,
+        conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """The OLDEST pending reservations this session is designated to serve.
+
+        ``limit``/``conversation_id`` exist for the multi-frame turn
+        (``pending_turn.PendingTurnBatch``): its companions are the next woken
+        rows of the PRIMARY's conversation, read through this same query so a
+        companion is fenced exactly like a primary (owner, generation, serving
+        session, live claims, deferred rows never selected).
+
+        The single-row description below is unchanged for ``limit=1``:
 
         WHY read-only and never creating: this is the eligibility check the
         Session runs before it attaches a request transform. A check that
@@ -3944,30 +4856,131 @@ class Store:
         if selected is not None:
             filters.append("AND conversation_id = ? AND message_id = ? ")
             bindings.extend(selected)
-        for conversation_id, message_id in sorted(exclude):
+        # Distinct loop names on purpose: binding ``conversation_id`` here once
+        # rebound the parameter below, so ANY exclusion silently scoped the read
+        # to the last excluded row's conversation and the drain skipped every
+        # other conversation's rows (PR #4382 Q1).
+        for excluded_conversation, excluded_message in sorted(exclude):
             filters.append("AND NOT (conversation_id = ? AND message_id = ?) ")
-            bindings.extend((conversation_id, message_id))
+            bindings.extend((excluded_conversation, excluded_message))
         if admitted_before is not None:
             filters.append("AND created_at <= ? ")
             bindings.append(float(admitted_before))
+        if conversation_id is not None:
+            filters.append("AND conversation_id = ? ")
+            bindings.append(conversation_id)
+        bounded = max(1, int(limit))
 
         with self._connect_readonly() as conn:
             if conn is None:
-                return None
+                return []
             if self._live_generation(conn, owner) != owner.enrollment_generation:
-                return None
-            return self._reservation(
-                conn.execute(
+                return []
+            # THE ROW'S SERVING SESSION is the session it was routed to, else
+            # the designated one. The designated session is therefore BLIND to a
+            # routed row, which is the point: a message routed to the session
+            # that asked must not also be served here. A routed row additionally
+            # needs the live designation to still be the one it was stamped with
+            # (a designation move kills it, as it kills an ordinary row), so a
+            # stale routed row is not claimed only to drift on its first call.
+            # An old-shape table (no column yet) is the designated-only predicate.
+            # A CLASSED row (``wake_class`` set) is never selected through the
+            # expired-claim arm: only a deferred row carries a class, and if a
+            # later digest reader claims one and lets the lease lapse, that must
+            # not turn it into a full turn here. Old-shape tables have no column.
+            expired_arm = (
+                "(state = 'claimed' AND claim_expires_at IS NOT NULL "
+                "AND claim_expires_at < ?"
+                + (" AND wake_class IS NULL" if self._has_wake_class_column(conn) else "")
+                + ")"
+            )
+            if self._has_routed_session_column(conn):
+                serving = (
+                    "COALESCE(routed_session, designated_session) = ? "
+                    "AND (routed_session IS NULL OR designated_session = "
+                    "(SELECT designated_session FROM enrollments "
+                    "WHERE owner_key = body_reservations.owner_key "
+                    "AND enrollment_generation = body_reservations.enrollment_generation "
+                    "AND state = 'committed')) "
+                )
+            else:
+                serving = "designated_session = ? "
+            return [
+                dict(row)
+                for row in conn.execute(
                     "SELECT * FROM body_reservations WHERE owner_key = ? "
                     "AND credential_id = ? AND enrollment_generation = ? "
-                    "AND designated_session = ? AND (state = 'pending' OR "
-                    "(state = 'claimed' AND claim_expires_at IS NOT NULL "
-                    "AND claim_expires_at < ?)) "
+                    f"AND {serving}AND (state = 'pending' OR {expired_arm}) "
                     + "".join(filters)
-                    + "ORDER BY created_at ASC, rowid ASC LIMIT 1",
-                    bindings,
-                ).fetchone()
+                    + "ORDER BY created_at ASC, rowid ASC LIMIT ?",
+                    [*bindings, bounded],
+                ).fetchall()
+            ]
+
+    def deferred_body_reservations_for(
+        self,
+        owner: OwnerSnapshot,
+        designated_session: str,
+        *,
+        limit: int,
+        now: float | None = None,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+    ) -> list[dict[str, Any]]:
+        """The NEWEST ambient-digest candidates this session could show.
+
+        WHY a separate reader rather than a flag on the woken one: the two
+        answer different questions with opposite orders. Woken rows are FIFO
+        (oldest must not starve); a digest is "what has been said lately", so
+        newest first, bounded by the caller.
+
+        WHICH ROWS: ``deferred`` with ``wake_class`` ``passive`` or
+        ``ambient`` — plus a digest claim whose lease EXPIRED (a turn died while
+        showing it), which only this reader may re-offer: the woken reader's
+        expired-claim arm skips classed rows so a digest row is never served as
+        a full turn. ``staggered`` rows are EXCLUDED: one still owns a pending
+        urgent-failover wake, and claiming it would make
+        :meth:`promote_staggered_reservation` (``state = 'deferred'``) refuse,
+        silently cancelling that wake.
+
+        Same fencing as :meth:`pending_body_reservations_for`: read-only,
+        owner/credential/generation-bound, and the row's serving session.
+        """
+
+        moment = time.time() if now is None else float(now)
+        bindings: list[Any] = [
+            _owner_key(owner),
+            owner.credential_id,
+            owner.enrollment_generation,
+            designated_session,
+            moment,
+        ]
+        filters: list[str] = []
+        for excluded_conversation, excluded_message in sorted(exclude):
+            filters.append("AND NOT (conversation_id = ? AND message_id = ?) ")
+            bindings.extend((excluded_conversation, excluded_message))
+        with self._connect_readonly() as conn:
+            if conn is None or not self._has_wake_class_column(conn):
+                return []
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return []
+            serving = (
+                "COALESCE(routed_session, designated_session) = ? "
+                if self._has_routed_session_column(conn)
+                else "designated_session = ? "
             )
+            return [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM body_reservations WHERE owner_key = ? "
+                    "AND credential_id = ? AND enrollment_generation = ? "
+                    f"AND {serving}AND wake_class IN ('passive', 'ambient') "
+                    "AND (state = 'deferred' OR (state = 'claimed' "
+                    "AND claim_expires_at IS NOT NULL AND claim_expires_at < ?)) "
+                    + "".join(filters)
+                    + "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    [*bindings, max(0, int(limit))],
+                ).fetchall()
+            ]
 
     def claim_body_reservation(
         self,
@@ -3995,13 +5008,15 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_wake_class_column(conn)
+            # Same expired-claim exclusion as ``pending_body_reservation_for``.
             cursor = conn.execute(
                 "UPDATE body_reservations SET state = 'claimed', claim_token = ?, "
                 "turn_token = ?, claim_expires_at = ?, attempts = attempts + 1, "
                 "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
                 "AND message_id = ? AND (state = 'pending' OR "
                 "(state = 'claimed' AND claim_expires_at IS NOT NULL "
-                "AND claim_expires_at < ?))",
+                "AND claim_expires_at < ? AND wake_class IS NULL))",
                 (
                     claim_token,
                     turn_token,
@@ -4011,6 +5026,113 @@ class Store:
                     conversation_id,
                     message_id,
                     float(now),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def claim_digest_reservation(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        claim_token: str,
+        turn_token: str,
+        now: float,
+        ttl: float,
+    ) -> bool:
+        """CAS one ambient-digest row (deferred, or an expired digest claim).
+
+        ``wake_class`` is KEPT on the claimed row: that is what keeps the woken
+        reader's expired-claim arm (and :meth:`claim_body_reservation`'s) from
+        ever turning a digest row into a full turn, and what routes its
+        release through :meth:`release_digest_claim` rather than to
+        ``pending``. Renew/complete are the ordinary claim-guarded ones.
+        """
+
+        self._reservation_field("claim_token", claim_token, _CLAIM_TOKEN)
+        self._reservation_field("turn_token", turn_token, _CLAIM_TOKEN)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_wake_class_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET state = 'claimed', claim_token = ?, "
+                "turn_token = ?, claim_expires_at = ?, attempts = attempts + 1, "
+                "updated_at = ? WHERE owner_key = ? AND conversation_id = ? "
+                "AND message_id = ? AND wake_class IN ('passive', 'ambient') "
+                "AND (state = 'deferred' OR (state = 'claimed' "
+                "AND claim_expires_at IS NOT NULL AND claim_expires_at < ?))",
+                (
+                    claim_token,
+                    turn_token,
+                    float(now) + float(ttl),
+                    float(now),
+                    _owner_key(owner),
+                    conversation_id,
+                    message_id,
+                    float(now),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def release_digest_claim(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        claim_token: str,
+        reason: str,
+        now: float,
+        max_attempts: int = DIGEST_MAX_ATTEMPTS,
+        count_attempt: bool = True,
+    ) -> bool:
+        """Return a digest claim to ``deferred`` — NEVER to ``pending``.
+
+        :meth:`release_body_claim` writes ``pending``, which would turn an
+        ambient post nobody was woken for into a full turn of its own (#4377
+        review, adjacent note). After ``max_attempts`` claims the row is
+        retired ``ambient_not_shown`` instead: a digest that keeps failing
+        (capacity, drift) must not ride every later turn forever, and the post
+        stays readable through ``channel_history``.
+
+        ``count_attempt=False`` un-counts the claim: the row was claimed but
+        then dropped for the digest's own bounds before any request carried it,
+        which is not a failed showing and must not age it toward retirement.
+        """
+
+        self._reservation_field("claim_token", claim_token, _CLAIM_TOKEN)
+        refund = 0 if count_attempt else 1
+        if reason not in BODY_HOLD_REASONS:
+            raise StoreRefused("invalid_body_reason", "reason")
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_wake_class_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET "
+                "state = CASE WHEN attempts - ? >= ? THEN 'retired' ELSE 'deferred' END, "
+                "terminal_code = CASE WHEN attempts - ? >= ? THEN 'ambient_not_shown' "
+                "ELSE terminal_code END, attempts = MAX(0, attempts - ?), "
+                "claim_token = NULL, turn_token = NULL, claim_expires_at = NULL, "
+                "last_error = ?, updated_at = ? WHERE owner_key = ? "
+                "AND conversation_id = ? AND message_id = ? AND state = 'claimed' "
+                "AND claim_token = ? AND wake_class IS NOT NULL",
+                (
+                    refund,
+                    int(max_attempts),
+                    refund,
+                    int(max_attempts),
+                    refund,
+                    reason,
+                    float(now),
+                    _owner_key(owner),
+                    conversation_id,
+                    message_id,
+                    claim_token,
                 ),
             )
             return cursor.rowcount == 1
@@ -4173,7 +5295,11 @@ class Store:
             return cursor.rowcount == 1
 
     def per_call_admission_state(
-        self, owner: OwnerSnapshot, designated_session: str
+        self,
+        owner: OwnerSnapshot,
+        designated_session: str,
+        *,
+        reservation: tuple[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """The four local facts one provider call must still satisfy.
 
@@ -4185,6 +5311,13 @@ class Store:
         ``None`` means "could not verify" — an absent store, a fenced owner,
         no row. Callers treat it as drift and send the request without the
         frame; it is never evidence of withdrawal (design S-24).
+
+        ``reservation`` is the ``(conversation_id, message_id)`` the caller holds
+        a claim on. ``designation_matches`` is true when the caller IS the live
+        designation, and ALSO when the row was routed to the caller while the
+        live designation is still the one the connector stamped on it — the two
+        facts the routed session's authority consists of. Without ``reservation``
+        the answer is the designated-only one, exactly as before.
         """
 
         with self._connect_readonly() as conn:
@@ -4207,10 +5340,22 @@ class Store:
                 (_owner_key(owner),),
             ).fetchone()
             consent_version = row["consent_version"]
+            matches = live_designation == designated_session
+            if not matches and reservation is not None and self._has_routed_session_column(conn):
+                routed = conn.execute(
+                    "SELECT routed_session, designated_session FROM body_reservations "
+                    "WHERE owner_key = ? AND conversation_id = ? AND message_id = ?",
+                    (_owner_key(owner), reservation[0], reservation[1]),
+                ).fetchone()
+                matches = (
+                    routed is not None
+                    and routed["routed_session"] == designated_session
+                    and routed["designated_session"] == live_designation
+                )
             return {
                 "owner_live": True,
                 "designated_session": live_designation,
-                "designation_matches": live_designation == designated_session,
+                "designation_matches": matches,
                 "policy_epoch": int(policy["epoch"]) if policy is not None else None,
                 "consent_version": (consent_version if isinstance(consent_version, str) else None),
             }
@@ -4540,7 +5685,7 @@ class Store:
                 "claim_token = NULL, turn_token = NULL, claim_expires_at = NULL, "
                 "updated_at = ? WHERE owner_key = ? "
                 "AND (credential_id != ? OR enrollment_generation != ?) "
-                "AND state IN ('pending', 'claimed')",
+                "AND state IN ('pending', 'claimed', 'deferred')",
                 (
                     time.time(),
                     _owner_key(owner),
@@ -4548,6 +5693,15 @@ class Store:
                     owner.enrollment_generation,
                 ),
             )
+        # Display-only bodies belong to the namespace that received them. An
+        # enrollment under any OTHER namespace (account switch, re-enrol on
+        # another tenant/endpoint/hub) must not inherit them; the same owner's
+        # re-commit (heal, generation bump) keeps its own. After the commit,
+        # never inside it: the display store is a separate file and a failed
+        # purge must not roll back authority.
+        from .display_bodies import DisplayBodyStore
+
+        DisplayBodyStore(self.config_dir).purge(keep_owner_key=_owner_key(owner))
 
     def invalidate(self, owner: OwnerSnapshot) -> int:
         """Fence pending results/claims and bump the generation. Returns it.
@@ -4814,17 +5968,31 @@ class Store:
         intent and dispatch replays identically — never a re-screen).
         Re-recording the same (owner, message, target) with the same tuple is
         idempotent; a DIFFERENT tuple is refused as a write-once conflict.
+
+        ``working``/``done`` (the receiving agent's own progress, posted by
+        ``bridge(op="ack")``) take NO receipt and refuse one: the hub checks
+        the allow verdict it stored at ``read``, so the intent is just the
+        write-once (message, target, client_ref) row whose ref a crash replay
+        must reuse. Their tuple columns stay NULL, which ``_intent_dict``
+        reads back as ``receipt=None``.
         """
 
         if target not in ACK_TARGETS:
             raise StoreRefused("invalid_target", f"ack target {target!r}")
-        if receipt is None or receipt.verdict != ("allow" if target == "read" else "reject"):
+        if target not in RECEIPT_ACK_TARGETS:
+            if receipt is not None:
+                raise StoreRefused(
+                    "receipt_not_allowed",
+                    f"{target} carries no screening receipt; the hub checks its stored verdict",
+                )
+        elif receipt is None or receipt.verdict != ("allow" if target == "read" else "reject"):
             raise StoreRefused("receipt_required", f"{target} needs a matching screening receipt")
         try:
             # The FULL immutable tuple is validated before anything is
             # persisted: a malformed hash/model/prompt is not "evidence with
             # gaps", it is not evidence (QA H2-Q7).
-            receipt.validated()
+            if receipt is not None:
+                receipt.validated()
         except TeamBridgeTypeError as error:
             raise StoreRefused("invalid_receipt", str(error)) from error
         if not isinstance(client_ref, str) or not client_ref:
@@ -4847,7 +6015,9 @@ class Store:
                 # Comparing only a subset let a changed template/model reuse
                 # the old intent silently (QA H2-Q7 / reviewer R2).
                 same = (
-                    existing["verdict"] == receipt.verdict
+                    existing["verdict"] is None and existing["client_ref"] == client_ref
+                    if receipt is None
+                    else existing["verdict"] == receipt.verdict
                     and existing["model"] == receipt.model
                     and existing["prompt_version"] == receipt.prompt_version
                     and existing["template_sha256"] == receipt.template_sha256
@@ -4880,12 +6050,12 @@ class Store:
                     message_id,
                     target,
                     client_ref,
-                    receipt.verdict,
-                    receipt.model,
-                    receipt.prompt_version,
-                    receipt.template_sha256,
-                    receipt.body_sha256,
-                    json.dumps(sorted(receipt.categories)),
+                    receipt.verdict if receipt is not None else None,
+                    receipt.model if receipt is not None else None,
+                    receipt.prompt_version if receipt is not None else None,
+                    receipt.template_sha256 if receipt is not None else None,
+                    receipt.body_sha256 if receipt is not None else None,
+                    json.dumps(sorted(receipt.categories)) if receipt is not None else None,
                     ACK_PENDING,
                     time.time(),
                     owner.enrollment_generation,
@@ -6056,6 +7226,125 @@ class Store:
                 ),
             ).rowcount
             return removed == 1
+
+    def write_once_resolution(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        body_sha256: str,
+        envelope_digest: str,
+    ) -> dict[str, Any] | None:
+        """The committed receipt a ``write_once_conflict`` may be answered with, or ``None``.
+
+        WHY (holds triage 2026-11-18 finding c; security review S-1/S-2 on
+        #4249). Write-once makes the FIRST verdict authoritative, but only while
+        it is still evidence under the LIVE policy: a receipt the owner has
+        since superseded (a tightened template, a new admission revision, a
+        serving model no longer approved, a privacy pass switched on) must
+        never override the current pass's answer. So the row goes through
+        :func:`receipt_authority` — the one copy of the currency and integrity
+        checks — with only the epoch equality waived (see ``epoch_bound``).
+
+        Also required: the same body and envelope (sender, type, request
+        block); an ``allow`` from a PREFERRED screener (an unsent fallback allow
+        is provisional and is re-screened, never revived here); and, when the
+        privacy pass is on or the policy was minted with it, a FINAL privacy
+        allow for this message, envelope, revision and the CURRENT control
+        generation (the same proof :meth:`_require_privacy_proof` demands of a
+        fresh allow). Read-only; ``None`` on anything else, including damage.
+        """
+
+        try:
+            # The ordinary connection (as :meth:`receipt_for_message`), not the
+            # ``mode=ro`` one: ``_privacy_control`` ensures its tables exist, and
+            # a refused CREATE on a read-only handle would read as "no proof"
+            # even with the pass off. Nothing here writes a row.
+            with self._connect() as conn:
+                self._init(conn)
+                key = _owner_key(owner)
+                policy = conn.execute(
+                    "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+                ).fetchone()
+                receipt = conn.execute(
+                    "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    (key, str(message_id)),
+                ).fetchone()
+                if policy is None or receipt is None:
+                    return None
+                receipt_row = dict(receipt)
+                if (
+                    receipt_row.get("body_sha256") != body_sha256
+                    or receipt_row.get("envelope_digest") != envelope_digest
+                ):
+                    return None
+                decoded, _damage, _note = receipt_authority(
+                    owner, dict(policy), receipt_row, epoch_bound=False
+                )
+                if decoded is None:
+                    return None
+                preferred = receipt_row.get("screener_preferred") == 1
+                if decoded["verdict"] == "allow":
+                    if not preferred:
+                        return None
+                    if not self._final_privacy_allow(
+                        conn,
+                        owner,
+                        dict(policy),
+                        message_id=str(message_id),
+                        envelope_digest=envelope_digest,
+                        admission_revision=receipt_row.get("admission_revision"),
+                    ):
+                        return None
+                return {**decoded, "screener_preferred": preferred}
+        except (sqlite3.Error, StoreRefused, TypeError, ValueError):
+            return None
+
+    def _final_privacy_allow(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        policy: Mapping[str, Any],
+        *,
+        message_id: str,
+        envelope_digest: str,
+        admission_revision: Any,
+    ) -> bool:
+        """Whether an allow may stand under A8: pass off, or a final privacy allow on record.
+
+        The read-only twin of :meth:`_require_privacy_proof`'s acceptance
+        rule, keyed by the message (a resolution has no decision id of its
+        own). A table or column that is absent reads as "no proof".
+        """
+
+        control = self._privacy_control(conn)
+        enabled = control is not None and int(control["enabled"]) == 1
+        minted = int(policy.get("privacy_generation") or 0)
+        if not enabled and minted == 0:
+            return True
+        if not enabled or control is None or minted != int(control["generation"]):
+            return False
+        for row in conn.execute(
+            "SELECT * FROM privacy_decisions WHERE owner_key = ? AND message_id = ? "
+            "AND envelope_digest = ? AND admission_revision = ? AND control_generation = ?",
+            (
+                _owner_key(owner),
+                message_id,
+                envelope_digest,
+                admission_revision,
+                int(control["generation"]),
+            ),
+        ).fetchall():
+            if row["final"] == "bypass" and int(row["first_preferred"]) == 1:
+                return True
+            if (
+                row["final"] == "admit"
+                and row["stage_state"] == "completed"
+                and row["privacy_result"] == "deliver"
+                and row["first_disposition"] == "deliver"
+            ):
+                return True
+        return False
 
     def receipt_for_message(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
         """THE trusted record for one screened message, by message id (H5 F3).
@@ -8211,6 +9500,206 @@ class Store:
         except sqlite3.Error:
             return None
 
+    def screening_hold_first_held_at(self, owner: OwnerSnapshot, message_id: str) -> float | None:
+        """When this message was FIRST held, from the durable rows; ``None`` if unheld.
+
+        WHY (operator report 2026-11-17). The screening-unavailable escalation
+        (``screening._aged_review_hold``) needs a hold age that a connector
+        restart cannot reset, so it must not come from the loop's in-memory
+        ``_RETRY_ATTEMPTS``. ``created_at`` is that fact: every re-hold upserts IN
+        PLACE and keeps it (``persist_hold``, PR #3063 m10).
+
+        WHY THE MINIMUM ACROSS BOTH KEYSPACES. A held conversation message has
+        two rows (:func:`_screening_hold_row`): the screener's bare ``bcmsg_``
+        row, which :meth:`retire_due_bare_conversation_holds` deletes every tick
+        once due — so its ``created_at`` restarts on every pass — and the
+        connector's composite feed-ref row, which lives until a verdict. The
+        earliest of them is the age the sender has actually waited. Read-only;
+        a damaged store answers ``None`` (no escalation, the old behaviour).
+        """
+
+        from local_operator.team_bridge.types import (
+            CONVERSATION_FEED_KIND,
+            CONVERSATION_FEED_TYPE,
+            is_conversation_message_id,
+        )
+
+        owner_key = _owner_key(owner)
+        try:
+            exact = _contentless_delivery_key(message_id)
+        except StoreRefused:
+            return None
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                stamps: list[float] = []
+                row = conn.execute(
+                    "SELECT created_at FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, exact),
+                ).fetchone()
+                if row is not None and row["created_at"] is not None:
+                    stamps.append(float(row["created_at"]))
+                if is_conversation_message_id(message_id):
+                    prefix = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
+                    for candidate in conn.execute(
+                        "SELECT message_id, created_at FROM screening_holds "
+                        "WHERE owner_key = ? AND substr(message_id, 1, ?) = ? "
+                        "AND instr(message_id, ?) > 0",
+                        (owner_key, len(prefix), prefix, f"/{message_id}/"),
+                    ).fetchall():
+                        if (
+                            screening_hold_message_id(str(candidate["message_id"])) == message_id
+                            and candidate["created_at"] is not None
+                        ):
+                            stamps.append(float(candidate["created_at"]))
+        except sqlite3.Error:
+            return None
+        finite = [stamp for stamp in stamps if math.isfinite(stamp)]
+        return min(finite) if finite else None
+
+    def note_aged_hold(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        now: float,
+        clock: str = HOLD_CLOCK_REVIEW,
+    ) -> float | None:
+        """Stamp (once) and return when this message entered a hold on ``clock``.
+
+        PR #4212 S-5: the escalation clock starts at the first hold under a code
+        that may age, not at the row's ``created_at``. Round 2 (R2-1): one stamp
+        per clock, so owner-action time never counts as screening delay. Written
+        only while a hold row for the message exists (``None`` otherwise, which
+        never converts anything); the first stamp wins (``INSERT OR IGNORE``).
+        Cleared with every terminal outcome by :meth:`_clear_unusable_passes`.
+        """
+
+        if self.screening_hold_first_held_at(owner, message_id) is None:
+            return None
+        owner_key = _owner_key(owner)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_aged_hold_table(conn)
+                conn.execute(
+                    "INSERT OR IGNORE INTO screening_hold_clocks "
+                    "(owner_key, message_id, clock, first_at) VALUES (?, ?, ?, ?)",
+                    (owner_key, message_id, clock, float(now)),
+                )
+                row = conn.execute(
+                    "SELECT first_at FROM screening_hold_clocks "
+                    "WHERE owner_key = ? AND message_id = ? AND clock = ?",
+                    (owner_key, message_id, clock),
+                ).fetchone()
+        except (sqlite3.Error, StoreRefused):
+            return None
+        if row is None:
+            return None
+        first = float(row["first_at"])
+        return first if math.isfinite(first) else None
+
+    def clear_hold_clock(self, owner: OwnerSnapshot, message_id: str, *, clock: str) -> None:
+        """Drop ONE clock's stamp for a message (R2-1); best effort, never raises.
+
+        Called on every owner-action pass for the REVIEW clock: while the owner
+        must act, the screening-review clock does not run, so a message that
+        waited hours for a sign-in starts its screening clock afresh afterwards.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_aged_hold_table(conn)
+                conn.execute(
+                    "DELETE FROM screening_hold_clocks "
+                    "WHERE owner_key = ? AND message_id = ? AND clock = ?",
+                    (_owner_key(owner), message_id, clock),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
+    def screening_route_evidence(self, owner: OwnerSnapshot) -> dict[str, float | None]:
+        """``{"success_at", "canary_failed_at"}`` for this account (S-6/S-9); read-only."""
+
+        empty: dict[str, float | None] = {"success_at": None, "canary_failed_at": None}
+        try:
+            with self._connect_readonly() as conn:
+                if conn is None:
+                    return empty
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'screening_route_evidence'"
+                ).fetchone()
+                if exists is None:
+                    return empty
+                row = conn.execute(
+                    "SELECT success_at, canary_failed_at FROM screening_route_evidence "
+                    "WHERE account_scope = ?",
+                    (self._account_scope(owner),),
+                ).fetchone()
+        except sqlite3.Error:
+            return empty
+        if row is None:
+            return empty
+
+        def _finite(value: Any) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) else None
+
+        return {"success_at": _finite(row[0]), "canary_failed_at": _finite(row[1])}
+
+    def record_canary_failure(self, owner: OwnerSnapshot) -> None:
+        """The content-free route canary failed too (S-9): outage evidence. Best effort."""
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_last_success_table(conn)
+                conn.execute(
+                    "INSERT INTO screening_route_evidence (account_scope, canary_failed_at) "
+                    "VALUES (?, ?) ON CONFLICT(account_scope) "
+                    "DO UPDATE SET canary_failed_at = excluded.canary_failed_at",
+                    (self._account_scope(owner), time.time()),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
+    def drop_review_decision(self, owner: OwnerSnapshot, message_id: str) -> None:
+        """Remove ONE message's review decision and its release row (round 3, Q3).
+
+        Only for an UNSCREENED decision a re-screen just answered: the screener's
+        own decision replaces it, so the owner's next Deliver is a screened
+        decision instead of a dead button on a refused release. Never raises.
+        """
+
+        key = _owner_key(owner)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                self._ensure_work_scope_tables(conn)
+                conn.execute(
+                    "DELETE FROM work_scope_decisions WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                )
+                conn.execute(
+                    "DELETE FROM owner_releases WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
     def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
         """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
 
@@ -8480,15 +9969,23 @@ class Store:
             return open_until
 
     def record_screening_success(self, owner: OwnerSnapshot) -> None:
-        """A provider success clears the account breaker."""
+        """A provider success clears the account breaker and stamps the success.
+
+        The stamp (S-6) is what tells an outage from a message-specific failure:
+        see :func:`_ensure_last_success_table`.
+        """
 
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            scope = self._account_scope(owner)
+            conn.execute("DELETE FROM screening_breaker WHERE account_scope = ?", (scope,))
+            _ensure_last_success_table(conn)
             conn.execute(
-                "DELETE FROM screening_breaker WHERE account_scope = ?",
-                (self._account_scope(owner),),
+                "INSERT INTO screening_route_evidence (account_scope, success_at) VALUES (?, ?) "
+                "ON CONFLICT(account_scope) DO UPDATE SET success_at = excluded.success_at",
+                (scope, time.time()),
             )
 
     def screening_breaker_state(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
@@ -8873,6 +10370,20 @@ class Store:
         "key_id TEXT NOT NULL, signature TEXT NOT NULL, surface TEXT NOT NULL, "
         "creator_generation INTEGER NOT NULL, outcome TEXT NOT NULL, outcome_at REAL, "
         "PRIMARY KEY (owner_key, message_id))",
+        # The audit receipt of a LOCAL-ONLY terminal Discard
+        # (:meth:`record_owner_release_local_terminal`), the ``credential_heals``
+        # shape: one row per settled message saying which signed record was
+        # settled, why it could only settle locally, the Deliver deadline that
+        # made it eligible, and when. Ids, closed words and times only. Kept
+        # beside ``owner_releases`` rather than as columns on it so the signed
+        # row, its payload and ``release_matches_decision`` stay byte-identical.
+        "CREATE TABLE IF NOT EXISTS owner_release_local_terminals ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
+        "conversation_id TEXT NOT NULL, creator_generation INTEGER NOT NULL, "
+        "outcome TEXT NOT NULL, reason TEXT NOT NULL, key_id TEXT NOT NULL, "
+        "account_id TEXT NOT NULL, decided_at REAL NOT NULL, "
+        "deliver_until REAL NOT NULL, at REAL NOT NULL, "
+        "PRIMARY KEY (owner_key, message_id))",
     )
 
     #: Amendment 2 columns (S-1, m3), added by ``ALTER`` so a table an earlier
@@ -8882,6 +10393,15 @@ class Store:
         ("work_scope_decisions", "screener_verdict", "TEXT NOT NULL DEFAULT ''"),
         ("work_scope_decisions", "screener_hop", "INTEGER NOT NULL DEFAULT -1"),
         ("work_scope_decisions", "screener_preferred", "INTEGER NOT NULL DEFAULT 0"),
+        # Holds triage 2026-11-18 (d): the screener's own REASON, capped at
+        # :data:`SCREENER_REASON_MAX` characters, so a hold's calibration can be
+        # audited after the fact (it lived only in ``ScreenResult``'s memory, so
+        # every over-trigger diagnosis was inference). NULL on rows written
+        # before it and on holds no model reason produced. OWNER-VISIBLE ONLY:
+        # it is untrusted model text about untrusted teammate text, so it is
+        # never logged, never put in a prompt, never published to the hub, and
+        # it is NOT part of the signed release payload (``hold_release``).
+        ("work_scope_decisions", "screener_reason", "TEXT"),
         ("owner_releases", "screener_verdict", "TEXT NOT NULL DEFAULT ''"),
         ("owner_releases", "screener_hop", "INTEGER NOT NULL DEFAULT -1"),
         ("owner_releases", "screener_preferred", "INTEGER NOT NULL DEFAULT 0"),
@@ -8916,8 +10436,20 @@ class Store:
         screener_hop: int = -1,
         screener_preferred: bool = False,
         hold_code: str = "",
+        screener_reason: str | None = None,
     ) -> dict[str, Any]:
         """Write the decision row ONCE; a re-drive keeps the first (eligibility is fixed).
+
+        ``screener_reason`` is the model's private reason, stored capped at
+        :data:`SCREENER_REASON_MAX` characters for the owner's audit only (see
+        the ``screener_reason`` column note).
+
+        THE SENDER BUDGET COUNTS ONLY ``work_scope_hold`` ROWS (holds triage
+        2026-11-18, finding a). Review rows are always written ``eligible = 1``
+        and spend no budget, but the count did not filter on the code, so a
+        sender's ordinary ``model_hold`` rows used the budget up and the next
+        genuine work-scope hold was written ineligible (H12: no buttons). The
+        budget bounds probing of the CATEGORY-trusting class only.
 
         ``hold_code`` defaults to the work-scope class; a review code
         (``hold_release.REVIEW_HOLD_CODES``) is always eligible — see there for
@@ -8954,8 +10486,14 @@ class Store:
             else:
                 spent = conn.execute(
                     "SELECT COUNT(*) FROM work_scope_decisions WHERE owner_key = ? "
-                    "AND sender_digest = ? AND eligible = 1 AND created_at > ?",
-                    (key, sender_digest, float(now) - hr.SENDER_BUDGET_WINDOW_S),
+                    "AND sender_digest = ? AND hold_code = ? AND eligible = 1 "
+                    "AND created_at > ?",
+                    (
+                        key,
+                        sender_digest,
+                        hr.WORK_SCOPE_HOLD,
+                        float(now) - hr.SENDER_BUDGET_WINDOW_S,
+                    ),
                 ).fetchone()[0]
                 if int(spent) >= hr.SENDER_BUDGET:
                     reason = hr.INELIGIBLE_BUDGET
@@ -8965,8 +10503,8 @@ class Store:
                 "envelope_digest, hold_code, screener_provider, screener_model, "
                 "template_sha256, prompt_version, categories, policy_epoch, "
                 "creator_generation, sender_digest, eligible, ineligible_reason, created_at, "
-                "screener_verdict, screener_hop, screener_preferred) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "screener_verdict, screener_hop, screener_preferred, screener_reason) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     key,
                     message_id,
@@ -8988,6 +10526,7 @@ class Store:
                     screener_verdict,
                     int(screener_hop),
                     1 if screener_preferred else 0,
+                    capped_screener_reason(screener_reason),
                 ),
             )
             row = conn.execute(
@@ -9140,40 +10679,165 @@ class Store:
         """WRITE-ONCE per (owner, message). Same word again → the existing row;
         the other word → ``already_decided``. The caller verified the signature."""
 
-        key = _owner_key(owner)
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
             self._ensure_work_scope_tables(conn)
-            existing = conn.execute(
+            existing = self._existing_owner_release(conn, owner, row)
+            if existing is not None:
+                return existing
+            return self._insert_owner_release(conn, owner, row, outcome="pending", outcome_at=None)
+
+    def record_owner_release_local_terminal(
+        self,
+        owner: OwnerSnapshot,
+        row: Mapping[str, Any],
+        *,
+        outcome: str,
+        reason: str,
+        deliver_until: float,
+        now: float,
+    ) -> dict[str, Any]:
+        """Write a signed Discard ALREADY SETTLED locally, plus its audit row, atomically.
+
+        WHY (follow-on to PR #4358). A Discard the person signs with a hold
+        receipt instead of a body hash (no body was presented, so no hub
+        confirmation was obtained — the server does not verify why), past its
+        Deliver window, is consumed by
+        the connector only when the hub serves the envelope again; a message
+        the hub no longer serves therefore sat ``pending`` forever. This
+        records the person's decision as the terminal ``outcome`` (a LOCAL
+        word — ``discarded_local_unconfirmed``) in the same transaction as the
+        ``owner_release_local_terminals`` audit row, so there is never a
+        settled row without its receipt or the reverse. Nothing here talks to
+        the hub, delivers, or notifies a sender, and the outcome says only
+        what THIS machine did.
+
+        Write-once like :meth:`record_owner_release`: the same word again
+        returns the existing row unchanged, the other word is
+        ``already_decided``. The caller verified eligibility and signed.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_work_scope_tables(conn)
+            existing = self._existing_owner_release(conn, owner, row)
+            if existing is not None:
+                return existing
+            written = self._insert_owner_release(
+                conn, owner, row, outcome=outcome, outcome_at=float(now)
+            )
+            # #4371 security review S-2: ``drop_review_decision`` deletes the
+            # ``owner_releases`` row but never its audit row (audit rows are
+            # never deleted), so a second local terminal for the same message
+            # would collide on this table's primary key. That must be a typed
+            # refusal the route maps to 409, never a raw IntegrityError (a 500).
+            # Raising inside ``with conn`` rolls back the release row above
+            # too, so a settled row never exists without its own receipt.
+            try:
+                self._insert_local_terminal_audit(
+                    conn,
+                    owner,
+                    row,
+                    outcome=outcome,
+                    reason=reason,
+                    deliver_until=deliver_until,
+                    now=now,
+                )
+            except sqlite3.IntegrityError as error:
+                raise StoreRefused(
+                    "state_unavailable", "local terminal audit row already recorded"
+                ) from error
+            return written
+
+    def _insert_local_terminal_audit(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        row: Mapping[str, Any],
+        *,
+        outcome: str,
+        reason: str,
+        deliver_until: float,
+        now: float,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO owner_release_local_terminals (owner_key, message_id, "
+            "conversation_id, creator_generation, outcome, reason, key_id, account_id, "
+            "decided_at, deliver_until, at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                _owner_key(owner),
+                row["message_id"],
+                row["conversation_id"],
+                owner.enrollment_generation,
+                outcome[:64],
+                reason[:64],
+                row["key_id"],
+                row["account_id"],
+                float(row["decided_at"]),
+                float(deliver_until),
+                float(now),
+            ),
+        )
+
+    def owner_release_local_terminal(
+        self, owner: OwnerSnapshot, message_id: str
+    ) -> dict[str, Any] | None:
+        """The local-terminal audit row for this message, or ``None``."""
+
+        rows = self._work_scope_rows(
+            "SELECT * FROM owner_release_local_terminals WHERE owner_key = ? " "AND message_id = ?",
+            (_owner_key(owner), message_id),
+        )
+        return rows[0] if rows else None
+
+    def _existing_owner_release(
+        self, conn: sqlite3.Connection, owner: OwnerSnapshot, row: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        existing = conn.execute(
+            "SELECT * FROM owner_releases WHERE owner_key = ? AND message_id = ?",
+            (_owner_key(owner), row["message_id"]),
+        ).fetchone()
+        if existing is None:
+            return None
+        if existing["word"] != row["word"]:
+            raise StoreRefused("already_decided", "this hold was already decided")
+        return dict(existing)
+
+    def _insert_owner_release(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        row: Mapping[str, Any],
+        *,
+        outcome: str,
+        outcome_at: float | None,
+    ) -> dict[str, Any]:
+        key = _owner_key(owner)
+        columns = (
+            "message_id", "conversation_id", "body_sha256", "envelope_digest",
+            "hold_code", "screener_provider", "screener_model", "template_sha256",
+            "categories", "word", "decided_at", "account_id", "key_id", "signature",
+            "surface", "screener_verdict", "screener_hop", "screener_preferred",
+        )  # fmt: skip
+        conn.execute(
+            "INSERT INTO owner_releases (owner_key, creator_generation, outcome, "
+            "outcome_at, "
+            + ", ".join(columns)
+            + ") VALUES (?,?,?,?,"
+            + ",".join("?" for _ in columns)
+            + ")",
+            (key, owner.enrollment_generation, outcome, outcome_at, *(row[c] for c in columns)),
+        )
+        return dict(
+            conn.execute(
                 "SELECT * FROM owner_releases WHERE owner_key = ? AND message_id = ?",
                 (key, row["message_id"]),
             ).fetchone()
-            if existing is not None:
-                if existing["word"] != row["word"]:
-                    raise StoreRefused("already_decided", "this hold was already decided")
-                return dict(existing)
-            columns = (
-                "message_id", "conversation_id", "body_sha256", "envelope_digest",
-                "hold_code", "screener_provider", "screener_model", "template_sha256",
-                "categories", "word", "decided_at", "account_id", "key_id", "signature",
-                "surface", "screener_verdict", "screener_hop", "screener_preferred",
-            )  # fmt: skip
-            conn.execute(
-                "INSERT INTO owner_releases (owner_key, creator_generation, outcome, "
-                + ", ".join(columns)
-                + ") VALUES (?,?,?,"
-                + ",".join("?" for _ in columns)
-                + ")",
-                (key, owner.enrollment_generation, "pending", *(row[c] for c in columns)),
-            )
-            return dict(
-                conn.execute(
-                    "SELECT * FROM owner_releases WHERE owner_key = ? AND message_id = ?",
-                    (key, row["message_id"]),
-                ).fetchone()
-            )
+        )
 
     def set_owner_release_outcome(
         self, owner: OwnerSnapshot, message_id: str, outcome: str, *, now: float
@@ -9187,10 +10851,23 @@ class Store:
             self._ensure_work_scope_tables(conn)
             conn.execute(
                 # Only a non-final outcome moves: ``admitted``/``rejected`` are
-                # terminal and a late replay must not rewrite them.
+                # terminal and a late replay must not rewrite them. The LOCAL
+                # terminal (``record_owner_release_local_terminal``) is final
+                # against every connector refusal too, and yields to exactly one
+                # word: ``rejected``, the hub's own confirmation of that same
+                # signed Discard if the hub ever serves the message again, so
+                # the row never keeps claiming "unconfirmed" after it was.
                 "UPDATE owner_releases SET outcome = ?, outcome_at = ? WHERE owner_key = ? "
-                "AND message_id = ? AND (outcome = 'pending' OR outcome LIKE 'refused:%')",
-                (outcome[:64], float(now), _owner_key(owner), message_id),
+                "AND message_id = ? AND (outcome = 'pending' OR outcome LIKE 'refused:%' "
+                "OR (outcome = ? AND ? = 'rejected'))",
+                (
+                    outcome[:64],
+                    float(now),
+                    _owner_key(owner),
+                    message_id,
+                    OWNER_RELEASE_LOCAL_TERMINAL,
+                    outcome[:64],
+                ),
             )
 
     def commit_owner_release(

@@ -1,0 +1,8 @@
+{
+  "wire.settings.transcript_display.choice.by_response.description": "每条已完成的回复",
+  "wire.settings.transcript_display.choice.by_response.label": "按回复",
+  "wire.settings.transcript_display.choice.by_turn.description": "每轮一条回复",
+  "wire.settings.transcript_display.choice.by_turn.label": "按轮次",
+  "wire.settings.transcript_display.help": "“按轮次”将每一轮精简为其回复。“按回复”在屏幕上保留每条已完成的回复，并仍标出本轮的最终回复。",
+  "wire.settings.transcript_display.label": "会话记录显示"
+}

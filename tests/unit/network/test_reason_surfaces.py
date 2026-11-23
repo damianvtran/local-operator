@@ -55,6 +55,50 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # The working-set receipt block (PR B): ``str()`` normalises a restore/left-behind
+    # REASON CODE as it is copied from the restore report into the block's row. It
+    # stays a machine code there; the human sentence is ``workset_text.reason_text``.
+    ("local_operator/network/workset_move.py", "arrival_receipt", "reason"): (
+        2,
+        "a reason CODE copied into the receipt block, rendered later by workset_text",
+    ),
+    # The offload's return path (#4245 round 3, B2). Each ``str()`` normalises a reason
+    # CODE in transit and never renders it: ``destination_transfer`` journals the coarse
+    # code the owner was already sent into ``pending.json``'s ``source_left``;
+    # ``destination_outcome`` copies it into the ``done`` frame's row; ``source_receipt``
+    # keeps a peer code only if ``workset_text.known_reason`` admits it (else
+    # ``not_transferred``). The sentence is ``workset_text.reason_text``, at render time.
+    ("local_operator/network/workset_move.py", "destination_transfer", "reason"): (
+        1,
+        "a decline reason CODE journaled for the source's receipt, never rendered raw",
+    ),
+    ("local_operator/network/workset_move.py", "destination_outcome", "reason"): (
+        1,
+        "a reason CODE copied into the done frame's row, rendered later by workset_text",
+    ),
+    ("local_operator/network/workset_move.py", "source_receipt", "reason"): (
+        1,
+        "a peer reason CODE kept only if workset_text's closed table knows it",
+    ),
+    # These f-strings use this device's HeavyClass.reason command label
+    # (long-lived-command and acquired notices) and memory_budget.reason
+    # (why the local cap is off). Neither value comes from a mesh peer.
+    ("local_operator/tools/builtin.py", "_acquire_heavy_lease", "reason"): (
+        3,
+        "local heavy-command labels and memory-cap explanation, not mesh peer codes",
+    ),
+    # Backfill parses this device's stored invite receipt to recover the minted
+    # id; the coerced detail is regex input, never a rendered peer refusal.
+    ("local_operator/network/operator_binding.py", "_invite_ids", "detail"): (
+        1,
+        "local approval receipt parsed for an invite id, not displayed",
+    ),
+    # This coercion builds the per-approval log-deduplication key. The other
+    # reason read feeds LOGGER directly; neither constructs a human mesh surface.
+    ("local_operator/network/operator_binding.py", "_log_backfill", "reason"): (
+        1,
+        "backfill outcome cache key used only to deduplicate developer log lines",
+    ),
     # A failed credential card's "Why it stopped" line (UX review #3002 r1, U1). The value
     # is ``approval_copy.reason_for(code)`` -- this project's own sentence for a refusal code,
     # never a peer's raw token; ``approval_copy.last_failure`` maps the stored code first.
@@ -72,6 +116,12 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the stored refusal code, mapped to approval_copy's sentence before any surface",
     ),
+    # node_take preserves the owner's refusal token in its machine result; it
+    # does not print it. B1 calls this helper only from the custody contract tests.
+    ("local_operator/network/credentials/renewal.py", "node_take", "reason"): (
+        1,
+        "owner refusal token forwarded in the machine result, not rendered",
+    ),
     # Exact executed-step discriminator for retaining signed intent; compared
     # internally, never rendered as a reason or substituted for signature proof.
     ("local_operator/network/approvals.py", "_sweep_namespace", "detail"): (
@@ -81,6 +131,12 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/credentials/consent.py", "verified_permission", "detail"): (
         1,
         "internal executed-receipt verification discriminator, never rendered",
+    ),
+    # This local operator-entered audit explanation is persisted with the
+    # notification grant. It is not a peer refusal token or mesh-rendered reason.
+    ("local_operator/cli.py", "sessions_notifications_command", "reason"): (
+        1,
+        "operator-entered local notification-authority audit explanation, not a mesh code",
     ),
     # ``lop prune``'s sweep vocabulary: these ARE the sentences that line prints
     # (``superseded, unreferenced``), authored in ``update.py`` for a reader.
@@ -93,6 +149,26 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/cli.py", "_browser_pair", "detail"): (
         1,
         "the local browser daemon's own transport error, in brackets after a sentence",
+    ),
+    # `lop browser setup/uninstall --node` (browser_bridge/node_host.py). The module
+    # imports the mesh only to ask "is this device a member?"; none of these values
+    # comes from a peer or relay. ``_wait_for_code`` reads the SAME local pairing
+    # answer as ``_browser_pair`` above (``browser_install.request_pairing_codes``
+    # on 127.0.0.1) into a step's evidence; the refusal ``reason`` is this
+    # machine's own user-machine detection prose; a step ``detail`` is
+    # node_host's own technical evidence (package versions, paths), shown
+    # verbatim by design inside a keyed row sentence.
+    ("local_operator/browser_bridge/node_host.py", "_Plan._wait_for_code", "reason"): (
+        1,
+        "the local browser daemon's pairing answer, inside a step's evidence",
+    ),
+    ("local_operator/cli.py", "_node_refusal_line", "reason"): (
+        1,
+        "this machine's own user-machine detection prose, in a keyed refusal sentence",
+    ),
+    ("local_operator/cli.py", "_node_step_line", "detail"): (
+        1,
+        "node_host's own step evidence for this machine, in a keyed row sentence",
     ),
     # The delegated content layer's per-pad row — the same class of prose as
     # ``_cleanup_row`` above: ``merged-clean clone past the window`` /
@@ -132,6 +208,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/session/runtime/server.py", "RuntimeServer._dispatch", "reason"): (
         1,
         "ask_dismiss closed-set operator token forwarded to the session, never rendered",
+    ),
+    # The same ``ask_dismiss`` token, read once more with the SAME ``str(... or "")``
+    # coercion the ``_dispatch`` arm forwards with, so the app-signature attestation
+    # (``asks.app_attest``) binds exactly what the session will receive. It is a
+    # comparison key for ``AttestTable.consume``, never rendered and never peer prose.
+    ("local_operator/session/runtime/server.py", "_ask_answer_stamp", "reason"): (
+        1,
+        "ask_dismiss closed-set token bound into the app attestation key, never rendered",
     ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
@@ -206,6 +290,46 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/update.py", "_publish_team_runtime", "reason"): (
         3,
         "log-only (debug/warning); local procname codes, glossed by _TEAM_SKIP_REASONS",
+    ),
+    # The background-daemon parity reasons (PR #4175, "update: bring background
+    # daemons onto the new build"). Every value is THIS device's own sentence about
+    # its own processes, authored in two places and nowhere else: the recovery
+    # prose in ``services._DAEMON_MODULES`` (``run `lop browser restart```, ...) or
+    # ``services._wakes_left_reason`` / ``update.wake_children_deferral`` (the
+    # live wake-children census), plus the refresh steps' own ``DaemonStatus.reason``
+    # ("move pending, retrying in the background"). No peer writes any of them and
+    # none arrives over a relay; they are declared, not glossed, because the
+    # transport glosses would cut the recovery command at its colon or replace the
+    # command the operator has to run with a generic "it did not answer". Same
+    # class as the prune vocabulary above. ``services.py`` and ``update.py`` are in
+    # this scan only because they name ``local_operator.network`` (services: the
+    # relay import and its module in the daemon inventory; update: the relay roll).
+    #   * ``stale_daemon_lines`` — the ``STALE daemon:`` row ``lop services status``
+    #     and the update report print, ending in the daemon's recovery sentence.
+    #   * ``_reconcile_with_processes`` — that same sentence folded into the
+    #     supervised row's reason when ``ps`` proves the process still runs an old
+    #     generation, so the report's row and the status row say one thing.
+    #   * ``_rolling_receipt`` — the pending daemon's reason inside
+    #     ``central_services_incomplete_reason``, the receipt's own account of why
+    #     the run is not complete.
+    ("local_operator/services.py", "stale_daemon_lines", "reason"): (
+        1,
+        "this device's own daemon recovery sentence (services._DAEMON_MODULES / wakes census)",
+    ),
+    ("local_operator/update.py", "_reconcile_with_processes", "reason"): (
+        1,
+        "the same local recovery sentence, folded into the supervised daemon's row",
+    ),
+    ("local_operator/update.py", "_rolling_receipt", "reason"): (
+        1,
+        "a local DaemonStatus.reason, quoted in central_services_incomplete_reason",
+    ),
+    #   * ``_broker_roll_refresh`` — this device's own secret-broker roll outcome
+    #     (``secrets.roll.RollResult.reason``, a sentence authored for the reader,
+    #     never a peer token), folded into the failed step's detail.
+    ("local_operator/update.py", "_broker_roll_refresh", "reason"): (
+        1,
+        "this device's own broker-roll sentence (secrets.roll), never a mesh token",
     ),
     # Assigned to the payload's ``code`` key, not to a line: the human half of that
     # refusal is ``message``.
@@ -333,8 +457,10 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # stored as the receipt's ``receipt`` and printed as ``<peer>: <sentence>``. Kept
     # raw because an EMPTY reply must stay empty (``mailbox_receipt_lines`` prints
     # nothing then) and ``peer_reason_words`` never returns empty — it would print
-    # "it did not answer" under a message that was delivered.
-    ("local_operator/network/cli.py", "_pilot_mailbox", "detail"): (
+    # "it did not answer" under a message that was delivered. Read in
+    # ``_deliver_mailbox``, the one delivery helper both the viewer and the
+    # view-free mailbox paths share.
+    ("local_operator/network/cli.py", "_deliver_mailbox", "detail"): (
         1,
         "the owner's own mailbox-delivery sentence, attributed to the peer; empty "
         "stays empty, which the never-empty gloss cannot express",
@@ -394,6 +520,25 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         2,
         "the peer's own conflict and refusal sentences, printed verbatim",
     ),
+    # The skill bundle (network/skillsync.py) mirrors the MCP bundle: every ``reason``
+    # it carries is a composed sentence, never a machine token -- the receiver's
+    # ``_refused``/``_decide``/``_ownership_reason`` prose, the sender's own "kept"
+    # sentences, a scan's ``LocalSkill.reason``, or an exception's message.
+    # ``_push_locked`` copies the peer's sentence into the per-peer outcome row;
+    # ``_describe`` and ``_cmd_skills`` (push report + local listing) print it.
+    ("local_operator/network/skillsync.py", "_push_locked", "reason"): (
+        1,
+        "carries the peer's own refusal/conflict sentence into the outcome row verbatim",
+    ),
+    ("local_operator/network/skillsync.py", "_describe", "reason"): (
+        1,
+        "the peer's or this device's refusal sentence, rendered as ``name (reason)``",
+    ),
+    ("local_operator/network/cli.py", "_cmd_skills", "reason"): (
+        2,
+        "the push report's per-skill sentence and the local listing's composed "
+        "will-not-travel sentence, printed verbatim",
+    ),
     # The MCP credential repair verb reads its OWN skip vocabulary. The rows come
     # from ``placement.grant_key_set`` and this handler's ``local-only`` check in
     # process (``no_local_credential``, ``local_only``, ...); ``--json`` carries
@@ -430,8 +575,10 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # outcome line, and ``state``'s recorded custom-instructions conflict — every one
     # the peer's (or, for ``state``, this device's own apply's) conflict sentence,
     # printed verbatim so a person learns why the head's copy was not installed.
+    # Two more (the subagent-tiers singleton): the push's tiers outcome line and
+    # ``state``'s recorded tiers conflict, the same two classes as the instructions.
     ("local_operator/network/cli.py", "_cmd_definitions", "reason"): (
-        3,
+        5,
         "the peer's own conflict sentence, printed verbatim",
     ),
     # The custom-instructions singleton's report: the push copies the peer's apply
@@ -439,8 +586,13 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # revision (``_instructions_to_send``) into its per-peer result, which the CLI
     # line above renders. Relayed, never composed from a token.
     ("local_operator/network/definitions.py", "push_to_peer", "reason"): (
+        2,
+        "the peer's custom-instructions and subagent-tiers apply sentences, relayed "
+        "into the push report",
+    ),
+    ("local_operator/network/definitions.py", "_tiers_to_send", "reason"): (
         1,
-        "the peer's custom-instructions apply sentence, relayed into the push report",
+        "the peer's recorded subagent-tiers conflict sentence, relayed into the report",
     ),
     ("local_operator/network/definitions.py", "_instructions_to_send", "reason"): (
         1,
@@ -533,6 +685,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # The reading for reachability rows READS the stage code only to classify it —
     # every sentence it returns is authored in one place — and the one verbatim arm
     # is the no-relay fallback's own prose row.
+    # The ``uplink`` rows (``network.uplink``) carry a detail this device composed
+    # from its own catalogue (``cli.network_uplink``) — localized prose, never a
+    # peer code — so both renderers print it as written.
+    ("local_operator/network/cli.py", "_cmd_doctor", "detail"): (
+        1,
+        "uplink row detail is this device's own localized sentence, not a peer code",
+    ),
+    ("local_operator/network/readiness.py", "uplink_lines", "detail"): (
+        1,
+        "uplink row detail is this device's own localized sentence, not a peer code",
+    ),
     ("local_operator/network/readiness.py", "reachability_reading", "detail"): (
         1,
         "classifier input; the returned sentences are authored here, never echoed",
@@ -541,6 +704,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # the PROBE'S OWN machine code — compared against the producer's constants so
     # a rename cannot drift it, and never printed from this site (the renderers
     # gloss through ``doctor_detail_words``).
+    # The failover sentence (remote routing sync): reads the row's OWN detail,
+    # just built by ``model_credential_row``'s glossing renderers, and appends a
+    # sentence authored in ``routing_sync.failover_sentence``. Nothing from a
+    # peer's raw reason is echoed.
+    ("local_operator/network/readiness.py", "_attach_failover", "detail"): (
+        1,
+        "appends to this device's own rendered row detail; no peer reason is echoed",
+    ),
     ("local_operator/network/readiness.py", "_did_not_lead", "detail"): (
         1,
         "classifier input (the probe's own code, compared against the producer's "
@@ -554,6 +725,15 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "classifier input (both dialects' codes, compared against the producers' "
         "constants); the row's sentence is rendered by the glossing renderers",
+    ),
+    # The live-link silence classifier (#4110): the same dialect read as
+    # ``_no_answer_row`` — the probe's own code, compared against relay's
+    # ``DETAIL_NO_ANSWER`` / ``CONNECT_FAILED_PREFIX`` — returning only a bool that
+    # decides whether a live link covers the row. Nothing from it is printed.
+    ("local_operator/network/readiness.py", "_silent_row", "detail"): (
+        1,
+        "classifier input (the probe's own code, compared against the producer's "
+        "constants); returns a bool, never rendered",
     ),
     # The default-model frame (PR #2923): ``model_credential_row`` wraps the verdict
     # chain's OWN sentence for the NOT_SHARED / NO_CREDENTIAL arms in the clause that
@@ -626,7 +806,7 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # Frame fields copied into audit records and ``set_trust(reason=…)``: the audit
     # trail is the machine register (`lop network log` prints the record verbatim on
     # purpose, and its ``remedy`` field is the human one).
-    ("local_operator/network/relay.py", "RelayServer._ctl_pair_confirm", "reason"): (
+    ("local_operator/network/relay.py", "RelayServer._pair_confirm_legacy", "reason"): (
         1,
         "an audit-record field",
     ),
@@ -724,6 +904,37 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the session's own compaction refusal token, journalled as bookkeeping, never rendered",
     ),
+    # Economic compaction's two decline paths mirror the idle journal above:
+    # the planner's refusal and the economic gate's recheck verdict are LOCAL
+    # machine tokens, prefixed into ``why`` by _journal_economic_decline. It
+    # appends COMPACTION_ECONOMIC_DECLINED_TYPE as a custom bookkeeping record,
+    # not a message; _economic_declined_at reads only marker_id/context_tokens
+    # for growth gating. Neither token is rendered as a human explanation.
+    ("local_operator/session/session.py", "Session._maybe_economic_compact", "reason"): (
+        2,
+        "local planner/gate refusal tokens journalled for economic growth gating, never rendered",
+    ),
+    # A node site card's signed decision the browser bridge refused: ``reason`` is
+    # the bridge's machine refusal code (``unsigned_decision``/``no_approver``/
+    # ``wrong_key``/``bad_signature``/...). The ``str()`` coercion only keys a
+    # lookup into this project's own refusal copy (``browser_site_approval``),
+    # and the raw token travels on as the answer's machine ``code`` field —
+    # the person reads the mapped sentence, never the token.
+    ("local_operator/session/session.py", "Session.site_decide", "reason"): (
+        1,
+        "the bridge's refusal code, mapped to this project's own refusal copy and "
+        "returned as a machine code field, never rendered",
+    ),
+    # The same refusal on a SUBAGENT's site card (PR #4283): ``site_decide`` hands
+    # the card to ``_site_decide_bound`` with its own ``_refuse``, and the bound path
+    # reads the bridge's ``applied: false`` code exactly as above -- ``str()`` keys
+    # ``_site_not_applied_copy`` (one mapping shared with the host's own cards), and
+    # the raw token rides only in the answer's machine ``code`` field.
+    ("local_operator/session/session.py", "Session._site_decide_bound", "reason"): (
+        1,
+        "the bridge's refusal code on a subagent's card, mapped to the same refusal "
+        "copy and returned as a machine code field, never rendered",
+    ),
     # The move queue's record projection: ``detail`` is the RECORD'S OWN phase
     # sentence, copied into the receipt payload a front end reads — the same
     # class as the ack's payload key above. Nothing renders it into a line in
@@ -762,6 +973,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # resource record's ``retention``, written only in this process: the browser
     # tool's ``retain`` action (the agent's own ``text``), "pending site
     # approval", or the subagent runner's "paused scope" — never a peer's prose.
+    # ``harness/subagent.py`` entered this scan when the tier-refusal remedy began
+    # reading this device's tier state (``keeps_own_tier_map`` imports
+    # ``local_operator.network.definitions``, PR #3951). Its two reads predate that
+    # and are the child's own provider-failover edge, not a peer value.
+    ("local_operator/harness/subagent.py", "_make_relay", "reason"): (
+        2,
+        "``ModelSwitchEvent.reason``: this process's own provider-failover reason "
+        "for a pinned child's model hop, recorded on the job row and rendered in "
+        "the fallback notice; authored by the local failover chain, never a mesh "
+        "or peer token",
+    ),
     ("local_operator/tools/builtin.py", "_format_bridge_tab", "reason"): (
         1,
         "the handed tab's retain reason — the child's own resource record "
@@ -832,6 +1054,21 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         2,
         "the browser host's page-program refusal token, read only to decide "
         "whether to attach the options list; never rendered to a person",
+    ),
+    # The working-set probe (docs/design/move-working-set.md §3.4). ``apply_probe``
+    # reads the DESTINATION's ``detail`` only to test it against ``DETAIL_CODES``:
+    # a code outside that closed set becomes ``"error"`` (security S3), and the kept
+    # code lands in the block's ``clone_detail`` field, which no text surface
+    # renders. ``audit_summary`` reads the answer THIS device's ``run_probe`` just
+    # produced, to COUNT codes for the ``session.workset.probe`` audit row.
+    ("local_operator/network/workset_probe.py", "apply_probe", "detail"): (
+        1,
+        "the destination's detail CODE, allowlisted against DETAIL_CODES and kept as "
+        "a block field; never rendered to a person",
+    ),
+    ("local_operator/network/workset_probe.py", "audit_summary", "detail"): (
+        1,
+        "this device's own probe codes, counted into the probe audit row; not rendered",
     ),
 }
 

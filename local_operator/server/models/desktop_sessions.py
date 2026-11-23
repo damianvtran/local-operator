@@ -713,6 +713,26 @@ class TranscriptEntryEnvelope(BaseModel):
 HistoryTsSource = Literal["entry", "unstated", "served"]
 
 
+class RowTruncation(BaseModel):
+    """The marker on a clipped history row (``session.row_clip.clip_row``)."""
+
+    #: Byte length of the FULL row: what ``GET .../history/rows/{ref}``
+    #: reassembles to (compact JSON of the desktop wire row, UTF-8).
+    bytes_total: int = Field(ge=0)
+    #: UTF-8 byte length (same unit as ``bytes_total``) of the row as served,
+    #: compact JSON, without this marker. Budgets are measured on the wire.
+    shown_bytes: int = Field(ge=0)
+    #: Opaque and bound to this session; ``None`` when no ref could be minted
+    #: (a peer's row clipped by its owner, which this device cannot fetch).
+    ref: str | None
+    #: Which bound clipped it: the open frame's page budget or the bare
+    #: ``/history`` page's.
+    reason: Literal["open_frame_cap", "history_cap"]
+    #: True when the payload was WITHHELD rather than cut: a non-message row
+    #: (the frontend checkpoint) is not meaningful half-present.
+    omitted: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
 class HistoryEntry(BaseModel):
     """A desktop history row: the envelope's four keys plus its stamp's provenance.
 
@@ -748,6 +768,25 @@ class HistoryEntry(BaseModel):
     # reader with a verified page/index view. None must not add strict DTO keys
     # to legacy responses (the same exclude_if policy as open-frame facts).
     journal_seq: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+    #: PRESENT ONLY ON A CLIPPED ROW (``session.row_clip``; ``docs/DESKTOP_API.md``
+    #: §"Clipped rows"): the row was larger than its read's per-row budget, so
+    #: its content is a projection and the full row is one ref fetch away. Absent
+    #: on every row that fits, so an unclipped page keeps today's bytes.
+    truncated: RowTruncation | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class HistoryRowRange(BaseModel):
+    """``GET /v1/desktop/sessions/{id}/history/rows/{ref}``: one byte range of a full row."""
+
+    bytes_total: int = Field(ge=0)
+    offset: int = Field(ge=0)
+    #: The limit APPLIED — the request's, clamped to ``ROW_RANGE_MAX_BYTES``.
+    limit: int = Field(ge=1)
+    length: int = Field(ge=0)
+    eof: bool
+    #: Standard base64 of the range's bytes; a range may split a UTF-8
+    #: character, so decode after concatenating, never per range.
+    data: str
 
 
 class RunFacts(BaseModel):
@@ -908,6 +947,41 @@ class HistoryPage(BaseModel):
 #: when it holds no rows — an empty page and an unwritten child are not the
 #: same fact, and only the filesystem can tell them apart.
 ChildTranscriptState = Literal["ready", "pending", "gone"]
+
+
+#: Every answer the tool-call diff pager can give (``tools/diff_archive``):
+#: ``archived`` carries rows; the rest are explicit no-rows answers, so a
+#: reader never says "not recorded" about a diff that was captured.
+ToolCallDiffState = Literal[
+    "archived", "oversized", "withheld", "unavailable", "evicted", "not_recorded", "inline"
+]
+
+
+class ToolCallDiffPage(BaseModel):
+    """One page of a write/edit call's COMPLETE, source-redacted diff.
+
+    The frozen v1 contract the desktop renderer pages through. ``rows`` are
+    unified-diff rows verbatim (the nameless ``--- ``/``+++ `` pair first), so
+    the renderer's existing green/red classifier applies unchanged.
+    A row too large for one page continues on the next through the
+    server-issued ``(next_start, next_offset)`` cursor: ``offset`` is a
+    code-point offset into the row's body (after its diff marker), every
+    fragment starts with the row's original marker, and the client joins
+    fragments of one row (``start + i``) by appending later fragments minus
+    their marker. ``next_offset`` > 0 means the last fragment is partial; both
+    cursors are ``None`` only at the end. ``clipped_rows`` is kept for wire
+    compatibility and is always ``[]`` (nothing is ever cut away).
+    """
+
+    state: ToolCallDiffState
+    start: int
+    offset: int
+    total_rows: int
+    rows: list[str]
+    hunk_header: str | None
+    next_start: int | None
+    next_offset: int | None
+    clipped_rows: list[int]
 
 
 class ChildTranscriptPage(BaseModel):
@@ -1318,6 +1392,17 @@ class CommandReceipt(BaseModel):
 
 class AnswerReceipt(BaseModel):
     detail: str
+    #: Set on an ask ANSWER or REVISION (``features.ask_consent_bearing``);
+    #: ``None`` on a DECLINE (never consent, whatever proof it carried: PR #4127
+    #: QA Q2) and on every other receipt this model carries (a gate answer, a
+    #: dismissal, a signed bridge decision), where the question does not arise.
+    #: True only when this backend presented the runtime's operator-capability
+    #: proof with the answer (it started that runtime), so the runtime stamped a
+    #: trusted surface; False means it stamped ``unverified``: recorded, settles
+    #: the ask, but never delete/move consent. WHY (incident a-48e3, 2026-11-16):
+    #: a card answer to a runtime the wake supervisor started looked identical to
+    #: a consenting one. Server-computed, never echoed from the request.
+    consent_bearing: bool | None = None
 
 
 class WatchReceipt(BaseModel):

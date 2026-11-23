@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 #: The derived schema. Derived tables only: bumping this discards and rebuilds
 #: them, so it is not the metadata store's version and must not be compared to
 #: it.
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 
 #: Re-exported for the indexer and for ``library doctor``-style callers.
 DB_PATH_PARTS: Final = (DB_DIRNAME, DB_FILENAME)
@@ -317,6 +317,11 @@ CREATE TABLE IF NOT EXISTS idx_assets(
     is_final INTEGER NOT NULL DEFAULT 0,
     tag_names TEXT NOT NULL DEFAULT '',
     session_titles TEXT NOT NULL DEFAULT '',
+    -- Remote files parity §5 (schema 3): 1 iff EVERY occurrence is a peer
+    -- session's, with the first such occurrence's device for the card's badge.
+    remote INTEGER NOT NULL DEFAULT 0,
+    remote_device TEXT NOT NULL DEFAULT '',
+    remote_device_name TEXT NOT NULL DEFAULT '',
     indexed_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_assets_recent ON idx_assets(last_ts DESC, asset_id);
@@ -326,6 +331,7 @@ CREATE INDEX IF NOT EXISTS idx_assets_kind ON idx_assets(kind);
 CREATE INDEX IF NOT EXISTS idx_assets_category ON idx_assets(category);
 CREATE INDEX IF NOT EXISTS idx_assets_origin_group ON idx_assets(origin_group);
 CREATE INDEX IF NOT EXISTS idx_assets_final ON idx_assets(is_final);
+CREATE INDEX IF NOT EXISTS idx_assets_remote ON idx_assets(remote);
 """,
         # The record fragments are carried per occurrence so an asset's
         # aggregate is a pure function of its occurrences: a session's removal
@@ -362,6 +368,12 @@ CREATE TABLE IF NOT EXISTS idx_occurrences(
     width INTEGER,
     height INTEGER,
     duration_s REAL,
+    -- '' for a local session. A peer session's rows name the owner device and
+    -- the owner's Files-index row id (the content route's handle for a path row,
+    -- whose path is NULL by construction: it names a file on THAT disk).
+    origin_device TEXT NOT NULL DEFAULT '',
+    origin_device_name TEXT NOT NULL DEFAULT '',
+    remote_file_id TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(asset_id, session_id, child_id)
 );
 CREATE INDEX IF NOT EXISTS idx_occurrences_asset ON idx_occurrences(asset_id);
@@ -385,7 +397,12 @@ CREATE TABLE IF NOT EXISTS idx_sessions(
     revision REAL NOT NULL DEFAULT 0,
     complete INTEGER NOT NULL DEFAULT 0,
     indexed_at REAL NOT NULL DEFAULT 0,
-    last_error TEXT
+    last_error TEXT,
+    -- '' for a local session; the owner device for a peer session the remote
+    -- feeder indexed (``library/remote.py``), whose ``revision`` is the OWNER's
+    -- files revision and ``misses`` its consecutive absences from the catalogue.
+    origin_device TEXT NOT NULL DEFAULT '',
+    misses INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS idx_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS idx_counts(
@@ -675,6 +692,9 @@ _ASSET_COMPARED_COLUMNS: Final = (
     "is_final",
     "tag_names",
     "session_titles",
+    "remote",
+    "remote_device",
+    "remote_device_name",
 )
 
 
@@ -705,6 +725,9 @@ _OCCURRENCE_COLUMNS: Final = (
     "width",
     "height",
     "duration_s",
+    "origin_device",
+    "origin_device_name",
+    "remote_file_id",
 )
 
 
@@ -742,6 +765,9 @@ def _occurrence_values(session_id: str, row: dict[str, Any]) -> tuple[Any, ...]:
         row.get("width"),
         row.get("height"),
         row.get("duration_s"),
+        row.get("origin_device") or "",
+        row.get("origin_device_name") or "",
+        row.get("remote_file_id") or "",
     )
 
 
@@ -1495,6 +1521,7 @@ class LibraryStore:
         roster_key: str = "",
         revision: float = 0.0,
         error: str | None = None,
+        origin_device: str = "",
     ) -> None:
         """Store the checkpoint for one scanned session.
 
@@ -1505,14 +1532,16 @@ class LibraryStore:
         sig = sig or {}
         connection.execute(
             "INSERT INTO idx_sessions(session_id, title, sig_size, sig_mtime, sig_inode, "
-            "title_key, roster_key, revision, complete, indexed_at, last_error) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "title_key, roster_key, revision, complete, indexed_at, last_error, "
+            "origin_device, misses) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
             "ON CONFLICT(session_id) DO UPDATE SET title = excluded.title, "
             "sig_size = excluded.sig_size, sig_mtime = excluded.sig_mtime, "
             "sig_inode = excluded.sig_inode, title_key = excluded.title_key, "
             "roster_key = excluded.roster_key, revision = excluded.revision, "
             "complete = excluded.complete, indexed_at = excluded.indexed_at, "
-            "last_error = excluded.last_error",
+            "last_error = excluded.last_error, origin_device = excluded.origin_device, "
+            "misses = 0",
             (
                 session_id,
                 title,
@@ -1525,6 +1554,7 @@ class LibraryStore:
                 1 if complete else 0,
                 time.time(),
                 error,
+                origin_device,
             ),
         )
 
@@ -1690,6 +1720,9 @@ class LibraryStore:
                 1 if is_final(aggregate) else 0,
                 str(tag_row[0]) if tag_row else "",
                 " ".join(aggregate.session_titles),
+                1 if aggregate.remote else 0,
+                str((aggregate.remote or {}).get("device_id") or ""),
+                str((aggregate.remote or {}).get("device_name") or ""),
             )
             if existing is not None and tuple(existing) == values:
                 # Unchanged aggregate: skip the upsert. ``indexed_at`` is the
@@ -1945,9 +1978,16 @@ class LibraryStore:
         name = str(row["derived_name"] or "")
         digest = row["digest"]
         if digest:
+            from local_operator.remote_files.cache import cache_root
             from local_operator.session.attachments import AttachmentStore
 
             path = AttachmentStore(self.config_dir / "attachments").path_for(str(digest))
+            if not path.is_file():
+                # A peer's media lands in the remote cache (precache or an open), and
+                # its thumbnail is generated from there (remote files parity §5).
+                cached = cache_root(self.config_dir) / f"{digest}.bin"
+                if cached.is_file():
+                    path = cached
         elif row["path"]:
             path = Path(str(row["path"]))
         else:
@@ -1957,6 +1997,12 @@ class LibraryStore:
             str(row["content_type"] or "application/octet-stream"),
             Path(name).suffix.lower(),
         )
+
+    @staticmethod
+    def _source_stamp(path: Path, digest: Any) -> str:
+        """A digest asset's liveness is its digest: the digest IS the content, so a
+        cache eviction of the source bytes never invalidates the thumbnail (§5)."""
+        return f"a:{digest}" if digest else thumb_source_stamp(path)
 
     def _thumb_row(self, asset_id: str) -> sqlite3.Row | None:
         with self.read() as connection:
@@ -1987,7 +2033,8 @@ class LibraryStore:
         # ``src`` is the source's stat identity — one stat, never a content
         # hash: re-reading a 4 MB image per grid request is the cost this cache
         # exists to remove.
-        return target if str(row["src"]) == thumb_source_stamp(path) else None
+        digest = (self._thumb_row(asset_id) or {"digest": None})["digest"]
+        return target if str(row["src"]) == self._source_stamp(path, digest) else None
 
     def ensure_thumbnail(self, asset_id: str, *, width: int, quality: int) -> str | None:
         """Generate the cached WebP for one asset at one width.
@@ -2032,7 +2079,8 @@ class LibraryStore:
         except Exception:  # noqa: BLE001 - a thumbnail is cosmetic; the row still works
             logger.debug("library: thumbnail failed for %s", asset_id, exc_info=True)
             return None
-        stamp = thumb_source_stamp(path)
+        row = self._thumb_row(asset_id)
+        stamp = self._source_stamp(path, row["digest"] if row is not None else None)
         with self.write() as connection:
             connection.execute(
                 "INSERT INTO idx_thumbnails(asset_id, width, path, key, src, created_at) "
@@ -2342,6 +2390,14 @@ def _aggregate(
     # ``_build_assets`` sorted the raw origins by their vocabulary order, which
     # is what makes ``origin`` ("strongest first") the first element.
     asset.origins.sort(key=library_index.ORIGINS.index)
+    # REMOTE iff every occurrence is a peer's: a digest this device also holds in a
+    # local session is a LOCAL asset (one asset, two occurrences) and opens locally.
+    devices = [str(row["origin_device"] or "") for row in rows]
+    if devices and all(devices):
+        asset.remote = {
+            "device_id": devices[0],
+            "device_name": str(rows[0]["origin_device_name"] or ""),
+        }
     return asset
 
 
@@ -2380,6 +2436,11 @@ def _asset_from_row(
         highlighted=bool(row["highlighted"]),
     )
     asset.occurrences = list(occurrences)
+    if "remote" in row.keys() and row["remote"]:
+        asset.remote = {
+            "device_id": str(row["remote_device"] or ""),
+            "device_name": str(row["remote_device_name"] or ""),
+        }
     return asset
 
 

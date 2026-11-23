@@ -39,6 +39,48 @@ _COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: Suffix distinguishing the en-only context sidecar from a namespace file.
 CONTEXT_SUFFIX = ".context.json"
 
+#: The EXACT English context-sidecar vocabulary shared by every writer (core,
+#: desktop, mobile) and by the ``read_public_copy`` reader. Operator decision
+#: 2026-11-17 (ask a-82fb, "Extend the reader with exact typed fields"): the
+#: reader serves these sidecars outside the redaction path, so it must accept a
+#: closed, typed schema rather than arbitrary metadata, and writers must fail at
+#: authoring time on anything else. ``width``/``length`` are the free-text width
+#: hints core and desktop already author; ``placeholders`` maps an ICU argument
+#: name to a one-line description (``{}`` is a valid "no arguments" record).
+#: Adding a field is a reviewed change here, never a per-repo extension.
+CONTEXT_STRING_FIELDS = frozenset({"role", "tone", "note", "width", "length"})
+CONTEXT_FIELDS = CONTEXT_STRING_FIELDS | {"maxCells", "placeholders"}
+
+
+def context_entry_problem(entry: object) -> tuple[str, str | None] | None:
+    """Why one sidecar entry breaks the shared schema, or ``None`` when it fits.
+
+    Returns ``(kind, field)`` with ``kind`` one of ``"not-object"``,
+    ``"unsupported-field"`` or ``"invalid-type"``. Callers word their own
+    message: the authoring check may name the field (committed source), while
+    the reader keeps fixed refusals that never echo file content, because an
+    invalid file is exactly the one that may carry stray data. Never a value.
+    """
+    if not isinstance(entry, dict):
+        return ("not-object", None)
+    for field, value in entry.items():
+        if field not in CONTEXT_FIELDS:
+            return ("unsupported-field", str(field))
+        if field in CONTEXT_STRING_FIELDS:
+            valid = isinstance(value, str)
+        elif field == "maxCells":
+            # bool is an int subclass, but is not a documented width value.
+            valid = type(value) is int
+        else:  # placeholders: flat str -> str, no nesting and no empty name
+            valid = isinstance(value, dict) and all(
+                isinstance(name, str) and name and isinstance(text, str)
+                for name, text in value.items()
+            )
+        if not valid:
+            return ("invalid-type", field)
+    return None
+
+
 #: Backend-owned namespaces a client is allowed to fetch. RFC §2.1: `wire.*`
 #: is core-owned and served; every client-owned namespace (`ui.*`, `tui.*`,
 #: `relay.*`, ...) bundles with its own client, so serving it here would create
@@ -126,6 +168,11 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.settings.keymap": (
         "hotkey row labels/help rendered by settings_io._t as plain label/help strings"
     ),
+    "wire.settings.transcript_display": (
+        "transcript layout row label/help and its two choice labels/descriptions "
+        "rendered by settings_io._t as plain strings; the slash command reuses the "
+        "rendered label as a receipt, never a code"
+    ),
     "wire.language_receipts": (
         "the /language receipts printed by tui/app.py and returned as finished "
         "text by session/runtime/serving.py; no envelope identity is sent"
@@ -149,6 +196,102 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.tool_rows.bridge": (
         "bridge rows reach the phone as already-rendered text "
         '(harness/bridge_copy.py, _t = tr("wire.tool_rows.bridge"))'
+    ),
+    # DEFERRED 2026-11-12 (session park, PR #3850, i18n finding I26): the
+    # audited park copy grew hi's wire.sessions from 3,895 B to 6,695 B and
+    # took hi's eager total to 67,987 B, over the 64 KiB per-locale ceiling.
+    # No client renders this namespace from the bundle: every key is resolved
+    # in-process by the sessions tool and leaves as finished text, so the
+    # bundle was carrying it for nobody.
+    "wire.sessions": (
+        "sessions tool receipts/approval prompts rendered in-process by "
+        'tools/builtin.py (_sessions_copy = tr("wire.sessions")) and returned '
+        "as finished tool text"
+    ),
+    # Deferred rather than raising the eager total ceiling: the phone-approvals
+    # setup copy (mostly the terminal-only `tui.*` report/usage lines) pushed hi
+    # past EAGER_TOTAL_MAX_BYTES, yet no client resolves one of its keys. The
+    # desktop route overrides the envelope `code` with the machine outcome token
+    # (`on`, `cancelled`, `file_only`, ...) and paints the server-rendered `text`.
+    "wire.operator_setup": (
+        "phone-approvals setup copy rendered in-process by operator/elevate.py, "
+        "tui/app.py and session/runtime/serving.py; the desktop setup route sends "
+        "server-rendered text under a machine outcome code, never a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4052): the new
+    # GitHub repository-sharing copy pushed hi to 81,230 B, past
+    # EAGER_TOTAL_MAX_BYTES, yet no client resolves one of its keys. Every
+    # producer binds `_github_text = tr("wire.github")` and hands on a FINISHED
+    # sentence: CLI lines and MeshRefusal text (network/cli.py), readiness rows
+    # (network/readiness.py), borrower refusal text (credentials/messages.py),
+    # and the owner's refusal detail / git-helper stderr notice (github.py).
+    "wire.github": (
+        "GitHub repository-sharing copy rendered in-process through "
+        'tr("wire.github") by network/cli.py, network/readiness.py, '
+        "network/credentials/messages.py and network/credentials/github.py; "
+        "the wire and stderr carry finished text, never a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4266, merge
+    # gate run 44521486072): the Amazon Bedrock remedies (4,166 B in hi) took
+    # hi's eager total to 74,237 B, past EAGER_TOTAL_MAX_BYTES, yet no client
+    # resolves one of its keys. providers/bedrock/errors.py and check.py render
+    # every key in-process through ``_text`` (``render_resolved``) and hand on a
+    # FINISHED sentence as ProviderError / KeyCheck text.
+    "wire.errors.bedrock": (
+        "Amazon Bedrock error remedies and connection-check results rendered "
+        "in-process by providers/bedrock/errors.py and providers/bedrock/check.py "
+        "(_text = render_resolved), and server/routes/auth.py renders refusal "
+        "envelopes with machine-category codes; all carry finished text, never "
+        "a catalogue key"
+    ),
+    # Login copy is composed before callbacks: CLI/TUI pickers and desktop
+    # operation snapshots receive strings, not keys for a client to resolve.
+    # Keep it out of the eager bundle rather than raising the total ceiling.
+    "wire.login.bedrock": (
+        "Amazon Bedrock login copy rendered in-process through render_resolved "
+        "by providers/bedrock/login.py, providers/bedrock/sso_login.py, "
+        "providers/auth_cli.py, server/utils/desktop_auth.py and tui/app.py; "
+        "callbacks and operation snapshots carry finished text, never a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4356): with
+    # these four keys hi's eager total reached 78,943 B against
+    # EAGER_TOTAL_MAX_BYTES (77,824 B), and no client resolves one of them.
+    # The failover notice is rendered by ``sign_in_required_text`` and handed
+    # to every host as a finished NoticeEvent ``text`` (no ``code``); the
+    # ``lop login-status`` / ``/login status`` state word is rendered by
+    # ``_sign_in_required_state`` into a plain line.
+    "wire.providers.reauth": (
+        "Google sign-in recovery notice and login-status state words rendered "
+        "in-process: providers/failover.py::sign_in_required_text (render_record) "
+        "and providers/auth_cli.py::_sign_in_required_state (render_resolved); "
+        "the session notice and the login-status line carry finished text, never "
+        "a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4349, merge gate
+    # run 44849201008): adding mcp_ready_timeout_invalid took hi's eager total to
+    # 77,924 B, 100 B past EAGER_TOTAL_MAX_BYTES (77,824 B); this namespace alone
+    # is 5,603 B in hi. No client resolves one of its keys: the SDK refusals are
+    # rendered in the EMBEDDING process by ``spec_refusal_text`` (active locale)
+    # and raised as a one-string SessionSpecError with no code attribute, so
+    # nothing a desktop/phone client loads at startup ever needs this copy.
+    "wire.errors.sdk_spec": (
+        "SDK specification refusals rendered in-process by session/spec.py and "
+        "sdk.py through spec_refusal_text (active locale) and raised as a "
+        "one-string SessionSpecError; the exception carries finished text, never "
+        "a catalogue key"
+    ),
+    # Deferred rather than raising the eager total ceiling (PR #4297, merge gate
+    # run 44928980132): this namespace's 22 keys took hi's eager total to
+    # 78,277 B against EAGER_TOTAL_MAX_BYTES (77,824 B); it is 3,805 B in hi.
+    # No client resolves one of its keys: ``ask_question`` renders the consent
+    # card in-process and the integrations tool files the finished question,
+    # option labels and descriptions as plain strings (the affirm/decline labels
+    # are then matched as text), so no startup surface needs this copy.
+    "wire.team_integrations": (
+        "Team Integrations consent-card copy rendered in-process by "
+        "team_bridge/integrations.py::ask_question; the integrations tool files "
+        "the finished question and option labels as plain strings, never a "
+        "catalogue key"
     ),
 }
 

@@ -1,0 +1,1 @@
+PASS: repository ledger._rows accepts one receipt; no ledger append/dry-run/apply executed

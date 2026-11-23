@@ -1,0 +1,17 @@
+MODULE /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py
+CHECKER /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+PYTHON /Users/damian/local-operator/.venv/bin/python
+ISOLATION HOME/config redirected; CMUX absent
+SHA256 en 113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912
+SHA256 context 67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be
+SHA256 ur fe5cfd731a80eedd50d066bce968adf6ddec24311af418fdad46db7644aef437
+OFFICIAL_SCOPED check_catalogues() []
+NEGATIVE missing-key ["ur/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+NEGATIVE added-argument ["ur/tui.provider_state: tui.provider_state.logged_in: arguments (('injected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+ROW tui.provider_state.logged_in {"ur": "سائن ان ہے", "ur_cells": 10, "en_cells": 9, "pseudo_cells": 23, "illustrative_state_budget": 17, "ur_exceeds_illustration": false, "combining_codepoints": 0}
+ROW tui.provider_state.env_key {"ur": "ماحولیاتی متغیر سے کلید", "ur_cells": 23, "en_cells": 7, "pseudo_cells": 19, "illustrative_state_budget": 17, "ur_exceeds_illustration": true, "combining_codepoints": 0}
+ROW tui.provider_state.needs_login {"ur": "سائن ان درکار ہے", "ur_cells": 16, "en_cells": 11, "pseudo_cells": 27, "illustrative_state_budget": 17, "ur_exceeds_illustration": false, "combining_codepoints": 0}
+ROW tui.provider_state.local_ready {"ur": "سرور کی ترتیب مکمل", "ur_cells": 18, "en_cells": 17, "pseudo_cells": 39, "illustrative_state_budget": 17, "ur_exceeds_illustration": true, "combining_codepoints": 0}
+ROW tui.provider_state.local_unconfigured {"ur": "سرور ترتیب دیں", "ur_cells": 14, "en_cells": 16, "pseudo_cells": 37, "illustrative_state_budget": 17, "ur_exceeds_illustration": false, "combining_codepoints": 0}
+PASS five keys: scoped official catalogue/context/ICU; two detected negatives; zero arguments/plural/select; NFC; protected tokens; no manual bidi; official raw render; plain/Rich widths; English/pseudo controls
+LIMITATION no app startup, native font/shaping/RTL/style certification, independent audit, eligibility/generation or release proof

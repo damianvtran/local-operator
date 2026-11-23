@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "relay.diagram",
+  "history_sha256": "d452c5787e2b15fc024a90baf7f87f96ed9c0816c225553822a74e2d0c4a0ba4",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "relay.diagram",
+      "source_sha256": "3d300aee470face8da7085af40bc46539be91af1d053af93c9a2e2edad2b941e",
+      "translator": {
+        "agent": "coder subagent 'i18n-translator' (lop session 353d8ed0df53, job 7d1c5373a56e), pele-diagrams PR lane",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-17"
+      },
+      "auditor": {
+        "agent": "copy-reviewer subagent 'i18n-auditor' (lop session 353d8ed0df53, job 8cab56cc0b3c); separate subagent from the translator, edited no catalogue",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-17",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of all 8 relay.diagram keys: key parity, idiom, glossary/style-guide register, maxCells, 'Copy source' rendered as 'code' (acceptable: the text is Mermaid code), SVG kept Latin, Urdu RTL mixed run. Translator and auditor ran on the same model id (no fallback observed); they are separate agent sessions."
+    }
+  ]
+}

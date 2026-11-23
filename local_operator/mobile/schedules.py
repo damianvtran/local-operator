@@ -60,7 +60,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -228,7 +228,7 @@ def _supervisor_info(config_dir: Path) -> SupervisorInfo:
 
 
 def _monitors_listing(config_dir: Path, limit: int) -> dict[str, Any]:
-    from local_operator.monitors.store import is_held, read_index_report
+    from local_operator.monitors.store import effective_rows, is_held, read_index_report
     from local_operator.resume import session_name, session_origin
     from local_operator.wakes.supervisor import _session_exists
 
@@ -244,7 +244,7 @@ def _monitors_listing(config_dir: Path, limit: int) -> dict[str, Any]:
         dormant = is_held(raw)
         session_dir = config_dir / "sessions" / session_id
         cwd = str(raw.get("cwd") or "")
-        monitors = _monitor_rows(raw, now_ms, dormant)
+        monitors = _monitor_rows(effective_rows(config_dir, session_id, raw), now_ms, dormant)
         entries.append(
             MonitorEntry(
                 session_id=session_id,
@@ -271,13 +271,13 @@ def _monitors_listing(config_dir: Path, limit: int) -> dict[str, Any]:
     ).model_dump()
 
 
-def _monitor_rows(entry: Mapping[str, Any], now_ms: int, dormant: bool) -> list[MonitorRow]:
+def _monitor_rows(
+    effective: Iterable[Mapping[str, Any]], now_ms: int, dormant: bool
+) -> list[MonitorRow]:
     from local_operator.monitors import store as monitor_store
 
     rows: list[MonitorRow] = []
-    for raw in entry.get("monitors") or ():
-        if not isinstance(raw, Mapping):
-            continue
+    for raw in effective:
         due = _as_int(raw.get("next_due_at"))
         last = _as_int(raw.get("last_check_at")) or 0
         disabled = bool(raw.get("disabled"))

@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.phone_access",
+  "history_sha256": "8cdfb594f526873d60aae7770217988954e456a0f8cf06439fc8b4400b1880c7",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.phone_access",
+      "source_sha256": "2979b226db50db768fcad68f5f7376854f2185b08e6b0af08eb8e72bdb470f58",
+      "translator": {
+        "agent": "i18n-translator subagent, Local Operator session 7af08d89b259 (values introduced in commit 1fce7ecb1f5f; English drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, independent `task` subagent, session ede889388023 (node lop-remote-node-2); not the translating i18n-translator (7af08d89b259) nor the English-drafting coder (b0300e2c2c7f); did not edit any value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a1: independent i18n-auditor ede889388023 (anthropic/claude-opus-5-5) of i18n-translator 7af08d89b259 values (claude-opus-5-5): PASSED, 0 blocker/major; 2 minor/nit (ZH-04, ZH-05). Whole namespace at new source hash. Record i18n/audits/evidence/zh-CN/wire.phone_access/a1/record.json",
+      "evidence": "i18n/audits/evidence/zh-CN/wire.phone_access/a1/record.json",
+      "round": "a1",
+      "keys_audited": 4
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.phone_access",
+      "source_sha256": "1d6935b1259cab3b9d4975c8b8149de76ceb61be177f22c6b4e01a289b6e762a",
+      "translator": {
+        "agent": "coder subagent of team lopdev that authored commit 9134015c (draft values and English source in the same commit); session id not disclosed in the brief or PR #4145",
+        "model": null,
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor role, independent `task` subagent of team lopdev, Local Operator session 43bcb19f888e; not the translator (the coder that authored 9134015c with the draft values) nor the English-drafting coder; did not edit any catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-17",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a2: independent i18n-auditor 43bcb19f888e (anthropic/claude-opus-5-5) of PR #4145 values at 0e4ad0a9171c: PASSED, 0 blocker/major (ZH-M1 minor, ZH-N2 nit); whole namespace (10 keys) at new en source; 6 new away_after keys judged in full, 4 a1 keys byte-unchanged. Record i18n/audits/evidence/zh-CN/wire.phone_access/a2/record.json",
+      "evidence": "i18n/audits/evidence/zh-CN/wire.phone_access/a2/record.json",
+      "round": "a2",
+      "keys_audited": 10
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.phone_access",
+      "source_sha256": "1d6935b1259cab3b9d4975c8b8149de76ceb61be177f22c6b4e01a289b6e762a",
+      "translator": {
+        "agent": "remediation coder subagent of team lopdev that authored commit d30d1fb1 (ZH-M1 fix to the four minute labels, applying the a2 auditor's suggested values verbatim); other six values by the coder of 9134015c; session ids not disclosed in the brief or PR #4145",
+        "model": null,
+        "date": "2026-11-17"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, independent `task` subagent of team lopdev, Local Operator session cee2e3bacd71; not the translator (the remediation coder that authored d30d1fb1 with the ZH-M1 value change, nor the coder that authored 9134015c) nor the English-drafting coder; did not edit any catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-17",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a3: independent i18n-auditor cee2e3bacd71 (anthropic/claude-opus-5-5) of PR #4145 values at d30d1fb1: PASSED, 0 blocker/major (ZH-M1 resolved, ZH-N2 nit carried); whole namespace (10 keys) at unchanged en source; 4 changed minute labels judged in full, 6 values byte-unchanged since a2; target sha256 91e8bf24126a. Record i18n/audits/evidence/zh-CN/wire.phone_access/a3/record.json",
+      "evidence": "i18n/audits/evidence/zh-CN/wire.phone_access/a3/record.json",
+      "round": "a3",
+      "keys_audited": 10
+    }
+  ]
+}

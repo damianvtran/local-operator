@@ -1,0 +1,7 @@
+{
+  "cli.daemon_build.install_restarted": "चल रही सेवा को नए बिल्ड पर फिर से शुरू किया गया (वह अब भी {generation} चला रही थी)",
+  "cli.daemon_build.install_restarted_unconfirmed": "चल रही सेवा को फिर से शुरू किया गया, क्योंकि उसके बिल्ड के मौजूदा होने की पुष्टि नहीं हो सकी",
+  "cli.daemon_build.install_restart_failed": "चल रही सेवा को नए बिल्ड पर फिर से शुरू नहीं किया जा सका; उसे वहाँ ले जाने के लिए `{command}` चलाएँ",
+  "cli.daemon_build.install_unconfirmed": "पुष्टि नहीं हो सकी कि चल रही सेवा नए बिल्ड पर है; अगर वह अब भी पुराने जैसा व्यवहार करे तो `{command}` चलाएँ",
+  "cli.daemon_build.status_stale": "पुराना बिल्ड ({generation}) चल रहा है; उसे नए बिल्ड पर फिर से शुरू करने के लिए `{command}` चलाएँ"
+}

@@ -1,0 +1,45 @@
+from pathlib import Path
+import sys,json,hashlib,re,unicodedata,io
+from unittest.mock import patch
+import local_operator
+from local_operator.i18n import catalogues as c, runtime as r
+from scripts.i18n import check
+from rich.console import Console
+from rich.text import Text
+from rich.cells import cell_len
+root=Path.cwd(); ns="tui.provider_state"
+print("MODULE",local_operator.__file__)
+assert Path(local_operator.__file__).resolve()==root/"local_operator/__init__.py"
+inputs=[("en","113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"),("ru","8536b96d908eb3f80192801d4444b283bf6a024668247f14a2ed7cb0ecf8558b")]
+for loc,h in inputs:
+ p=root/f"local_operator/i18n/catalogues/{loc}/{ns}.json"
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==h
+ print("HASH",loc,h)
+p=root/f"local_operator/i18n/catalogues/en/{ns}.context.json"
+assert hashlib.sha256(p.read_bytes()).hexdigest()=="67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+en=c.load_catalogue("en",ns); ru=c.load_catalogue("ru",ns)
+assert list(en)==list(ru) and len(en)==5
+with patch.object(c,"locales",return_value=["en","ru"]), patch.object(c,"namespaces",return_value=[ns]):
+ problems=check.check_catalogues(); print("OFFICIAL check_catalogues",problems); assert not problems
+ original=c.load_catalogue
+ for name,mutation in [("missing key",{k:v for k,v in ru.items() if k!=list(ru)[0]}),("added argument",{**ru,list(ru)[0]:ru[list(ru)[0]]+" {unexpected}"})]:
+  def loader(loc,namespace): return mutation if loc=="ru" else original(loc,namespace)
+  with patch.object(c,"load_catalogue",side_effect=loader):
+   failures=check.check_catalogues(); print("NEGATIVE",name,failures); assert failures
+for key in en:
+ for loc,msg in [("en",en[key]),("ru",ru[key])]:
+  assert r.message_arguments(msg)==() and r.plural_selectors(msg)==()
+  assert all(type(node).__name__=="_Text" for node in r.parse_message(msg))
+  assert unicodedata.normalize("NFC",msg)==msg
+  assert not re.findall(r"`[^`]*`|</?[^>]+>|--[a-z][a-z-]*",msg)
+  out=r.render_message(msg,{},loc); assert out==msg
+  rich=Text.from_markup(out); assert rich.plain==out and not rich.spans
+  stream=io.StringIO(); Console(file=stream,width=80,color_system=None).print(rich,end="",soft_wrap=True)
+  assert stream.getvalue()==out
+  print("RENDER",key,loc,json.dumps(out,ensure_ascii=False),"cells",cell_len(out),"args/plural/select=0 NFC/protected/Rich=PASS")
+ # Diagnostic-only expanded pseudo control; not a production pseudo locale or fit cap.
+ pseudo="⟦"+en[key]+" ~~~⟧"
+ assert r.render_message(pseudo,{},"en")==pseudo
+ assert cell_len(pseudo)>cell_len(en[key])
+ print("PSEUDO",key,"cells",cell_len(pseudo),"expansion preserved PASS")
+print("PASS all five keys; plain Rich diagnostics ONLY; no styled/native/app/eligibility proof")

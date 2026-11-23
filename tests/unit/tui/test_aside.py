@@ -40,7 +40,12 @@ from local_operator.tui.widgets.editor import (
     SHELL_PLACEHOLDER,
     Editor,
 )
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from local_operator.tui.widgets.transcript import (
+    TAIL_TOLERANCE_ROWS,
+    NoticeBlock,
+    TranscriptView,
+    UserBlock,
+)
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _renderable_plain
 from tests.unit.tui.waiting import settle
 
@@ -412,8 +417,9 @@ async def test_an_aside_over_a_live_turn_carries_the_sentence_on_screen() -> Non
         )
         assert panel.turns[-1].state == "done"
         # A mid-turn fork is queued for the turn's boundary (decision D5), so
-        # the card advertises ^f even while the agent works.
-        assert "^f" in panel.render_lines_for_test()[-1]
+        # the card advertises the fork key (its live spelling, `ctrl+f` by
+        # default) even while the agent works.
+        assert "ctrl+f" in panel.render_lines_for_test()[-1]
 
 
 @pytest.mark.asyncio
@@ -549,11 +555,21 @@ async def test_a_reader_scrolled_back_is_not_yanked_to_the_tail_on_close() -> No
     session = AsideSession(answer="\n\n".join(f"para {i} " * 20 for i in range(20)))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 24)) as pilot:
-        await pilot.pause()
+        # Boot adoption calls ``follow_tail`` (via ``project_settled_rows``).
+        # If it lands AFTER the reader parks at y=3 below, the next
+        # ``_scroll_to_tail`` drags the view to the end and the premise reads
+        # ``68 < 68`` -- CI run 43279222834. Wait on the adoption edge first.
+        await _settle_boot(pilot, app, session)
         for i in range(40):
             app._append_block(UserBlock(f"question number {i:02d} about the codebase"))
-        await pilot.pause()
         transcript = app._transcript_view()
+        # Park only once the appended rows are laid out past y=3 by more than
+        # the tail tolerance; otherwise y=3 could still count as "at the tail".
+        await settle(
+            pilot,
+            lambda: transcript.max_scroll_y > 3 + TAIL_TOLERANCE_ROWS,
+            what="the 40 appended rows are laid out past the parked offset",
+        )
 
         # Scroll back to re-read something, the gesture the docstring names.
         transcript.note_user_scroll()
@@ -860,11 +876,11 @@ def test_the_fork_key_is_advertised_only_when_it_would_work() -> None:
     panel = AsidePanel()
     panel.display = True
     panel._turns = [AsideTurn(question="q?", state="running")]
-    assert "^f" not in panel.render_lines_for_test()[-1]
+    assert "ctrl+f" not in panel.render_lines_for_test()[-1]
 
     panel._turns = [AsideTurn(question="q?", answer="a.", state="done")]
     panel.set_fork_available(True)
-    assert "^f" in panel.render_lines_for_test()[-1]
+    assert "ctrl+f" in panel.render_lines_for_test()[-1]
 
 
 def test_a_failed_aside_is_never_forkable() -> None:
@@ -1224,12 +1240,12 @@ def test_the_footer_advertises_copy_beside_fork() -> None:
     panel.append_answer(generation, "still streaming")
     footer = panel.render_lines_for_test()[-1]
     assert f"{ASIDE_COPY_KEY} copy" in footer
-    assert "^f" not in footer
+    assert "ctrl+f" not in footer
 
     panel.settle_answer(generation, "settled")
     panel.set_fork_available(True)
     footer = panel.render_lines_for_test()[-1]
-    assert footer.index(ASIDE_COPY_KEY) < footer.index("^f")
+    assert footer.index(ASIDE_COPY_KEY) < footer.index("ctrl+f")
     assert footer.startswith("esc discard, back to the chat")
 
 

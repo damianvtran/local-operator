@@ -1,3 +1,4 @@
+import { clearHeldContinuations } from "./continuation-memory";
 import { clearPendingEchoes } from "./pending-echo";
 
 const PRIVATE_STORAGE_PREFIXES = ["lo-mobile-command:", "lo-mobile-draft:"];
@@ -20,4 +21,7 @@ export function clearPrivateSessionStorage(): void {
 	   than one reload away from being true. The login page's own script cannot
 	   do this half: it runs in a page that never loaded this bundle. */
 	clearPendingEchoes();
+	/* Retry envelopes localStorage could not hold live in memory for the same
+	   reason: they carry the user's words and images. */
+	clearHeldContinuations();
 }

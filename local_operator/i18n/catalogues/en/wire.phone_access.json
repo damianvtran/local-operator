@@ -1,0 +1,12 @@
+{
+  "wire.phone_access.title": "Phone access",
+  "wire.phone_access.description": "How this computer keeps its Radient tunnel for the phone app working. Changes apply to the next sign-in.",
+  "wire.phone_access.auto_setup.label": "Reconnect phone access after signing in",
+  "wire.phone_access.auto_setup.help": "When you sign in to Radient on a computer that already has phone access, reconnect or repair its tunnel in the background. It never activates billing or spends credit; any price or missing credit is shown to you instead.",
+  "wire.phone_access.away_after.label": "Send to phone when I'm away from my computer for",
+  "wire.phone_access.away_after.help": "How long this computer can go without keyboard or mouse input before a finished task it would show you here goes to your phone instead. Locking the screen counts as away right away. Needs the desktop app.",
+  "wire.phone_access.away_after.choice.1m.label": "1 minute",
+  "wire.phone_access.away_after.choice.2m.label": "2 minutes",
+  "wire.phone_access.away_after.choice.5m.label": "5 minutes",
+  "wire.phone_access.away_after.choice.10m.label": "10 minutes"
+}

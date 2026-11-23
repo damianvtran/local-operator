@@ -1,0 +1,737 @@
+{
+  "head": "b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "base": "2afbb818b69074d9f11b0fc1a9a6360967218476",
+  "actual_auditor_model": "anthropic/claude-opus-5-5",
+  "fallback_this_resumed_round": "none observed",
+  "previous_round_actual_model": "openai/gpt-6.1-sol after Opus quota fallback",
+  "changed_value_count": 9,
+  "retention": [
+    {
+      "locale": "fr",
+      "namespace": "wire.github",
+      "changed_keys": [
+        "wire.github.failure_unknown"
+      ],
+      "unchanged_count": 67,
+      "unchanged_values_sha256": "dcd491bf10832e8f887db8adedcb23bf83f561e2d601ef9ddbcad16fbf24920e",
+      "baseline_target_sha256": "a7fa09f683e431a7537b0942a48aa1ef2d7bf0ff0db1a47ee5fd86b26f1be069",
+      "current_target_sha256": "62221c3f619ba434a4342457d5e06a5146efaee482e3b7bd0e04e3d8c87016e2",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/record.json",
+        "sha256": "3bc208651f16950916956fb556145571374005e10656ead06b4e4364e12f1791"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/fr/wire.github/gh4052s1/record.json",
+        "sha256": "c1994b77a45fe255cc9e1cb0ba378fc5f7369919352c07c7ab34947790fe9241"
+      }
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "changed_keys": [],
+      "unchanged_count": 867,
+      "unchanged_values_sha256": "0da064c7c4e23adffad4a602054e58345b9585e66c59aba08f8ae3d005660e0d",
+      "baseline_target_sha256": "e773ea8aedb8b87586a4e0c8d72ed6e32cac39d6b522fd0f4b5ae34ac7315037",
+      "current_target_sha256": "e773ea8aedb8b87586a4e0c8d72ed6e32cac39d6b522fd0f4b5ae34ac7315037",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/fr/wire.settings/gh4052r1/record.json",
+        "sha256": "cde36a30de5c307e443ec218249618375934a5c059cf25aeb7ee89d6050ff918"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/fr/wire.settings/gh4052s1/record.json",
+        "sha256": "9d2dc5d67818cbebef00e63200322abeccb37362e83d10296d8f245405bc2a81"
+      }
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.github",
+      "changed_keys": [
+        "wire.github.share_empty"
+      ],
+      "unchanged_count": 67,
+      "unchanged_values_sha256": "93a7c32e9573ad23541f6256843b337ea843e86f63134307338df289fe324073",
+      "baseline_target_sha256": "f3ec27fb36efb1e04cd51bf44acca3e2258a11400554d3cda44bb00064298287",
+      "current_target_sha256": "237f67c0d160ff0d11ab8dc192881f6382aa05dce48f19dbfa03942c15f5ad64",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/es/wire.github/gh4052r1/record.json",
+        "sha256": "9a9b565b235531f1219d759af4daa5c9c812d7e85eb7734c8b2c681f64cdf423"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/es/wire.github/gh4052s1/record.json",
+        "sha256": "ddd26fb22663d3bf84ba6842b537617cc68f3b0ea55e1311c27a67f8a3c2eb6e"
+      }
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "changed_keys": [],
+      "unchanged_count": 867,
+      "unchanged_values_sha256": "7951dedbcebcff5a42410b28ae90fff2b87c3e5b48c1badb32e4ba6c5b76c8a7",
+      "baseline_target_sha256": "b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91",
+      "current_target_sha256": "b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/es/wire.settings/gh4052r1/record.json",
+        "sha256": "7f6f1935ad818ad232feef45223c42492cde7f9eef0c0ed27b89dfd347da424b"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/es/wire.settings/gh4052s1/record.json",
+        "sha256": "d46b38f6d30e8204c752b89a153dc03b1d85ac73f398263e8622bb537b73a41a"
+      }
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.github",
+      "changed_keys": [],
+      "unchanged_count": 68,
+      "unchanged_values_sha256": "e663df0cedd84d21a6be932dd283d8d20b8a0af305c11aaf03685d46c5b80c41",
+      "baseline_target_sha256": "dc68606f6da5693a3c876b8a43c936f55dcb71ae4d219219cd505adc57993a69",
+      "current_target_sha256": "dc68606f6da5693a3c876b8a43c936f55dcb71ae4d219219cd505adc57993a69",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/zh-CN/wire.github/gh4052r1/record.json",
+        "sha256": "bba71ab8719a5fa313e5f91334b842c997e4699cab61eb5054a9c26c76e8773c"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/zh-CN/wire.github/gh4052s1/record.json",
+        "sha256": "89728d7a786dd42aa2d62fea104ca48e894fe63dcef70dbf239b7261b2bed571"
+      }
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "changed_keys": [],
+      "unchanged_count": 867,
+      "unchanged_values_sha256": "8f2cda3be0093a85dead8d92e81d9ae2708b2a41c58d64a9ed3939db207c9b3e",
+      "baseline_target_sha256": "0bfb410cda210ef39d5109ffd1e4c826ac2edcdc1c19a510311f2f4dd0ac2345",
+      "current_target_sha256": "0bfb410cda210ef39d5109ffd1e4c826ac2edcdc1c19a510311f2f4dd0ac2345",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/zh-CN/wire.settings/gh4052r1/record.json",
+        "sha256": "115b634b6908cd71879f72ebfbb4e10a3689ab839a511bda0f7f139631266ce6"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/zh-CN/wire.settings/gh4052s1/record.json",
+        "sha256": "9270dd1a28146963805a408f7328c821d27d279e28286c52eb80e764f7f58229"
+      }
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "changed_keys": [
+        "wire.github.exclude_added",
+        "wire.github.include_added",
+        "wire.github.opt_out_step",
+        "wire.github.share_empty",
+        "wire.github.wrapper_denied"
+      ],
+      "unchanged_count": 63,
+      "unchanged_values_sha256": "0be092e616f2c00312f0c63a1e8b60a0e51d8204a9766ab2eb96414d51d87ae9",
+      "baseline_target_sha256": "5423f28f859465cc5f28b3b316257bd66c9b1bcfe2bfd0ade2ea834560e600f1",
+      "current_target_sha256": "da0e24c21f461cf8a9dc277b6c9666178c87ee77455f98ef46ce0cb1f386875c",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/ru/wire.github/gh4052r1/record.json",
+        "sha256": "fb0437d6216190c8be8b18bf8ca9e4b7d622294eab86ed6d01d1bce30d60ae44"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/ru/wire.github/gh4052s1/record.json",
+        "sha256": "888994f41fc3db361529f5098c0d4ead9174b8a1862b568d8f3db1380ec9a216"
+      }
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "changed_keys": [
+        "wire.settings.network_credentials_github_repositories.help"
+      ],
+      "unchanged_count": 866,
+      "unchanged_values_sha256": "5ca7abeef368af209683545b58a2d2145ddf11f60e58e1dda363434e97ea23ef",
+      "baseline_target_sha256": "2b500c8786bdad052555f689678c28212384969512295b9d1cd495d90c0c57ee",
+      "current_target_sha256": "76ccba21dac8666e63540e58685103acba70c28c38d0b1ff64849c20500611c3",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/ru/wire.settings/gh4052r1/record.json",
+        "sha256": "f522ff05c93f069085c3d8df02d7727321758880dad08f2a9469f4aaacc9be0e"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/ru/wire.settings/gh4052s1/record.json",
+        "sha256": "e5b47dd850a78af25cffb53498f4e447888146c582f9dd4df07e4cab320ffba7"
+      }
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.github",
+      "changed_keys": [],
+      "unchanged_count": 68,
+      "unchanged_values_sha256": "29839fb02b6c2d8b8d24b037894a359b73e00c68ebe78027de52c1dc34711daf",
+      "baseline_target_sha256": "4aafd3e2688a454b0f80f938f05ae8eac0f2e25735e4c55a92168f274e22d253",
+      "current_target_sha256": "4aafd3e2688a454b0f80f938f05ae8eac0f2e25735e4c55a92168f274e22d253",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/vi/wire.github/gh4052r1/record.json",
+        "sha256": "c9d70dd28cd48fef3dc3cb24d996c42c9dae53e8d710cd312ab430634bb0de70"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/vi/wire.github/gh4052s1/record.json",
+        "sha256": "91b2de01afca942efed4aa2c061535cc3e76edffa237509d5863788e3ed3b9f3"
+      }
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "changed_keys": [],
+      "unchanged_count": 867,
+      "unchanged_values_sha256": "320b2a4c5eae91ee94de276b144c7c90775f572d1708aea91c973c9cae0196ca",
+      "baseline_target_sha256": "28d393b48281312b1d918d3af7826581890b01607addb9dae23a702ae12e26e4",
+      "current_target_sha256": "28d393b48281312b1d918d3af7826581890b01607addb9dae23a702ae12e26e4",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/vi/wire.settings/gh4052r1/record.json",
+        "sha256": "4e0713f55564a25c8f86da5bc36a64c636721ffa739a5f61f44adc87f076087b"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/vi/wire.settings/gh4052s1/record.json",
+        "sha256": "6be81ebfe2898f0e536f9f3c0c2cbd45a448f29ec27589d2460700a853c23fc7"
+      }
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.github",
+      "changed_keys": [
+        "wire.github.wrapper_denied"
+      ],
+      "unchanged_count": 67,
+      "unchanged_values_sha256": "7c90f479b59c3ed1fee7e0ad050c7f79c75a3f512e174a42d3ad4c859ed8a3a8",
+      "baseline_target_sha256": "bb25b9b554704e8b4f9e6494e8fc2ceb5804e2deb1474f3fbf915fe37aa27c86",
+      "current_target_sha256": "03892d99ab9c4906a90c4e0d439ffd98f42ad29c710303b749ce0d33a6a07d26",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/ur/wire.github/gh4052r1/record.json",
+        "sha256": "f4ce519c66e5772482e51c8ff517ca056771b153fa1c13fa615e0e72e0af727c"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/ur/wire.github/gh4052s1/record.json",
+        "sha256": "b63db079c487e88e0f95efa7dc8937dd693e643889c32e3b1a9ac6ce814d1880"
+      }
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "changed_keys": [],
+      "unchanged_count": 867,
+      "unchanged_values_sha256": "6780adfed35f5a08103e8185ddae02857edbaca0701ee92d8638dc617f477087",
+      "baseline_target_sha256": "47981cc870a599caf1ec964295ed3123b87a2f345bdb324c166694125d959476",
+      "current_target_sha256": "47981cc870a599caf1ec964295ed3123b87a2f345bdb324c166694125d959476",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/ur/wire.settings/gh4052r1/record.json",
+        "sha256": "3bff4c69fba6b7accfa409dae17f10985a916559a943a34c197d93db137ee062"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/ur/wire.settings/gh4052s1/record.json",
+        "sha256": "dee159ea165699e3243fbd11b3ca1f249eb80882095a7cb32a74eeacc04f9386"
+      }
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.github",
+      "changed_keys": [],
+      "unchanged_count": 68,
+      "unchanged_values_sha256": "2a4b87888998e6a6a61fc6b6861b62deff0b35bedb90817cda82ea503c170d34",
+      "baseline_target_sha256": "21d945c15034e7ccd1ff1ef4682910a582a981df65df1e3098598073a1966c7f",
+      "current_target_sha256": "21d945c15034e7ccd1ff1ef4682910a582a981df65df1e3098598073a1966c7f",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/hi/wire.github/gh4052r1/record.json",
+        "sha256": "fe93fc90cedb5d115eb446f4beb4fd9b237013e9ef798ea87d40bf7150913ff1"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/hi/wire.github/gh4052s1/record.json",
+        "sha256": "194cd19757db65a7e6b979c0ad31023cf350613eee3598a4d85528de76df2150"
+      }
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "changed_keys": [],
+      "unchanged_count": 867,
+      "unchanged_values_sha256": "8b54f73611d5a3cd521bf6080f00a82c8d528b3350d8a129dc6f642414887b05",
+      "baseline_target_sha256": "f160e478a9465b9b775a975fc0895596eddb8530bb6ca2958a43102a9d63bce4",
+      "current_target_sha256": "f160e478a9465b9b775a975fc0895596eddb8530bb6ca2958a43102a9d63bce4",
+      "retained_primary_record": {
+        "path": "i18n/audits/evidence/hi/wire.settings/gh4052r1/record.json",
+        "sha256": "6a00d5ef9403fcefc34eaa57aea2ca04a61febc35043c618b0a4cc16249e6cfd"
+      },
+      "retained_second_record": {
+        "path": "i18n/audits/evidence/hi/wire.settings/gh4052s1/record.json",
+        "sha256": "59f9e05c33be92474f008f61f96ad9c35bae64d7418da55c0dc3fb3601d9f488"
+      }
+    }
+  ],
+  "changed": [
+    {
+      "locale": "fr",
+      "namespace": "wire.github",
+      "message_key": "wire.github.failure_unknown",
+      "old": "échec de la liste des dépôts GitHub",
+      "new": "échec de la récupération de la liste des dépôts GitHub",
+      "params": {},
+      "rendered": "échec de la récupération de la liste des dépôts GitHub",
+      "before_rendered": "échec de la liste des dépôts GitHub"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.github",
+      "message_key": "wire.github.share_empty",
+      "old": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero se rechaza todo préstamo mientras {reason}; {remedy}",
+      "new": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: {reason}; {remedy}",
+      "params": {
+        "reason": "REASON",
+        "remedy": "REMEDY"
+      },
+      "rendered": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: REASON; REMEDY",
+      "before_rendered": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero se rechaza todo préstamo mientras REASON; REMEDY"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "message_key": "wire.github.exclude_added",
+      "old": "{repo} исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, {ttl}",
+      "new": "{repo} исключён — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, {ttl}",
+      "params": {
+        "repo": "octo-org/website",
+        "ttl": "в течение 5 мин"
+      },
+      "rendered": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "before_rendered": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, в течение 5 мин"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "message_key": "wire.github.include_added",
+      "old": "{repo} возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, {ttl}",
+      "new": "{repo} возвращён — устройства, которым вы предоставили доступ, снова смогут выполнять push в него при следующем получении учётных данных, {ttl}",
+      "params": {
+        "repo": "octo-org/website",
+        "ttl": "в течение 5 мин"
+      },
+      "rendered": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "before_rendered": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, в течение 5 мин"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "message_key": "wire.github.opt_out_step",
+      "old": "исключить репозиторий: {command} — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, {ttl}",
+      "new": "исключить репозиторий: {command} — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, {ttl}",
+      "params": {
+        "command": "lop network credential github exclude <owner/repo>",
+        "ttl": "в течение 5 мин"
+      },
+      "rendered": "исключить репозиторий: lop network credential github exclude <owner/repo> — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "before_rendered": "исключить репозиторий: lop network credential github exclude <owner/repo> — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, в течение 5 мин"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "message_key": "wire.github.share_empty",
+      "old": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока {reason}; {remedy}",
+      "new": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: {reason}; {remedy}",
+      "params": {
+        "reason": "REASON",
+        "remedy": "REMEDY"
+      },
+      "rendered": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: REASON; REMEDY",
+      "before_rendered": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "message_key": "wire.github.wrapper_denied",
+      "old": "{repo} отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте {command} на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ.",
+      "new": "{repo} отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте {command} на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ.",
+      "params": {
+        "repo": "octo-org/website",
+        "command": "lop network credential github repos"
+      },
+      "rendered": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте lop network credential github repos на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ.",
+      "before_rendered": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "message_key": "wire.settings.network_credentials_github_repositories.help",
+      "old": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+      "new": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее переданного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+      "params": {},
+      "rendered": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее переданного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+      "before_rendered": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.github",
+      "message_key": "wire.github.wrapper_denied",
+      "old": "{repo}، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر {command} جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔",
+      "new": "{repo}، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر {command} جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔",
+      "params": {
+        "repo": "octo-org/website",
+        "command": "lop network credential github repos"
+      },
+      "rendered": "octo-org/website، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔",
+      "before_rendered": "octo-org/website، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔"
+    }
+  ],
+  "renders": [
+    {
+      "locale": "fr",
+      "message_key": "wire.github.failure_unknown",
+      "params": {},
+      "text": "échec de la récupération de la liste des dépôts GitHub",
+      "kind": "changed value"
+    },
+    {
+      "locale": "es",
+      "message_key": "wire.github.share_empty",
+      "params": {
+        "reason": "REASON",
+        "remedy": "REMEDY"
+      },
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: REASON; REMEDY",
+      "kind": "changed value"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.exclude_added",
+      "params": {
+        "repo": "octo-org/website",
+        "ttl": "в течение 5 мин"
+      },
+      "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "kind": "changed value"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.include_added",
+      "params": {
+        "repo": "octo-org/website",
+        "ttl": "в течение 5 мин"
+      },
+      "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "kind": "changed value"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.opt_out_step",
+      "params": {
+        "command": "lop network credential github exclude <owner/repo>",
+        "ttl": "в течение 5 мин"
+      },
+      "text": "исключить репозиторий: lop network credential github exclude <owner/repo> — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "kind": "changed value"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.share_empty",
+      "params": {
+        "reason": "REASON",
+        "remedy": "REMEDY"
+      },
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: REASON; REMEDY",
+      "kind": "changed value"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.wrapper_denied",
+      "params": {
+        "repo": "octo-org/website",
+        "command": "lop network credential github repos"
+      },
+      "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте lop network credential github repos на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ.",
+      "kind": "changed value"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.settings.network_credentials_github_repositories.help",
+      "params": {},
+      "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее переданного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+      "kind": "changed value"
+    },
+    {
+      "locale": "ur",
+      "message_key": "wire.github.wrapper_denied",
+      "params": {
+        "repo": "octo-org/website",
+        "command": "lop network credential github repos"
+      },
+      "text": "octo-org/website، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔",
+      "kind": "changed value"
+    },
+    {
+      "locale": "es",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_explicit",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: el ajuste de repositorios de GitHub elegidos a mano no contiene ningún repositorio tras aplicar las exclusiones; añade repositorios al ajuste de repositorios de GitHub (búscalo en /settings), o vuelve explícitamente a todos los repositorios con permiso de push, menos los excluidos, con lop network credential github repos --use-default",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "es",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_unavailable_local",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: no se pudo obtener la lista de repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (no se pudo contactar con GitHub) y no hay una lista anterior de respaldo; vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "es",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_unavailable_remote",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: no se pudo obtener la lista de repositorios a los que su cuenta de GitHub puede hacer push (no se pudo contactar con GitHub) y no hay una lista anterior de respaldo; vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "es",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_excluded_local",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: todos los repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (2) están excluidos; vuelve a incluir uno con lop network credential github include <owner/repo>",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "es",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_excluded_remote",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: todos los repositorios a los que su cuenta de GitHub puede hacer push (2) están excluidos; vuelve a incluir uno con lop network credential github include <owner/repo>",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "es",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_no_repos_local",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: la cuenta de GitHub de este dispositivo no puede hacer push a ningún repositorio; concede a esa cuenta de GitHub permiso de push en un repositorio",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "es",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_no_repos_remote",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: su cuenta de GitHub no puede hacer push a ningún repositorio; concede a esa cuenta de GitHub permiso de push en un repositorio",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_explicit",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев; добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_unavailable_local",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push (не удалось связаться с GitHub), и нет предыдущего списка для замены; повторите, когда GitHub станет доступен: lop network credential github repos --refresh",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_unavailable_remote",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push (не удалось связаться с GitHub), и нет предыдущего списка для замены; повторите, когда GitHub станет доступен: lop network credential github repos --refresh",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_excluded_local",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (2), исключены; верните один из репозиториев командой lop network credential github include <owner/repo>",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_excluded_remote",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: все репозитории, в которые его учётная запись GitHub может выполнять push (2), исключены; верните один из репозиториев командой lop network credential github include <owner/repo>",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_no_repos_local",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий; предоставьте этой учётной записи GitHub право выполнять push в репозиторий",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.share_empty",
+      "reason_key": "reason_no_repos_remote",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: его учётная запись GitHub не может выполнять push ни в один репозиторий; предоставьте этой учётной записи GitHub право выполнять push в репозиторий",
+      "kind": "composed refusal"
+    },
+    {
+      "locale": "fr",
+      "message_key": "wire.github.source_last_good",
+      "text": "la liste récupérée il y a 2 jours — impossible de lister les dépôts GitHub à l’instant (échec de la récupération de la liste des dépôts GitHub) ; elle peut donc être périmée",
+      "kind": "changed failure neighbor"
+    },
+    {
+      "locale": "fr",
+      "message_key": "wire.github.reason_unavailable_local",
+      "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée (échec de la récupération de la liste des dépôts GitHub), sans liste antérieure de secours",
+      "kind": "changed failure neighbor"
+    },
+    {
+      "locale": "fr",
+      "message_key": "wire.github.readiness_last_good",
+      "text": "la liste récupérée il y a 2 jours — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification: échec de la récupération de la liste des dépôts GitHub",
+      "kind": "changed failure neighbor"
+    }
+  ],
+  "render_count": 26,
+  "pseudo": [
+    {
+      "locale": "fr",
+      "message_key": "wire.github.failure_unknown",
+      "original_cells": 54,
+      "pseudo_cells": 95,
+      "width": 80,
+      "no_clipping": true,
+      "technical_tokens_preserved": true
+    },
+    {
+      "locale": "es",
+      "message_key": "wire.github.share_empty",
+      "original_cells": 150,
+      "pseudo_cells": 259,
+      "width": 80,
+      "no_clipping": true,
+      "technical_tokens_preserved": true
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.exclude_added",
+      "original_cells": 164,
+      "pseudo_cells": 272,
+      "width": 80,
+      "no_clipping": true,
+      "technical_tokens_preserved": true
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.include_added",
+      "original_cells": 163,
+      "pseudo_cells": 270,
+      "width": 80,
+      "no_clipping": true,
+      "technical_tokens_preserved": true
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.opt_out_step",
+      "original_cells": 212,
+      "pseudo_cells": 332,
+      "width": 80,
+      "no_clipping": true,
+      "technical_tokens_preserved": true
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.share_empty",
+      "original_cells": 131,
+      "pseudo_cells": 224,
+      "width": 80,
+      "no_clipping": true,
+      "technical_tokens_preserved": true
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.wrapper_denied",
+      "original_cells": 339,
+      "pseudo_cells": 581,
+      "width": 80,
+      "no_clipping": true,
+      "technical_tokens_preserved": true
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.settings.network_credentials_github_repositories.help",
+      "original_cells": 390,
+      "pseudo_cells": 663,
+      "width": 80,
+      "no_clipping": true,
+      "technical_tokens_preserved": true
+    },
+    {
+      "locale": "ur",
+      "message_key": "wire.github.wrapper_denied",
+      "original_cells": 259,
+      "pseudo_cells": 415,
+      "width": 80,
+      "no_clipping": true,
+      "technical_tokens_preserved": true
+    }
+  ],
+  "rtl_probe": {
+    "raw": "octo-org/website، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔",
+    "projected": "⁧⁦octo-org/website⁩، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر ⁦lop network credential github repos⁩ جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔⁩",
+    "isolate_counts": {
+      "RLI": 1,
+      "LRI": 2,
+      "PDI": 3
+    },
+    "native_shaping_verified": false
+  },
+  "production_before_eligibility": [
+    {
+      "locale": "fr",
+      "message_key": "wire.github.failure_unknown",
+      "source_locale": "en",
+      "text": "GitHub repository listing failed"
+    },
+    {
+      "locale": "es",
+      "message_key": "wire.github.share_empty",
+      "source_locale": "en",
+      "text": "GitHub repositories: none yet — the share is in place, but every borrow is refused while REASON; REMEDY"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.exclude_added",
+      "source_locale": "en",
+      "text": "octo-org/website is opted out — devices you share with lose push to it the next time they fetch the credential, в течение 5 мин"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.include_added",
+      "source_locale": "en",
+      "text": "octo-org/website is back in — devices you share with can push to it again the next time they fetch the credential, в течение 5 мин"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.opt_out_step",
+      "source_locale": "en",
+      "text": "opt a repository out: lop network credential github exclude <owner/repo> — devices you share with lose push to it the next time they fetch the credential, в течение 5 мин"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.share_empty",
+      "source_locale": "en",
+      "text": "GitHub repositories: none yet — the share is in place, but every borrow is refused while REASON; REMEDY"
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.github.wrapper_denied",
+      "source_locale": "en",
+      "text": "octo-org/website isn't in the repository list the lending device provided (it may be opted out or not pushable there). Check lop network credential github repos on the lending device. Only that device can change what it lends."
+    },
+    {
+      "locale": "ru",
+      "message_key": "wire.settings.network_credentials_github_repositories.help",
+      "source_locale": "en",
+      "text": "owner/repo entries to lend GitHub access for. When never set, use every repository the login can push to, minus opt-outs. Clearing a previously shared hand-picked list stops lending; return to automatic selection with lop network credential github repos --use-default."
+    },
+    {
+      "locale": "ur",
+      "message_key": "wire.github.wrapper_denied",
+      "source_locale": "en",
+      "text": "octo-org/website isn't in the repository list the lending device provided (it may be opted out or not pushable there). Check lop network credential github repos on the lending device. Only that device can change what it lends."
+    }
+  ],
+  "unresolved_blocker_major_count": 0,
+  "all_prior_findings_resolved": [
+    "I-RU-PUSH",
+    "I-RU-WRAPPER",
+    "I-COMPOSE",
+    "I2-UR-01",
+    "I2-RU-01",
+    "I-FR-01",
+    "I-RU-02"
+  ]
+}

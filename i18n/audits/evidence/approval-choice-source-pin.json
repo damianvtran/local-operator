@@ -1,0 +1,727 @@
+{
+  "scope": "PRIVATE English/context preparation only; translations and safety audits pending; not release eligible",
+  "owner_session": "6f29705fb5aa",
+  "model": "openai/gpt-6.1-sol",
+  "fallback_from": "anthropic/claude-opus-5-5 (provider quota failure before implementation)",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+  "base": "fa4fb006319718935477ffae732cab76708062fe",
+  "head": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+  "keys": [
+    "wire.settings.tool_approval_mode.choice.ask.label",
+    "wire.settings.tool_approval_mode.choice.auto.label"
+  ],
+  "files": {
+    "local_operator/i18n/catalogues/en/wire.settings.json": {
+      "before_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+      "after_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+      "before_git_blob": "0a7663c97283d8db3a9c9c893f07e5434db6a662",
+      "after_git_blob": "b6ed7628cc367e59259f6f15e81a58d26104e983"
+    },
+    "local_operator/i18n/catalogues/en/wire.settings.context.json": {
+      "before_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+      "after_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+      "before_git_blob": "3dc9c46d103c3eb93c21b869a475a11eed53a313",
+      "after_git_blob": "ca046ea079bfbdaab0a0f58cd5c17479fbd94460"
+    }
+  },
+  "source_key_pins": {
+    "wire.settings.tool_approval_mode.choice.ask.label": {
+      "before_sha256": "e43a5493c180fde1ca0c3b266b7781876016f68d2caaa937e049f3c050b87a66",
+      "after_sha256": "5632aefc70ebd0e581592139d0046b2db0c54a41ac3ebef38b5787e9e2252e08",
+      "context_before_present": false,
+      "context_after_sha256": "8ed1bd15a7a0117342d18d5aa288582d0de2ba18e86560b2c2b96b8c4ff0ff90",
+      "source_text_sha256": {
+        "before": "2f2fc7f2e9ce13b09b84f63d54d0b4a59f4dbd46aea41da67023817e2d0c5e59",
+        "after": "b8c209cdead61a095ec097b7a13c4fc9264c04b3e3bd0fca42ec8dbaeebeeafe"
+      }
+    },
+    "wire.settings.tool_approval_mode.choice.auto.label": {
+      "before_sha256": "634635a2166efa2ae765abd31d4ae807082287e329a8a7fff42b1fb30f65087e",
+      "after_sha256": "d18036b75b2c3e4f24e316880a907dfff7ccde897477f15e3956fa7420f4bb1f",
+      "context_before_present": false,
+      "context_after_sha256": "62c75210887a77d9c9444aef754774f4de4747fbae04cb2dcd373f13043f2d1b",
+      "source_text_sha256": {
+        "before": "929260ad9b9ea9fe0f3553dd964f4ff3deb5792efd031a2b90f573fe91f012bb",
+        "after": "d461a493a3753877c9486cffa3444265a33370af8a7fff242fb119b71750839c"
+      }
+    }
+  },
+  "locale_pins": {
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+      "before_sha256": "7067ac12bb803902e580de79671c11a134a6890a26b98f34610d4a1be9613076",
+      "after_sha256": "7067ac12bb803902e580de79671c11a134a6890a26b98f34610d4a1be9613076",
+      "old_values_sha256": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "76c5ae7c86d0d2acf7ab683e69f42b90991c0987cc53f3ea434c2b242277dd3c",
+        "wire.settings.tool_approval_mode.choice.auto.label": "634635a2166efa2ae765abd31d4ae807082287e329a8a7fff42b1fb30f65087e"
+      }
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+      "before_sha256": "69ea99a4a07d996963c9ac597b5f0a0a855d0fecd4660fbab776660061cdfb93",
+      "after_sha256": "69ea99a4a07d996963c9ac597b5f0a0a855d0fecd4660fbab776660061cdfb93",
+      "old_values_sha256": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "6377a69b9460bcdb3b3dc18f5ae665d44e006fe2bb41c0218c9f56a6c17c934a",
+        "wire.settings.tool_approval_mode.choice.auto.label": "634635a2166efa2ae765abd31d4ae807082287e329a8a7fff42b1fb30f65087e"
+      }
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "before_sha256": "cba7d4afe5a3b22f229f3f31e8c3a7eb8dfcdc3aceb9562f78c07d76cfb4341b",
+      "after_sha256": "cba7d4afe5a3b22f229f3f31e8c3a7eb8dfcdc3aceb9562f78c07d76cfb4341b",
+      "old_values_sha256": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "e43a5493c180fde1ca0c3b266b7781876016f68d2caaa937e049f3c050b87a66",
+        "wire.settings.tool_approval_mode.choice.auto.label": "634635a2166efa2ae765abd31d4ae807082287e329a8a7fff42b1fb30f65087e"
+      }
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+      "before_sha256": "68a0809d4356416703208d407734abe6433ec1b7b6796d61b7a2706691b3a624",
+      "after_sha256": "68a0809d4356416703208d407734abe6433ec1b7b6796d61b7a2706691b3a624",
+      "old_values_sha256": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "5fcf584c8f22aed796017cf8659858f8a225944525c9b9fe1c24da43b6d3792f",
+        "wire.settings.tool_approval_mode.choice.auto.label": "634635a2166efa2ae765abd31d4ae807082287e329a8a7fff42b1fb30f65087e"
+      }
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+      "before_sha256": "df178c2af51d345e5692e2fe68ac3b069907548424efb5bda5b5dc01bcee95f2",
+      "after_sha256": "df178c2af51d345e5692e2fe68ac3b069907548424efb5bda5b5dc01bcee95f2",
+      "old_values_sha256": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "93811c7079ca9b9783c6d0c3212cf3511bbba62a57edb17d4f93cd4079627a9b",
+        "wire.settings.tool_approval_mode.choice.auto.label": "634635a2166efa2ae765abd31d4ae807082287e329a8a7fff42b1fb30f65087e"
+      }
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "before_sha256": "5b47f6cbefb5a6c485d44af0b40842c3e295ef72538bb30bb27bed55ba706931",
+      "after_sha256": "5b47f6cbefb5a6c485d44af0b40842c3e295ef72538bb30bb27bed55ba706931",
+      "old_values_sha256": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "e43a5493c180fde1ca0c3b266b7781876016f68d2caaa937e049f3c050b87a66",
+        "wire.settings.tool_approval_mode.choice.auto.label": "634635a2166efa2ae765abd31d4ae807082287e329a8a7fff42b1fb30f65087e"
+      }
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+      "before_sha256": "6c4712d0a5a6edd1b2fee561f5ca66dcaf5916fe8ef356a27ee20100de31da0d",
+      "after_sha256": "6c4712d0a5a6edd1b2fee561f5ca66dcaf5916fe8ef356a27ee20100de31da0d",
+      "old_values_sha256": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "79513e921f1be58f21cc852b65455f7ed5c5331a9b98bce66c34053bbc4b56e4",
+        "wire.settings.tool_approval_mode.choice.auto.label": "634635a2166efa2ae765abd31d4ae807082287e329a8a7fff42b1fb30f65087e"
+      }
+    }
+  },
+  "checks": {
+    "source_scope": "PASS: exactly two source values changed, no new catalogue keys",
+    "context_scope": "PASS: exactly two context entries added; neither existed before",
+    "ICU": "PASS: both parse and retain zero arguments",
+    "runtime_identity": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/__init__.py",
+    "resolved_choices": [
+      [
+        "ask",
+        "Ask"
+      ],
+      [
+        "auto",
+        "Automatic"
+      ]
+    ],
+    "raw_values": "PASS: ask/auto accepted; default ask unchanged",
+    "negative_display_inputs": {
+      "Ask": "expected one of: Ask, Automatic",
+      "Automatic": "expected one of: Ask, Automatic"
+    },
+    "locale_bytes": "PASS: 7 complete target files identical to base"
+  },
+  "retained_exceptions": [
+    "responses remains an API-brand technical literal, untouched",
+    "ask/auto remain raw machine values and command arguments"
+  ],
+  "not_run": [
+    "translation or linguistic audit",
+    "generated outputs or ledger updates",
+    "native/App/browser validation",
+    "broad test suite",
+    "PR/release/merge"
+  ],
+  "rationale": {
+    "ask": "Sentence-case human mode name, grounded in prompting before write/exec tools; not a promise to prompt for every tool.",
+    "auto": "Expanded to Automatic to distinguish human-facing mode name from machine token; does not promise unconditional execution.",
+    "context": "Both context entries were absent at base; added without changing any pre-existing context.",
+    "safety_sources": [
+      "local_operator/harness/approval.py:235-275 (person-only gates)",
+      "local_operator/guardrails/check.py:1-27 (guardrail checks remain after approval)"
+    ]
+  },
+  "consumer_contracts": {
+    "backend": [
+      "local_operator/settings_io.py:333-338 (Choice fields)",
+      "local_operator/settings_io.py:3395-3406 (raw values separate from labels)",
+      "local_operator/settings_io.py:7140-7157 (validation compares Choice.value)",
+      "local_operator/server/routes/settings.py:224-227 (API sends value and label separately)"
+    ],
+    "TUI": [
+      "local_operator/tui/widgets/settings_view.py:2190 (writes row.choice.value)",
+      "local_operator/tui/widgets/settings_view.py:3212 (preview uses row.choice.value)"
+    ],
+    "desktop_read_only_inspection": {
+      "repo": "/Users/damian/local-operator-ui",
+      "head": "94d96837486c50f95ae21595bcca393590d4c9ed",
+      "paths": [
+        "src/renderer/src/features/settings/components/setting-control.tsx:748-785 (select uses serialized value, paints label)",
+        "src/renderer/src/features/settings/components/backend-settings-drafts.ts:144-151 (enum draft matches and writes value)"
+      ]
+    },
+    "finding": "No human-label parsing contract found in inspected selection, preview, serialization and validation paths. No native or rendered claim."
+  },
+  "verification_note": "Scratch verifier initially miscalled tr as a direct resolver; corrected to tr(namespace)(Msg), reran successfully. Product source needed no remediation.",
+  "hash_convention": "File hashes are SHA-256 of exact bytes. old_values_sha256/source_key_pins are SHA-256 of UTF-8 compact JSON serialization (ensure_ascii=False, separators comma/colon). Additional source_text_sha256 hashes raw UTF-8 source text for translator ledger compatibility.",
+  "postauthor_integration": {
+    "status": "AUTHORING_FROZEN_ONLY; independent native safety A/B pending for every locale; not release eligible",
+    "base": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+    "integrator_session": "ed38f0e57081",
+    "actual_integrator_model": "openai/gpt-6.1-sol",
+    "fallback": "Host switched from anthropic/claude-opus-5-5 for provider quota before integration work",
+    "changed_value_count": 9,
+    "locales": {
+      "fr": {
+        "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+        "before_sha256": "7067ac12bb803902e580de79671c11a134a6890a26b98f34610d4a1be9613076",
+        "after_sha256": "8a6fcb21ed6799b4ff69f52d8f61bf70256b40f2bc10e7d9ee72dd799f8f8876",
+        "key_count": 895,
+        "changed_keys": [
+          "wire.settings.tool_approval_mode.choice.auto.label"
+        ],
+        "unchanged_count": 894,
+        "selected_canonical_sha256": "9ad27d98138bfcb771e92b1df923fa1acb17ac375bb4f28324d5c6edbfa73476"
+      },
+      "es": {
+        "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+        "before_sha256": "69ea99a4a07d996963c9ac597b5f0a0a855d0fecd4660fbab776660061cdfb93",
+        "after_sha256": "e1026565e8003ddb8985c82e0b23de028a7ac4e01b5fbd5e4b6a3294660c64a5",
+        "key_count": 895,
+        "changed_keys": [
+          "wire.settings.tool_approval_mode.choice.auto.label"
+        ],
+        "unchanged_count": 894,
+        "selected_canonical_sha256": "b3137442b15468777e795f323bd276f56a688d8c1109dcd9ce65e160bd44fd64"
+      },
+      "zh-CN": {
+        "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+        "before_sha256": "cba7d4afe5a3b22f229f3f31e8c3a7eb8dfcdc3aceb9562f78c07d76cfb4341b",
+        "after_sha256": "8d44389ff7b4b19be7fde38015eecb50caac7555a771ad6cc52fb1820d489f5a",
+        "key_count": 895,
+        "changed_keys": [
+          "wire.settings.tool_approval_mode.choice.ask.label",
+          "wire.settings.tool_approval_mode.choice.auto.label"
+        ],
+        "unchanged_count": 893,
+        "selected_canonical_sha256": "3dd1e07963471910edc08acafa8f587b01d94be19966634e5e3c63742bcbfc40"
+      },
+      "ru": {
+        "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+        "before_sha256": "68a0809d4356416703208d407734abe6433ec1b7b6796d61b7a2706691b3a624",
+        "after_sha256": "87ac6464c94f359c7ba6a045fe0e8d0ed1297c653d036d47da0aaedf3b90f4f8",
+        "key_count": 895,
+        "changed_keys": [
+          "wire.settings.tool_approval_mode.choice.auto.label"
+        ],
+        "unchanged_count": 894,
+        "selected_canonical_sha256": "3a4ecc144843136ae0cd58eb5385b3d88644a236ebecbf343ff0f72dc2b0eaa3"
+      },
+      "ur": {
+        "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+        "before_sha256": "5b47f6cbefb5a6c485d44af0b40842c3e295ef72538bb30bb27bed55ba706931",
+        "after_sha256": "79869c119f2cb73152c50a4a3ffb647441cd0b0db0fb1f49a76f29a15324bc5e",
+        "key_count": 895,
+        "changed_keys": [
+          "wire.settings.tool_approval_mode.choice.ask.label",
+          "wire.settings.tool_approval_mode.choice.auto.label"
+        ],
+        "unchanged_count": 893,
+        "selected_canonical_sha256": "fde72a767a645ec6097c3fad3d1663a702018271e26153ab4bef791e181775d6"
+      },
+      "vi": {
+        "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+        "before_sha256": "df178c2af51d345e5692e2fe68ac3b069907548424efb5bda5b5dc01bcee95f2",
+        "after_sha256": "830fc55bf9a1df0dfb3d915574800b0aa563b83a95a9ed36caf7ebeb9ecbf28b",
+        "key_count": 895,
+        "changed_keys": [
+          "wire.settings.tool_approval_mode.choice.auto.label"
+        ],
+        "unchanged_count": 894,
+        "selected_canonical_sha256": "94367d26f1ed4d0f23fc9742ed53bd1e7e2a852611e73986bb3293f8aafa3fc8"
+      },
+      "hi": {
+        "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+        "before_sha256": "6c4712d0a5a6edd1b2fee561f5ca66dcaf5916fe8ef356a27ee20100de31da0d",
+        "after_sha256": "64bf453ca81721ed35d89ba95d7e5e5aac343765d5e6010fbd37ccbc50704f48",
+        "key_count": 895,
+        "changed_keys": [
+          "wire.settings.tool_approval_mode.choice.auto.label"
+        ],
+        "unchanged_count": 894,
+        "selected_canonical_sha256": "9d7ea71b3d1ab904d78a16436b800b78e294b1786a617acb15d059c1f215823e"
+      }
+    },
+    "verified_controls": [
+      "895 keys before/after per locale; same key order",
+      "Only the two selected label values may differ; inverse exact token replacement reconstructs complete original bytes",
+      "NFC and no authored format/bidi controls",
+      "Original cache full-file and selected canonical digests match git base",
+      "English source and context full files unchanged from base"
+    ],
+    "native_approval": "NOT_RUN; author controls are not independent approval",
+    "prior_893_semantic_coverage": "BLOCKED_PROOF: references below cover convergence and eight voice labels only; full retained semantic chain not established",
+    "ur_provenance": {
+      "status": "PENDING_PRIMARY_SOURCE; exact resumed serving model UNKNOWN",
+      "raw_receipt": "i18n/audits/evidence/approval-choice-translator-ur.json",
+      "raw_receipt_sha256": "54872b21bacc6e8c02cc6306739a898dbe1b60e9f902d240f8f9f13c53ba8398",
+      "raw_claim_preserved": true,
+      "raw_claim_author_model": "anthropic/claude-opus-5-5",
+      "raw_claim_summary": "Resumed Anthropic, no fallback observed in segment",
+      "conflicting_primary_metadata_reported_by_manager": {
+        "scout_session": "d9afb8c91933",
+        "author_session": "bc9d98e0db6e",
+        "source": "transcript.jsonl",
+        "line_7": "active GPT route after quota",
+        "line_34": "selected Anthropic without observed route clear"
+      },
+      "interpretation": "Do not verify raw Anthropic claim or silently reattribute exact emission to GPT; manager resolving exact request source. First fresh proposal segment reportedly known GPT route; exact emission not retrieved. Not a language failure or authorization to reauthor."
+    },
+    "prior_evidence_references": {
+      "fr": {
+        "history_path": "i18n/audit-history/fr/wire.settings.json",
+        "history_file_sha256": "233a006be3a169bcbaae3020a3e1598365cc443a63788a976f14fda7ca1d19e8",
+        "references": [
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "2ee6972b0ee8445c33d3eaa36e40a9550f3cdc9d44b68b2b93e1e157dfc3929e",
+            "target_sha256": "880c7563e46afaf5c9ae7afa60fdcb8a7aeb1ba040e460b4b86fa63bbc2c373c",
+            "keys_audited": 0,
+            "entry_index": 34,
+            "target_matches_before_pin": false
+          },
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+            "target_sha256": "7067ac12bb803902e580de79671c11a134a6890a26b98f34610d4a1be9613076",
+            "contribution_key_count": 8,
+            "full_namespace_reaudit": false,
+            "audit_receipt": "docs/qa/i18n-voice-choice-audits/fr.json",
+            "audit_receipt_sha256": "13e049bc053594825ab1d6a4917db7aa231a87a6d75783276e43488e795e9a09",
+            "entry_index": 35,
+            "target_matches_before_pin": true,
+            "raw_receipt_exists": true,
+            "raw_receipt_actual_sha256": "13e049bc053594825ab1d6a4917db7aa231a87a6d75783276e43488e795e9a09",
+            "raw_receipt_fields": [
+              "locale",
+              "namespace",
+              "source_sha256",
+              "context_sha256",
+              "target_sha256",
+              "translator",
+              "auditor",
+              "status",
+              "verdict",
+              "round",
+              "worktree",
+              "head",
+              "base",
+              "scope_keys",
+              "scope_key_count",
+              "read_key_count",
+              "read_key_count_explanation",
+              "findings",
+              "note",
+              "linguistic_review",
+              "fit",
+              "controls",
+              "evidence_file",
+              "probe_file"
+            ]
+          }
+        ],
+        "coverage_status": "PARTIAL provenance references only: old-source convergence row explicitly keys_audited=0; latest exact-before-target row covers eight voice-choice keys, not all 893 retained keys. Complete prior semantic chain NOT established in bounded integration."
+      },
+      "es": {
+        "history_path": "i18n/audit-history/es/wire.settings.json",
+        "history_file_sha256": "f873a8d86ec9ca6e8f60904faee080ad0d62a2180c0f9a34b3cafd0701bfefb6",
+        "references": [
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "2ee6972b0ee8445c33d3eaa36e40a9550f3cdc9d44b68b2b93e1e157dfc3929e",
+            "target_sha256": "6863fc599cd42891402d36b7145c9dfb7fa70775580e777f2b8d253d4e7dff7c",
+            "keys_audited": 0,
+            "entry_index": 34,
+            "target_matches_before_pin": false
+          },
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+            "target_sha256": "69ea99a4a07d996963c9ac597b5f0a0a855d0fecd4660fbab776660061cdfb93",
+            "contribution_key_count": 8,
+            "full_namespace_reaudit": false,
+            "audit_receipt": "docs/qa/i18n-voice-choice-audits/es.json",
+            "audit_receipt_sha256": "6684c4b1813cc0bd86724427b8e20b4083ebf2255807819c5a4ab9f72a8e39b0",
+            "entry_index": 35,
+            "target_matches_before_pin": true,
+            "raw_receipt_exists": true,
+            "raw_receipt_actual_sha256": "6684c4b1813cc0bd86724427b8e20b4083ebf2255807819c5a4ab9f72a8e39b0",
+            "raw_receipt_fields": [
+              "locale",
+              "namespace",
+              "source_sha256",
+              "context_sha256",
+              "target_sha256",
+              "worktree",
+              "head",
+              "scope_base",
+              "round",
+              "scope_keys",
+              "scope_note",
+              "coverage",
+              "date",
+              "translator",
+              "auditor",
+              "status",
+              "verdict",
+              "namespace_verdict",
+              "findings",
+              "semantic_decisions",
+              "contextual_notes",
+              "controls",
+              "runtime",
+              "fit_measures",
+              "evidence_sources",
+              "note"
+            ]
+          }
+        ],
+        "coverage_status": "PARTIAL provenance references only: old-source convergence row explicitly keys_audited=0; latest exact-before-target row covers eight voice-choice keys, not all 893 retained keys. Complete prior semantic chain NOT established in bounded integration."
+      },
+      "zh-CN": {
+        "history_path": "i18n/audit-history/zh-CN/wire.settings.json",
+        "history_file_sha256": "46555246dd0b4fdc23de5b3ee65ad5c5aa21011d6b01951dcd881c1765070e2c",
+        "references": [
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "2ee6972b0ee8445c33d3eaa36e40a9550f3cdc9d44b68b2b93e1e157dfc3929e",
+            "target_sha256": "0f7b2e3d3cf9c8f0eac54793a74b1e223efe01c2b17bb0b0d1d2d2ceca0b34f5",
+            "keys_audited": 0,
+            "entry_index": 34,
+            "target_matches_before_pin": false
+          },
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+            "target_sha256": "cba7d4afe5a3b22f229f3f31e8c3a7eb8dfcdc3aceb9562f78c07d76cfb4341b",
+            "contribution_key_count": 8,
+            "full_namespace_reaudit": false,
+            "audit_receipt": "docs/qa/i18n-voice-choice-audits/zh-CN.json",
+            "audit_receipt_sha256": "83e8b1ec096a5b7af001690df06ba2829c129bb31d239d7b0caf2e73d1983de1",
+            "entry_index": 35,
+            "target_matches_before_pin": true,
+            "raw_receipt_exists": true,
+            "raw_receipt_actual_sha256": "83e8b1ec096a5b7af001690df06ba2829c129bb31d239d7b0caf2e73d1983de1",
+            "raw_receipt_fields": [
+              "locale",
+              "namespace",
+              "source_sha256",
+              "context_sha256",
+              "target_sha256",
+              "status",
+              "verdict",
+              "round",
+              "date",
+              "worktree",
+              "head",
+              "scope_base",
+              "scope_note",
+              "keys",
+              "keys_audited",
+              "supporting_description_keys_read",
+              "additional_parent_label_help_keys_read",
+              "distinct_source_target_keys_read",
+              "context_entries_read",
+              "contribution_key_coverage",
+              "independent",
+              "translator",
+              "auditor",
+              "namespace_verdicts",
+              "findings",
+              "per_key_semantic_review",
+              "controls_tested",
+              "fit",
+              "plurals",
+              "rtl",
+              "glossary_register",
+              "preflight_reconciliation",
+              "actual_runtime",
+              "not_run",
+              "evidence_paths",
+              "inputs_sha256",
+              "note"
+            ]
+          }
+        ],
+        "coverage_status": "PARTIAL provenance references only: old-source convergence row explicitly keys_audited=0; latest exact-before-target row covers eight voice-choice keys, not all 893 retained keys. Complete prior semantic chain NOT established in bounded integration."
+      },
+      "ru": {
+        "history_path": "i18n/audit-history/ru/wire.settings.json",
+        "history_file_sha256": "e920429acf82f1578b9babd844cdf9cc0d06e36ea54eb9bc03e7d04e0da07031",
+        "references": [
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "2ee6972b0ee8445c33d3eaa36e40a9550f3cdc9d44b68b2b93e1e157dfc3929e",
+            "target_sha256": "5b2b7f000b73f3387ef23ac185ef09dda4ef8ea14f48b7549867fc8cbdcded3a",
+            "keys_audited": 0,
+            "entry_index": 35,
+            "target_matches_before_pin": false
+          },
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+            "target_sha256": "68a0809d4356416703208d407734abe6433ec1b7b6796d61b7a2706691b3a624",
+            "contribution_key_count": 8,
+            "full_namespace_reaudit": false,
+            "audit_receipt": "docs/qa/i18n-voice-choice-audits/ru.json",
+            "audit_receipt_sha256": "8fe45a1a07218f8b60c82766240ccf1112dddff778448d4fc1327dd5d4bbc86b",
+            "entry_index": 36,
+            "target_matches_before_pin": true,
+            "raw_receipt_exists": true,
+            "raw_receipt_actual_sha256": "8fe45a1a07218f8b60c82766240ccf1112dddff778448d4fc1327dd5d4bbc86b",
+            "raw_receipt_fields": [
+              "locale",
+              "namespace",
+              "source_sha256",
+              "context_file_sha256",
+              "target_file_sha256",
+              "full_file_sha256",
+              "status",
+              "verdict",
+              "scope",
+              "worktree",
+              "head",
+              "base",
+              "round",
+              "working_tree_note",
+              "contribution_keys",
+              "keys_read",
+              "translator",
+              "auditor",
+              "independence",
+              "findings",
+              "namespace_verdicts",
+              "semantic_assessment",
+              "out_of_scope_observations",
+              "checks",
+              "fit_followup",
+              "evidence_files",
+              "preflight_reconciliation"
+            ]
+          }
+        ],
+        "coverage_status": "PARTIAL provenance references only: old-source convergence row explicitly keys_audited=0; latest exact-before-target row covers eight voice-choice keys, not all 893 retained keys. Complete prior semantic chain NOT established in bounded integration."
+      },
+      "ur": {
+        "history_path": "i18n/audit-history/ur/wire.settings.json",
+        "history_file_sha256": "557ae8c83dabe037745eb80733d70f9bf5ad74c58da0e5f3af64def88a0c5d32",
+        "references": [
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "2ee6972b0ee8445c33d3eaa36e40a9550f3cdc9d44b68b2b93e1e157dfc3929e",
+            "target_sha256": "79a6861e2e1edd77a9c09c404cc966282fd67a974f9d64dae8587fa2da99a89e",
+            "keys_audited": 0,
+            "entry_index": 34,
+            "target_matches_before_pin": false
+          },
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+            "target_sha256": "5b47f6cbefb5a6c485d44af0b40842c3e295ef72538bb30bb27bed55ba706931",
+            "contribution_key_count": 8,
+            "full_namespace_reaudit": false,
+            "audit_receipt": "docs/qa/i18n-voice-choice-audits/ur.json",
+            "audit_receipt_sha256": "dfe3f512abf792e24d2bf2367e2f1e4f1cf085cc8e2dc5d6aae187aa21c2453a",
+            "entry_index": 35,
+            "target_matches_before_pin": true,
+            "raw_receipt_exists": true,
+            "raw_receipt_actual_sha256": "dfe3f512abf792e24d2bf2367e2f1e4f1cf085cc8e2dc5d6aae187aa21c2453a",
+            "raw_receipt_fields": [
+              "locale",
+              "namespace",
+              "source_sha256",
+              "context_sha256",
+              "target_sha256",
+              "translator",
+              "auditor",
+              "status",
+              "verdict",
+              "reviewed_head",
+              "round",
+              "base",
+              "scope_keys",
+              "scope_key_count",
+              "descriptions_read_count",
+              "context_entries_read_count",
+              "full_namespace_audit",
+              "changed_key_count",
+              "unchanged_scope_keys",
+              "scope_hash_encoding",
+              "scope_source_sha256",
+              "scope_context_sha256",
+              "scope_target_sha256",
+              "input_hashes",
+              "namespace_verdicts",
+              "findings",
+              "linguistic_review",
+              "tested_controls",
+              "not_run",
+              "execution_notes",
+              "evidence",
+              "note"
+            ]
+          }
+        ],
+        "coverage_status": "PARTIAL provenance references only: old-source convergence row explicitly keys_audited=0; latest exact-before-target row covers eight voice-choice keys, not all 893 retained keys. Complete prior semantic chain NOT established in bounded integration."
+      },
+      "vi": {
+        "history_path": "i18n/audit-history/vi/wire.settings.json",
+        "history_file_sha256": "3290670b003f4de15a45c66edb7ac7f281de19c8966705821e795504aaff989e",
+        "references": [
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "2ee6972b0ee8445c33d3eaa36e40a9550f3cdc9d44b68b2b93e1e157dfc3929e",
+            "target_sha256": "68a778f480a84c6a12825ac478ceabcf48e5b162aa2380bf0dc9d11b149862a1",
+            "keys_audited": 0,
+            "entry_index": 34,
+            "target_matches_before_pin": false
+          },
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+            "target_sha256": "df178c2af51d345e5692e2fe68ac3b069907548424efb5bda5b5dc01bcee95f2",
+            "contribution_key_count": 8,
+            "full_namespace_reaudit": false,
+            "audit_receipt": "docs/qa/i18n-voice-choice-audits/vi.json",
+            "audit_receipt_sha256": "83ca85f86f8650726d932ab9b279392bb4b744e58ba1564b87f5d46bc9cdc144",
+            "entry_index": 35,
+            "target_matches_before_pin": true,
+            "raw_receipt_exists": true,
+            "raw_receipt_actual_sha256": "83ca85f86f8650726d932ab9b279392bb4b744e58ba1564b87f5d46bc9cdc144",
+            "raw_receipt_fields": [
+              "schema",
+              "locale",
+              "namespace",
+              "round",
+              "audit_id",
+              "commit_audited",
+              "working_tree_note",
+              "base",
+              "allocation",
+              "source_sha256",
+              "context_sha256",
+              "target_sha256",
+              "file_paths",
+              "translator",
+              "auditor",
+              "status",
+              "verdict",
+              "namespace_verdicts",
+              "keys",
+              "keys_audited",
+              "contextual_keys_read",
+              "total_unique_keys_read",
+              "findings",
+              "measured_at_utc",
+              "checks",
+              "source_preflight_note",
+              "rows",
+              "note"
+            ]
+          }
+        ],
+        "coverage_status": "PARTIAL provenance references only: old-source convergence row explicitly keys_audited=0; latest exact-before-target row covers eight voice-choice keys, not all 893 retained keys. Complete prior semantic chain NOT established in bounded integration."
+      },
+      "hi": {
+        "history_path": "i18n/audit-history/hi/wire.settings.json",
+        "history_file_sha256": "440dd4cd189de435d71b14bce8caffe6e0bcbe0d3c9c633b2a20e7ac20fb5b27",
+        "references": [
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "2ee6972b0ee8445c33d3eaa36e40a9550f3cdc9d44b68b2b93e1e157dfc3929e",
+            "target_sha256": "0bc2f6e709abb32a8644a6b54faf01cc5d4e85cde5b6656ec46ad2f2f865ce79",
+            "keys_audited": 0,
+            "entry_index": 34,
+            "target_matches_before_pin": false
+          },
+          {
+            "status": "passed",
+            "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+            "context_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+            "target_sha256": "6c4712d0a5a6edd1b2fee561f5ca66dcaf5916fe8ef356a27ee20100de31da0d",
+            "contribution_key_count": 8,
+            "full_namespace_reaudit": false,
+            "audit_receipt": "docs/qa/i18n-voice-choice-audits/hi.json",
+            "audit_receipt_sha256": "a7d5656567b7390159e208cfc4077223cbeb9b3dbd0b4ec1720d6869a7b3b678",
+            "entry_index": 35,
+            "target_matches_before_pin": true,
+            "raw_receipt_exists": true,
+            "raw_receipt_actual_sha256": "a7d5656567b7390159e208cfc4077223cbeb9b3dbd0b4ec1720d6869a7b3b678",
+            "raw_receipt_fields": [
+              "locale",
+              "namespace",
+              "source_sha256",
+              "context_sha256",
+              "target_sha256",
+              "status",
+              "verdict",
+              "round",
+              "keys",
+              "keys_audited",
+              "translator",
+              "auditor",
+              "scope",
+              "namespace_verdicts",
+              "findings",
+              "per_key_audit",
+              "controls",
+              "parity",
+              "fit",
+              "plural_check",
+              "rtl_check",
+              "read_sources",
+              "preflight_reconciliation",
+              "evidence",
+              "not_run",
+              "note"
+            ]
+          }
+        ],
+        "coverage_status": "PARTIAL provenance references only: old-source convergence row explicitly keys_audited=0; latest exact-before-target row covers eight voice-choice keys, not all 893 retained keys. Complete prior semantic chain NOT established in bounded integration."
+      }
+    },
+    "selected_icu_controls": {
+      "runtime_identity": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/__init__.py",
+      "selected_literals_checked": 16,
+      "arguments": 0,
+      "selectors": 0,
+      "negative_control": "Malformed {broken rejected with MessageSyntaxError",
+      "scope": "Selected English and seven locale literals only; not full-catalogue checks"
+    }
+  }
+}

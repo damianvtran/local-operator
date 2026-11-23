@@ -23,12 +23,25 @@ result; a refusal that over-fires blocks a message the agent meant to send:
   followed by ANY upper-case run (it is tuned to mask fragments), so the word
   ``ASIAN`` matched it (measured). Here a key id must be the full 20-character
   shape, ``(AKIA|ASIA)[0-9A-Z]{16}``.
-* an ALL-DIGIT value never counts as a credential-named assignment. A prose
-  count under a plural label (``tokens: 1234567890``, ``total tokens: …``) is
-  a usage figure an agent reports all the time; the shared table's count
-  judgement covers the identifier spelling (``max_tokens=``) but not a spaced
-  prose label (review m3). The accepted cost: a purely numeric password under
-  a ``password:`` label passes this guard.
+* an ASCII ALL-DIGIT value under the bare plural label ``tokens`` never counts
+  as a credential-named assignment. A prose count (``tokens: 1234567890``,
+  ``total tokens: …``, ``used tokens=…``) is a usage figure an agent reports
+  all the time; the shared table's count judgement covers the identifier
+  spelling (``max_tokens=``) but not a spaced prose label (review m3). The
+  release is keyed on that NAME, not on the rule (security review S-5 / QA
+  Q-O2 on #3430): an all-digit ``password:``, ``api_key=``,
+  ``client_secret:``, ``token:`` or ``api_tokens:`` value is still refused —
+  numeric PINs, passwords and keys exist, and nothing needs them released.
+  ASCII only, because ``str.isdigit`` also accepts full-width and other
+  Unicode digit runs, which no usage count is spelled in. WHAT THE RELEASE
+  ACTUALLY COVERS (security S-1): the shared table's ``name`` group cannot hold
+  a space, so it captures only the LAST word of a spaced label — the release
+  therefore covers a bare ``tokens`` AND ``tokens`` with one word in front of
+  it (``total tokens:``, ``used tokens=``). That front word is checked: when it
+  is a credential word (``access``, ``secret``, ``api``, ``auth``, ``bearer``,
+  ``session``, ``refresh``), the value is refused, so ``access tokens: <digits>``
+  is not a count. The accepted cost: a numeric credential under a bare
+  ``tokens`` label, or one behind a non-credential word, passes.
 * ONE extra rule for the AWS secret access key under the SDK and
   ``aws configure`` labels the shared table does not spell: run-together
   ``SecretAccessKey`` (``"SecretAccessKey": "…"`` is the shape ``aws sts
@@ -110,6 +123,15 @@ VAULT_HANDOFF_SENTENCE = (  # i18n: ignore model-facing refusal sentence
 )
 
 
+#: The word directly in front of a spaced ``tokens`` label (security S-1),
+#: searched only up to where ``name`` starts, and the front words that make the
+#: label a credential rather than a usage count.
+_FRONT_WORD = re.compile(r"([A-Za-z]+)[ \t]+$")
+_CREDENTIAL_FRONT_WORDS = frozenset(
+    {"access", "secret", "api", "auth", "bearer", "session", "refresh"}
+)
+
+
 def _below_floor(label: str, value: str, match: Match[str]) -> bool:
     """The bridge's confidence floor over the shared table (``reject`` hook).
 
@@ -121,12 +143,23 @@ def _below_floor(label: str, value: str, match: Match[str]) -> bool:
     finds an anchor word, and a spliced id is no anchor, so a spliced id with
     no other anchor in the text is never scanned at all — the gap is the
     prefilter's, not this floor's. A credential-named assignment whose value
-    is all digits is a count, not a credential (module docstring, m3).
+    is all ASCII digits AND is named ``tokens`` (any case), bare or behind one
+    non-credential word, is a count, not a credential (module docstring, m3
+    narrowed by S-5 and S-1). The ``name`` group
+    is the shared table's assignment-name group, common to both
+    ``credential-assignment`` spellings (``redaction_shapes._ASSIGNMENT_NAME_GROUP``).
     """
 
-    del match
     if label == "credential-assignment":
-        return value.strip().isdigit()
+        name = (match.groupdict().get("name") or "").lower()
+        digits = value.strip()
+        if not (name == "tokens" and digits.isascii() and digits.isdigit()):
+            return False
+        # Security S-1: ``name`` is only the last word of a spaced label, so
+        # ``access tokens: <digits>`` reaches here as ``tokens``. Refuse when
+        # the word in front of it names a credential (module docstring).
+        front = _FRONT_WORD.search(match.string, 0, match.start("name"))
+        return not (front and front.group(1).lower() in _CREDENTIAL_FRONT_WORDS)
     if label != "aws-access-key-id":
         return False
     return _AWS_KEY_ID.fullmatch(value.replace("'", "").replace('"', "")) is None
@@ -169,11 +202,14 @@ def refuse_secret_in(op: str, text: Any) -> dict[str, Any] | None:
     try:
         classes = credential_classes(text)
     except Exception as failure:  # any scanner fault must refuse, never fail open
-        # Type name only: an exception's text could quote the input.
+        # Type name only: an exception's text could quote the input. Qualified
+        # by module (review N-3): a bare ``__name__`` logs ``re.error`` as the
+        # word ``error``, which reads as no type at all.
         logger.warning(
-            "team bridge %s refused before send: credential scan failed (%s)",
+            "team bridge %s refused before send: credential scan failed (%s.%s)",
             op,
-            type(failure).__name__,
+            type(failure).__module__,
+            type(failure).__qualname__,
         )
         return {
             "ok": False,

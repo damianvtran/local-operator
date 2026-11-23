@@ -32,6 +32,7 @@ how the app routes messages internally.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from functools import partial
 from types import SimpleNamespace
@@ -95,6 +96,21 @@ def working_clock(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         "monotonic_from_epoch",
         partial(card_mod.monotonic_from_epoch, clock=source.monotonic),
     )
+    # `ToolCard.__init__` captures `time.monotonic` as its `clock` DEFAULT the
+    # same way, and a card passes that clock to the converter explicitly, which
+    # outranks the partial above. Without this a card the app mounts would stamp
+    # its start on the REAL clock while the band reads the fake one, and a batch
+    # clock (the oldest card's start, `OperatorApp._current_activity`) would mix
+    # the two. Only the default is replaced: a caller passing `clock=` keeps it.
+    init = card_mod.ToolCard.__init__
+    names = [
+        name
+        for name, param in inspect.signature(init).parameters.items()
+        if param.default is not inspect.Parameter.empty and param.kind is not param.KEYWORD_ONLY
+    ]
+    defaults = list(init.__defaults__ or ())
+    defaults[names.index("clock")] = source.monotonic
+    monkeypatch.setattr(init, "__defaults__", tuple(defaults))
     return clock
 
 
@@ -708,7 +724,9 @@ async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed(
 
 
 @pytest.mark.asyncio
-async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
+async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls(
+    working_clock: SimpleNamespace,
+) -> None:
     """Design round 3, D9. The phase outlives the work its label names.
 
     Round 2 keyed the number to the PHASE and suppressed it only when EVERY
@@ -730,6 +748,14 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
     ``any`` for ``all`` does NOT achieve this — the survivor here dates itself
     perfectly well; it is the anchor that is wrong), and shedding a call must
     still not restart the clock, which is what round 1 pinned.
+
+    On the FROZEN display clock (``working_clock``), so every reading is exact.
+    This test used to wind a card back against the real ``time.monotonic`` and
+    then ``await pilot.pause()`` before reading: a loaded CI shard spent >= 1 s
+    in that pause (mounting the second card), ``format_duration`` truncates, and
+    ``14s`` came back ``15s`` on correct code (main runs 41607921479 and
+    44028823576). The ages are now made by ADVANCING the clock, so the numbers
+    are a function of the product's arithmetic and nothing else.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -740,17 +766,21 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
         # An epoch-less start event would mount clockless instead (QA round 1,
         # Q1) and there would be no batch clock to be truthful about; the
         # properties asserted below are about the ANCHOR, not about provenance.
-        app.post_message(_started("old", "await_job", epoch=time.time(), job_id="7a73c97ffc54"))
+        app.post_message(
+            _started("old", "await_job", epoch=working_clock.wall, job_id="7a73c97ffc54")
+        )
         await pilot.pause()
         line = _working(app)
         assert line is not None
 
         # AGE the first call, then start a second — the shape a batch has when
-        # the viewer arrives mid-execution and the owner refills a slot. Wound
-        # back rather than slept, as the sibling clock tests do it.
+        # the viewer arrives mid-execution and the owner refills a slot. Aged by
+        # advancing the frozen clock, never by sleeping or by rewinding against
+        # real time (see the docstring).
         aged = 14.0
-        app._tool_cards["old"]._started = time.monotonic() - aged
-        app.post_message(_started("new", "read", epoch=time.time(), path="a.py"))
+        working_clock.tick += aged
+        working_clock.wall += aged
+        app.post_message(_started("new", "read", epoch=working_clock.wall, path="a.py"))
         await pilot.pause()
         app._refresh_working_activity()
         # The batch's clock is the OLDEST call's age: both cards date
@@ -766,11 +796,10 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
         survivor = app._tool_cards["new"]
         survivor_started = survivor.started_at
         assert survivor_started is not None, "the survivor's own start is known"
-        survivor_age = time.monotonic() - survivor_started
+        survivor_age = working_clock.tick - survivor_started
+        assert survivor_age == 0.0, "the survivor joined at the frozen instant"
         shown = line._clock_text()
-        # THE ASSERTION THAT FAILS ON THE OLD CODE, which showed ~14s here.
-        # A small tolerance because the survivor ages between the two reads;
-        # the defect was an overstatement of 14s, not of milliseconds.
+        # THE ASSERTION THAT FAILS ON THE OLD CODE, which showed 14s here.
         assert shown == format_duration(survivor_age), (
             f"the band says {shown!r} for a call {survivor_age:.1f}s old: the clock is "
             "still anchored to the batch the label no longer describes"
@@ -780,10 +809,14 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
         # clock. The survivor's own zero is unchanged by its sibling settling,
         # so a batch losing a call every twenty seconds still shows a number
         # past twenty — the "has this been stuck" question the clock answers.
-        app.post_message(_started("third", "bash", epoch=time.time(), command="ls"))
+        # The survivor ages first, so a joiner that moved the zero to its own
+        # start would read `0s` instead of `5s` and be told apart.
+        working_clock.tick += 5.0
+        working_clock.wall += 5.0
+        app.post_message(_started("third", "bash", epoch=working_clock.wall, command="ls"))
         await pilot.pause()
         app._refresh_working_activity()
-        assert line._clock_text() == format_duration(time.monotonic() - survivor_started), (
+        assert line._clock_text() == format_duration(5.0), (
             "a call JOINING the batch must not move the zero either: the oldest "
             "running call is still the one the clock measures"
         )

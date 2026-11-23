@@ -1,0 +1,137 @@
+{
+  "locale": "vi",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "54105ab21aa358fb156b7386c70f7ad857c399cc5b3dd5877d0c562325b456c3",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Delegation brief; translator execution not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "54305dc914d4",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "fallback_used": false,
+    "independent_from_translator": true
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": [
+    "tui.settings_view.editor.contract_unset",
+    "tui.settings_view.pane.more"
+  ],
+  "keys_read": 11,
+  "changed_keys_read": 2,
+  "composition_neighbors_read": 9,
+  "unresolved_blocker_major": 0,
+  "findings": [],
+  "evidence": [
+    {
+      "key": "tui.settings_view.editor.contract_unset",
+      "arguments_parity": true,
+      "en": "enter saves · esc cancels · clear to unset",
+      "vi": "enter lưu · esc hủy · để trống để gỡ",
+      "en_cells": 42,
+      "vi_cells": 36,
+      "maxCells": 23
+    },
+    {
+      "key": "tui.settings_view.pane.more",
+      "arguments_parity": true,
+      "en": "… 3 more",
+      "vi": "… còn 3",
+      "en_cells": 8,
+      "vi_cells": 7,
+      "maxCells": 16
+    },
+    {
+      "key": "tui.settings_view.editor.contract",
+      "arguments_parity": true,
+      "en": "enter saves · esc cancels",
+      "vi": "enter lưu · esc hủy",
+      "en_cells": 25,
+      "vi_cells": 19,
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_long",
+      "arguments_parity": true,
+      "en": "↑↓ suggestions · tab completes · enter saves · esc",
+      "vi": "↑↓ gợi ý · tab điền · enter lưu · esc",
+      "en_cells": 50,
+      "vi_cells": 37,
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_medium",
+      "arguments_parity": true,
+      "en": "↑↓ browse · tab complete · enter saves",
+      "vi": "↑↓ duyệt · tab điền · enter lưu",
+      "en_cells": 38,
+      "vi_cells": 31,
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_short",
+      "arguments_parity": true,
+      "en": "↑↓ · tab · enter saves",
+      "vi": "↑↓ · tab · enter lưu",
+      "en_cells": 22,
+      "vi_cells": 20,
+      "maxCells": 23
+    },
+    {
+      "key": "tui.settings_view.pane.agents_empty",
+      "arguments_parity": true,
+      "en": "no agents configured",
+      "vi": "chưa cấu hình tác nhân nào",
+      "en_cells": 20,
+      "vi_cells": 26,
+      "maxCells": 38
+    },
+    {
+      "key": "tui.settings_view.pane.teams_empty",
+      "arguments_parity": true,
+      "en": "no teams configured",
+      "vi": "chưa cấu hình nhóm nào",
+      "en_cells": 19,
+      "vi_cells": 22,
+      "maxCells": 38
+    },
+    {
+      "key": "tui.settings_view.pane.providers_header",
+      "arguments_parity": true,
+      "en": "providers",
+      "vi": "nhà cung cấp",
+      "en_cells": 9,
+      "vi_cells": 12,
+      "maxCells": 20
+    },
+    {
+      "key": "tui.settings_view.pane.empty_hint",
+      "arguments_parity": true,
+      "en": "/agents lists and attaches them",
+      "vi": "/agents để liệt kê và gắn",
+      "en_cells": 31,
+      "vi_cells": 25,
+      "maxCells": 38
+    },
+    {
+      "key": "tui.small.settings_view.overflow_more",
+      "arguments_parity": true,
+      "en": "  … 3 more",
+      "vi": "  … còn 3",
+      "en_cells": 10,
+      "vi_cells": 9
+    }
+  ],
+  "note": "Independent delta re-audit. Two changed keys plus nine composition neighbours (eight in tui.settings_view, one in tui.small); namespace not fully re-audited. Current worktree HEAD 464c2500c7ab94c2c2335cfb2c277eb801d7b858; hashes pin actual catalogue bytes. Accuracy, idiom, terse register, glossary, NFC and ICU argument parity pass. Vietnamese other-only plural renders counts 0,1,2,5,21,100,1000,9999999999 at <=16 cells. pane.more matches overflow_more after removing indentation. contract_unset is 36 cells versus en 42 and context maxCells 23; inspected actual consumer settings_view.py:4458-4487: full hint is selected only if its width plus two-cell indent fits room; otherwise base translated contract is retained (21 cells including indent). Thus over-cap is an intentional fit ladder, not clipping; unchanged known width exception, improved by 10 cells. At narrow widths unset clause remains omitted by design as English also is. No English prose remains in changed values; verbatim technical key names permitted. Semantic and runtime-string audit, not rendered-frame certification; no RTL applicability and no provider/model fallback."
+}

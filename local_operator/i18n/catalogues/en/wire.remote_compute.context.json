@@ -213,5 +213,53 @@
     "role": "CLI error for HTTP 403 from the remote-compute API",
     "tone": "plain, one sentence; not a bug report",
     "note": "No placeholders. 403 means the server-side preview allowlist does not carry this Radient account yet, so the remedy is to wait for the preview rather than to retry or re-login. `preview` stays in parentheses as the feature's own label."
+  },
+  "wire.remote_compute.option_spot": {
+    "role": "Product label for the opt-in spot capacity choice under the Dedicated tier",
+    "tone": "two words at most; a capacity label, capitalised like a proper noun",
+    "note": "No placeholders. An OPT-IN option under Dedicated, never a tier of its own, and never the word 'radient' in front of it. Must stay short enough for a picker row.",
+    "maxCells": 24
+  },
+  "wire.remote_compute.refusal_conflict": {
+    "role": "CLI runtime message for lop exec --remote when Radient answers a conflict whose precise cause this build cannot name",
+    "tone": "plain, two sentences; no technical identifiers",
+    "note": "No placeholders. MUST NOT mention idempotency keys: this is the sentence used when the server did NOT say the conflict was an idempotency one, and saying so was the bug it replaces."
+  },
+  "wire.remote_compute.repo_no_remote": {
+    "role": "CLI runtime message when a directory has no git repository or no origin remote",
+    "tone": "plain, one sentence; states the fact and why it blocks the run",
+    "note": "No placeholders. 'origin' is a remote name and stays verbatim. Also used when git itself is unavailable."
+  },
+  "wire.remote_compute.repo_not_https_remote": {
+    "role": "CLI runtime message when the origin remote cannot be cloned by the container",
+    "tone": "plain, two sentences; the remedy last",
+    "note": "No placeholders. The literal scheme 'https://' stays verbatim. The remote URL itself is never shown here."
+  },
+  "wire.remote_compute.repo_unpushed_commit": {
+    "role": "CLI runtime message when HEAD is not on any origin branch",
+    "tone": "plain, two sentences; the remedy last",
+    "note": "Placeholder {detail} is a short commit id and a branch name; preserve it exactly and do not translate it. 'origin' stays verbatim."
+  },
+  "wire.remote_compute.run_busy": {
+    "role": "CLI runtime message for a refusal that says the run or workload is occupied",
+    "tone": "plain, two sentences; the remedy last",
+    "note": "No placeholders. Covers both the run-busy and the workload-busy refusal codes, so it must read correctly for either."
+  },
+  "wire.remote_compute.run_limit": {
+    "role": "CLI runtime message for a refusal that says the account is at a concurrent limit",
+    "tone": "plain, two sentences; the remedy last",
+    "note": "No placeholders. MUST NOT read as a credit, billing or idempotency problem, and must read correctly for both the run limit and the workload limit."
+  },
+  "wire.remote_compute.tier_cloud_run": {
+    "role": "Product label for the on-demand remote-compute tier",
+    "tone": "two or three words; a tier label, capitalised like a proper noun",
+    "note": "No placeholders. Names the on-demand, pay-as-you-go tier. Never 'spot' and never a Radient product name. Must stay short enough for a picker row.",
+    "maxCells": 24
+  },
+  "wire.remote_compute.tier_dedicated": {
+    "role": "Product label for the dedicated remote-compute tier",
+    "tone": "one word where the locale has one; a tier label, capitalised like a proper noun",
+    "note": "No placeholders. The spot choice sits UNDER this label as an option, so the label itself must not mention spot. Must stay short enough for a picker row.",
+    "maxCells": 24
   }
 }

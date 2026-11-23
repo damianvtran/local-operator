@@ -53,7 +53,9 @@ from local_operator.tui.widgets.ask_queue import (
     settled_chip,
 )
 from local_operator.tui.widgets.transcript import NoticeBlock
+from tests.unit.tui.conftest import await_booted
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.waiting import settle
 
 pytestmark = pytest.mark.asyncio
 
@@ -551,7 +553,7 @@ async def test_the_segments_are_one_painted_line_and_never_split_a_hint():
 async def test_the_filter_keys_and_the_segments_scope_the_visible_rows(enabled):
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -599,7 +601,7 @@ async def test_a_truncated_frame_MOUNTS_with_the_backend_tally(enabled):
     """
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows([_row("a1"), _row("a2")]),
             open_count=7,
@@ -616,7 +618,7 @@ async def test_a_truncated_frame_MOUNTS_with_the_backend_tally(enabled):
 async def test_a_filtered_empty_half_still_names_the_half_holding_the_rows(enabled):
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         # TWO answerable rows, so the expansion lands on the LIST rather than a
         # single ask's card — the filter only exists on the list.
         app._sync_ask_surface(ask_rows([_row("a1"), _row("a2")]))
@@ -639,7 +641,7 @@ async def test_an_answered_but_undelivered_row_is_pending_and_wears_the_glyph(en
     """§10's delivering half: recorded, not yet in the transcript, still owed."""
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a4", status="answered", delivered=False)]))
         await _settle(pilot)
         # Nothing is ANSWERABLE, so the expansion lands on the list rather than
@@ -656,7 +658,7 @@ async def test_a_settled_row_is_read_only_and_its_gestures_are_inert(enabled):
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a3", status="declined")]))
         await _settle(pilot)
         app._expand_asks()
@@ -676,7 +678,7 @@ async def test_a_settled_row_is_read_only_and_its_gestures_are_inert(enabled):
 async def test_a_header_segment_is_a_press_target(enabled):
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1"), _row("a2"), _row("a3", status="declined")]))
         await _settle(pilot)
         app._expand_asks()
@@ -704,7 +706,7 @@ async def test_the_fleet_tally_sums_the_index_and_the_marks_cover_every_session(
     _seed(isolated_index, "s-settled", [_row("c1", status="declined")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         counts, total = app._read_fleet_asks()
         # The timed-out b2 owes no answer, so it marks nothing (#2481 design D3).
         assert counts == {"s-other": 1}
@@ -730,7 +732,7 @@ async def test_an_index_with_nothing_outstanding_marks_nobody_and_totals_zero(
     _seed(isolated_index, "s-settled", [_row("c1", status="answered", delivered=True)])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         counts, total = app._read_fleet_asks()
         assert counts == {} and total == 0
         app._ask_marks = dict(counts)
@@ -743,7 +745,7 @@ async def test_an_index_with_nothing_outstanding_marks_nobody_and_totals_zero(
 async def test_the_sidebar_footer_never_states_a_zero_fleet_total(enabled):
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         sidebar = app._session_sidebar
         assert sidebar._asks_note() == ""
         assert sidebar._asks_hit(4, sidebar.size.height - 1) is False
@@ -765,7 +767,7 @@ async def test_the_kill_switch_hides_every_fleet_surface(monkeypatch, enabled, i
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._ask_marks = {"s-other": 1}
         app._ask_fleet_rows = ask_rows([_row("b1", session_id="s-other")])
         app._ask_scope = SCOPE_FLEET
@@ -841,7 +843,7 @@ async def test_a_bridge_card_answer_decides_through_the_verified_door(
     _seed(isolated_index, "s-other", [_bridge_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         row = ask_rows([_bridge_row("b1", session_id="s-other")])[0]
         await app._fleet_ask_worker(row, "respond", {"bridge-bmsg_1": ["Approve"]})
         assert record["engage"] == ("s-other", "AskErrand", "b1")
@@ -871,7 +873,7 @@ async def test_a_same_session_bridge_card_decides_through_the_owner_path(
     session.bridge_ask_ids = {"b1"}
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_bridge_row("b1", status=status)]))
         await _settle(pilot)
         app._expand_asks()
@@ -890,7 +892,7 @@ async def test_an_ordinary_ask_still_answers_through_the_owner_contract(enabled,
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1")]))
         await _settle(pilot)
         app._expand_asks()
@@ -912,7 +914,7 @@ async def test_a_refused_bridge_decision_reaches_the_surface_typed(enabled, isol
     }
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_bridge_row("b1")]))
         await _settle(pilot)
         app._expand_asks()
@@ -954,7 +956,7 @@ async def test_a_fleet_row_of_another_session_answers_through_the_engage_chain(
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         row = ask_rows([_row("b1", session_id="s-other")])[0]
         await app._fleet_ask_worker(row, "respond", {"q1": ["Yes"]})
         assert record["engage"] == ("s-other", "AskErrand", "b1")
@@ -972,7 +974,7 @@ async def test_a_fleet_decline_rides_the_engage_chain(enabled, isolated_index, m
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         rows = ask_rows([_row("b1", session_id="s-other")])
         await app._fleet_ask_worker(rows[0], "decline", None)
         assert record["decline"] == ("b1", "terminal")
@@ -1002,7 +1004,7 @@ async def test_a_fleet_dismiss_takes_the_no_boot_path(enabled, isolated_index, m
     _seed(isolated_index, "s-other", [_row("b2", status="timed_out")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         row = ask_rows([_row("b2", status="timed_out", session_id="s-other")])[0]
         await app._fleet_ask_worker(row, "dismiss", None)
     assert calls == [("s-other", "b2", "terminal")]
@@ -1033,7 +1035,7 @@ async def test_a_fleet_dismiss_forwards_the_operator_reason(enabled, isolated_in
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         row = ask_rows([_row("b1", session_id="s-other")])[0]
         await app._fleet_ask_worker(row, "dismiss", None, "answered_in_chat")
     assert record["engage"] == ("s-other", "AskErrand", "b1")
@@ -1061,7 +1063,7 @@ async def test_a_cold_fleet_dismiss_forwards_the_reason_and_boots_nothing(
     _seed(isolated_index, "s-other", [_row("b2")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         row = ask_rows([_row("b2", session_id="s-other")])[0]
         await app._fleet_ask_worker(row, "dismiss", None, "moot")
     assert calls == [("s-other", "b2", "terminal", "moot")]
@@ -1088,7 +1090,7 @@ async def test_a_refused_fleet_dismiss_says_so_in_the_asks_own_words(
     app = _app()
     seen: list[str] = []
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         monkeypatch.setattr(app, "_ask_gesture_refusal", lambda text: seen.append(text))
         row = ask_rows([_row("b2", status="timed_out", session_id="s-other")])[0]
         await app._fleet_ask_worker(row, "dismiss", None)
@@ -1124,7 +1126,7 @@ async def test_an_unexpected_fleet_dismiss_failure_is_worded_as_a_dismissal(
     app = _app()
     seen: list[str] = []
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         monkeypatch.setattr(app, "_ask_gesture_refusal", lambda text: seen.append(text))
         row = ask_rows([_row("b2", status="timed_out", session_id="s-other")])[0]
         await app._fleet_ask_worker(row, "dismiss", None)
@@ -1141,7 +1143,7 @@ async def test_a_refused_fleet_answer_says_so_in_the_asks_own_words(
     seen: list[str] = []
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         monkeypatch.setattr(app, "_ask_gesture_refusal", lambda text: seen.append(text))
         row = ask_rows([_row("b1", session_id="s-other")])[0]
         await app._fleet_ask_worker(row, "respond", {"q1": ["Yes"]})
@@ -1153,7 +1155,7 @@ async def test_a_fleet_row_of_this_session_keeps_the_owner_contract(enabled, iso
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._ask_scope = SCOPE_FLEET
         own = ask_rows([_row("a1", session_id=str(session.session_id))])[0]
         other = ask_rows([_row("b1", session_id="s-other")])[0]
@@ -1177,7 +1179,7 @@ async def test_the_settle_handler_routes_by_the_rows_own_session(enabled, isolat
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         routed: list[tuple[str, object]] = []
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(
@@ -1203,7 +1205,7 @@ async def test_an_in_flight_row_refuses_a_second_gesture(enabled, isolated_index
     """A7's double-fire guard, at the surface: the mark and the refusal are one state."""
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._ask_scope = SCOPE_FLEET
         app._ask_fleet_rows = ask_rows([_row("b1", session_id="s-other")])
         app._mount_ask_list(scope=SCOPE_FLEET)
@@ -1232,9 +1234,9 @@ async def test_the_fleet_list_opens_from_the_sidebar_note(enabled, isolated_inde
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        await _fleet_door_settled(app, pilot)
         assert app._ask_scope == SCOPE_FLEET
         listing = app.query_one(AskQueueList)
         assert listing._scope == SCOPE_FLEET
@@ -1265,7 +1267,7 @@ async def test_a_snapshot_never_tears_down_a_fleet_list_or_card(enabled, isolate
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         # Pilot ticks do not join admission. Priming with None would make the
         # eventual legitimate session swap compete with the snapshot under test.
         async with asyncio.timeout(30):  # Deadlock guard, not a startup-speed assertion.
@@ -1320,13 +1322,13 @@ async def test_the_fleet_door_never_mounts_a_second_list(enabled, isolated_index
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        await _fleet_door_settled(app, pilot)
         first = app.query_one(AskQueueList)
         # A SECOND press: the read is repeated, the widget is not.
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        await _fleet_door_settled(app, pilot)
         assert list(app.query(AskQueueList)) == [first]
         assert app._ask_scope == SCOPE_FLEET
 
@@ -1339,7 +1341,7 @@ async def test_the_fleet_door_never_mounts_a_second_list(enabled, isolated_index
         session_listing = app.query_one(AskQueueList)
         assert session_listing._scope == SCOPE_SESSION
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        await _fleet_door_settled(app, pilot)
         assert list(app.query(AskQueueList)) == [session_listing]
         assert session_listing._scope == SCOPE_FLEET
         assert app._ask_scope == SCOPE_FLEET
@@ -1368,7 +1370,7 @@ async def test_a_second_fleet_gesture_is_dropped_and_the_first_engage_survives(
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._ask_fleet_rows = ask_rows([_row("b1", session_id="s-other")])
         app._ask_scope = SCOPE_FLEET
         app._mount_ask_list(scope=SCOPE_FLEET)
@@ -1394,6 +1396,34 @@ async def test_a_second_fleet_gesture_is_dropped_and_the_first_engage_survives(
         assert record["respond"] == ("b1", {"q1": ["Yes"]}, "terminal")
         assert record["closed"] is True
         assert app._ask_in_flight == set()
+
+
+async def _fleet_door_settled(app, pilot) -> None:
+    """Return once the fleet door's read has landed a list in the prompt host.
+
+    IDEMPOTENCE ASKS A DIFFERENT QUESTION THAN ``_fleet_list_ready`` DOES: that
+    one asserts a named row exists (a snapshot fixture's precondition), while the
+    door tests need "the read this press started has finished", whatever it
+    landed. ``settle`` is the shape for that — it joins the ONE finite
+    ``ask-fleet`` worker, and returns only when the group is empty AND the list
+    is up, so a press that re-points an already-mounted list (the second press)
+    cannot pass on the first press's widget.
+
+    WHY NOT ``_settle(pilot, 6)``. ``_load_fleet_asks``' first hop is
+    ``asyncio.to_thread(store.index_asks, ...)`` and its second is the catalogue
+    titles; a turn count cannot bound either. Measured with a synthetic 1 s
+    ``index_asks``, the worker was still RUNNING after six pauses with no list
+    mounted — the shape of main run 44983433612, ``NoMatches: No nodes match
+    'AskQueueList'``. ``LOP_TEST_SLOW_BOOT_WARM_S`` does not reach this worker
+    (it slows the SESSION warm-up), so this wait is what the door needs and the
+    boot wait is what the adoption needs; a door test has both.
+    """
+    await settle(
+        pilot,
+        lambda: app._ask_scope == SCOPE_FLEET and bool(app.query(AskQueueList)),
+        what="fleet ask list mounted",
+        workers=("ask-fleet",),
+    )
 
 
 async def _fleet_list_ready(app, ask_id, waiting: asyncio.Event | None = None):
@@ -1475,7 +1505,7 @@ async def test_answering_from_the_card_hands_the_user_the_list_in_flight(
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app.action_open_fleet_asks()
         ready = asyncio.create_task(_fleet_card_ready(app, pilot, "b1", waiting))
         witness = asyncio.create_task(waiting.wait())
@@ -1524,7 +1554,7 @@ async def test_the_kill_switch_clears_marks_that_were_already_painted(
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         sidebar = app._session_sidebar
         # PAINT first, through the app's own painter — the frame a user could
         # have been looking at when the flag went off.
@@ -1546,9 +1576,9 @@ async def test_a_session_at_the_projection_cap_withholds_the_split(enabled, isol
     _seed(isolated_index, "s-big", [_row(f"c{i}") for i in range(policy.PROJECTION_CAP)])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        await _fleet_door_settled(app, pilot)
         listing = app.query_one(AskQueueList)
         assert app._ask_fleet_truncated is True
         assert app._ask_fleet_open_count == policy.PROJECTION_CAP
@@ -1581,7 +1611,7 @@ async def test_a_fleet_row_with_no_session_id_fails_loudly_not_sideways(
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._ask_scope = SCOPE_FLEET
         orphan = ask_rows([_row("b1")])[0]
         assert orphan.session_id == ""
@@ -1612,9 +1642,9 @@ async def test_a_fleet_row_names_the_conversation_the_sidebar_names(
     )
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        await _fleet_door_settled(app, pilot)
         listing = app.query_one(AskQueueList)
         painted = listing.render().plain
         # Clipped to the handle budget by design: a title is a sentence and
@@ -1650,13 +1680,13 @@ async def test_a_frontend_snapshot_keeps_the_capped_fleets_backend_tally(enabled
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         # The adopt-time snapshot's effect: a real Session implements
         # `subscribe_frontend` (`local_operator/session/session.py`), so by the
         # time a user can press anything this is already the live session.
         app._ask_session = session
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        await _fleet_door_settled(app, pilot)
         live = app.query_one(AskQueueList)  # raises if the surface is not mounted
         assert f"{policy.PROJECTION_CAP} outstanding" in live.header_text(200)
 
@@ -1697,11 +1727,11 @@ async def test_a_fleet_list_arms_the_countdown_clock_with_no_current_asks(enable
     _seed(isolated_index, "s-other", [_row("o1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         assert app._ask_rows == []
         assert app._ask_tick is None
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        await _fleet_door_settled(app, pilot)
         assert app._ask_rows == [], "the fleet door must not need current-session rows"
         assert app._ask_fleet_rows, "the door read the index"
         assert app._ask_tick is not None, "a fleet list with deadlines on screen has no clock"
@@ -1727,7 +1757,7 @@ async def test_the_fleet_submit_path_drops_the_cards_draft(enabled, isolated_ind
     _seed(isolated_index, "s-other", [_row("b1"), _row("b2")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._ask_scope = SCOPE_FLEET
         rows = ask_rows([_row("b1", session_id="s-other"), _row("b2", session_id="s-other")])
         app._ask_fleet_rows = rows
@@ -1770,11 +1800,11 @@ async def test_the_fleet_rows_carry_their_own_handles_at_the_doors_own_width(
     _seed(isolated_index, "s-tools", [_row("t1")])
     app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._set_sidebar_open(True)
         await _settle(pilot)
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        await _fleet_door_settled(app, pilot)
         listing = app.query_one(AskQueueList)
         width = int(listing.content_size.width)
         painted = listing.render().plain.splitlines()
@@ -1801,7 +1831,7 @@ async def test_leaving_the_ask_surface_stops_the_clock_when_no_rows_remain(
     _seed(isolated_index, "s-other", [_row("o1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._ask_session = app._session
         indexed, release, waiting = (asyncio.Event() for _ in range(3))
         native_thread = asyncio.to_thread
@@ -1866,7 +1896,7 @@ async def test_the_fleet_tally_applies_the_lapsed_window_like_the_list(enabled, 
 
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         await app._load_fleet_asks()
         await _settle(pilot)
         assert listed(app) == {"s-lapsed", "s-stale", "s-open"}, "the 7 d window lists all three"

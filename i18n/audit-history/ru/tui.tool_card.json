@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "tui.tool_card",
+  "history_sha256": "7b7c0d5dff90679e8938aa0dec838be6e8ef43a2670427c5e7c4a5690f9aff0f",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "tui.tool_card",
+      "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+      "context_sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087",
+      "target_sha256": "3f43a9bac00009465b6934d692287b12242d27132afee91d80bc02a6a57e43a9",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "a85b340e5906",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "RU-1"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent audit (round 1) of the new tui.tool_card namespace (16 keys), source commit 4e164d26c8ec. Auditor a85b340e5906 (openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 0 nit (RU-1). Superseded: target_sha256 is the round-1 file; the translator then revised it and a round-2 audit (row tc2) covers the current bytes. Record: i18n/audits/evidence/ru/tui.tool_card/tc1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/ru/tui.tool_card/tc1/record.json",
+      "round": "tc1"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.tool_card",
+      "source_sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37",
+      "context_sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087",
+      "target_sha256": "b55e5d78bad7e0056a20f29046b3413a4b3abbf26e6666bf2c4dccad96245de6",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "e4c9dd1c9f95",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent audit (round 2 (delta re-audit after the round-1 fixes)) of the new tui.tool_card namespace (16 keys), source commit 4e164d26c8ec. Auditor e4c9dd1c9f95 (openai/gpt-6.1-sol) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. Record: i18n/audits/evidence/ru/tui.tool_card/tc2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/ru/tui.tool_card/tc2/record.json",
+      "round": "tc2"
+    }
+  ]
+}

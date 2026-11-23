@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "audit_id": "a3",
+  "audit_kind": "independent_translation_audit_new_keys",
+  "locale": "ru",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-17",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #4193: 4 new keys judged side by side with English and en/mobile.doctor.context.json; other keys unchanged from the base and not re-audited",
+  "key_count": 35,
+  "keys_audited": 4,
+  "changed_keys": [
+    "mobile.doctor.watches.ok",
+    "mobile.doctor.watches.near",
+    "mobile.doctor.watches.at_limit",
+    "mobile.doctor.watches.unknown"
+  ],
+  "source_sha256": "bf2cc180fd8bc8a7f5445eb4c4a5708fbb7915e6271fefe69f04c425babbcfef",
+  "target_sha256": "15006d4ae5111507d7c634131ab5303142e469ad378557e9c8c0a228cd3698a2",
+  "source_audit_revision": "ce4f2e4e576baaf3ed899b55c6b0ecb61442da94",
+  "branch": "fix/library-inotify-watch",
+  "worktree": "~/local-operator/.worktrees/library-inotify",
+  "translator": {
+    "agent": "coder subagent of PR #4193 (commit ce4f2e4e5; wrote the English source and all 7 translations)",
+    "model": "not reported in the commit; served model of the coder child unverified",
+    "date": "2026-11-17"
+  },
+  "auditor": {
+    "agent": "copy-reviewer acting as independent i18n auditor, lopdev team member (`task` subagent), session c47ffb8607fc; did not write the translations; edited no catalogue value",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-17",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "bf2cc180fd8bc8a7f5445eb4c4a5708fbb7915e6271fefe69f04c425babbcfef",
+    "context": "446fe9d489c7bc3597886ff2b218ee635071a15c0cde2383f11a8c739472f9cf",
+    "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "style_guide": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings": [],
+  "checks": [
+    "placeholder multiset identical to English for all 4 keys",
+    "fs.inotify.max_user_watches / fs.inotify.max_user_instances and “No space left on device” byte-identical, in the locale's quotation marks",
+    "NFC, no bidi control characters",
+    "formality matches the locale guide; process/administrator/support terms match sibling mobile.doctor rows"
+  ],
+  "limits": "LLM audit, same model family as the translator (disclosed); no native-speaker pass and no rendered terminal/desktop frame claimed."
+}

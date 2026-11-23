@@ -12,6 +12,7 @@ developer's own settings.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -135,6 +136,87 @@ async def test_bool_toggle_writes_and_survives_reopen(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key,initial,committed",
+    (
+        ("tool_approval_mode", "ask", "auto"),
+        ("display.nerd_icons", None, True),
+        ("display.nerd_icons", True, False),
+        ("display.nerd_icons", False, None),
+        ("speech.voice.tone", "removed-choice", "warm"),
+    ),
+)
+async def test_localized_enum_browsing_preserves_wire_values(
+    tmp_path: Path,
+    key: str,
+    initial: Any,
+    committed: Any,
+) -> None:
+    """Painting/expansion/cancel are read-only; accept still writes typed wire data."""
+    from local_operator.i18n import text
+    from local_operator.server.routes.settings import _view
+    from local_operator.tui.widgets import settings_view as sv_mod
+
+    previous = text.active_locale()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    try:
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause()
+            app._open_settings_view()
+            view = app.query_one(SettingsView)
+            setting = settings_io.BY_KEY[key]
+            if initial == "removed-choice":
+                # External/stale configuration bypasses today's enum validator.
+                view._manager.set_config_value("speech", {"voice": {"tone": initial}})
+            else:
+                settings_io.write_setting(view._manager, setting, initial)
+            path = tmp_path / "config.yml"
+            original = path.read_bytes() if path.exists() else None
+            wire = _view(view._manager, setting).model_dump(mode="json")
+
+            def projection(body):
+                return (body["value"], body["default"], [c["value"] for c in body["choices"]])
+
+            baseline = json.dumps(projection(wire))
+            text.set_active_locale("fr")
+            index = _select(view, key)
+            view._row_text(view._rows[index], index, 116)
+            painted = _view(view._manager, setting).model_dump(mode="json")
+            assert json.dumps(projection(painted)) == baseline
+            view.action_activate()
+            await pilot.pause()
+            if initial == "removed-choice":
+                assert all(c.value != initial for c in sv_mod._choices_for(setting))
+                for offset, row in enumerate(view._rows):
+                    if row.kind == "choice":
+                        assert row.setting is not None
+                        if row.setting.key == key:
+                            assert "●" not in view._row_text(row, offset, 116).plain
+            await pilot.press("escape")
+            assert (path.read_bytes() if path.exists() else None) == original
+            _select(view, key)
+            view.action_activate()
+            for index, row in enumerate(view._rows):
+                if (
+                    row.kind == "choice"
+                    and type(row.choice.value) is type(committed)
+                    and row.choice.value == committed
+                ):
+                    view._selected = index
+                    break
+            else:
+                raise AssertionError("missing target choice")
+            view.action_activate()
+            stored = settings_io.read_setting(view._manager, setting)
+            assert type(stored) is type(committed) and stored == committed
+            body = _view(view._manager, setting).model_dump(mode="json")
+            assert type(body["value"]) is type(committed) and body["value"] == committed
+            assert sv_mod._edit_seed(stored) == ("" if stored is None else str(stored))
+    finally:
+        text.set_active_locale(previous)
+
+
+@pytest.mark.asyncio
 async def test_enum_expansion_selects_a_choice(tmp_path: Path) -> None:
     """The ENUM kind: Enter expands, Enter on a choice commits and collapses."""
     app = OperatorApp(lambda: _factory(FakeSession()))
@@ -213,7 +295,7 @@ async def test_a_collapsed_enum_row_shows_the_label_the_picker_shows(
         assert " both" not in collapsed, (locale, collapsed)
         # The value CELL is exactly the picker's label, not merely present in
         # the row: one string painted by two surfaces.
-        assert settings_view._collapsed_value(setting, "both") == painted, locale
+        assert settings_view._render_value("both", setting=setting) == painted, locale
 
         # The picker paints the same label: one source, one answer.
         view.action_activate()
@@ -237,74 +319,20 @@ async def test_a_collapsed_enum_row_shows_the_label_the_picker_shows(
         assert stored == "both", stored
 
 
-@pytest.mark.parametrize("locale", ("ur", "zh-CN"))
-def test_no_other_enum_choice_changes_its_collapsed_text(
-    locale: str, restore_active_locale: Any
-) -> None:
-    """The other 169 ENUM choices keep reading their stored word, in every locale.
+def test_a_hand_edited_enum_value_still_shows_what_is_stored() -> None:
+    """A value that is not one of the choices reads as itself, not the nearest legal answer.
 
-    V2-1's restriction: the label swap-in is for the ONE choice whose label
-    names a combination (``delivery.busy_default=both``). Every other choice's
-    collapsed cell keeps reading the stored word itself, notably the rows whose
-    English LABEL says more than that word: ``12h`` → ``12-hour``,
-    ``cross-family`` → ``allow cross-vendor``, ``switch`` → ``this terminal``,
-    ``7d`` → ``7 days``. The four ``session.cleanup.temporary.idle_minutes``
-    presets origin/main brought read the same way, label over word: ``15`` →
-    ``15 minutes``, ``30`` → ``30 minutes``, ``120`` → ``2 hours``, ``1440`` →
-    ``24 hours``. Restyling any of them is a design decision this fix must not
-    make on its own.
-
-    Expected values are derived HERE from the ENGLISH source label — the
-    independent statement of "this label names a combination" — rather than
-    from the implementation's own table, so a stray or missing entry fails
-    instead of agreeing with itself. ``ur`` and ``zh-CN`` are the two locales
-    the old comma split got wrong.
+    origin/main's ``_render_value(value, setting=...)`` shows the localized
+    choice label for every ENUM member; a hand-edited config value that is no
+    member falls through to the stored word. (The narrower ``_collapsed_value``
+    this branch used for the one ``both`` row is retired: the general rule
+    covers it, and ``test_a_collapsed_enum_row_shows_the_label_the_picker_shows``
+    pins that row in every locale.)
     """
-    from local_operator.i18n.messages import render
-    from local_operator.i18n.text import set_active_locale
     from local_operator.tui.widgets import settings_view
 
-    def english_label(choice: settings_io.Choice) -> str:
-        """The authored English label behind a localized one.
-
-        Resolved through the same namespace probe every render uses: choice
-        labels live in more than one catalogue (``retry``'s account-policy
-        members carry their own namespace), so the code alone does not name
-        the file.
-        """
-        message = getattr(choice.label, "message", None)
-        if message is None:
-            return str(choice.label)
-        return render(message.code, dict(message.params), locale="en")
-
-    set_active_locale(locale)
-    checked = 0
-    for setting in settings_io.SETTINGS:
-        if setting.kind is not Kind.ENUM:
-            continue
-        for choice in settings_view._choices_for(setting):
-            checked += 1
-            parts = [part for part in english_label(choice).split(",") if part.strip()]
-            expected = (
-                str(choice.label) if len(parts) > 1 else settings_view._render_value(choice.value)
-            )
-            assert settings_view._collapsed_value(setting, choice.value) == expected, (
-                locale,
-                setting.key,
-                choice.value,
-            )
-    # The registry's ENUM value space at the time of the fix (measured in this
-    # tree, not remembered): a setting or choice added later decides its own
-    # case and must re-state this count deliberately. The pin is deliberate:
-    # origin/main's four ``session.cleanup.temporary.idle_minutes`` choices
-    # raised it from 166 to 170, so a new ENUM choice must be looked at on
-    # purpose.
-    assert checked == 170, checked
-
-    # A hand-edited value that is not one of the choices still shows what is
-    # there rather than the nearest legal answer (the docstring's contract).
     busy = settings_io.BY_KEY["delivery.busy_default"]
-    assert settings_view._collapsed_value(busy, "sometimes") == "sometimes"
+    assert settings_view._render_value("sometimes", setting=busy) == "sometimes"
 
 
 @pytest.mark.asyncio
@@ -650,16 +678,74 @@ async def test_arriving_at_the_top_shows_the_section_header_that_owns_the_row() 
         # and never too many.
         for _ in range(len(view._selectable())):
             view.action_move(-1)
-        await pilot.pause()
+        # Settled on the deferred scroll itself, not on one pause: CI job
+        # 136088027109 read the offset before the refresh that applies it.
+        await _settle_deferred_scrolls(pilot, view)
         assert view._selected == view._selectable()[0]
         assert view._body.scroll_offset.y == 0, "the owning section header is scrolled off"
 
         # `home` agrees with holding `up`.
         view.action_jump(1)
-        await pilot.pause()
+        await _settle_deferred_scrolls(pilot, view)
         view.action_jump(0)
-        await pilot.pause()
+        await _settle_deferred_scrolls(pilot, view)
         assert view._body.scroll_offset.y == 0
+
+
+async def _settle_deferred_scrolls(pilot: Any, view: SettingsView) -> None:
+    """Pump until every after-refresh callback queued so far has run.
+
+    The condition, not a count: one ``pilot.pause()`` drains widget queues and
+    requests a refresh, but the screen invokes its after-refresh callbacks from
+    a LATER turn, and under load that turn is not promised inside a fixed
+    number of pauses. Reading ``screen._callbacks`` (Textual's own queue of
+    ``call_after_refresh`` work) makes the wait independent of the code under
+    test: the pre-fix view's stale deferred scroll still lands, and still
+    fails the assertion that follows. The bound is a wedge backstop only.
+    """
+    await pilot.pause()
+    for _ in range(200):
+        if not view.screen._callbacks:
+            return
+        await pilot.pause()
+    raise AssertionError("after-refresh callbacks never drained")
+
+
+@pytest.mark.asyncio
+async def test_home_right_after_end_lands_at_the_top_before_any_refresh() -> None:
+    """`end` then `home` in one batch must leave the viewport on the top row.
+
+    Regression for main-red run 44674031880 (job 136088027109, ``305 == 0``).
+    Cursor moves defer their scroll to the next refresh, and
+    `_scroll_to_selection` used to decide against the APPLIED offset. When the
+    second key arrived before that refresh (one `pilot.pause()` does not
+    promise one on a loaded runner; a fast typist or a remote terminal batches
+    keys the same way), `home` read the stale 0, judged the top row already in
+    view and scheduled nothing, and then the queued `end` scroll landed: cursor
+    on the first row, viewport parked on the last page. Driven here with NO
+    pause between the keys, so it is deterministic rather than load-dependent.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await _settle_deferred_scrolls(pilot, view)
+        assert view._body.max_scroll_y > 0, "premise: the page must be taller than the viewport"
+        assert view._body.scroll_offset.y == 0
+
+        view.action_jump(1)
+        view.action_jump(0)
+        await _settle_deferred_scrolls(pilot, view)
+        assert view._selected == view._selectable()[0]
+        assert view._body.scroll_offset.y == 0, "a stale deferred scroll outlived the newer move"
+
+        # And the mirror: `home` then `end` must end on the last page.
+        view.action_jump(0)
+        view.action_jump(1)
+        await _settle_deferred_scrolls(pilot, view)
+        assert view._selected == view._selectable()[-1]
+        assert view._body.scroll_offset.y == view._body.max_scroll_y
 
 
 @pytest.mark.asyncio
@@ -962,7 +1048,8 @@ async def test_settings_keeps_a_body_row_on_a_short_terminal() -> None:
     body widget reported height 1 while painting zero rows onto the
     frame, which is how a size assertion would have shipped the defect.
     """
-    from local_operator.tui.widgets.settings_view import _TOO_SHORT
+    # Spelled out (not read from the catalogue) so a wording change fails here.
+    _TOO_SHORT = "terminal too short for settings — make it taller"
 
     counts: dict[int, int] = {}
     for height in (14, 15, 16, 17, 18, 20, 24):
@@ -3248,14 +3335,19 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
 
             await pilot.press("home")
             await pilot.pause()
-            # A cushion, not a count, but DERIVED since the Library merge added
-            # sections: a fixed 40 no longer reached the end at 42 headers and
-            # reported the Memory section as the bottom. Paging clamps, so the
-            # extra presses after the last section are no-ops.
-            presses = sum(1 for row in view._rows if row.kind == "header") + 2
-            for _ in range(presses):
+            # Pagedown moves ONE SECTION PER PRESS, so a fixed cushion is a count
+            # in disguise: the list grows with every section (42 headers after the
+            # voice fold; 25 on main before it) and the old 40 stopped two short.
+            # Press until the cursor stops moving instead — a paging bug that
+            # stalls mid-list still fails the assertion below, because the loop
+            # ends wherever the gesture ends.
+            previous = None
+            for _ in range(200):
                 await pilot.press("pagedown")
-            await pilot.pause()
+                await pilot.pause()
+                if view._selected == previous:
+                    break
+                previous = view._selected
 
             last = view._selectable()[-1]
             assert view._selected == last, (
@@ -3266,10 +3358,15 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
                 view._body.scroll_offset.y == view._body.max_scroll_y
             ), "paging reached the last row without reaching the bottom of the view"
 
-            # And back: `pageup` reaches the first row the same way.
-            for _ in range(presses):
+            # And back: `pageup` reaches the first row the same way, so it needs
+            # the same convergence rather than a second cushion.
+            previous = None
+            for _ in range(200):
                 await pilot.press("pageup")
-            await pilot.pause()
+                await pilot.pause()
+                if view._selected == previous:
+                    break
+                previous = view._selected
             assert view._selected == view._selectable()[0]
 
 
@@ -5357,6 +5454,60 @@ async def test_subagent_dock_row_renders_in_appearance_with_its_three_choices(
         view.action_activate()
         await pilot.pause()
         assert _values(tmp_path)["display.dock"] == "hidden"
+        assert "display" not in _values(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_the_transcript_display_row_offers_both_layouts_and_writes_flat(
+    tmp_path: Path,
+) -> None:
+    """The row the `/transcript` command is the discoverable half of.
+
+    Two things can go wrong silently here: the row sits under the wrong section
+    (a layout is Appearance, not Session), or its commit nests the key —
+    `values.display.transcript_display` instead of the literal top-level key
+    `display.transcript_display` that `tui/settings.py` reads.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        index = _select(view, "display.transcript_display")
+        lines = view.render_lines_for_test()
+        row = lines[index + 2]
+        # The collapsed row paints the LABEL, not the stored token: localization
+        # landed beside this row's choices, and the token is what the write at
+        # the end of this test checks (`by-turn` on disk).
+        assert "Transcript display" in row and "By turn" in row, row
+        headers = [
+            (offset, line)
+            for offset, line in enumerate(lines[: index + 2])
+            if line.strip().lower().startswith("appearance") or line.strip().lower() == "session"
+        ]
+        assert headers and headers[-1][1].strip().lower().startswith("appearance"), headers
+
+        view.action_activate()
+        await pilot.pause()
+        assert view._expanded == "display.transcript_display"
+        choices = [row.choice.value for row in view._rows if row.kind == "choice"]
+        assert choices == ["by-turn", "by-response"], choices
+        # The labels are the settings row's copy, not the stored tokens: the
+        # `/transcript` receipt names a mode by the same words this list paints.
+        labels = [row.choice.label for row in view._rows if row.kind == "choice"]
+        assert labels == ["By turn", "By response"], labels
+        assert any(
+            "By response" in line for line in view.render_lines_for_test()
+        ), "the expanded list must paint the mode labels"
+
+        for offset, row in enumerate(view._rows[index + 1 :], start=index + 1):
+            if row.kind == "choice" and row.choice.value == "by-response":
+                view._selected = offset
+                break
+        view.action_activate()
+        await pilot.pause()
+        assert _values(tmp_path)["display.transcript_display"] == "by-response"
         assert "display" not in _values(tmp_path)
 
 

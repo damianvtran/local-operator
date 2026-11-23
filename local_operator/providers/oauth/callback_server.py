@@ -205,6 +205,22 @@ class LoginCancelledError(LoginError):
         super().__init__(message)
 
 
+class LoginDeferredError(LoginError):
+    """The user chose to finish a step outside this login, so nothing was stored.
+
+    Not a failure and not a cancel: Amazon Bedrock's "I'll run it myself"
+    answer to an expired AWS SSO session is a deliberate choice that ends the
+    login with a command to run elsewhere (#4270 design D4 / QA Q7). Hosts
+    render it as a neutral note, exit 0 from the CLI, and set ``command``
+    apart so it can be copied. A ``LoginError`` subclass so any host that does
+    not know it still ends the login rather than storing anything.
+    """
+
+    def __init__(self, message: str, *, command: str = "") -> None:
+        super().__init__(message)
+        self.command = command
+
+
 class LoginTimeoutError(LoginError):
     """No callback/manual code arrived within the timeout window."""
 
@@ -262,6 +278,61 @@ class InvalidGrantError(LoginError):
     LoginError`` handler keeps working unchanged, and only callers that want
     the distinction test for this type.
     """
+
+
+#: Why a grant died, persisted beside the dead-grant tombstone so a surface can
+#: name the cause without another refresh. Only one cause is distinguished
+#: today; every other dead grant carries no reason and reads as a plain
+#: "sign-in expired".
+REAUTH_REASON_SESSION_POLICY = "session_policy"
+
+
+class ReauthRequiredError(InvalidGrantError):
+    """The IdP demands an interactive re-authentication by organisation policy.
+
+    Google answers a refresh with ``invalid_grant`` / ``error_subtype:
+    invalid_rapt`` ("reauth related error") when a Google Workspace admin has
+    turned on **Google Cloud session control**
+    (https://support.google.com/a/answer/9368756): every 1-24 h the user must
+    sign in again for gcloud, the Cloud console and any third-party app that
+    holds a Cloud scope. The refresh token itself is still valid, but no
+    client-side refresh can get past the policy, so for this store it is as
+    dead as any other ``invalid_grant`` -- the only remedies are an interactive
+    sign-in, or an admin exempting the OAuth client (Trusted apps + "Exempt
+    Trusted apps") or relaxing the policy.
+
+    A subclass of :class:`InvalidGrantError` so every dead-grant handler (the
+    tombstone, the cascade, ``/usage``) treats it identically; ``reason`` is
+    the extra fact the user-facing copy uses to explain WHY a sign-in that
+    worked this morning stopped working without anything having been revoked.
+    """
+
+    reason = REAUTH_REASON_SESSION_POLICY
+
+
+def is_reauth_policy_response(body: str) -> bool:
+    """Whether a token-endpoint body is Google's session-control refusal.
+
+    Matched on the structured ``error_subtype`` first; the description text is
+    the fallback because Google documents the subtype only informally and the
+    description (``reauth related error (invalid_rapt)``) is what every
+    observed body carries. Requires the ``invalid_grant`` verdict as well, so a
+    body that merely mentions RAPT in some other error is not promoted.
+    """
+    stripped = (body or "").strip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except ValueError:
+        return False
+    if not isinstance(parsed, dict) or parsed.get("error") != "invalid_grant":
+        return False
+    subtype = parsed.get("error_subtype")
+    if isinstance(subtype, str) and subtype.strip().lower() == "invalid_rapt":
+        return True
+    description = parsed.get("error_description")
+    return isinstance(description, str) and "invalid_rapt" in description.lower()
 
 
 #: OAuth2 token-endpoint error codes that are terminal for a STORED grant
@@ -495,6 +566,12 @@ def raise_for_refresh_failure(
     classifies the failure without restyling anyone's error string.
     """
     message = message or f"{provider_label} refresh failed ({status_code}): {body}"
+    if is_reauth_policy_response(body):
+        raise ReauthRequiredError(
+            f"{provider_label} refresh refused: your Google Workspace's Google Cloud "
+            "session control requires you to sign in again "
+            f"(https://support.google.com/a/answer/9368756). {message}"
+        )
     if is_terminal_grant_response(status_code, body):
         raise InvalidGrantError(message)
     raise LoginError(message)
@@ -534,9 +611,24 @@ class LoginCallbacks:
     on_warning: Callable[[str], Awaitable[None] | None] | None = None
     on_input_rejected: Callable[[], Awaitable[None] | None] | None = None
     on_manual_code_input: Callable[[], Awaitable[str | None] | str | None] | None = None
-    # Endpoint setup is a sequence of explicit fields, not an OAuth code. The
-    # host decides how to capture them; the controller never touches stdin.
+    # Explicit configuration fields, not an OAuth code: endpoint setup or a
+    # required post-auth project. The host decides how to capture them; flows
+    # never touch stdin. None cancels; an empty value is interpreted by the
+    # caller (optional endpoint fields can keep defaults; required login fields cancel).
     on_setup_input: Callable[[str, str, bool], Awaitable[str | None] | str | None] | None = None
+    #: One single-select choice: ``(title, [(value, label, description)], default)``
+    #: -> the chosen ``value``, or ``None`` to cancel. Structured logins (Amazon
+    #: Bedrock's method / profile / Region pickers, login_kind "aws") ask
+    #: through it so a host can render a real picker. Optional: a host without
+    #: it gets a numbered ``on_setup_input`` prompt instead
+    #: (``providers/bedrock/login.choose``), so existing embedders keep working.
+    on_choice: (
+        Callable[
+            [str, list[tuple[str, str, str]], str | None],
+            Awaitable[str | None] | str | None,
+        ]
+        | None
+    ) = None
     #: Structured facts about the flow a host renders as CONTROLS rather than
     #: prose: ``user_code`` (a device flow's code), ``launch_url`` (the short
     #: loopback ``/launch`` alias) and ``expires_in`` (seconds until the flow's
@@ -1420,6 +1512,16 @@ class OAuthCallbackFlow(ABC):
         finally:
             for task in waiters:
                 task.cancel()
+            # Let the cancelled helper tasks (the paste-code reader above all)
+            # run their cleanup NOW, before ``exchange_token`` runs. A provider
+            # whose exchange opens a second, post-callback prompt (Vertex asks
+            # for a project ID when none is discoverable) otherwise races the
+            # first prompt's teardown: the host's ``finally`` would clear the
+            # NEW prompt's pending state, leaving Desktop with no field to
+            # answer (409 on input) and the CLI with a stale reader.
+            helpers = [task for task in waiters if isinstance(task, asyncio.Task)]
+            if helpers:
+                await asyncio.wait(helpers)
 
         if not done:
             raise LoginTimeoutError(self._timeout_message())

@@ -1,0 +1,26 @@
+{
+  "tool_call_id": "call_8799b65487fb460f905c9aa51315b269:dcf7d16f6cfe4f2292b616a2da53e14b",
+  "tool_name": "read_public_copy",
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n \"tui.editor_readonly.hint\": \"Solo lectura · {key} volver\"\n}"
+    }
+  ],
+  "details": {
+    "path": "local_operator/i18n/catalogues/es/tui.editor_readonly.json",
+    "key": "tui.editor_readonly.hint",
+    "public_copy": true,
+    "policy": "docs/security/redaction-policy.md",
+    "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+    "sha256": "2c7c4f51b63192dacfe61350bcdc1caf451b2c5dc3feb3436caa3813691dac21",
+    "repository_root": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer",
+    "repository": "damianvtran/local-operator",
+    "repository_verified": true,
+    "commit": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+    "checkout_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967"
+  },
+  "duration_s": 4.114620166015811,
+  "is_error": false,
+  "useless": false
+}

@@ -67,7 +67,7 @@ from __future__ import annotations
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import SupportsIndex
 
 #: The env var an agent sets inline to run an unbounded search as written.
@@ -168,6 +168,17 @@ _WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "sudo": frozenset({"u", "g", "p", "C", "h", "r", "t", "U", "D"}),
     "nice": frozenset({"n"}),
     "xargs": frozenset({"I", "n", "P", "s", "L", "a", "d", "E"}),
+    # ``env -u NAME`` unsets NAME: without this the variable name read as the
+    # program (field report 2026-11-12: ``env -u NODE_OPTIONS … python
+    # run_bounded.py -- node <pad>/x.mjs`` was ranked as paths "handed to
+    # NODE_OPTIONS", so the real program's read-only inputs hit the backstop).
+    #
+    # Every valued short flag of GNU env (``-u``/``-C``/``-a``) and BSD env
+    # (``-u``/``-P``/``-L``/``-U``), not just ``-u``: with ``-C`` missing,
+    # ``env -C /tmp rm -rf ~`` read ``/tmp`` as the program and the ``rm``
+    # vanished (QA Q-3-1 on PR #3906). ``resolve._env_split`` reads this same
+    # entry, so the wrapper peel and the ``-S`` finder cannot drift apart.
+    "env": frozenset({"u", "C", "a", "P", "L", "U"}),
 }
 
 #: The same, spelled long and with a space rather than an ``=``.
@@ -187,6 +198,16 @@ _WRAPPER_LONG_VALUE_FLAGS = frozenset(
         "--arg-file",
     }
 )
+
+#: Long value flags only ONE wrapper takes. ``env --unset NAME`` (field report
+#: 2026-11-12) lives here, not in the shared table above: shared, it made
+#: ``sudo --unset rm -rf ~/work`` peel ``rm`` away as a flag value (review F2
+#: on PR #3906), though sudo rejects ``--unset``.
+_WRAPPER_OWN_LONG_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    # ``--chdir`` is also in the shared table (sudo takes it); listed here too so
+    # this entry is env's complete long-option vocabulary for ``_env_split``.
+    "env": frozenset({"--unset", "--chdir", "--argv0"}),
+}
 
 #: Shells whose ``-c`` argument is a command string. Their inner text is parsed
 #: with the SAME rules, recursively — the wrapper an agent reaches for to make a
@@ -222,8 +243,84 @@ SCRATCHPAD_ENV = "LOCAL_OPERATOR_SCRATCHPAD"
 #: child (``skills/``, ``attachments/``, the scratchpad) is not.
 _STORE_STR_RE = re.compile(r"^(?:~|\$HOME|\$\{HOME\})/\.local-operator")
 
-#: A heredoc opener: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`.
-_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+#: Where a heredoc opener's delimiter word starts: `<<EOF`, `<<-EOF`,
+#: `<<'EOF'`, `<<"EOF"`. Only the START is matched here; the whole word is
+#: read by :func:`heredoc_opener`. Words not starting like this (``<<\EOF``,
+#: ``<<1``) are not treated as openers at all, so the lines after them stay
+#: commands to every guard (stricter, and unchanged from before).
+_HEREDOC_START_RE = re.compile(r"<<-?\s*(?=['\"]?[A-Za-z_])")
+
+#: Bash metacharacters: an unquoted one ends the delimiter word.
+_WORD_END = frozenset(" \t\n|&;()<>")
+
+#: Returned by :func:`heredoc_opener` for an opener whose delimiter word this
+#: reader will not guess at (expansion syntax, a backslash, an unclosed quote).
+HEREDOC_UNREADABLE = ""
+
+
+def heredoc_opener(text: str, i: int) -> tuple[str, int] | None:
+    """Read a heredoc opener at ``text[i] == '<'``: ``(delimiter, index_after)``.
+
+    Returns None when ``text[i:]`` is not an opener this scanner recognises.
+    Returns ``(HEREDOC_UNREADABLE, index_after_start)`` when it is one but the
+    delimiter word cannot be read safely; callers must then FAIL CLOSED (treat
+    the line as open/unresolvable and keep reading later lines as commands).
+
+    Why the whole word (security review R1, PR #3962): the old regex stopped
+    at the first non-identifier character, so ``<<E"O"F`` read as ``E``,
+    ``<<'EO'F`` as ``EO``, ``<<EOF-x`` as ``EOF`` and ``<<'EOF'.x`` as ``EOF``.
+    Bash's delimiter is the whole word after quote removal (``EOF``,
+    ``EOF``, ``EOF-x``, ``EOF.x``), so a body could end at a line bash still
+    reads as data — or, worse, run past the line where bash's body ends and
+    swallow the commands after it (``rm -rf ~`` hidden as "heredoc data").
+
+    Constraints: bash does no expansion on the delimiter, but ``$``, backticks
+    and backslashes inside it are rare enough and subtle enough (``$'…'``,
+    escapes) that this reader refuses them rather than modelling them.
+
+    Extglob (security review round 2 R3, PR #3962): with ``shopt -s extglob``
+    in effect bash reads ``E@(x)`` (also ``?( *( +( !(``) as ONE word, so its
+    delimiter is ``E@(x)``, not the ``E@`` this loop stops at. Whether extglob
+    is on cannot be known from the text, so the word is refused (fail closed);
+    with extglob off the shape is a bash syntax error, so refusing costs
+    nothing real.
+
+    The returned word is stripped of outer whitespace (round 2 M2): readers
+    compare it with ``line.strip()``, so a word ending in ``\r`` (CRLF text)
+    or a quoted ``'EOF '`` could otherwise never match any line and would
+    always fall to the unterminated path. Stripping both sides keeps the match
+    a superset of bash's exact-line match: a body can only end EARLIER than
+    bash ends it, never later. A word that is all whitespace is refused.
+    """
+    m = _HEREDOC_START_RE.match(text, i)
+    if m is None:
+        return None
+    j = m.end()
+    n = len(text)
+    parts: list[str] = []
+    while j < n and text[j] not in _WORD_END:
+        ch = text[j]
+        if ch in "'\"":
+            close = text.find(ch, j + 1)
+            if close == -1:
+                return HEREDOC_UNREADABLE, m.end()
+            inner = text[j + 1 : close]
+            if ch == '"' and any(c in inner for c in "$`\\"):
+                return HEREDOC_UNREADABLE, m.end()
+            parts.append(inner)
+            j = close + 1
+            continue
+        if ch in "$`\\":
+            return HEREDOC_UNREADABLE, m.end()
+        parts.append(ch)
+        j += 1
+    if j < n and text[j] == "(" and j > m.end() and text[j - 1] in "?*+@!":
+        # An extglob group continues the word under `shopt -s extglob` (R3).
+        return HEREDOC_UNREADABLE, m.end()
+    delim = "".join(parts).strip()
+    if not delim:
+        return HEREDOC_UNREADABLE, m.end()
+    return delim, j
 
 
 @dataclass
@@ -240,6 +337,11 @@ class Lexed:
     segments: list[tuple[str, bool, str]]
     bodies: list[list[str]]
     open: bool
+    #: Parallel to ``bodies``: True only for a retained duplicate whose entire
+    #: owning substitution opens AND closes in this same segment. Consumers
+    #: must still prove they recursively walk that substitution before omitting
+    #: the duplicate; split/unclosed substitutions deliberately remain False.
+    nested_bodies: list[list[bool]] = field(default_factory=list)
 
 
 #: Frames of :func:`lex`'s context stack. A QUOTE frame suppresses operators,
@@ -259,26 +361,36 @@ class _FrameStack(list[str]):
         self.quotes = 0
         self.subs = 0
         self.arith = 0
+        self.segment = 0
+        self.sub_owners: list[tuple[int, int]] = []
+        self.closed_subs: dict[int, int] = {}
+        self.next_sub = 0
 
     def _count(self, frame: str, step: int) -> None:
         if frame in _QUOTE_FRAMES:
             self.quotes += step
         elif frame in ("$(", "`"):
             self.subs += step
-        elif frame in ("$((", "${"):
+        elif frame in ("$((", "${", "$["):
             self.arith += step
 
     def append(self, frame: str) -> None:
         super().append(frame)
         self._count(frame, 1)
+        if frame in ("$(", "`"):
+            self.sub_owners.append((self.next_sub, self.segment))
+            self.next_sub += 1
 
     def pop(self, index: SupportsIndex = -1) -> str:
         frame = super().pop(index)
         self._count(frame, -1)
+        if frame in ("$(", "`"):
+            owner, _start = self.sub_owners.pop()
+            self.closed_subs[owner] = self.segment
         return frame
 
 
-def lex(command: str) -> Lexed:
+def lex(command: str, *, keep_empty_case_terminators: bool = False) -> Lexed:
     """THE shell-line scanner shared by every bash guard (search, sleep, delete).
 
     One scanner on purpose. The guardrail review found, round after round,
@@ -293,7 +405,8 @@ def lex(command: str) -> Lexed:
 
     Model (deliberately bash-like, not a full parser):
     - Context stack frames: ``'``, ``"``, ``$'`` (ANSI-C, ``\\`` escapes),
-      ``$(``, ``$((``, ``${``, `````, plain ``(`` inside a substitution.
+      ``$(``, ``$((``, ``${``, ``$[`` (legacy arithmetic, ``[`` nested in it),
+      `````, plain ``(`` inside a substitution.
     - Operators ``; | & newline`` split segments unless a QUOTE frame is on the
       stack. Splitting inside an unquoted ``$(…)`` is kept on purpose: the
       search guard has always looked at a ``grep`` behind ``$(cd x; …``.
@@ -301,7 +414,7 @@ def lex(command: str) -> Lexed:
       start of a word (input start, or after unescaped whitespace or one of
       ``; & | (``).
     - ``<<WORD`` opens a heredoc only with no quote frame and outside
-      ``$((``/``${``; its body is captured at the next newline and blanked
+      ``$((``/``${``/``$[``; its body is captured at the next newline and blanked
       from the segment text (data is never read as commands), the opener kept.
       An opener with no delimiter line leaves the text in place and marks the
       result ``open`` (fail closed).
@@ -309,11 +422,12 @@ def lex(command: str) -> Lexed:
     segments: list[tuple[str, bool, str]] = []
     # Bodies keyed by the index of the segment holding their ``<<`` opener.
     owned: dict[int, list[str]] = defaultdict(list)
+    body_owners: dict[int, list[tuple[int, int] | None]] = defaultdict(list)
     buf: list[str] = []
     stack = _FrameStack()
     # (delimiter, owning segment index, inside substitution, retain ownership)
     # for openers awaiting the next newline.
-    pending: list[tuple[str, int, bool, bool]] = []
+    pending: list[tuple[str, int, bool, bool, tuple[int, int] | None]] = []
     piped = False
     word_start = True
     unterminated_heredoc = False
@@ -324,6 +438,7 @@ def lex(command: str) -> Lexed:
         return stack.quotes > 0
 
     while i < n:
+        stack.segment = len(segments)
         ch = command[i]
         top = stack[-1] if stack else None
         if top == "'":
@@ -384,6 +499,15 @@ def lex(command: str) -> Lexed:
             i += 3
             word_start = False
             continue
+        if command.startswith("$[", i):
+            # Legacy arithmetic ``$[1<<2]`` (round 2 M1, PR #3962): its ``<<``
+            # is a shift, exactly like ``$((``; reading it as a heredoc opener
+            # let a later ``E]`` line "close" a body bash never opened.
+            stack.append("$[")
+            buf.append("$[")
+            i += 2
+            word_start = False
+            continue
         if command.startswith("$(", i) or command.startswith("${", i):
             stack.append(command[i : i + 2])
             buf.append(command[i : i + 2])
@@ -409,6 +533,16 @@ def lex(command: str) -> Lexed:
             buf.append("))")
             i += 2
             continue
+        if top in ("$[", "[") and ch in "[]":
+            # A subscript ``$[a[1]<<2]`` nests ``[``; only the matching ``]``
+            # ends the arithmetic.
+            if ch == "[":
+                stack.append("[")
+            else:
+                stack.pop()
+            buf.append(ch)
+            i += 1
+            continue
         if ch == "(" and stack:
             stack.append("(")
         elif ch == ")" and top in ("$(", "("):
@@ -419,20 +553,26 @@ def lex(command: str) -> Lexed:
             word_start = False
             continue
         if ch == "<" and command.startswith("<<", i) and not stack.arith:
-            m = _HEREDOC_RE.match(command, i)
-            if m is not None:
-                pending.append((m.group(2), len(segments), stack.subs > 0, not quoted()))
-                buf.append(command[i : m.end()])
-                i = m.end()
+            opener = heredoc_opener(command, i)
+            if opener is not None and opener[0] == HEREDOC_UNREADABLE:
+                # An opener whose delimiter we cannot read: no body is
+                # skipped (its lines stay commands) and the line is open.
+                unterminated_heredoc = True
+            elif opener is not None:
+                delim, end = opener
+                sub_owner = stack.sub_owners[0] if stack.sub_owners else None
+                pending.append((delim, len(segments), stack.subs > 0, not quoted(), sub_owner))
+                buf.append(command[i:end])
+                i = end
                 word_start = False
                 continue
         if ch == "\n" and pending:
             # Bodies start after this newline, one per opener, in order.
             pos = i + 1
             resume = i
-            captured: list[tuple[str, int, bool, bool]] = []
+            captured: list[tuple[str, int, bool, bool, tuple[int, int] | None]] = []
             ok = True
-            for delim, owner, in_sub, retain_owned in pending:
+            for delim, owner, in_sub, retain_owned, sub_owner in pending:
                 lines: list[str] = []
                 found = False
                 while pos <= n:
@@ -450,10 +590,10 @@ def lex(command: str) -> Lexed:
                 if not found:
                     ok = False
                     break
-                captured.append(("\n".join(lines), owner, in_sub, retain_owned))
+                captured.append(("\n".join(lines), owner, in_sub, retain_owned, sub_owner))
             pending = []
             if ok:
-                if any(in_sub for _b, _o, in_sub, _r in captured):
+                if any(in_sub for _b, _o, in_sub, _r, _s in captured):
                     # R9-1: an opener inside ``$(…)``/backticks belongs to the
                     # command INSIDE the substitution (``x="$(bash <<EOF …)"``),
                     # not to the outer segment. Keep the body text inline so
@@ -465,12 +605,13 @@ def lex(command: str) -> Lexed:
                     buf.append(command[i:resume])
                 else:
                     buf.append(" ")
-                for body, owner, in_sub, retain_owned in captured:
+                for body, owner, in_sub, retain_owned, sub_owner in captured:
                     # R10: an unquoted substitution can split before its shell
                     # stage; that piece has no opening substitution to recurse
                     # into. Retain its owned body as well as the inline text.
                     if not in_sub or retain_owned:
                         owned[owner].append(body)
+                        body_owners[owner].append(sub_owner)
                 # Otherwise resume AT the newline ending the last delimiter
                 # line, so it still ends the segment.
                 i = resume
@@ -500,8 +641,11 @@ def lex(command: str) -> Lexed:
             while j < n and command[j] == ch:
                 j += 1
             text = "".join(buf).strip()
-            if text:
-                segments.append((text, piped, command[i:j] if ch != "\n" else "\n"))
+            op = command[i:j] if ch != "\n" else "\n"
+            # A case arm can end after a newline already flushed its body.
+            # Only the case-aware consumer needs that separator on its own.
+            if text or (keep_empty_case_terminators and op == ";;"):
+                segments.append((text, piped, op))
             buf = []
             piped = ch == "|" and (j - i) == 1
             i = j
@@ -517,6 +661,13 @@ def lex(command: str) -> Lexed:
         segments=segments,
         bodies=[owned.get(k, []) for k in range(len(segments))],
         open=bool(stack) or bool(pending) or unterminated_heredoc,
+        nested_bodies=[
+            [
+                sub is not None and sub[1] == k and stack.closed_subs.get(sub[0]) == k
+                for sub in body_owners.get(k, [])
+            ]
+            for k in range(len(segments))
+        ],
     )
 
 
@@ -650,8 +801,10 @@ def _peel(segment: str) -> tuple[str | None, str]:
                 return None, ""
             spelling = _unquote(token)
             if spelling.startswith("-") and spelling != "-":
-                takes_value = (len(spelling) == 2 and spelling[1] in value_flags) or (
-                    spelling in _WRAPPER_LONG_VALUE_FLAGS
+                takes_value = (
+                    (len(spelling) == 2 and spelling[1] in value_flags)
+                    or spelling in _WRAPPER_LONG_VALUE_FLAGS
+                    or spelling in _WRAPPER_OWN_LONG_VALUE_FLAGS.get(literal, ())
                 )
                 rest = after.lstrip()
                 if takes_value:

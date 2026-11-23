@@ -56,6 +56,9 @@ from local_operator.session.catalog import live_state_from_flags
 #: that a session created on a peer (``/new remote``) surfaces while the user is
 #: still looking at the list it should appear in.
 _TTL_S = 20.0
+#: The same bound, public for callers that schedule their own refresh against
+#: :func:`listing_age_s` rather than letting a read dial inline.
+LISTING_TTL_S = _TTL_S
 
 #: ``config root`` → ``(monotonic read time, rows, unanswered peers, wall-clock
 #: read start in ms)``. The wall-clock half exists for ONE reader,
@@ -141,6 +144,39 @@ def read_listing(
     if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
         return cached[1], cached[2]
     return _read_all(root, catalog, moment, key)
+
+
+def listing_age_s(root: Path | None = None, *, now: float | None = None) -> float | None:
+    """Seconds since the cached listing for ``root`` was read; ``None`` when there is none.
+
+    A cache PEEK, never a read: it lets a caller that must not wait on a fan-out
+    (the mobile relay's list frames, ``mobile.daemon._PeerRowsRefresher``) decide
+    whether to refresh in the background and answer from the entry meanwhile.
+    An entry that only :func:`seed_peer_row` wrote answers ``inf``: it was never a
+    listing, so it must be treated exactly like no listing at all.
+    """
+    cached = _CACHE.get("" if root is None else str(root))
+    if cached is None:
+        return None
+    moment = time.monotonic() if now is None else now
+    return moment - cached[0]
+
+
+def cached_listing(
+    root: Path | None = None,
+) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]] | None:
+    """The cached ``(rows, unanswered)`` for ``root``, or ``None``; a PEEK, never a read.
+
+    Lets a background refresher tell "the read brought news" from "the read
+    confirmed what every open frame already shows" (PR #4020 agent review, R2):
+    the entry is stamped with the read's START, so a read that takes the TTL
+    lands already stale, and ringing the list for an unchanged answer made the
+    open stream's rebuild start the next read, back to back.
+    """
+    cached = _CACHE.get("" if root is None else str(root))
+    if cached is None:
+        return None
+    return cached[1], cached[2]
 
 
 def listing_read_at_ms(root: Path | None, rows: object) -> int | None:
@@ -238,6 +274,31 @@ def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | 
         if row.id == session_id:
             return row
     return None
+
+
+def peer_session_holders(session_id: str, root: Path | None = None) -> list[SessionRow]:
+    """EVERY cached remote row for ``session_id``, one per holding device.
+
+    Cache-only, like :func:`peer_session_row`, which answers "is it remote?"
+    with the FIRST match. A caller about to ACT on the answer — the ``send``
+    tool delivering to the holder without an explicit ``peer`` — needs to know
+    whether that first match is the only one: two devices reporting one id
+    (a stale row after a move, or a collision) is ambiguity it must refuse, not
+    a choice it may make. Rows without an owning device are not a holder
+    anyone could be routed to and are skipped.
+    """
+    cached = _CACHE.get("" if root is None else str(root))
+    if cached is None:
+        return []
+    holders: list[SessionRow] = []
+    seen: set[str] = set()
+    for row in cached[1]:
+        device = str(row.owner_device or "")
+        if row.id != session_id or not row.is_remote or not device or device in seen:
+            continue
+        seen.add(device)
+        holders.append(row)
+    return holders
 
 
 def seed_peer_row(root: Path | None, row: SessionRow) -> None:
@@ -469,6 +530,15 @@ def park_edges(
         kind = str(row.pending or "")
         if not kind or not row.live_state:
             continue
+        if getattr(row, "pending_queued", False):
+            # The ask QUEUE's claim (``_sync_queued_ask_pending``), not a parked
+            # gate: a listing fact for the "needs" badge, never a park (PR #3934
+            # Q1). A park here paged EVERY member with a TUI for a question on
+            # a session it did not start; the origin is told instead by the
+            # forwarded ``remote-ask:`` rows, one per ask. Keyed on the owner's
+            # flag rather than on the forwarded notices so a BLOCKING gate that
+            # parks beside open queued asks still parks (R1-3).
+            continue
         key = (str(row.owner_device or ""), row.id)
         current[key] = kind
         fresh[key] = RemotePark(
@@ -487,17 +557,6 @@ def park_edges(
     return edges, state
 
 
-class RemoteCompletion(NamedTuple):
-    """One NEW finished turn on a peer, for a session THIS device started."""
-
-    session_id: str
-    device_id: str
-    device_name: str
-    token: str
-    outcome: str
-    name: str
-
-
 class RemoteNotice(NamedTuple):
     """One NEW (or newly revised) ``notify`` item on a peer, for that session."""
 
@@ -509,6 +568,14 @@ class RemoteNotice(NamedTuple):
     priority: str
     title: str
     name: str
+    #: The owner item's own time (epoch ms, the owner's clock), or 0 when the
+    #: owner did not say (an older build). The origin raises only a notice newer
+    #: than its first-seen baseline and writes it at this time (2026-11-13).
+    at_ms: int = 0
+    #: ``SessionRow.remote_started_by_agent_on``: the device whose agent started
+    #: the session, for a forwarded ask's body. ``""`` is no label (the plain
+    #: "runs on <device>" body). Display-only.
+    started_by_agent_on: str = ""
 
 
 def _carry_silent(
@@ -531,44 +598,6 @@ def _carry_silent(
             state[key] = value
 
 
-def completion_edges(
-    previous: Mapping[tuple[str, str], str],
-    rows: Iterable[SessionRow],
-    *,
-    unanswered: Iterable[str] = (),
-) -> tuple[tuple[RemoteCompletion, ...], dict[tuple[str, str], str]]:
-    """New completion EPISODES among ``rows``, and the map to pass back next read.
-
-    Pure, and keyed exactly as :func:`park_edges` is — ``(device, session)`` —
-    for the same cross-device reason. The episode identity is the owner's
-    completion TOKEN: a new token is a new finished turn (fire once); the same
-    token on the next read is no edge; a key that leaves the map (the owner
-    acknowledged it — the operator opened the conversation somewhere) is the
-    caller's to settle. Unlike a park, a completion is a STORED fact, so a
-    stored row's claim counts as much as a live one's.
-    """
-    current: dict[tuple[str, str], object] = {}
-    fresh: dict[tuple[str, str], RemoteCompletion] = {}
-    for row in rows:
-        claim = row.remote_attention
-        if not claim or not claim[0]:
-            continue
-        key = (str(row.owner_device or ""), row.id)
-        current[key] = claim[0]
-        fresh[key] = RemoteCompletion(
-            session_id=row.id,
-            device_id=key[0],
-            device_name=str(row.owner_device_name or ""),
-            token=claim[0],
-            outcome=claim[1] or "complete",
-            name=_chosen_name(row),
-        )
-    state = dict(current)
-    _carry_silent(previous, state, unanswered)
-    edges = tuple(fresh[key] for key, token in current.items() if previous.get(key) != token)
-    return edges, {key: str(value) for key, value in state.items()}
-
-
 #: One tracked notice: ``(device, session, owner item key)``.
 NoticeKey = tuple[str, str, str]
 
@@ -586,7 +615,7 @@ def notice_edges(
     items, and each is its own episode: keying per session made two notices
     inside one listing TTL replace each other, so a ``high`` "Tests failed"
     followed by a ``normal`` "Deploy done" lost the high one. The silence rule
-    is :func:`completion_edges`' (``_carry_silent`` reads ``key[0]``, the
+    is the one ``_carry_silent`` applies (it reads ``key[0]``, the
     device, which this key keeps first). A notice that leaves the map is NOT
     settled by the caller: the owner's item going read there says nothing about
     whether the operator saw the forwarded row here, so the origin's row keeps
@@ -613,11 +642,148 @@ def notice_edges(
                 priority=claim[2] or "normal",
                 title=claim[3],
                 name=_chosen_name(row),
+                # A 4-tuple (a parse older than ``at``) has no time: 0.
+                at_ms=int(claim[4]) if len(claim) > 4 else 0,
+                started_by_agent_on=str(getattr(row, "remote_started_by_agent_on", "") or ""),
             )
     state: dict[NoticeKey, int] = dict(current)
     _carry_silent(previous, state, unanswered)
     edges = tuple(fresh[key] for key, value in current.items() if previous.get(key) != value)
     return edges, state
+
+
+def _attested_notices(
+    peer_row: Any, owner_device: str = "", bound_nodes: frozenset[str] = frozenset()
+) -> tuple[tuple[str, int, str, str, int], ...] | None:
+    """The row's forwarded notices, minus ``notify`` items it may not raise here.
+
+    THE ORIGIN RE-APPLIES THE OWNER'S DEFAULT-DENY (operator rule, 2026-11-14:
+    only a deliberate ``notify`` or an ask reaches the dashboard; agent/worker
+    session progress must not). The owner filters in
+    ``remote_attention.stamp_rows_for_viewer``, but the owner is another device
+    and may run a build older than that filter — which is exactly how five
+    agent-lane workers on lop-remote-node-2 reached this inbox after v0.103.0.
+    Applying the same predicate to the row's own ``origin`` here makes the rule
+    hold as soon as THIS device updates. Open asks (``remote-ask:``) always
+    pass: a question still waiting on the operator is never withheld.
+
+    A SESSION STARTED ON ITS OWNER (no foreign ``origin.source_device``) reaches
+    this device only over the operator binding (``network.operator_binding``):
+    no owner build before the binding put notices on such a row, so the legacy
+    flood this filter guards against cannot arrive on one. Its ``notify`` items
+    pass — only from an owner this device presented its proof to
+    (``bound_nodes``: ``operator_binding.bound_devices``, the active nodes this
+    Mac onboarded or holds a signed credential card for, so a co-member it
+    never bound cannot raise one) and unless
+    the row itself says an agent started it. The owner already
+    applied ``remote_attention.is_non_agent_session`` (manager rule,
+    2026-11-15: ``notify`` from operator- or node-started NON-AGENT sessions
+    reaches the operator's device; agent-started stays on the node).
+    """
+    notices = getattr(peer_row, "notices", None)
+    if not notices:
+        return notices
+    from local_operator.notifications.remote_attention import (
+        ASK_NOTICE_PREFIX,
+        origin_is_operator_started,
+    )
+
+    origin = getattr(peer_row, "origin", None)
+    if origin_is_operator_started(origin):
+        return notices
+    if owner_device in bound_nodes and _started_on_owner(origin, owner_device):
+        return notices
+    return tuple(
+        claim for claim in notices if claim and str(claim[0]).startswith(ASK_NOTICE_PREFIX)
+    )
+
+
+def _bound_nodes(root: Path) -> frozenset[str]:
+    """Mesh ids this device binds (its operator-binding presentees). Never raises.
+
+    ``bound_devices``, not ``onboarded_devices`` (PR #4030 QA R3, Q4): a node
+    bound by a credential card has no onboarding record, and must not be told
+    "forwarded" by its binding while this listing drops its notify.
+    """
+    try:
+        from local_operator.network.operator_binding import bound_devices
+
+        return bound_devices(root)
+    except Exception:  # noqa: BLE001 — no binding, no started-on-owner notices
+        return frozenset()
+
+
+def _agent_starter_label(origin: Any, names: Mapping[str, str]) -> str:
+    """The name of the device whose AGENT started a row's session, or ``""``.
+
+    WHY: a forwarded ask from an agent-started session (the agent-child leg of
+    ``remote_attention.signed_card_target``) otherwise reads exactly like one
+    from a session the operator opened. Derived HERE, on the receiving device,
+    from what it already holds rather than from a new wire field: the owner's
+    stamp ``origin`` (``kind`` and ``source_device``, which the owner wrote from
+    the creating link's authenticated device id, ``relay`` peer create) and THIS
+    device's own names for device ids (``names``: its identity plus the peers
+    answer). A peer create carries no starter session id or agent name
+    (``source_session_id: ""``), so the device is the most specific honest
+    answer, and no peer-supplied free text is ever shown. Display-only: routing
+    reads ``origin`` through ``remote_attention.notice_origin``, never this.
+
+    ``""`` — the caller keeps the plain body — when the origin is not a mapping,
+    is not ``kind: agent``, names no source device, or names one this device
+    cannot put a name to (an id is not a label a reader can use).
+    """
+    from local_operator.notifications.remote_attention import notice_origin
+
+    source, agent_child = notice_origin(origin)
+    if not agent_child or not source:
+        return ""
+    return str(names.get(source) or "")
+
+
+def _device_names(root: Path | None, peers: Mapping[str, Any]) -> dict[str, str]:
+    """Device id -> human name, from THIS device's identity and peers answer.
+
+    This device's own identity is included because the usual starter of an
+    agent-child session is an agent running HERE (the operator's Mac), and a
+    device does not list itself among its peers. Guarded on ``root`` for the
+    same reason as ``_network_names``: a root-less call is a test's injected
+    catalogue and must not read the developer's real identity. Never raises.
+    """
+    names = {device_id: str(getattr(facts, "name", "") or "") for device_id, facts in peers.items()}
+    if root is None:
+        return names
+    try:
+        from local_operator.network import identity
+
+        mine = identity.load(root)
+    except Exception:  # noqa: BLE001 — no identity, no self label
+        return names
+    if mine is not None and mine.device_id and mine.name:
+        names[mine.device_id] = mine.name
+    return names
+
+
+def _started_on_owner(origin: Any, owner_device: str) -> bool:
+    """A row the owner itself started, and nothing on it says an AGENT did.
+
+    ``origin`` empty (no stamp) or naming the owner as its source; an agent
+    kind or a ``started_by: agent`` attestation denies (default-deny, #4001).
+    """
+    from local_operator.notifications.remote_attention import (
+        AGENT_ORIGIN_KIND,
+        STARTED_BY_FIELD,
+    )
+
+    if not origin:
+        return True
+    if not isinstance(origin, dict):
+        return False
+    if str(origin.get("kind") or "") == AGENT_ORIGIN_KIND:
+        return False
+    if str(origin.get(STARTED_BY_FIELD) or "") == AGENT_ORIGIN_KIND:
+        return False
+    source = str(origin.get("source_device") or "")
+    return not source or (bool(owner_device) and source == owner_device)
 
 
 def _chosen_name(row: SessionRow) -> str:
@@ -701,28 +867,138 @@ def _started_epoch(peer_row: object) -> float:
     return float(value or 0.0)
 
 
+def _open_catalog(root: Path | None, catalog: object | None) -> object | None:
+    """The relay catalogue to read, or ``None`` when there is none to ask.
+
+    Shared by :func:`_read` and :func:`peer_pid_rows` so both keep the SAME
+    zero-peer gate: a device with no relay record issues no call at all.
+    """
+    if catalog is not None:
+        return catalog
+    try:
+        from local_operator.network import store
+    except Exception:  # pragma: no cover - the mesh package is always importable
+        return None
+    try:
+        if store.find_own_relay(root) is None:
+            # NO RELAY, NO WORK: the zero-peer property, measured as "did
+            # this process issue a call" rather than asserted in a comment.
+            return None
+    except Exception:  # noqa: BLE001 - an unreadable store is no projection
+        return None
+    try:
+        from local_operator.network.projection import RelayPeerCatalog
+
+        return RelayPeerCatalog(root)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+class PeerPidRow(NamedTuple):
+    """One remote session row whose owner reports ``pid``, with its liveness.
+
+    ``owner_device``/``owner_device_name`` deliberately mirror
+    :class:`~local_operator.resume.SessionRow`'s spelling: the send tool's
+    session-id route (``_execute_send_routed``) reads exactly those two
+    attributes off a holder, so a live match can ride that route unchanged.
+    """
+
+    session_id: str
+    owner_device: str
+    owner_device_name: str
+    #: True only when the owner answered THIS read and its row is a running
+    #: session (``busy``/``idle``/``attached``) — see :func:`peer_pid_rows`.
+    live: bool
+    #: Why a non-live row is not live, in words; ``""`` for a live row.
+    not_live_reason: str = ""
+
+
+#: The liveness tokens a pid match may be ROUTED to. ``wedged`` is excluded on
+#: purpose: it means the owner has a record whose heartbeat stopped, and a pid
+#: is a guess-prone address (pids recycle) — a guessed address must not land on
+#: a session nobody is answering for. ``""`` (stored/stale/cold) has no process
+#: behind it at all, so the pid it carried names nothing any more.
+_ROUTABLE_STATES = frozenset({"busy", "idle", "attached"})
+
+
+def peer_pid_rows(
+    pid: int, root: Path | None = None, *, catalog: object | None = None
+) -> list[PeerPidRow]:
+    """Every remote row whose owner reports ``pid``, from ONE FRESH read.
+
+    WHY A PID NEEDS THIS. A pid is device-local: ``send(pid=N)`` scans only this
+    device's registry, yet ``sessions`` lists remote rows WITH their owner's pid,
+    which invites exactly that call. This answers "which remote session, if any,
+    does that pid name" so the caller can route by session id or refuse with the
+    candidates.
+
+    WHY FRESH, NEVER THE ROW CACHE. The cached listing (``_CACHE``, reused for
+    ``LISTING_TTL_S``) carries no pid, and even if it did a cached pid may have
+    been recycled since it was read. This is the same forced read
+    (``ttl_s=0``) the session-id miss already pays: the relay asks each peer
+    live (``RelayServer``'s listing), so only the owner's CURRENT answer can
+    match — a row whose owner no longer reports ``pid`` simply is not here, and
+    an entry older than the catalogue's own freshness bound never reaches the
+    decision. Liveness is then the facts that read already carries, never a new
+    timeout: the owner's peer block must be ``reachable`` and the row's state
+    (read through :func:`_live_state`, the listing's own reading) must be a
+    running token in ``_ROUTABLE_STATES``.
+
+    Every failure is an empty answer (this module's rule), and a device with no
+    relay issues no call (:func:`_open_catalog`).
+    """
+    if pid <= 0:
+        return []
+    catalog = _open_catalog(root, catalog)
+    if catalog is None:
+        return []
+    try:
+        peers = {peer.device_id: peer for peer in catalog.peers()}  # type: ignore[attr-defined]
+        raw = catalog.rows()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - a refused or timed-out relay is no rows
+        return []
+    matches: list[PeerPidRow] = []
+    seen: set[tuple[str, str]] = set()
+    for peer_row in raw:
+        try:
+            row_pid = int(getattr(peer_row, "pid", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        session_id = str(getattr(peer_row, "session_id", "") or "")
+        device_id = str(getattr(peer_row, "device_id", "") or "")
+        if row_pid != pid or not session_id or not device_id:
+            continue
+        if (device_id, session_id) in seen:
+            continue
+        seen.add((device_id, session_id))
+        facts = peers.get(device_id)
+        name = str(getattr(facts, "name", "") or getattr(peer_row, "device_name", "") or "")
+        state = _live_state(peer_row)
+        if facts is None or not getattr(facts, "reachable", False):
+            reason = "its device did not answer this read"
+        elif state not in _ROUTABLE_STATES:
+            reason = f"it is {state or 'not running'} there"
+        else:
+            reason = ""
+        matches.append(
+            PeerPidRow(
+                session_id=session_id,
+                owner_device=device_id,
+                owner_device_name=name or device_id,
+                live=not reason,
+                not_live_reason=reason,
+            )
+        )
+    return matches
+
+
 def _read(
     root: Path | None, catalog: object | None
 ) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
     """One projection read, or ``((), ())``. Every failure is an empty answer."""
+    catalog = _open_catalog(root, catalog)
     if catalog is None:
-        try:
-            from local_operator.network import store
-        except Exception:  # pragma: no cover - the mesh package is always importable
-            return (), ()
-        try:
-            if store.find_own_relay(root) is None:
-                # NO RELAY, NO WORK: the zero-peer property, measured as "did
-                # this process issue a call" rather than asserted in a comment.
-                return (), ()
-        except Exception:  # noqa: BLE001 - an unreadable store is no projection
-            return (), ()
-        try:
-            from local_operator.network.projection import RelayPeerCatalog
-
-            catalog = RelayPeerCatalog(root)
-        except Exception:  # noqa: BLE001
-            return (), ()
+        return (), ()
     try:
         peers = {peer.device_id: peer for peer in catalog.peers()}  # type: ignore[attr-defined]
         raw = catalog.rows()  # type: ignore[attr-defined]
@@ -736,6 +1012,8 @@ def _read(
     # must not wander into the developer's real store; production always names
     # its root.
     network_names = _network_names(root) if root is not None else {}
+    bound_nodes = _bound_nodes(root) if root is not None else frozenset()
+    device_names = _device_names(root, peers)
     rows: list[SessionRow] = []
     # Key by (owner_device, session_id), not id alone: a cross-device collision
     # is a routing ambiguity the reader must see, not silently collapse. Within
@@ -813,8 +1091,13 @@ def _read(
                 # catalogue double or an older parse has neither attribute, which
                 # is no claim.
                 remote_attention=getattr(peer_row, "attention", None),
-                remote_notices=getattr(peer_row, "notices", None),
+                remote_notices=_attested_notices(peer_row, facts.device_id, bound_nodes),
                 remote_attention_unknown=bool(getattr(peer_row, "attention_unknown", False)),
+                pending_queued=bool(getattr(peer_row, "pending_queued", False)),
+                remote_asks_unknown=bool(getattr(peer_row, "asks_unknown", False)),
+                remote_started_by_agent_on=_agent_starter_label(
+                    getattr(peer_row, "origin", None), device_names
+                ),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

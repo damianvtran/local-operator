@@ -76,5 +76,9 @@
   "relay.asks.duration.less_than_minute": "<1 मिनट",
   "relay.asks.duration.minutes": "{count, number} मिनट",
   "relay.asks.duration.hours": "{count, plural, one {# घंटा} other {# घंटे}}",
-  "relay.asks.duration.days": "{count, number} दिन"
+  "relay.asks.duration.days": "{count, number} दिन",
+  "relay.asks.card.command.label": "सुझाया गया कमांड",
+  "relay.asks.card.command.copy": "कॉपी करें",
+  "relay.asks.card.command.copied": "कॉपी हो गया",
+  "relay.asks.card.command.copy_failed": "कॉपी नहीं हो सका — कमांड चुन लिया गया है, वहीं से कॉपी करें"
 }

@@ -4045,6 +4045,7 @@ class TestAgentStopOutcome:
         max_wall_s: float | None = None,
         confinement_root: Path | None = None,
         session: _ScriptedSession | None = None,
+        config_overrides: dict[str, Any] | None = None,
     ) -> tuple[Any, _ScriptedSession, Any]:
         home = scratch_root / "home"
         config_dir = home / ".local-operator"
@@ -4059,7 +4060,7 @@ class TestAgentStopOutcome:
             config_dir=config_dir, agent_home=agent_home, cwd=work, allow_volatile=True
         )
         spec = build_spec("ep-ending")
-        config = build_config(tmp_path, observation_retry_delay=0.0)
+        config = build_config(tmp_path, observation_retry_delay=0.0, **(config_overrides or {}))
         # ``_WedgeAdapter`` with its failure injection switched off is the
         # capable fake the arm needs (``ask_user_answer_owner: adapter``) in a
         # healthy environment; the plain ``FakeAdapter`` is refused at the
@@ -4802,6 +4803,7 @@ class TestReleaseRetention:
         scratch_root: Path,
         session: Any = None,
         owner_status: Any = None,
+        rescue_complete: bool = True,
     ) -> tuple[Any, _UnverifiedSession, _WedgeAdapter, list[Any]]:
         home = scratch_root / "home"
         config_dir = home / ".local-operator"
@@ -4839,7 +4841,9 @@ class TestReleaseRetention:
 
         async def rescue(descriptor: Any, **kwargs: Any) -> Any:
             rescued.append(descriptor)
-            return SimpleNamespace(complete=True, receipts=(), rescue_required=False)
+            return SimpleNamespace(
+                complete=rescue_complete, receipts=(), rescue_required=not rescue_complete
+            )
 
         def launch(selected: Any) -> Any:
             del selected
@@ -5422,6 +5426,501 @@ class TestSessionAccounting:
         )
         assert all(value is None for value in payload["accounting"].values())
         assert payload["steps"] == 0  # retained legacy default, not new telemetry
+
+    @staticmethod
+    def _request_row(
+        request_id: str, *, job_id: str | None, role: str | None = None
+    ) -> dict[str, Any]:
+        return {
+            "request_id": request_id,
+            "purpose": "turn",
+            "job_id": job_id,
+            "actor_role": role,
+            "usage_coverage": "missing",
+            "usage": None,
+        }
+
+    def test_verifier_requests_match_the_requests_row(self) -> None:
+        """The ``accounting`` event and the ``requests`` row count ONE subset.
+
+        Measured on a real episode (v0.107.2): ``requests.verifier.count`` was
+        7 while ``accounting.verifier_requests`` was ``null`` -- the snapshot
+        never read the subset the cost row already selects. A worker's own
+        ``task(agent="verifier")`` carries the role name but no recorded job
+        id, so it stays the worker's spend in both places.
+        """
+
+        from local_operator.evaluation.session_arm import (
+            _flush_request_observation,
+            _session_accounting,
+        )
+
+        rows = [
+            self._request_row("r1", job_id=None),
+            self._request_row("r2", job_id="vjob-1", role="verifier"),
+            self._request_row("r3", job_id="vjob-2", role="verifier"),
+            self._request_row("r4", job_id="vjob-2", role="verifier"),
+            self._request_row("r5", job_id="worker-task", role="verifier"),
+        ]
+        handle = SimpleNamespace(
+            request_rows=rows,
+            request_usages=[],
+            verifier_job_ids={"vjob-1", "vjob-2"},
+            verifier_armed=True,
+        )
+        written: list[tuple[str, dict[str, Any]]] = []
+        sink = SimpleNamespace(write=lambda kind, payload: written.append((kind, payload)))
+        _flush_request_observation(sink, handle)  # type: ignore[arg-type]
+        accounting = _session_accounting(None, handle, close_joined=True)  # type: ignore[arg-type]
+
+        requests_row = written[-1][1]
+        assert requests_row["verifier"]["count"] == 3
+        assert accounting.verifier_requests == requests_row["verifier"]["count"]
+        # The whole-tree clock is untouched: the verifier's rows stay inside it
+        # and the worker's decision-group clocks are read from the bridge only.
+        assert accounting.logical_requests == requests_row["count"] == 5
+        assert accounting.decision_groups_used is None
+
+    def test_an_armed_verifier_that_made_no_request_reports_zero(self) -> None:
+        """Armed is a KNOWN subset: empty is a measured 0, not an unknown."""
+
+        from local_operator.evaluation.session_arm import _session_accounting
+
+        handle = SimpleNamespace(
+            request_rows=[self._request_row("r1", job_id=None)],
+            request_usages=[],
+            verifier_job_ids=set(),
+            verifier_armed=True,
+        )
+        accounting = _session_accounting(None, handle, close_joined=True)  # type: ignore[arg-type]
+        assert accounting.verifier_requests == 0
+
+    def test_an_arm_without_a_verifier_keeps_the_count_unknown(self) -> None:
+        """No harness verifier -> ``null``, never a zero that reads as "ran, idle".
+
+        A worker's own ``task(agent="verifier")`` rows are present on purpose:
+        with the verifier off they must not surface as a verifier count.
+        """
+
+        from local_operator.evaluation.session_arm import (
+            _flush_request_observation,
+            _session_accounting,
+        )
+
+        handle = SimpleNamespace(
+            request_rows=[
+                self._request_row("r1", job_id=None),
+                self._request_row("r2", job_id="worker-task", role="verifier"),
+            ],
+            request_usages=[],
+            verifier_job_ids=set(),
+            verifier_armed=False,
+        )
+        written: list[tuple[str, dict[str, Any]]] = []
+        sink = SimpleNamespace(write=lambda kind, payload: written.append((kind, payload)))
+        _flush_request_observation(sink, handle)  # type: ignore[arg-type]
+        accounting = _session_accounting(None, handle, close_joined=True)  # type: ignore[arg-type]
+        assert "verifier" not in written[-1][1]
+        assert accounting.verifier_requests is None
+
+    @pytest.mark.asyncio
+    async def test_an_armed_episode_carries_the_count_into_the_accounting_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """Through ``run_session_episode``: arming reaches the sealed snapshot.
+
+        The fake target has no command capability, so the armed verifier can
+        never issue a request -- which is exactly the measured 0 the event and
+        ``outcome.json`` must state instead of ``null``.
+        """
+
+        from local_operator.evaluation.completion_verifier import (
+            CompletionVerifierConfig,
+        )
+        from local_operator.evaluation.session_arm import _outcome_json
+
+        run, _session, _adapter = TestAgentStopOutcome()._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[[{"kind": "wait", "duration_ms": 10}]],
+            config_overrides={"completion_verifier": CompletionVerifierConfig(rounds=1)},
+        )
+        outcome = await run()
+
+        assert outcome.accounting.verifier_requests == 0
+        assert _outcome_json(outcome)["accounting"]["verifier_requests"] == 0
+        events = [
+            json.loads(line)
+            for line in (outcome.record_root / "events.jsonl").read_text().splitlines()
+        ]
+        [accounting_row] = [row for row in events if row.get("kind") == "accounting"]
+        assert '"verifier_requests": 0' in json.dumps(accounting_row)
+        # The requests row keeps its byte-for-byte rule: no rows, no key.
+        [requests_row] = [row for row in events if row.get("kind") == "requests"]
+        assert '"verifier"' not in json.dumps(requests_row)
+
+
+class _RaisingTurnSession(_ScriptedSession):
+    """A turn that raises before any batch, on a session whose owned join is
+    COMPLETE -- so the exception path runs cleanup rather than the retained
+    hold (``_ExplodingSession`` is the unverified-join sibling)."""
+
+    async def prompt(
+        self, text: str, *, images: Any = None, harness_injected: bool = False
+    ) -> None:
+        del text, images, harness_injected
+        raise SessionArmError("synthetic mid-turn failure")
+
+
+class TestCleanupSettlesTheRescueDescriptor:
+    """The descriptor's fate is decided by cleanup's RECEIPTS, not its raise.
+
+    ``rescue.json`` is the durable statement "this episode may still own a
+    resource". The decision used to live inside ``cleanup()``'s ``except``, so
+    a CLEAN cleanup -- the ordinary ending -- never discarded it (every clean
+    episode left a descriptor for the sweep to re-release) and a cleanup that
+    RETURNED non-clean receipts was never routed to rescue. The reply arm
+    (``EpisodeRunner._close_out``) has always decided on the aggregate.
+    """
+
+    @staticmethod
+    def _descriptors(tmp_path: Path) -> list[Path]:
+        return sorted((tmp_path / "rescue").rglob("rescue.json"))
+
+    @staticmethod
+    def _fixture(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scratch: Path, **kwargs: Any
+    ) -> tuple[Any, Any, list[Any]]:
+        """``TestReleaseRetention``'s fixture (its rescue double RECORDS calls)
+        over a session whose owned join is honestly complete, so the arm
+        reaches cleanup instead of the retained hold."""
+
+        kwargs.setdefault(
+            "session", _ScriptedSession(scratch, [[{"kind": "wait", "duration_ms": 10}]])
+        )
+        run, _session, adapter, rescued = TestReleaseRetention()._fixture(
+            tmp_path=tmp_path, monkeypatch=monkeypatch, scratch_root=scratch, **kwargs
+        )
+        return run, adapter, rescued
+
+    @pytest.mark.asyncio
+    async def test_a_clean_cleanup_discards_the_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        run, adapter, rescued = self._fixture(tmp_path, monkeypatch, short_scratch)
+        outcome = await run()
+
+        assert adapter.calls.count("cleanup") == 1
+        assert outcome.rescue_required is False
+        assert outcome.rescue_complete is None
+        assert rescued == []  # nothing to rescue: cleanup confirmed every action
+        assert self._descriptors(tmp_path) == []
+
+    @pytest.mark.asyncio
+    async def test_a_returned_receipt_that_forces_rescue_keeps_the_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """Cleanup RETURNS (no raise) with a failed action: rescue owns it now."""
+
+        run, adapter, rescued = self._fixture(
+            tmp_path, monkeypatch, short_scratch, rescue_complete=False
+        )
+        adapter.cleanup_status = "failed"
+        outcome = await run()
+
+        assert adapter.calls.count("cleanup") == 1
+        assert outcome.rescue_required is True
+        assert len(rescued) == 1  # the returned receipts reached the rescue path
+        assert outcome.rescue_complete is False
+        # An incomplete rescue leaves the descriptor for the sweep.
+        assert len(self._descriptors(tmp_path)) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_forced_rescue_that_completes_retires_the_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        run, adapter, rescued = self._fixture(tmp_path, monkeypatch, short_scratch)
+        adapter.cleanup_status = "failed"
+        outcome = await run()
+
+        assert outcome.rescue_required is True
+        assert outcome.rescue_complete is True
+        assert len(rescued) == 1
+        assert self._descriptors(tmp_path) == []
+
+    @pytest.mark.asyncio
+    async def test_a_raising_cleanup_keeps_the_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """Existing behaviour, pinned: a raise is never evidence of cleanup."""
+
+        run, adapter, rescued = self._fixture(
+            tmp_path, monkeypatch, short_scratch, rescue_complete=False
+        )
+        original = adapter._call_raw
+
+        async def raising(method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+            if method == "cleanup":
+                adapter.calls.append("cleanup")
+                raise RuntimeError("synthetic cleanup transport loss")
+            return await original(method, params, result_type, **kwargs)
+
+        monkeypatch.setattr(adapter, "_call_raw", raising)
+        outcome = await run()
+
+        assert outcome.rescue_required is True
+        assert len(rescued) == 1
+        assert outcome.rescue_complete is False
+        assert len(self._descriptors(tmp_path)) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_score_failure_after_cleanup_does_not_rescue_twice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """Cleanup runs BEFORE a score failure is re-raised, so the exception
+        path finds it already settled: one rescue, one answer.
+
+        A failed score poisons the adapter session, so that cleanup cannot
+        confirm anything and hands the descriptor to rescue. The re-raise then
+        lands in the exception path, which used to rescue a SECOND time -- on
+        a worker the first, complete rescue had just retired.
+        """
+
+        run, adapter, rescued = self._fixture(tmp_path, monkeypatch, short_scratch)
+        original = adapter._call_raw
+
+        async def failing_score(method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+            if method == "score":
+                raise RuntimeError("synthetic score failure")
+            return await original(method, params, result_type, **kwargs)
+
+        monkeypatch.setattr(adapter, "_call_raw", failing_score)
+        outcome = await run()
+
+        assert outcome.status == "failed"
+        assert "synthetic score failure" in (outcome.diagnostic or "")
+        assert len(rescued) == 1
+        assert outcome.rescue_required is True
+        assert outcome.rescue_complete is True
+        assert self._descriptors(tmp_path) == []
+
+    @staticmethod
+    def _ambiguous_prepare(adapter: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``prepare`` raises, i.e. the reply is lost and the call is AMBIGUOUS:
+        the supervisor poisons the session and marks rescue required while the
+        provisional descriptor is on disk and no cleanup plan exists yet."""
+
+        original = adapter._call_raw
+
+        async def failing_prepare(method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+            if method == "prepare":
+                raise RuntimeError("synthetic prepare failure")
+            return await original(method, params, result_type, **kwargs)
+
+        monkeypatch.setattr(adapter, "_call_raw", failing_prepare)
+
+    @pytest.mark.asyncio
+    async def test_a_failure_before_the_cleanup_plan_exists_is_rescued_exactly_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """PR #4236 review M1. The settlement moved inside the branch that
+        needs a cleanup plan, so an ambiguous ``prepare`` -- rescue required,
+        descriptor persisted, ``plan is None`` -- reached NO decision: zero
+        rescue attempts and ``rescue.json`` left in the inbox, on a path that
+        used to be rescued. There are no receipts to settle on here, so the
+        rescue is the only release: one attempt, and a complete one retires
+        the descriptor."""
+
+        run, adapter, rescued = self._fixture(tmp_path, monkeypatch, short_scratch)
+        self._ambiguous_prepare(adapter, monkeypatch)
+        outcome = await run()
+
+        assert outcome.status == "failed"
+        assert "synthetic prepare failure" in (outcome.diagnostic or "")
+        # Nothing past the failed call ran: no cleanup produced any receipt.
+        assert "reset_start" not in adapter.calls and "cleanup" not in adapter.calls
+        assert outcome.rescue_required is True
+        assert len(rescued) == 1
+        assert outcome.rescue_complete is True
+        assert self._descriptors(tmp_path) == []
+
+    @pytest.mark.asyncio
+    async def test_an_incomplete_rescue_before_the_cleanup_plan_keeps_the_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """The other half of "settled per its result": a rescue that does not
+        complete leaves the descriptor for the sweep, and is still tried once."""
+
+        run, adapter, rescued = self._fixture(
+            tmp_path, monkeypatch, short_scratch, rescue_complete=False
+        )
+        self._ambiguous_prepare(adapter, monkeypatch)
+        outcome = await run()
+
+        assert outcome.status == "failed"
+        assert outcome.rescue_required is True
+        assert len(rescued) == 1
+        assert outcome.rescue_complete is False
+        assert len(self._descriptors(tmp_path)) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_episode_with_a_clean_cleanup_discards_the_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """The exception path runs the SAME cleanup and owes the same decision:
+        a turn that raised says nothing about whether the worker was released."""
+
+        run, adapter, rescued = self._fixture(
+            tmp_path,
+            monkeypatch,
+            short_scratch,
+            session=_RaisingTurnSession(short_scratch, []),
+        )
+        outcome = await run()
+
+        assert outcome.status == "failed"
+        assert adapter.calls.count("cleanup") == 1
+        assert outcome.rescue_required is False
+        assert rescued == []
+        assert self._descriptors(tmp_path) == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_episode_with_an_unclean_cleanup_keeps_the_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        run, adapter, rescued = self._fixture(
+            tmp_path,
+            monkeypatch,
+            short_scratch,
+            session=_RaisingTurnSession(short_scratch, []),
+            rescue_complete=False,
+        )
+        adapter.cleanup_status = "failed"
+        outcome = await run()
+
+        assert outcome.status == "failed"
+        assert outcome.rescue_required is True
+        assert len(rescued) == 1
+        assert len(self._descriptors(tmp_path)) == 1
+
+
+#: The conftest builder itself: ``TestDisclosedInfraInTheSessionRecord``
+#: replaces this module's ``build_spec`` global for one fixture and still needs
+#: the original underneath.
+_BUILD_SPEC = build_spec
+
+
+class TestDisclosedInfraInTheSessionRecord:
+    """A session-arm record states the disclosed infra overrides it ran under.
+
+    WHY. The launcher's disclosure lives in ``EpisodeSpec.metadata`` and only
+    the reply arm's ``EvidenceManifest`` ever sealed it. This arm builds no
+    manifest, so a session record could not show that a declared
+    ``EVALUATOR_TOOL_PATH`` was in effect (found reading a real session-arm
+    record on PR #4236): two runs of one task, scored with and without the
+    evaluator's host tools, were evidence-identical. The ``reset`` row now
+    carries ``disclosed_infra``, keyed through the same table as the manifest.
+    """
+
+    @staticmethod
+    def _reset_row(outcome: Any) -> dict[str, Any]:
+        lines = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        [row] = [
+            row
+            for row in (json.loads(line) for line in lines if line.strip())
+            if row["kind"] == "reset"
+        ]
+        return row
+
+    @staticmethod
+    def _infra(name: str, value: str) -> Any:
+        from local_operator.evaluation.adapters.api import ScopedInfraValue
+
+        return ScopedInfraValue(name=name, purpose="benchmark_compute", value=value)
+
+    @staticmethod
+    def _spec_with_infra(episode_id: str, *values: Any) -> Any:
+        # ``EpisodeSpec`` is frozen; same construction as the runner tests'
+        # ``_spec_with_infra`` (bound at import, so the fixture's patched
+        # module global below cannot recurse into this).
+        spec = _BUILD_SPEC(episode_id)
+        object.__setattr__(spec, "infra_values", tuple(values))
+        return spec
+
+    def test_every_disclosed_value_is_stamped_under_its_manifest_key(self) -> None:
+        """ONE table: whatever the reply arm's manifest would name, this names
+        identically -- so adding a disclosed value cannot skip the session arm."""
+
+        from local_operator.evaluation.runner.episode import (
+            DISCLOSED_INFRA_METADATA_KEYS,
+        )
+        from local_operator.evaluation.session_arm import _disclosed_infra_stamp
+
+        supplied = {name: f"value-for-{name.lower()}" for name in DISCLOSED_INFRA_METADATA_KEYS}
+        assert "EVALUATOR_TOOL_PATH" in supplied
+        spec = self._spec_with_infra(
+            "ep-disclose",
+            *(self._infra(name, value) for name, value in supplied.items()),
+            # Ordinary infra is not a disclosed override and stays out.
+            self._infra("OSWORLD_TTL_SECONDS", "900"),
+        )
+
+        assert _disclosed_infra_stamp(spec) == {
+            DISCLOSED_INFRA_METADATA_KEYS[name]: value for name, value in supplied.items()
+        }
+        assert _disclosed_infra_stamp(build_spec("ep-disclose-none")) == {}
+
+    @pytest.mark.asyncio
+    async def test_the_reset_row_carries_the_declared_tool_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """Through the real driver: the value ``prepare`` was handed is the one
+        the sealed record names, in the row written once the environment the
+        value shaped exists."""
+
+        from local_operator.evaluation.adapters.api import Requirement
+
+        tool_path = "/opt/evaluator-tools:/opt/more-tools"
+        value = self._infra("EVALUATOR_TOOL_PATH", tool_path)
+        # The shared fixture builds its own spec through this module's
+        # ``build_spec``; give it one carrying the override.
+        monkeypatch.setattr(
+            sys.modules[__name__],
+            "build_spec",
+            lambda episode_id: self._spec_with_infra(episode_id, value),
+        )
+        run, adapter, _rescued = TestCleanupSettlesTheRescueDescriptor._fixture(
+            tmp_path, monkeypatch, short_scratch
+        )
+        # The gate refuses a disclosed value the adapter build does not declare.
+        adapter.declared_requirements = (
+            Requirement(
+                requirement_id="EVALUATOR_TOOL_PATH",
+                kind="infra",
+                name="EVALUATOR_TOOL_PATH",
+                required=False,
+            ),
+        )
+        outcome = await run()
+
+        assert outcome.score is not None, outcome
+        row = self._reset_row(outcome)
+        assert row["disclosed_infra"] == {"evaluator_tool_path": tool_path}
+
+    @pytest.mark.asyncio
+    async def test_a_run_without_overrides_states_that_it_had_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """An empty mapping is a stated fact; a missing key would leave a
+        reader to guess whether the run predates the stamp."""
+
+        run, _adapter, _rescued = TestCleanupSettlesTheRescueDescriptor._fixture(
+            tmp_path, monkeypatch, short_scratch
+        )
+        outcome = await run()
+
+        assert self._reset_row(outcome)["disclosed_infra"] == {}
 
 
 class TestTheStreamCompletedStopBoundary:

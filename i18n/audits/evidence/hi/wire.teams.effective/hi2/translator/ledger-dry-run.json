@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/damian/local-operator/.venv/bin/python",
+    "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/scripts/i18n/ledger.py",
+    "append",
+    "--receipt",
+    "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/translator-receipt.json",
+    "--expected-history-sha",
+    "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "--dry-run"
+  ],
+  "expected_history_sha": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "exit_code": 0,
+  "stdout": "i18n/audit-history/hi/wire.teams.effective.json\n",
+  "stderr": "",
+  "apply": false
+}

@@ -422,6 +422,7 @@ def test_install_registers_the_tick_step_once():
 
 
 def test_every_advertised_op_capability_has_a_registered_handler(rig):
+    from local_operator.mobile import remote_sessions
     from local_operator.network import relay, wire
     from local_operator.network.credentials import owner
     from local_operator.network.types import OP_CAPABILITY
@@ -444,6 +445,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # and answers that field; it adds no op and no new kind, which is why the
         # receiver it names is the broker itself, exactly as the two push strings do.
         wire.CREDENTIAL_PLACEMENT_DIGEST_V1: "net_broker",
+        # The renew nudge is a ``renew`` KIND on the broker op (``renew_push``),
+        # routed to its receiver even on a borrower-only device with no broker.
+        wire.CREDENTIAL_RENEW_PUSH_V1: "net_broker",
         # Catalogue is a metadata kind on the installed broker, not a pure
         # handshake feature or a second unregistered peer operation.
         wire.CREDENTIAL_CATALOGUE_METADATA_V1: "net_broker",
@@ -453,15 +457,26 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         "credential-refresh-v1": "net_broker",
         "peer-readiness-v1": "net_readiness",
         "mcp-defs-v1": "net_mcp_defs",
+        wire.SKILLS_SYNC_V1: "net_skills",
         "memory-sync-v1": "net_memory",
         "mesh-update-v1": "net_update",
         wire.MESH_RESTART_V1: "net_restart",
         # The single-file pull (network/files.py; mesh-file-transfer.md S1).
         wire.MESH_FILE_V1: "net_file_get",
+        # A peer session's Files index (network/file_index.py; remote-files-parity §2).
+        wire.MESH_FILE_INDEX_V1: "net_session_files",
         "peer-journal-source-v1": "net_session_history",
         # The remote peek (network/peek.py) is a real new peer op, not a pure feature:
         # advertising it promises an owner that answers ``net_session_peek``.
         wire.SESSION_PEEK_V1: "net_session_peek",
+        # The owner-folded mobile read adds no op: it gates a ``mobile_session_read``
+        # mode on the existing history op (``RelayServer._op_session_history`` hands
+        # it to ``mobile.remote_sessions.owner_read``), so advertising it promises an
+        # owner whose ``net_session_history`` handler folds the projection itself.
+        remote_sessions.READ_CAPABILITY: "net_session_history",
+        # Supplement bytes are another ``mobile_session_read`` purpose on the same
+        # op (``owner_read``'s ``supplement`` branch), checked by both peers; no op.
+        wire.MOBILE_SESSION_SUPPLEMENTS_V1: "net_session_history",
         # Change pushes gate a receiving mode on the existing membership op;
         # advertising them promises that its handler understands bound snapshots.
         wire.MEMBER_LIST_PUSH_V1: "net_member_list",
@@ -469,6 +484,11 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # fields on the existing catalogue answer (``RelayServer._rows_for_viewer``),
         # so advertising it promises an owner whose ``net_catalog`` handler stamps them.
         wire.REMOTE_ATTENTION_V1: "net_catalog",
+        # Advertising the binding promises verification/storage of the signed
+        # onboarding proof through this dedicated peer op, not just a wire feature.
+        wire.OPERATOR_BINDING_V1: "net_operator_binding",
+        # The working-set move gate rides the existing move op's phases.
+        wire.SESSION_MOVE_WORKSET_V1: "net_session_move",
     }
     pure_features = {
         # Reserved pool feature: no compute-pool op or dispatch contract exists yet.
@@ -485,6 +505,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # and the ask condition only adds ``if_digest`` to that same frame. A peer
         # lacking it keeps receiving full tables. No new dispatchable op.
         wire.MEMBER_LIST_DIGEST_V1,
+        # Diagnostic only: says this build's listener signs its welcome and its dialer
+        # requires that proof (mesh-listener-auth). No op, and never gates anything.
+        "listener-proof-v1",
     }
     assert set(wire.LINK_CAPABILITIES) == set(handlers) | pure_features
     server = relay.RelayServer(root=rig.root, identity=rig.own)

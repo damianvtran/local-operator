@@ -46,6 +46,7 @@ from local_operator.harness.jobs import FALLBACK_MARKER, is_model_fallback
 # tui.small with the other small shared TUI fragments.
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
+from local_operator.tui import hotkey_hints
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.costs import SubtreeComponents, subtree_components, subtree_cost
@@ -1639,7 +1640,12 @@ def summary_counts(jobs: Sequence[Any], *, paused_ids: set[str] | None = None) -
 
 
 def _summary_segments(
-    counts: SummaryCounts, scope: str, spinner_glyph: str, *, dropped: frozenset[str]
+    counts: SummaryCounts,
+    scope: str,
+    spinner_glyph: str,
+    *,
+    dropped: frozenset[str],
+    hotkey: str = _HOTKEY,
 ) -> list[tuple[str, str, str]]:
     """``(name, text, semantic ink)`` for every segment that survives ``dropped``.
 
@@ -1688,12 +1694,17 @@ def _summary_segments(
         segments.append(("cancelled", f"{counts.cancelled} cancelled", "dim"))
     if counts.interrupted and "interrupted" not in dropped:
         segments.append(("interrupted", f"{counts.interrupted} interrupted", "dim"))
-    segments.append(("hotkey", _HOTKEY, "muted"))
+    segments.append(("hotkey", hotkey, "muted"))
     return segments
 
 
 def compose_summary(
-    counts: SummaryCounts, *, spinner_glyph: str, width: int, scope: str = ""
+    counts: SummaryCounts,
+    *,
+    spinner_glyph: str,
+    width: int,
+    scope: str = "",
+    hotkey: str = _HOTKEY,
 ) -> Text:
     """The one-row summary the panel paints in :attr:`Density.SUMMARY`.
 
@@ -1724,7 +1735,7 @@ def compose_summary(
     """
     # The hotkey's own cells come off the top, separator included, so the name
     # yields before the way back out does — the rule `_scope_width` states.
-    scope_cells = _scope_width(width, hint_cells=cell_len(STATS_SEAM) + cell_len(_HOTKEY))
+    scope_cells = _scope_width(width, hint_cells=cell_len(STATS_SEAM) + cell_len(hotkey))
     scope = truncate_cells(scope, scope_cells) if scope and scope_cells else ""
     inks = {
         name: Style(color=theme_mod.semantic_color(name)) for name in ("dim", "muted", "danger")
@@ -1733,7 +1744,9 @@ def compose_summary(
     # The widest frame is the reference so the choice is stable across frames.
     widest = max(SPINNER_FRAMES, key=cell_len)
     for _ in range(len(_SUMMARY_SHED_ORDER) + 1):
-        segments = _summary_segments(counts, scope, widest, dropped=frozenset(dropped))
+        segments = _summary_segments(
+            counts, scope, widest, dropped=frozenset(dropped), hotkey=hotkey
+        )
         needed = sum(cell_len(text) for _name, text, _ink in segments)
         needed += cell_len(STATS_SEAM) * (len(segments) - 1)
         if needed <= width:
@@ -1742,7 +1755,9 @@ def compose_summary(
         if not remaining:
             break
         dropped.add(remaining[0])
-    segments = _summary_segments(counts, scope, spinner_glyph, dropped=frozenset(dropped))
+    segments = _summary_segments(
+        counts, scope, spinner_glyph, dropped=frozenset(dropped), hotkey=hotkey
+    )
     row = Text(no_wrap=True, overflow="ellipsis")
     for index, (_name, text, ink) in enumerate(segments):
         if index:
@@ -2550,10 +2565,13 @@ class SubagentPanel(Container):
         # trying to get back to a known shape (round 1, U1/D2). "Shrink" is
         # true of every forward step and names no destination.
         row.append(
-            _t(
-                _x.subagent_panel_ctrl_g_shrink()
-                if self._expanded
-                else _x.subagent_panel_ctrl_g_expand()
+            hotkey_hints.live_copy(
+                self,
+                _t(
+                    _x.subagent_panel_ctrl_g_shrink()
+                    if self._expanded
+                    else _x.subagent_panel_ctrl_g_expand()
+                ),
             ),
             style=muted,
         )
@@ -2925,6 +2943,32 @@ class SubagentPanel(Container):
             self._dirty = True
             self._start_spinner()
 
+    def _toggle_key(self) -> str:
+        """The key this panel's hints NAME: the live remap, else the default.
+
+        The header and the summary reserve this key's cells before truncating
+        the scope, so a remap that lengthens the chord shortens the name
+        instead of pushing the hint off the row — the budget rule the module
+        records above :data:`_HOTKEY`.
+        """
+        return hotkey_hints.live_key(self, "keymap.toggle_subagents")
+
+    def keymap_hints_changed(self) -> None:
+        """Forget the header/summary equality guards after a live remap (R1).
+
+        ``_paint_header`` skips its write when `(shown, compact, hint, scope)`
+        are unchanged and `_paint_summary` when its summary key is unchanged —
+        correct for a 1 Hz poll, wrong for a remap: the key is none of those
+        four inputs, so the old chord stayed painted until an unrelated event.
+        Dropping the flags here makes the app's band refresh repaint both.
+        """
+        self._header_shown = False
+        self._header_compact = False
+        self._header_hint = False
+        self._header_scope = ""
+        self._summary_key = None
+        self.refresh(layout=True)
+
     def _paint_header(self) -> None:
         """Paint the panel's identifying label.
 
@@ -2968,7 +3012,7 @@ class SubagentPanel(Container):
         # 45 at 40, 44 and 36 columns). `_scope_width` reserves the hint's cells
         # first and drops the scope when what is left cannot name anything —
         # the hint is the way back out of the page and outranks the name of it.
-        hint_cells = (cell_len(HINT_GAP) + cell_len(_HOTKEY)) if hint else 0
+        hint_cells = (cell_len(HINT_GAP) + cell_len(self._toggle_key())) if hint else 0
         scope_cells = _scope_width(self._row_width(), hint_cells=hint_cells)
         scope = truncate_cells(self._selected_label, scope_cells) if scope_cells else ""
         if (
@@ -3010,7 +3054,7 @@ class SubagentPanel(Container):
             # has learned holds a statistic — it read as "Subagents, and also
             # ctrl+g" rather than "Subagents (press ctrl+g)" (round 1, D3).
             header.append(HINT_GAP, style=dim)
-            header.append(_HOTKEY, style=muted)
+            header.append(self._toggle_key(), style=muted)
         self._header.update(header)
 
     def _summary_counts_cached(self) -> SummaryCounts:
@@ -3118,7 +3162,13 @@ class SubagentPanel(Container):
         self._header_compact = True
         self._summary_key = key
         self._header.update(
-            compose_summary(counts, spinner_glyph=glyph, width=width, scope=self._selected_label)
+            compose_summary(
+                counts,
+                spinner_glyph=glyph,
+                width=width,
+                scope=self._selected_label,
+                hotkey=self._toggle_key(),
+            )
         )
 
     def summary_text(self) -> str:

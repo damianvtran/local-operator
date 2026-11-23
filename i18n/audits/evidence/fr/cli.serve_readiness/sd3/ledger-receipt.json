@@ -1,0 +1,49 @@
+{
+  "locale": "fr",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10",
+  "status": "passed",
+  "audit_date": "2026-11-16",
+  "auditor": {
+    "agent": "Audit daemon French (i18n-auditor)",
+    "session": "19f657b90086",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "170903662c6e",
+    "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol",
+    "fallback": {
+      "observed": false,
+      "reported": false,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "170903662c6e",
+    "model": "openai/gpt-6.1-sol",
+    "provenance_source": "Task brief identifies same original translator; previous task acf0a84cd992 actual model openai/gpt-6.1-sol. Current job identity supplied by requesting session, not independently queried."
+  },
+  "note": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/record.json; sd3 first independent revised-copy pass: 11 changed/new audited, 4 unchanged proven; 15-key mechanics; 0 findings",
+  "record_reference": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/record.json",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "open_finding_ids": [],
+    "findings_report": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/report.md"
+  },
+  "bundle_companions": [
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/report.md",
+      "sha256": "fcd94ceae38fea4a79affa324f6fef5b5eab1ffefa3d5f1a35e9ca68e14a872a"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/audit.log",
+      "sha256": "bce90939e92c4724525d8b538746dbb4036a9d3f0f1e48463907b00a30a5e8cc"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/verify.py.txt",
+      "sha256": "e4fbd1f515c7a42b1f197571d7ddb57b1e9c735ab7ddf733fc3ec4c92429bb12"
+    }
+  ]
+}

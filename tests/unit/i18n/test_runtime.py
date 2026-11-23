@@ -68,6 +68,15 @@ class TestPlural:
         assert "other" in str(err.value) or "category" in str(err.value)
 
 
+def test_rendered_parts_keep_interpolation_owners_in_selected_order() -> None:
+    source = "{n, plural, other {{slot, select, yes {{second}/{first}/{second} #} other {unused}}}}"
+    params = {"n": 4, "slot": "yes", "first": "same", "second": "same"}
+    parts = runtime.render_message_parts(source, params, "en")
+    assert "".join(text for text, _ in parts) == render(source, params) == "same/same/same 4"
+    assert [owner for _, owner in parts if owner] == ["second", "first", "second"]
+    assert all(owner is None for text, owner in parts if text == "4")
+
+
 class TestSelect:
     def test_matching_key_and_fallback(self) -> None:
         src = "{gender, select, male {He} female {She} other {They}} replied"

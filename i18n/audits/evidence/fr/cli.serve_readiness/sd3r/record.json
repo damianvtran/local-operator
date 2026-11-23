@@ -1,0 +1,262 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3r",
+  "audit_date": "2026-11-16",
+  "key_count": 15,
+  "auditor": {
+    "agent": "Audit daemon French (i18n-auditor)",
+    "session": "19f657b90086",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "7f2b030d2636",
+    "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol",
+    "fallback": {
+      "observed": false,
+      "reported": false,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7f2b030d2636",
+    "model": null,
+    "actual_model_source": "Request names the current translator job but does not supply its actual model. Prior translator model is not assumed to establish this job model.",
+    "fallback": "unknown for translator job; no inference made"
+  },
+  "source_audit_revision": {
+    "base": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+    "includes_uncommitted_catalogues": true,
+    "includes_uncommitted_readiness_selection": true
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e4e9031bf84e0d6e9edea53f41d54ad03adb96b53d9f0c87872971d2c1aee629"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/cli.serve_readiness.json",
+      "sha256": "64cccc02900fd20a7070edfde9eb36e87b1c966486de63d9034df77108d59d15"
+    }
+  },
+  "source_selection": {
+    "path": "local_operator/network/readiness.py",
+    "sha256": "3adbd0122dc704320bd77991299071739057da36d34e39bec7d6591821d5968b",
+    "selection_read_ranges": [
+      "3007-3057",
+      "3144-3163",
+      "3181-3217"
+    ],
+    "unchanged_since_sd3": true
+  },
+  "policy_inputs": [
+    {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/audits/evidence/README.md",
+      "sha256": "f98005f6797ad42d3e0c8d8f72516bf684519ad9e6b7ad7ac83812bbdb4a4d3b"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    }
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/report.md",
+      "sha256": "5c0d682ed79ff900d96767a4506b2a63774e306cd85de31a3b6d1c78b0ff8e45"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/audit.log",
+      "sha256": "4988670ac9943fbbc8ab4e6d9695ad97a04380ed2c63ddb93be27b1c86ecc428"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/verify.py.txt",
+      "sha256": "a75b6370865843d49e2a88a983694160af7920b9d8a5a101256e4eefc34f3481"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/ledger-receipt.json",
+      "sha256": "f904a59c2e4e2e05c0b9c0706243a0aa22dbb7365a1e4d65b1c568ad1b6bc298"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/ledger-dry-run.log",
+      "sha256": "7966f0daa98ba19ebed13dc9f049a429129ed41f8401f7bfb15b5c28233fb791"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/receipt.json",
+      "sha256": "6293cbb02edb245f599bcc10b6df508216149d92f6eefbde585f003b90621ae2"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "open_finding_ids": [],
+    "findings_report": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/report.md"
+  },
+  "findings": [],
+  "coverage": {
+    "changed_key": "cli.serve_readiness.not_this_daemon",
+    "changed_current_text": "enregistrement présent, mais réutilisation de PID détectée",
+    "semantically_rechecked_neighbors": [
+      "cli.serve_readiness.pid_reason",
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.and_more"
+    ],
+    "prior_record": {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/record.json",
+      "sha256": "7dacbad8c2ec175ed4536254ccb4a6bf62927b05f218d4c930880fe731235a21"
+    },
+    "retained_unchanged_target_key_count": 14,
+    "retained_unchanged_keys": [
+      "cli.serve_readiness.unproven",
+      "cli.serve_readiness.not_reporting",
+      "cli.serve_readiness.unknown_state",
+      "cli.serve_readiness.install_unknown",
+      "cli.serve_readiness.cgroup_unknown",
+      "cli.serve_readiness.recorded_gap",
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.stale",
+      "cli.serve_readiness.other_unit",
+      "cli.serve_readiness.identity_restart",
+      "cli.serve_readiness.pid_reason",
+      "cli.serve_readiness.and_more",
+      "cli.serve_readiness.identity_no_action",
+      "cli.serve_readiness.identity_restart_manual"
+    ],
+    "proof": "Replace sole changed French value with its sd3 value; reconstructed entire raw file SHA-256 matches sd3. Same proof for one English value and sole context note.",
+    "previous_input_hashes": {
+      "en": {
+        "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+        "sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10"
+      },
+      "context": {
+        "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+        "sha256": "40d35aa2e026aa02a96376d4c550023446af21b89456ad0c80cd9540e8a63428"
+      },
+      "fr": {
+        "path": "local_operator/i18n/catalogues/fr/cli.serve_readiness.json",
+        "sha256": "04dd067c9bca413031a8ee2012b299f2979035c1701a827a354a428cbe3ede57"
+      }
+    },
+    "semantic_coverage_total": 15,
+    "mechanical_coverage_total": 15,
+    "first_auditor_current_target_followup": true,
+    "second_independent_audit_claimed": false,
+    "deferred_scope": "cgroup wording N1 not reopened"
+  },
+  "review_trigger": {
+    "id": "RU-SD3-01",
+    "applies_to_locale": "ru",
+    "french_assessment": "New French diagnosis is number-neutral and integrates correctly with plural PID groups; no Russian disposition claimed"
+  },
+  "mechanical_result": {
+    "catalogue_validator_exit_code": 0,
+    "parser_verification_exit_code": 0,
+    "keys_checked": 15,
+    "plural_messages_checked": 6,
+    "french_categories": [
+      "one",
+      "many",
+      "other"
+    ],
+    "counts_rendered": [
+      0,
+      1,
+      2,
+      1000000,
+      1500000
+    ],
+    "opaque_tokens_and_code_preserved": true,
+    "pid_reuse_group_counts": [
+      1,
+      2,
+      1000000
+    ]
+  },
+  "audit_notes_not_execution_log": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/report.md",
+  "execution_logs": [
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/audit.log",
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/ledger-dry-run.log"
+  ],
+  "artifact_provenance": "All companions belong to this record and actual auditor. Logs carry explicit record references and captured actual command stdout/stderr/exit codes. report.md is reasoning, not execution evidence. verify.py.txt is exact executed verification source.",
+  "ledger": {
+    "candidate_receipt": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/ledger-receipt.json",
+    "dry_run_exit_code": 0,
+    "expected_history_sha256_at_dry_run": "a052b379228ca1206bccf0cc96ac39fe70599c9cd07d10b00857e0d0ff5f8f6b",
+    "appended": false,
+    "parent_owns_append": true,
+    "note_length": 177
+  },
+  "prior_evidence_preservation": {
+    "file_count": 44,
+    "files": {
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/audit.log": "f0eabe55491f2487c526c66010e46194294733d9e4511d8b5ec0137127b44b1c",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/verify.py.txt": "44ce583dd974c25a7f4bb6f5fbbad88cc6c72d7b3739451c7aea8cb246b54a73",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/report.md": "4276e6a88cc10b0a42e5232763d4a0cfba28a516d4ee9d0ed392a362b84ab238",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/receipt.json": "aa028ae984c71fb2c951f363035941e9cfd3687b6eaab0112e6f2dfb9a116c66",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/ledger-dry-run.log": "2473e045974f146ddc1d2f2920006ff2f7acc5922dd014a3e844817e3de29271",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1/record.json": "f2f322d3ac4d38687d83e0e60869a402742af178507e5aeac7ae1779c58eb482",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2/reproduce.py.txt": "8896855117f614341eb08d28eb640e23797c2c475fb422b6f0f49cddfc41b31b",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2/independent-verdict.json": "1b744d59c110a0b43f84b64ccd58af55cdd2c176f3d42a04a7c99bbebf685131",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2/comparison-note.md": "06f73dbf7c530d09c040021e99c68e993b32a70c41dff2ca08d8536608e4b0a2",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2/driver-recovery.log": "107999ed1808d2b282aefa36095053521d1b7b145cd7c187a6dba1e3abbeb8c3",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2/audit.log": "3176affdf6c6ed6a1c55363b9717ea4911bb14f888f9f57d86c8148602995ebb",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2/rendered.txt": "494dd8f2116d165a495127efc99402811147d98fa8f52b7db504bea841daace7",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2/report.md": "be9a13d6c9e01f6d2e970904f57a1197edb0100c95e3fd09701da8756724dc73",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2/record.json": "ce426beee7ca44cf4841cf1b7893b372db92ba63bb5934384a53e335b13dc8c8",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2/receipt.json": "49874a92e04dd89e29da8af1d537bde08a9f70cb69efb6b457f78c6e3d2c431b",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/verify.py.txt": "02de8cf6d86d1bd6932fc8600346462ef52621293bfa7e49ca4d97636d805187",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/audit.log": "2f24263ac7048c0101f138a2feac5f79a02a1ea34b44d527eb608fc7121692b5",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/report.md": "4ab4ff7ee398cb32b6dbd69eb66adcd0dbed70184455f8ef771e88623f72f750",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/ledger-receipt.json": "f5c3068693a218a49c78744b44db5b47e0c1ffa4d932e279775fc2e458e968ae",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/ledger-dry-run.log": "023ee7d12a80267a54086c03d66b4e029008ec98c86e53a0fe5c9cbd3170d1ea",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/receipt.json": "d688ed94892154e559d5f9659f6d48b483c79f4fae93919ae3288cc78fd913bd",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/record.json": "722251f4c6ddb07810c559dc245003639aa5244f29d865b61522a2f209a1ce22",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2r/catalogue-check.py.txt": "e20e9c2b052e575f5093391f0793bc2022e80b3ec94fa55b6010f37ff7e57794",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2r/rendered.txt": "d70eea1fb83071e24ffd6c1b1da3b7c0a0c3782321511c3fc608f33e5990549b",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2r/delta.json": "d4da3e84ceba479a9ce71546ecc8dbeb476c0c030d0469263dfe1ac25572a0ba",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2r/report.md": "4e3f2187d689797a67a6fe698efdfce5b266a438d8a97a18f50783cac61ca028",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2r/record.json": "ce1ddf037844fb94d00f3f6ba77f5bde031a8aa20a40ac5d801e1399ff046ee5",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2r/audit.log": "c1ecac4f1fa41d1b5a8ae1f0ef7f25da6c093ab87f3283f31f315bde07860699",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd2r/receipt.json": "9e7be130a1b712ab2c7dc132b744609527b03d559aa315e62669a0254e17d2c5",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd3/verify.py.txt": "e4fbd1f515c7a42b1f197571d7ddb57b1e9c735ab7ddf733fc3ec4c92429bb12",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd3/audit.log": "bce90939e92c4724525d8b538746dbb4036a9d3f0f1e48463907b00a30a5e8cc",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd3/report.md": "fcd94ceae38fea4a79affa324f6fef5b5eab1ffefa3d5f1a35e9ca68e14a872a",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd3/ledger-receipt.json": "7fb0c3e3dabc12c05cdc5b0371e992cc6ce035535ad7415261bf1a0ac1642229",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd3/ledger-dry-run.log": "78ff368b5e0d762291dc08963286a30b5d2d00161ca05983abc42894cee63f80",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd3/receipt.json": "5c763a5397bdcb8e4b9d3198f7e1a1021538f5aacf4257f7b935f1a5225b2733",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd3/record.json": "7dacbad8c2ec175ed4536254ccb4a6bf62927b05f218d4c930880fe731235a21",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd4/catalogue-audit.py.txt": "832557381615d10b8c4fed9167cc8c760a31cc2e7332fc5e89c78f01b3121b8b",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd4/delta.json": "d24849ff8bd0923d3bae541526135ea1aedb5bf8e51fa488ea1abdf96cdbb87b",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd4/rendered.txt": "b1da0635d75dd51ea7097579c9b935dda20ee7dad8f5b7c36580fadbd341aa2e",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd4/report.md": "51438aa248dc2eb69b8b1e99e96ee5fcdae3ca72f3f440cf5c81992fd5714375",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd4/record.json": "0d6c25781a199ad183d911d1da082fe1945527bc93e1104e8a2a6b5c88d84e97",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd4/input-manifest.json": "e87a73d67203668ea37386ca9e92a7f56ae9810ff179a20505daa38b739650bf",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd4/audit.log": "fec3c6e4b135569cd4d20edc8e897ae98f8171b602924e7af505cac139b95a02",
+      "i18n/audits/evidence/fr/cli.serve_readiness/sd4/receipt.json": "829f832e90c951d0e6ca3fc5b67d6d736de2e69910421eccb3d31fc24a056b70"
+    }
+  },
+  "limits": {
+    "translation_or_mt_services": false,
+    "source_or_translation_edits": false,
+    "pytest_services_or_installs": false,
+    "live_terminal_or_visual_certificate": false,
+    "history_append": false,
+    "commit": false,
+    "on_main_claimed": false
+  },
+  "hash_graph_note": "Record hashes every companion. Manifest hashes other companions and references the record path without a circular hash."
+}

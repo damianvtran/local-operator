@@ -1,0 +1,174 @@
+{
+  "locale": "vi",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "b7c2ec114200f25a3e36bc978add07ae2b37274d92c3f472c01a4f6f94810a3e",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Provided by delegator; not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor/settings-audit-vi",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "fail",
+    "findings": 2,
+    "unresolved_blocker_major_count": 1
+  },
+  "status": "fail",
+  "verdict": "fail",
+  "keys_read": 21,
+  "findings": [
+    {
+      "id": "VI-01",
+      "severity": "major",
+      "key": "tui.settings_view.too_short",
+      "current": "terminal quá thấp để hiện cài đặt — hãy kéo cao thêm",
+      "proposed": "cửa sổ quá thấp để hiện cài đặt — hãy kéo cao thêm",
+      "reason": "Untranslated generic terminal violates the explicit no-English goal and glossary.md lines 37–38; vi.md lines 21–28 do not sanction terminal. Existing wire.settings.appearance.description, wire.settings.asks.description and wire.settings.display_terminal_title.label also retain terminal, but that pre-existing drift is not authorization for new untranslated copy. Cửa sổ names the resizable window described in the source context."
+    },
+    {
+      "id": "VI-02",
+      "severity": "minor",
+      "key": "tui.settings_view.editor.contract_unset",
+      "current": "{save_key} lưu · {cancel_key} hủy · để trống là bỏ đặt",
+      "proposed": "{save_key} lưu · {cancel_key} hủy · để trống để gỡ thiết lập",
+      "reason": "Bỏ đặt is an unnatural calque of unset; gỡ thiết lập expresses removing the setting in ordinary Vietnamese, preserving the documented shorter contract fallback."
+    }
+  ],
+  "checks": {
+    "key_parity": true,
+    "placeholder_parity": true,
+    "plural_categories": [
+      "other"
+    ],
+    "plural_branches": [
+      "other"
+    ],
+    "exact_numeric_plural_branches": false,
+    "plural_renders": {
+      "0": "… còn 0 mục",
+      "1": "… còn 1 mục",
+      "2": "… còn 2 mục",
+      "5": "… còn 5 mục",
+      "21": "… còn 21 mục"
+    },
+    "widths": {
+      "tui.settings_view.editor.contract": {
+        "en": 25,
+        "vi": 19,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.contract_unset": {
+        "en": 42,
+        "vi": 40,
+        "maxCells": 23
+      },
+      "tui.settings_view.editor.suggest_long": {
+        "en": 50,
+        "vi": 37,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.suggest_medium": {
+        "en": 38,
+        "vi": 31,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.suggest_short": {
+        "en": 22,
+        "vi": 20,
+        "maxCells": 23
+      },
+      "tui.settings_view.pane.agents_empty": {
+        "en": 20,
+        "vi": 26,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.empty_hint": {
+        "en": 29,
+        "vi": 23,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.more": {
+        "en": 8,
+        "vi": 11,
+        "maxCells": 16
+      },
+      "tui.settings_view.pane.providers_empty": {
+        "en": 22,
+        "vi": 22,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.providers_header": {
+        "en": 9,
+        "vi": 12,
+        "maxCells": 20
+      },
+      "tui.settings_view.pane.tab_agents": {
+        "en": 6,
+        "vi": 8,
+        "maxCells": 10
+      },
+      "tui.settings_view.pane.tab_teams": {
+        "en": 5,
+        "vi": 4,
+        "maxCells": 10
+      },
+      "tui.settings_view.pane.teams_empty": {
+        "en": 19,
+        "vi": 22,
+        "maxCells": 38
+      },
+      "tui.settings_view.row.add_chain": {
+        "en": 13,
+        "vi": 12,
+        "maxCells": null
+      },
+      "tui.settings_view.row.add_hop": {
+        "en": 11,
+        "vi": 12,
+        "maxCells": null
+      },
+      "tui.settings_view.scope.live": {
+        "en": 4,
+        "vi": 12,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.never": {
+        "en": 5,
+        "vi": 13,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.new_launch": {
+        "en": 10,
+        "vi": 13,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.new_sessions": {
+        "en": 12,
+        "vi": 9,
+        "maxCells": 14
+      },
+      "tui.settings_view.section.takes_effect": {
+        "en": 23,
+        "vi": 22,
+        "maxCells": null
+      },
+      "tui.settings_view.too_short": {
+        "en": 48,
+        "vi": 52,
+        "maxCells": null
+      }
+    },
+    "hint_ladder_cells": [
+      37,
+      31,
+      20
+    ],
+    "rendered_frame": "Not captured: this audit executes string rendering and cell budgets, not UI geometry."
+  },
+  "note": "Read-only independent audit of all 21 English/vi/context entries. No repo edits. Actual model openai/gpt-6.1-sol; no fallback. CLDR other-only, placeholders verified from bytes via message_arguments; render_message uses prescribed literal keys and /team. All NFC, no bidi controls (vi LTR; Urdu not applicable). Contract_unset 40 cells vs English 42 is allowed: production settings_view.py 4442–4470 falls back to 19-cell contract (21 including indent); short hint 20 cells (22 including indent) fits 23. Remaining capped strings fit. More at count 21 is 12/16 cells. Terms match wire.settings.classification_vendor.choice.auto.description (chặng), wire.settings.classification_vendor.label (nhà cung cấp), tui.small.settings_view.chain_row_hint (chuỗi), tui.small.settings_view.hop_count (chặng), vi.md 27–28 and glossary.md 60/77 (tác nhân/nhóm). Scope and other editor strings accurate; no T/V mismatch. Larger live/never scope labels remain within 14 cells. No live rendered-frame certification."
+}

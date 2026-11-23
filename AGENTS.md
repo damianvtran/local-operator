@@ -682,6 +682,25 @@ and quoting one total with the other's percentage is how a number stops being
 evidence.) Prefer the scoped inner loop above, and remember that the scoped `test`
 job narrows for nothing on this tree today.
 
+**To wait for heavy work, take the heavy-job slot (#4104); never loop on
+`pgrep -f <pattern>`, which matches its own command line** (twice on 2026-11-17 a
+waiter matched itself forever and read as a heavy job in another lane's check). No CLI
+waiter exists yet: the `bash` tool takes the slot itself for a heavy command
+(`pytest -n N`, JS builds, `tsc`/`vue-tsc` and `typecheck` scripts, native iOS
+builds: `xcodebuild`, `expo run:ios`/`prebuild`, `pod install`, `eas build --local`;
+not mypy/pyright, nor `xcodebuild -version`/`-list`, `pod --version`, `expo start`; `expo run:ios` keeps its slot while Metro runs
+unless `--no-bundler`), queues up to 15 min and names the holder. A serial `python -m
+pytest` of targeted FILES or node ids takes no slot while its effective xdist
+workers (command line over `PYTEST_ADDOPTS` over addopts) are 0-2, so it never
+queues behind a held one; this repo's addopts say `-n auto`, so pass `-n 0`.
+More workers, a directory or whole-suite pytest (`-k` or not: collection
+imports the tree) and `affected_tests.py --run/--evidence` take the slot.
+Otherwise check `lop services status` once (it names the holder without
+waiting), or take a specific run's exact pid once and wait with a bounded `kill -0 <pid>` loop. Never wait on any
+`pgrep -f` pattern for test or heavy names: the waiter's shell, its `timeout`
+wrapper and the parent `bash -c` all carry the text, and `[p]ytest` still matches
+a later literal in that same command line.
+
 **A local run now reports on itself, so silence is no longer ambiguous.** With
 `LOCAL_OPERATOR_SHARD_STALL_SECONDS` absent (i.e. anywhere but the CI shard job),
 `tests/shard_stall_watchdog.py` falls back to `LOCAL_DEFAULT_SECONDS` = 900 s on a
@@ -860,9 +879,11 @@ backend exists — Darwin today. command-status keeps the bound, the forwarded
 signals, the leader-exit sweep and the memory grant, signals the group only
 while its leader is unreaped, and always reports `cleanup=unknown`; it never
 certifies cleanup (`docs/design/run-bounded-contract.md`). The recipe also gives the node child
-ci.yml's heap headroom — `NODE_OPTIONS=--max-old-space-size=6144`, raised only
-when the caller's `NODE_OPTIONS` has no `--max-old-space-size` or a smaller
-one, a larger value passing through — because a bare run otherwise inherits
+heap headroom — local `run_bounded` uses a 6144 MB floor
+(`scripts/run_bounded.py` `NODE_HEAP_MB`, `NODE_OPTIONS=--max-old-space-size=6144`)
+while CI's pyright step uses 8192 on the 16 GB runner (`ci.yml`); the local value
+is raised only when the caller's `NODE_OPTIONS` has no `--max-old-space-size` or
+a smaller one, a larger value passing through — because a bare run otherwise inherits
 node's ~4 GB default cap, which OOMed the analyzer under fleet load.
 
 **1800 s, deliberately NOT the 900 s that would mirror that job's
@@ -919,6 +940,17 @@ named on the last stderr line); spawned cleanup-required runs also write
 `<run_id>.spawn.json` and `.exit.json` naming the group it owned (`--run-id` or
 `$LOCAL_OPERATOR_RUN_ID` binds the id); see `scripts/run_bounded.py`'s RUN
 RECORD section for the schema.
+
+`--start-by <epoch | ISO-8601 with offset/Z>` (also on `lop services heavy run`)
+enforces a granted window's latest start ("start by 08:05Z"): checked after any
+queue/lease wait, immediately before spawn; if it has passed the command is
+never started and the status is **79**. `run_bounded.py` writes a completion
+record for it (`cause=late-start`, `spawned=no`); `heavy run` prints a stderr
+line and appends a `late-start` row to the lease trail
+(`<config>/run/heavy-jobs/heavy-lease.jsonl`), which `heavy status` shows only
+while the queue is enabled. An unreadable or out-of-range value is a usage
+error (2) before any wait;
+`--timeout` and runtime are untouched.
 
 Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
 nothing runs a sweep in that case — what protects the group there is that the
@@ -1005,6 +1037,45 @@ test_eval_tool.py` as **24 failures** that three agents in a row wrote off as
 "environmental". They were a broken venv, and they all pass once it points
 somewhere real. Treat a standing block of "known environmental" failures as an
 unverified claim, not as weather.
+
+### Never install packages or copy manifests into `~` or another non-repo root
+
+Run package-manager installs (`npm`, `pnpm`, `yarn`, `bun`, `pip`/`uv pip`)
+**only inside a repository, or inside an isolated scratch project that has its
+own manifest**. Never with the working directory in `~`, the scratchpad root,
+or any other directory that is not a project; never copy a `package.json`,
+lockfile or `pnpm-workspace.yaml` into one.
+
+**Why.** npm and pnpm do not install "here": they walk up to the nearest
+ancestor holding a `package.json` (or `node_modules`) and install *there*. A
+one-off `npm install <lib>` run from a manifest-less directory under `~` lands
+in `~/package.json`, `~/package-lock.json` and `~/node_modules`. That has
+happened repeatedly on this host (September–November 2026: several pnpm and npm
+installs, most recently a subagent fetching one library for an interop test).
+The damage outlives the install: a stray `~/package.json` carrying a
+`packageManager` pin makes pnpm in **every** directory under `~` self-switch to
+that version, recursively, until the memory guard kills it — breaking unrelated
+repositories.
+
+**A one-off dependency** (a test that needs a library directory, a script's
+helper) gets its own scratch project:
+
+```sh
+mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/jose-probe" && cd "$LOCAL_OPERATOR_SCRATCHPAD/jose-probe"
+npm init -y                       # the manifest that stops the walk-up
+npm prefix                        # MUST print this directory, not ~ or a parent
+npm install jose@6
+# or, without cd: npm install --prefix "$LOCAL_OPERATOR_SCRATCHPAD/jose-probe" jose@6
+```
+
+For pnpm, check `pnpm root` resolves to `<that dir>/node_modules` before
+installing. If the prefix/root prints `~` or any ancestor, stop: the install
+would write there.
+
+**Found a stray manifest in `~`** (`package.json`, a lockfile, `node_modules`)?
+Report the paths and what you know of their origin. Do not delete or move them
+unless the operator names those paths — other tools may be resolving through
+them right now.
 
 ### One stash list is shared by every worktree of a clone
 
@@ -1324,13 +1395,14 @@ changes the `version =` line fails unless its title starts with
 `chore(release):`. Dependency and metadata edits to `pyproject.toml` are
 unaffected — the guard reads the version line, not the file.
 
-It makes the violation loud; it does not make it impossible. `main`'s ruleset
-requires one approving review and one required status check, `CI Gate` (plus
-`Merge gate (full suite)` once that context is added — see "Who may merge: two
-tiers"), and admins hold a configured bypass, so an `--admin` merge lands over a
-red guard. Treat a failing `version-bump-guard` as a stop signal rather than an
-obstacle to route around:
-the job is the reviewer's missing memory, not a lock.
+It blocks the merge, even an `--admin` one. `main` carries two rulesets (see
+"Who may merge: two tiers"): ruleset 3622629 requires one approving review,
+and the admin bypass covers only that rule; ruleset 26808267 requires two
+status checks, `CI Gate` and `Merge gate (full suite)`, and has no bypass
+actors. `CI Gate` fails closed on a red `version-bump-guard`, so a red guard
+turns `CI Gate` red and the ruleset refuses the merge. Treat a failing guard as
+a finding to fix, not an obstacle to route around: drop the bump, or retitle a
+genuine release PR `chore(release):`.
 
 **A release PR's green is narrow.** Change-scope gating classifies a diff
 that is nothing but the `version =` line as a release bump, and a release
@@ -1339,9 +1411,11 @@ bump runs seven checks, not the matrix: `changes`, `version-bump-guard` and
 artifact` on Python 3.12, 3.13 and 3.14 from `release-gate.yml` (among its
 triggers, a push to `release-next`/`release-next-*`, the runbook's bump
 branch). Every other `ci.yml` job reports skipping. The second required check,
-`Merge gate (full suite)`, is deliberately not armed on a bump PR — no
-`ready-to-merge` label is added, and a version-only diff classifies the matrix
-out anyway — so neither a missing nor a skipped gate is a defect here. The classifier keys on
+`Merge gate (full suite)`, is still required on a bump PR — the ruleset refuses
+even an `--admin` merge without it — so arm it with `make merge-gate PR=<n>`;
+its suite jobs report skipped on the version-only diff, so the gate runs no
+suite and its wall time is the runner queue (about 13 min on #4165, about
+86 min on #4199). The classifier keys on
 the diff but the Release Gate keys on the branch name, so a bump pushed from
 any other branch shows only the two `ci.yml` checks: the artifact gate never
 ran, which is a reason to use the mandated branch, not a green. That is the
@@ -1413,25 +1487,43 @@ warnings below.
 that both run `lop sessions` and both announce themselves in the same minute
 each see "nobody owns it" and both proceed — which is precisely how two
 out-of-queue releases happened. A `send` is not observable to a session that
-was not listening, so it cannot be the lock. An open PR whose title starts
-`chore(release):` — first `claim release window`, later
-`bump version to X.Y.Z` — is observable to everyone through the forge, so it
-is; the search below keys on the prefix, so the retitle does not drop the lock. The lock is opened *before* the number is known — the bump
+was not listening, so it cannot be the lock. An open release PR — pushed from
+a `release-next` branch, titled first `chore(release): claim release window`,
+later `chore(release): bump version to X.Y.Z` — is observable to everyone
+through the forge, so it is. The lookup below lists open PRs and matches them
+locally: a branch starting `release-next` or `release/claim`, or a title
+starting `chore(release)`. The branch arm survives the retitle; the title arm
+catches a release PR pushed from any other branch name (#3665
+`chore/release-0-101-33`, claim #2903 `release-claim-0.90.1`). The lock is opened *before* the number is known — the bump
 is decided from the window's contents, which do not exist yet when the lock
 is taken — so it starts life as a claim and becomes the bump once decided.
 
 Before starting a release, every agent does the same things, in this order:
 
-1. **Look for the lock.**
-   `gh pr list --search '"chore(release)" in:title' --state open`.
-   An open bump PR means the window is owned: its body names
-   the owning session's pid, so `send` that session (by `pid`) your PR's
-   number, merge SHA and `Release:` line, and let it aggregate. Do not start a
-   second release. (Quote the phrase — `gh`'s search passes it to GitHub,
-   which treats bare parentheses as syntax and returns nothing.)
+1. **Look for the lock — list and match locally, never `--search`.**
+   ```sh
+   gh pr list --state open --limit 500 --json number,title,headRefName,createdAt \
+     --jq '.[] | select((.headRefName | startswith("release-next") or startswith("release/claim")) or (.title | startswith("chore(release)")))'
+   ```
+   ANY line of output means the window has an owner — claim or bump PR alike.
+   Its body names the owning session's pid, so `send` that session (by `pid`)
+   your PR's number, merge SHA and `Release:` line, and let it aggregate. Do not
+   start a second release. Why not a `--search`: a claim PR is a draft titled
+   `chore(release): claim release window`, and a `--search` on `chore(release)`
+   matches it only when the phrase is quoted exactly right — unquoted, GitHub
+   reads the parentheses as syntax and returns nothing, which reads as "no
+   owner" (measured 2026-11-14 on local-operator-ui: `chore(release)` and
+   `chore(release) in:title` returned nothing while claim PR #1908 was open).
+   In local-operator-ui, sessions that searched titles nearly claimed the
+   windows #1908 and #1878 already held. The `--jq` match is a plain local
+   string comparison, so the parentheses are not syntax there; it keeps the
+   title as a fallback arm for release PRs on other branch names. `--limit 500`
+   because `gh pr list` stops at 30 by default and this repo routinely has more
+   than 30 open PRs.
 2. **Take the lock by opening the claim PR.** If nothing is open, the
    release owner's *first* act — before collecting anything — is pushing
-   branch `release-next` with one empty commit and opening a draft PR titled
+   a branch that MUST start with `release-next` (plain `release-next` unless
+   that name is taken) with one empty commit and opening a draft PR titled
    `chore(release): claim release window`; its body names the owner's session
    pid from `lop sessions` and an empty checklist of the PRs in the window.
    Include a `## Public release notes` section following
@@ -1461,48 +1553,76 @@ it landed.
 
 ### PyPI storage cap and per-release size
 
-PyPI caps a project at **10 GB total**, every release counts, and this project
-ships several a day. Measured on 0.90.17, one release cost ~59 MB (pure wheel
-19.98 MB, `macosx_11_0_universal2` wheel 20.14 MB, sdist 18.85 MB); the cap was
-hit and v0.90.18/19 failed with `400 Project size too large`. Two changes bring
-a release to ~29 MB:
+PyPI caps this project at **30 GiB** (32,212,254,720 B), raised from the
+10 GB default on 2026-11-04 in pypi/support#12882 (#12738 closed 11-05 as
+covered). Every release counts, yanked files included, and this project ships
+several a day. Measured on 0.90.17, one release cost ~59 MB (pure wheel
+19.98 MB, `macosx_11_0_universal2` wheel 20.14 MB, sdist 18.85 MB); the old
+cap was hit and v0.90.18/19 failed with `400 Project size too large`. Two
+changes cut a release's bytes:
 
 - **Slim wheels.** `publish.yml` runs `scripts/slim_wheel.py` on the pure wheel
   (the macOS wheel is retagged from it): `#` comments are stripped, while
   docstrings, shebang/coding lines, pragma comments (`# type:`, `# noqa`,
   `# pragma`, `# pyright:`, `# fmt:`) and every line number are kept. Each
   module must be `ast.dump(..., include_attributes=True)`-identical with an
-  equal line count, or the build fails. `ci.yml` `packaging-smoke-build` and
-  `release-gate.yml` run the same step, so a PR the slimmer cannot verify fails
-  before a release does.
+  equal line count, or the build fails. When the wheel carries the built phone
+  bundle (`local_operator/mobile/web/dist/index.html` plus `dist/assets/`), it
+  also drops every other `mobile/web/` member — the web build inputs (`src/`,
+  `.gen.ts`, lockfile, scripts, manifests, ~1.0 MB compressed) that only
+  `mobile/install.py` reads to rebuild a missing `dist/`; a wheel without
+  `dist/` keeps them so `lop mobile install` can still build. `ci.yml`
+  `packaging-smoke-build` and `release-gate.yml` run the same step, so a PR the
+  slimmer cannot verify fails before a release does.
 - **The sdist lives on the GitHub Release** (`sdist-release` job), not on
   PyPI. Nothing installs it from PyPI: the updater, desktop app and install
   scripts take wheels, and the Dockerfile builds from the tree.
 
-`scripts/check_dist_size.py` is the guard: a wheel over **18 MiB** fails, over
-16 MiB warns. `--wheels-only` runs on both artifacts `pypi-publish` downloads
-(in `release-build` and `keyagent-macos`); the publisher itself runs no repo
-code and only shell-checks for exactly two wheels. PR CI (`ci.yml`,
-`release-gate.yml`) passes `--budget-mib 17.5`: its wheel lacks the phone
-bundle and key-agent helper (~0.37 MiB), so the plain 18 MiB line would first
-go red in the release's `keyagent-macos` job, after the tag exists.
+**The runway check is the authoritative gate.** `scripts/check_dist_size.py
+--runway` reads `https://pypi.org/pypi/local-operator/json` and computes used
+bytes (all files, yanked too), cadence (releases first uploaded in the last 30
+days / 30), bytes per release (pure + macOS wheel; with only the pure wheel,
+pure x2 + 0.16 MiB) and `runway_days = (cap - used) / (bytes_per_release x
+cadence)`. Under **60 days** it warns: the retention decision goes to the
+operator then. Under **21 days** it fails `release-gate.yml` (before the tag) and
+`publish.yml` `release-build`. `ci.yml` `packaging-smoke-build` passes
+`--runway-warn-only`, so a low runway never blocks an unrelated PR. A PyPI
+outage or malformed JSON only warns.
+
+**The per-wheel line is a jump tripwire** derived from the cap: on 2026-11-16
+(19,249,689,996 B remaining, 6.43 releases/day) a 23.78 MiB wheel gives exactly
+60 days of linear runway, so a wheel over **23.5 MiB** fails and over
+**21.5 MiB** warns. `--wheels-only` runs on both artifacts `pypi-publish`
+downloads (in `release-build` and `keyagent-macos`); the publisher itself runs
+no repo code and only shell-checks for exactly two wheels. PR CI (`ci.yml`,
+`release-gate.yml`) passes `--budget-mib 23.25`. Since 2026-11-16 both build
+the phone bundle before `python -m build`, as `publish.yml` does, so the PR
+wheel is the release shape and the old ~0.37 MiB proxy gap (bundle plus
+helper) is now just the macOS key-agent helper (~0.16 MiB); the plain line
+would still first go red in the release's `keyagent-macos` job, after the tag
+exists.
 
 **Growth, measured.** The pure wheel grew 12.62 MiB (0.65.0, 10-01) to
-19.07 MiB (0.90.18, 10-27) unslimmed: ~0.25 MiB/day, ~0.18 MiB/day slim. The
-0.91.0 slim wheel with the bundle is 14.41 MiB. At that rate the 16 MiB warning
-arrives in ~9 days and the 17.5 MiB PR line in ~3 weeks. **When the warning
-fires:** compare the wheel's member list and sizes against the last release
-(`unzip -l`) to find what grew; a large non-`.py` asset or a vendored file is
-the usual cause and the fix is to drop or move it. If it is genuine code
-growth, plan the next cut before the PR line is reached (docstrings are not a
-candidate: they are runtime help text), and raise the budgets only together
-with a retention change, after re-reading the script's docstring.
+19.07 MiB (0.90.18, 10-27) unslimmed: ~0.25 MiB/day, ~0.18 MiB/day slim.
+**When a size warning fires:** compare the wheel's member list and sizes
+against the last release (`unzip -l`) to find what grew; a large non-`.py`
+asset or a vendored file is the usual cause and the fix is to drop or move it.
+Docstrings are not a candidate: they are runtime help text.
 
-**Retention is the operator's decision.** Suggested policy: keep every release
-from the last ~30 days and the last patch of every minor. Deleting a PyPI
-release is a manual, irreversible operator action on pypi.org; agents never
-delete releases or files. Quota-increase requests are pending as
-pypi/support#12738 and pypi/support#12882.
+**2026-11-16 measurement.** The 0.106.2 slim pure wheel (CI shape, no
+`dist/`) was 18,347,774 B; 0.106.1 → 0.106.2 was only +2,294 B, so growth is
+cumulative. Growth since 0.91.2 is +3.42 MB, of which `.py` +2.56 MB, i18n
+JSON +552 KB and `.flac` +181 KB. Dropping the phone web build inputs saves
+~1.0 MB per wheel. **Projection:** 12.96 GB used of 32.21 GB; after that
+relief ~35.4 MB per release at 6.43/day is a linear runway of ~85 days; with
+wheel growth of 0.189 MiB/day, ~63 days, reaching the cap around
+**2027-01-18**.
+
+**Retention is the operator's decision.** When the runway warning fires
+(<60 days), take the retention decision to the operator; the release gate fails at
+<21 days. Suggested policy: keep every release from the last ~30 days and the
+last patch of every minor. Deleting a PyPI release is a manual, irreversible
+operator action on pypi.org; agents never delete releases or files.
 
 ### What the release owner does
 
@@ -1535,13 +1655,20 @@ pypi/support#12738 and pypi/support#12882.
    that also carries code is a defect — the code belongs in a reviewed PR
    of its own.
 
-   **Expect seven checks on this PR, not a matrix.** A version-only
+   **Expect seven checks on this PR, not a matrix — then arm the merge
+   gate.** A version-only
    `pyproject.toml` diff classifies as a release bump, so from `ci.yml` only
    `changes`, `version-bump-guard` and `CI Gate` run and every other job reports
    skipping — the whole job set would be gating code this PR does not touch.
-   The other required check, `Merge gate (full suite)`, is not armed on a bump
-   PR at all (no `ready-to-merge` label, and the version-only diff would
-   classify the matrix out anyway), so seven is the complete list.
+   The other required check, `Merge gate (full suite)`, is not automatic but
+   is still required: once the seven are green, run `make merge-gate PR=<n>`.
+   The gate classifies the version-only diff as a release bump, its suite jobs
+   (`test`, `tui-e2e`, `coverage-report`) report skipped, and the gate runs no
+   suite, so its wall time is the runner queue (about 13 min on #4165, about
+   86 min on #4199). The PR ends with the seven plus a green
+   `Merge gate (full suite)`. An `--admin` merge before the gate is refused
+   by the ruleset (`Required status check "Merge gate (full suite)" is
+   expected`; measured on bump PR #4199, 2026-11-18).
    The other four come from `.github/workflows/release-gate.yml`, which fires
    on the push to `release-next` (its triggers also include `release-next-*`,
    pushes to `main`, and `workflow_dispatch`): `Release invariants` (the
@@ -1657,8 +1784,9 @@ git -C ~/local-operator fetch origin
 git -C ~/local-operator log --oneline "$(git -C ~/local-operator describe --tags --abbrev=0 origin/main)..origin/main"
 
 # 2. Take the lock: an empty claim commit in a throwaway worktree, opened as
-#    a draft PR. (No open chore(release) PR was found in step 1 of "One
-#    release owner per window".) The number is not known yet.
+#    a draft PR. (No open release-next*/release/claim* or chore(release) PR was
+#    found by the lookup in step 1 of "One release owner per window".) The
+#    number is not known yet. The branch MUST start with release-next.
 git -C ~/local-operator worktree add ~/local-operator/.worktrees/release-next origin/main
 git -C ~/local-operator/.worktrees/release-next checkout -b release-next
 git -C ~/local-operator/.worktrees/release-next commit --allow-empty -m 'chore(release): claim release window'
@@ -2086,10 +2214,13 @@ isolated generation, then commit `current` under the existing install-root
 transaction; busy runtimes retain their loaded package/dependency/resource roots
 and move individually only when their existing idle latch admits it. Do not
 weaken fresh-artifact/signature, duplicate-attempt, stale-target, root ownership
-or conditional rollback checks. Automatic generation collection is frozen in
-both PyPI and snapshot update tails: an absent discovery/argv/open-file reference
-is not proof that a runtime will never read a bundled asset later. An unreadable
-fleet census must not veto isolated preparation, and must never license deletion.
+or conditional rollback checks. Every promotion tail (PyPI, snapshot, mesh) then
+runs `update.reclaim_after_promotion` = `lop install prune`'s own guarded policy,
+never a second deletion path (operator, 2026-11-16, after 113 generations piled up
+under the old freeze): current, the running tree, record-named roots and the
+`update.keep_generations` (2) newest survive; `update.auto_prune: false` disables;
+no kill/move; failure never fails the update. An unreadable fleet
+census must not veto isolated preparation, and must never license deletion.
 
 Installed/current and actual service-serving builds are different outcomes.
 Daemon-owned work and unsupported old reload capabilities must defer service
@@ -2198,9 +2329,11 @@ Warnings that still hold, each of which has already cost a release:
   and has silently consumed the number you are about to use. That is exactly
   how 0.50.1 and 0.50.2 were burned — each consumed by a PR's own bump, neither
   ever built, tagged or published, and the next owner had to skip both. The
-  `version-bump-guard` CI job now catches this on the PR, but it does **not**
-  block an `--admin` merge, because `main`'s ruleset configures no required
-  status checks and admins hold a bypass. The pre-tag check is the backstop.
+  `version-bump-guard` CI job now catches this on the PR and, through the
+  required `CI Gate` (ruleset 26808267, no bypass actors), blocks even an
+  `--admin` merge; the admin bypass covers only the review rule. The pre-tag
+  check is the backstop for a bump that slipped in before the guard or under a
+  `chore(release):` title.
 - **A shard failure on your branch alone is not evidence your diff caused it.**
   CI shards the unit suite with `scripts/shard_tests.py` — a
   longest-processing-time-first (LPT) partition of
@@ -2311,6 +2444,16 @@ install moved to a strictly newer version, and the head has at least one other
 active member. Once open, the relay driver re-asks parked members every
 `CADENCE_S` (300 s), and on the generation layout a busy runtime keeps its build
 and is retired once idle (`buildwatch` convergence) — no drain.
+
+**Team Bridge is not on a mesh node.** `lop team-bridge setup` never enrols a
+mesh node (an enrolment copied from the primary is left as it is), and nodes
+don't send agent messages on the operator's behalf, because consent cannot be
+proven remotely. To reach a teammate or post to the bridge, use the `send` tool
+to give the request — what to send and to whom — to the operator's
+chief-of-staff session on the primary device (by session id; add
+`peer=<primary device>` if the id is not found); it relays and tells you what it
+did. The `lop send` shell command is local-only. See `guide://network` "Team
+Bridge does not travel".
 
 **Visual evidence on a headless node has no browser tool.** Electron capture
 still works there under Xvfb through `capturePage()` — a working example is
@@ -2833,10 +2976,11 @@ tool and is unavailable here — GitHub restricts it to org-owned public
 repositories and Enterprise Cloud private ones, and this repository is
 user-owned (`repository.mergeQueue` is null; `enableMergeQueue` does not exist).
 The second context has to be in the ruleset for the block to bite:
-`gh api repos/damianvtran/local-operator/rulesets/3622629` shows
-`required_status_checks` carrying `CI Gate` alone, and
-`Merge gate (full suite)` is added with a `PUT` on that ruleset — until it is
-there, the gate is a comment rather than a lock. Add it **after** the workflow
+`gh api repos/damianvtran/local-operator/rules/branches/main` shows
+`required_status_checks` (ruleset 26808267) carrying both `CI Gate` and
+`Merge gate (full suite)`; ruleset 3622629 holds only the review and
+non-fast-forward rules. Without the second context the gate is a comment
+rather than a lock. Add it **after** the workflow
 that reports it has merged, and never before: a required context that nothing
 reports sits in "Expected" and blocks every PR in the fleet.
 
@@ -3026,6 +3170,47 @@ consumes — `tests/` included — gets at least a delta check, and any executab
 change, minor fixes included, gets a numbered
 `### Agent review — round <N>` delta round scoped `<prev-head>..<head>` by an
 independent reviewer, plus QA if a QA'd surface moved.
+
+## macOS login items: Background Task Management attribution
+
+macOS lists every LaunchAgent under System Settings > Login Items and posts
+"… can run in the background" when one appears. Background Task Management
+(BTM) names the item after the code at the plist's **`Program`**, not
+`ProgramArguments[0]`, `Label` or the file name (measured on macOS 27.2,
+2026-11-14): an unsigned `Program` is named after its file name ("python3",
+"python3.12") with no developer, and every such item notifies on its own; a
+Developer-ID-signed `Program` is named after its bundle and grouped under the
+certificate's developer name, and once that developer has been notified,
+further items from it register silently. Ordinary tool-call child processes
+(bash, eval, python) create no BTM items at all — only launchd plists do.
+
+So every plist names the CI-signed launcher
+(`packaging/macos/lop-launcher/launcher.c`, planted at
+`~/.local/share/lop/bin/Local Operator.lopruntime`), which execs the `python3`
+shim beside it; `update.daemon_program()` selects it only after `codesign`
+verifies team `SHA2U6KT7V` AND the exact leaf `Developer ID Application:
+Radient Inc. (SHA2U6KT7V)`, and falls back to the shim otherwise (pure wheel,
+pip/pipx/source installs). Per-episode jobs (`com.local-operator.episode.<id>`)
+use the launcher's `LOP_LAUNCHER_TARGET` mode so their own interpreter still runs.
+Expect **one** "Software from "Radient Inc." can run in the background"
+notification per Mac at rollout.
+
+Rules that follow from it:
+
+- **Only the Radient Inc. organization identity signs Local Operator code.**
+  The team id survived the individual-to-organization conversion, so a team
+  check alone also accepts the retired individual certificate — and BTM would
+  show its personal name. `procname.SIGNING_AUTHORITY` is the one pin; CI
+  asserts it on the finished signature, and the local runtime-signing opt-in
+  refuses any other leaf (runtimes then stay ad-hoc).
+- **Never run `sfltool`** to inspect BTM (it raises an admin/Touch ID dialog on
+  the operator's screen); read the `BackgroundTaskManagementAgent` "Posting
+  advisory" lines with `log show` instead.
+- Tests and rigs create no plists in the real `~/Library/LaunchAgents`; use an
+  isolated `HOME` ("Isolating a run").
+- **Linux** (systemd user units) has no BTM equivalent: nothing to do.
+  **Windows** would need an Authenticode-signed launcher `.exe` (a separate
+  certificate); deferred, and nothing notifies there today.
 
 ## Security advisories
 
@@ -3597,6 +3782,90 @@ browser work: use the `browser` tool against the paired browser like any other
 session. Reach for a harness only when you need a browser that does not yet
 have the build you are testing.
 
+#### Testing a node browser without the operator
+
+A headless node approves a site only on the OPERATOR's signature, which the
+extension re-verifies against the anchor in Chrome managed policy
+(`browser_bridge/site_approval.py`). Never answer a card in the operator's real
+asks or notifications stores to test that, and never loosen the default-deny.
+Run the isolated harness instead (Linux node, Chrome at `/opt/google/chrome`):
+
+```sh
+SB=<path to a built storybook-static>   # see "Storybook" below
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --storybook-dir "$SB"   # full flow
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --storybook-dir "$SB" --preflight  # rig only
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --security-control \
+  --root "$LOCAL_OPERATOR_SCRATCHPAD/node-browser-harness-<stamp>"
+```
+
+- **Storybook (required, `--storybook-dir`):** the screenshots open the
+  `browser-approvals-dock--approved` story from a static Storybook build. In a
+  `local-operator-ui` checkout (or worktree) whose head has that story, run
+  `pnpm build-storybook`; it writes `storybook-static/` at that checkout's root
+  (gitignored). Any existing build that contains the story can be reused; there
+  is no default path, so a missing build is a clean refusal, not a FAIL row.
+- **Where results land:** each run writes
+  `$LOCAL_OPERATOR_SCRATCHPAD/node-browser-harness-<stamp>/` (or `--root`, which
+  must be a fresh subdirectory of the scratchpad): `results.md`/`results.json`,
+  `light.png`/`dark.png`, `inner.log` and the Chrome/daemon logs. The last
+  stdout line prints the path. A full run takes about 30 s; the backstop is
+  600 s.
+
+- **What is real:** the installed CRX the live node runs (read only; its version
+  is in the results), a fresh headless Chrome profile, the bridge daemon,
+  policy-delivered pairing, a `Session` running the real browser tool, the
+  `RuntimeServer` door, two real loopback `RelayServer` instances with separate
+  config stores and a signed synthetic operator binding, catalogue transport
+  into `RemoteAttentionWatcher` and the synthetic operator's `notifications.db`.
+  A separate operator process mounts the real desktop router and POSTs to
+  `/v1/desktop/sessions/{sid}/answers`; `DesktopSessions` resolves a real
+  mesh-backed remote facade and the handler selects the signed `bridge_decide`
+  door. The model is scripted, the pairing fixture supplies two synthetic
+  humans, the key is file-only, and the root-owned anchor is replaced
+  (`tests/fixtures/anchor_fixture.py`). No product bypass is installed.
+- **Isolation:** one `systemd-run --user --scope` (1536M, no swap) around
+  `unshare -Urmn`; scratch dirs are bind-mounted over
+  `/etc/opt/chrome/policies/managed` and `/etc/local-operator/operators`, the
+  private netns makes the real bridge on `127.0.0.1:4099` unreachable, and the
+  inner run aborts if the real policy file is visible. Every root lives under
+  `$LOCAL_OPERATOR_SCRATCHPAD`; the launcher refuses anything else, including
+  live config subtrees if the scratchpad environment is mis-set (only the
+  canonical `sessions/<id>/scratchpad/<run>` subtree is exempt). The hidden
+  `--inner`/`--operator` modes re-apply those refusals, refuse outside a
+  private netns holding only `lo`, and refuse any config root that does not
+  resolve under the run root, before writing anything.
+- **Interrupts:** the scope is named `nbh-<stamp>`; on exit, Ctrl-C, SIGTERM or
+  the backstop the launcher runs `systemctl --user stop nbh-<stamp>.scope`
+  (exact cgroup membership) and removes `/tmp/nbh-<stamp>-*`. Only a SIGKILLed
+  launcher can leave the scope; stop it by that name.
+- **Proof it touched nothing:** the launcher hashes the real policy and anchor,
+  records the live node Chrome's PID, real :4099 listener owner and the
+  paired-identity lines of `lop browser status` before and after, and fails
+  on any difference (or on a failed/empty identity probe).
+- **Rows:** open refused (`origin_not_allowed`), card raised, wrong-key
+  signature, plain `ask_respond`, the agent's own unsigned decide, signed Approve
+  (`lop browser sites --json` allows the origin), open succeeds, light/dark
+  screenshots differ, each taken only once the story rendered in its theme (the
+  tape polls `snapshot` for the story root, then checks the PNG's content and
+  page-background luminance; a spinner frame is "not rendered"), signed Deny
+  (origin in the `--json` denied list, open still refused), and a late signed
+  Approve after the AGENT withdrew its request with its own `cancel_access`
+  (`BLOCKED`, not `PASS`, unless the extension answered `cancelled`). The member
+  also withdraws its queued ask, so the late HTTP tap must receive 409 with the
+  queue's withdrawn refusal, not Phase 1's non-member extension-expiry refusal.
+  Each card is observed over real catalogue transport and its one full
+  `remote-notice:<device>:<session>:remote-ask:<ask>` inbox key is checked;
+  answered, denied and cancelled member cards must retire on the next listing.
+  Results: `results.md`/`results.json`, PNGs and logs in the run directory.
+  LOOK at both PNGs before citing them; a sha256 alone is not proof.
+- **Phase boundary:** Phase 1 used direct loopback attach and did not cover the
+  mesh/inbox/HTTP legs. This harness continuation adds those legs and real
+  membership without changing pairing policy, host anchors or product code.
+- **Testing an extension change:** the harness installs the CRX named in
+  `~/.local-operator/browser/extension/update.xml`, not `extension/` source.
+- A long `TMPDIR` breaks Chrome's singleton socket (108-byte unix path limit),
+  so Chrome gets a short private dir under `/tmp`, removed at exit.
+
 ### 7. Evidence goes on the PR, never into the repository
 
 **Do not commit PR evidence artifacts** — before/after frames (SVG or PNG),
@@ -3706,6 +3975,8 @@ repeatedly (#122, #373, #461, #486, #496, #498, #499), so the rules below are
 not style preferences.
 
 ### Wait on the event, never on the clock
+
+**Rule:** no hard-coded elapsed bounds or fixed sleeps in unit tests; wait on an event or a settle helper (`wait_for`, `ChangeSignal`), and derive any bound from the property protected or an existing calibration.
 
 **Do not** poll a wall-clock deadline and assert afterwards:
 

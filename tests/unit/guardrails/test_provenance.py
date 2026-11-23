@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,7 @@ from local_operator.guardrails.check import (
     check_tool_call,
 )
 from local_operator.guardrails.classify import Risk, classify_bash
-from local_operator.guardrails.preview import preview_tool_call
+from local_operator.guardrails.preview import PreviewReport, preview_tool_call
 from local_operator.guardrails.resolve import resolve_command
 from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE,
@@ -52,7 +53,13 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (state / "config.yml").write_text("version: 1\n")
     # Synthetic trees are never live process cwd; dedicated worktree-removal
     # controls cover live/unknown inventory without depending on fleet latency.
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
+    # An OWN tree's busy answer bypasses ``_live_cwd_inside`` for a fresh
+    # ``cwd_holders`` scan (PR #3987), so "never a live cwd" must hold at the
+    # inventory too. Without this the real scan ran: on GitHub's Linux runner
+    # one same-uid pid's ``/proc/<pid>/cwd`` reads EACCES, the inventory fails
+    # closed ("busy"), and own cleanups read HIGH (train t6, run 43665122262).
+    monkeypatch.setattr(prov, "_cwd_entries", lambda *, fresh=False: ())
     # Nor do they have a GitHub remote: stub "GitHub, no open PR" so the clean
     # worktree path is reachable. The PR-state controls live in
     # ``test_worktree_remove_and_refusal_scope.py``.
@@ -184,6 +191,39 @@ def test_subagent_creation_is_visible_to_parent(home: Path) -> None:
     _create(home, "mkdir ~/child-rig", sid=CHILD, ancestors=(SID,))
     assert _verdict(home, "rm -rf ~/child-rig", sid=SID).risk is Risk.LOW
     assert _verdict(home, "rm -rf ~/child-rig", sid=OTHER).risk is Risk.HIGH
+
+
+def test_explicit_mktemp_ownership_carries_into_later_preview(home: Path) -> None:
+    env = {**_env(home), "PATH": os.defpath}
+    argv = ["/usr/bin/mktemp", "-d", str(home / "qa-rig.XXXXXXXX")]
+    pending = prov.plan_creations(shlex.join(argv), cwd=str(home), env=env)
+    assert pending is not None
+    result = subprocess.run(argv, cwd=home, env=env, check=True, capture_output=True, text=True)
+    target = Path(result.stdout.rstrip("\n"))
+    assert target.parent == home and target.is_dir()
+
+    def preview(command: str, sid: str = CHILD) -> PreviewReport:
+        # A later call gets a fresh context, with no shell binding or scratch exemption.
+        ctx = CallContext(cwd=str(home), env=env, scratchpad=None, session_id=sid)
+        return preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+
+    literal = shlex.join(["rm", "-rf", str(target)])
+    # The same existing path is HIGH until its creation is recorded.
+    assert preview(literal).builtin_risk == "HIGH"
+    assert prov.commit_creations(
+        pending, session_id=CHILD, ancestors=(SID,), env=env, scratchpad=None
+    ) == [str(target.resolve())]
+    for sid in (CHILD, SID):
+        owned = preview(literal, sid)
+        assert (owned.builtin_risk, owned.action) == ("LOW", "allow")
+    assert preview(literal, OTHER).builtin_risk == "HIGH"
+
+    protected = preview(shlex.join(["rm", "-rf", str(home / ".local-operator")]))
+    assert (protected.builtin_risk, protected.action) == ("CRITICAL", "refuse")
+    # The opaque relative operand could resolve to the protected cwd itself.
+    opaque = preview('rm -rf "$(unknown-target)"')
+    assert (opaque.builtin_risk, opaque.action) == ("CRITICAL", "refuse")
+    assert target.is_dir()  # Every delete-shaped call above was preview-only.
 
 
 def test_glob_low_only_when_every_match_is_owned(home: Path) -> None:
@@ -1052,8 +1092,12 @@ def test_write_shaped_planters_stay_critical(home: Path, command: str) -> None:
 _READS = [
     (f"python3 ana.py ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
     (f"python3 ana.py ~/.local-operator/sessions/{SID}/transcript.jsonl", Risk.HIGH),
-    # Round 6: sed/sqlite3 are not strict read-only; a session mention is HIGH.
-    (f"sed -n 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
+    # Round 6: sqlite3 and a sed that may write are not strict read-only. A
+    # sed whose script can only print (no w/W/e, no -i/-f) is a pure read
+    # since field case B, 2026-11-12 (``resolve._sed_read_only``).
+    (f"sed -n 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.LOW),
+    (f"sed -n '1w /x' ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
+    (f"sed -i '' 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.CRITICAL),
     (f"awk 'NR==1' ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
     # Plain sort/uniq/shasum only read (operator, 2026-11-09: "Read-only
     # commands are never dangerous-delete"); ``sort -o`` stays a write.
@@ -1265,6 +1309,10 @@ def test_mention_invariant_is_never_low(home: Path, program: str) -> None:
         if program in ("zip", "tar") and " Q " in command:
             # Exemption (b): ``zip Q <s>`` / ``tar Q <s>`` name ``Q`` as the
             # archive and the session path as a SOURCE — a read.
+            continue
+        if program == "sed" and " Q " in command:
+            # ``sed Q <s>``: the script is ``Q`` (quit) and the path an INPUT,
+            # a provable read (``resolve._sed_read_only``, case B 2026-11-12).
             continue
         assert _verdict(home, command).risk is not Risk.LOW, command
 

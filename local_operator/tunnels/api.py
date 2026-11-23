@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import email.utils
+import re
 from contextlib import closing
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -18,7 +21,12 @@ from local_operator.providers.auth_store import (
     CredentialInvalidError,
 )
 from local_operator.tunnels.config import DEFAULT_API_URL
-from local_operator.tunnels.errors import LoginRequired, RecordNotFound, RequestFailed
+from local_operator.tunnels.errors import (
+    ClientUpgradeRequired,
+    LoginRequired,
+    RecordNotFound,
+    RequestFailed,
+)
 
 #: Pauses before re-opening the store after `AuthStoreBusyError`. Why retry at
 #: all: the bootstrap guard is held only while another `lop` process opens the
@@ -31,6 +39,83 @@ from local_operator.tunnels.errors import LoginRequired, RecordNotFound, Request
 #: inside the poller's 10 s cadence plus one attempt, and a store that stays
 #: busy that long surfaces as "local credential store busy" rather than hanging.
 STORE_BUSY_RETRY_DELAYS: tuple[float, ...] = (0.5, 1.0)
+
+#: The longest wait a control-plane answer may ask for and still be believed. A
+#: hint is a hint, not an instruction to go dark: the edge WAF's own hint is 300 s
+#: (radient-infra `waf.py` `RATE_LIMIT_BODY`, "retry in 300 seconds"), so an hour
+#: is generous for any honest answer while a garbled or hostile value (a year)
+#: is ignored and the caller falls back to its own backoff.
+MAX_RETRY_AFTER_S = 3600.0
+
+#: The edge WAF's 429 body. Two shapes are live, and both must be read:
+#:
+#: - before radient-infra #138 (deployed 2026-11-17 16:24Z): only
+#:   `{"error": {"code": "rate_limited", "message": "... retry in 300 seconds."}}`,
+#:   with NO `Retry-After` header, so the sentence was the only statement of the
+#:   wait;
+#: - from #138: a `Retry-After` header, the same nested `error` object byte for
+#:   byte, plus a top-level `"code": "rate_limited"` and
+#:   `"details": {"retry_after_seconds": 300}` (60 for the tunnel-session rule).
+#:
+#: The header wins (it is the HTTP contract); the body is the fallback for the
+#: old shape, for a proxy that strips the header, and for a header nobody can
+#: parse. `details.retry_after_seconds` is preferred over the sentence because
+#: it is the structured statement of the same number.
+_WAF_RETRY_IN = re.compile(r"retry in (\d{1,5}) seconds?", re.IGNORECASE)
+
+
+def _header_retry_after(response: httpx.Response) -> float | None:
+    """`Retry-After` as seconds (delta-seconds or an HTTP date), or ``None``."""
+    header = response.headers.get("retry-after", "").strip()
+    if not header:
+        return None
+    if header.isdigit():
+        return float(header)
+    try:
+        when = email.utils.parsedate_to_datetime(header)
+    except (TypeError, ValueError):
+        return None
+    if when is None or when.tzinfo is None:
+        return None
+    return (when - datetime.now(UTC)).total_seconds()
+
+
+def _waf_body_retry_after(response: httpx.Response) -> float | None:
+    """The WAF body's own statement of the wait, in either shape, or ``None``."""
+    try:
+        answer = response.json()
+    except ValueError:
+        return None
+    if not isinstance(answer, dict):
+        return None
+    details = answer.get("details")
+    hinted = details.get("retry_after_seconds") if isinstance(details, dict) else None
+    # `bool` is an `int`: `true` must not read as one second.
+    if isinstance(hinted, (int, float)) and not isinstance(hinted, bool):
+        return float(hinted)
+    error = answer.get("error")
+    message = error.get("message") if isinstance(error, dict) else None
+    found = _WAF_RETRY_IN.search(message) if isinstance(message, str) else None
+    return float(found.group(1)) if found else None
+
+
+def retry_after_seconds(response: httpx.Response) -> float | None:
+    """The wait, in seconds, an error answer asked for, or ``None``.
+
+    `Retry-After` first (delta-seconds or an HTTP date, RFC 9110 §10.2.3), then —
+    for a 429 only, and also when the header is present but unparseable — the
+    WAF body (`_waf_body_retry_after`, both shapes). Only a NUMBER leaves this
+    function: the body itself is never returned or logged, because a provider
+    body may echo a bearer (see `request`). Anything unparseable or outside
+    `(0, MAX_RETRY_AFTER_S]` is ``None``, so the caller's own backoff applies
+    rather than a value nobody can vouch for.
+    """
+    seconds = _header_retry_after(response)
+    if seconds is None and response.status_code == 429:
+        seconds = _waf_body_retry_after(response)
+    if seconds is None or not 0 < seconds <= MAX_RETRY_AFTER_S:
+        return None
+    return seconds
 
 
 async def _open_store_on_thread() -> AuthStore:
@@ -253,6 +338,16 @@ class RadientTunnels:
         if not isinstance(token, str) or not token:
             raise LoginRequired("The tunnel's Radient login expired; log in again.")
         headers = {"Authorization": f"Bearer {token}"}
+        if api_path is None:
+            from local_operator.tunnels import config as tunnel_config
+            from local_operator.tunnels.relay.connector import PROTOCOL
+
+            # Advertising support is opt-in on the wire, not inferred from a
+            # User-Agent version: old servers ignore it and dual-run stays intact.
+            # The explicit Cloudflare kill switch must never promise a relay-only
+            # bootstrap that this device has been told not to use.
+            if tunnel_config.transport_override() != tunnel_config.TRANSPORT_CLOUDFLARE:
+                headers["X-Radient-Tunnel-Protocol"] = PROTOCOL
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         response = await self.client.request(
@@ -266,6 +361,10 @@ class RadientTunnels:
         # Never surface provider error bodies: they may echo a bearer, client
         # secret, or connector token. The status is enough for a useful retry.
         if response.status_code >= 400:
+            # Only the tunnel-family contract owns this status. Never reflect its
+            # body (even JSON claiming to be a helpful upgrade instruction).
+            if response.status_code == 426 and api_path is None:
+                raise ClientUpgradeRequired()
             # 404 gets a TYPE, not just the generic sentence: it is the one status
             # the tunnel commands translate, because under an owner-pinned
             # request it usually means the selected login does not own this
@@ -276,6 +375,7 @@ class RadientTunnels:
             raise RequestFailed(
                 f"Radient tunnel request failed (HTTP {response.status_code}).",
                 status=response.status_code,
+                retry_after=retry_after_seconds(response),
             )
         if api_path is not None:
             try:

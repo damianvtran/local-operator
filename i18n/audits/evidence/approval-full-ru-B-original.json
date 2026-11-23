@@ -1,0 +1,2277 @@
+{
+  "locale": "ru",
+  "side": "B",
+  "namespace": "wire.settings",
+  "round": 1,
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "status": "failed",
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "target_sha256": "87ac6464c94f359c7ba6a045fe0e8d0ed1297c653d036d47da0aaedf3b90f4f8",
+  "translator": {
+    "agent": "approval-labels-author-ru",
+    "model": "openai/gpt-6.1-sol",
+    "source": "i18n/audits/evidence/approval-choice-translator-ru.json, self-reported actual authoring fallback; current auto value agrees with that receipt",
+    "scope": "Only Automatic label newly authored. Ask retained with original author unknown; other 893 original authors unknown. Do not attribute all 895 to this translator."
+  },
+  "auditor": {
+    "agent": "approval-full-ru-B-cached / translation-auditor",
+    "session_id": "870397d651f4",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_evidence": "Host [model switch] record before semantic reading: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure: quota. No claim based on initial model header.",
+    "findings": 3,
+    "unresolved_blocker": 0,
+    "unresolved_major": 3,
+    "major_affected_keys": 33,
+    "minor_findings": 1,
+    "minor_width_affected_keys": 37,
+    "independence": "No partner auditor opinions or receipts read. Only authorized translator provenance receipt read after fresh full pair read."
+  },
+  "input_bindings": {
+    "english": {
+      "path": "/Users/damian/.local-operator/sessions/6448acb16e8d/scratchpad/approval-full-en-A-approved-capture.json",
+      "envelope_sha256": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+      "canonical_map_sha256": "f621866fb5e74c1b617e29e17d02008cb42dce6574aa3624ff9a557e1ef2a7b6"
+    },
+    "target": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/ru-approved-envelope.json",
+      "envelope_sha256": "5456f858a3d0e6313a94516363026f64bea9275ab84f8ff0337fa2e2c77a0efc",
+      "canonical_map_sha256": "8bbe29760a31a538fefbf2848c9f2cf32a52e2fc92bd04e45c464e98071cdc52"
+    },
+    "envelope_metadata": "Both public_copy=true, repository_verified=true, repository damianvtran/local-operator, correct locale paths and root, commit and checkout_head equal pinned head. Tool details.sha256 hashes formatted tool text, not original file.",
+    "source_target_original_files": "Read for SHA256 only; no raw product prose fallback. Hashes agree with supplied manifest and authorized translator after-file hash."
+  },
+  "fresh_semantic_pairs_read": 895,
+  "fresh_english_keys_read": 895,
+  "fresh_russian_keys_read": 895,
+  "context_entries_read": 104,
+  "retained_semantic_keys": 0,
+  "reading_evidence": "All ordinal pairs 1..895 emitted and read in this session; every elided middle expanded through spill handles. All 104 metadata entries read after SHA match, including every elided context entry. Unrelated masked Hindi glossary note ignored, not decoded. No scoped catalogue/context value masked.",
+  "scope_labels": {
+    "keys": [
+      "wire.settings.tool_approval_mode.choice.ask.label",
+      "wire.settings.tool_approval_mode.choice.auto.label"
+    ],
+    "semantic_verdict": "passed: «спрашивать» / «автоматически» are native mode labels, not ask-tool names; no always-all-tools promise, unconditional authorization or guardrail bypass. Choice values remain ask/auto in inspected code.",
+    "width_verdict": "pending rendered fit only: 3→10 and 9→13 cells; literal pseudo 16/19 cells.",
+    "plain_literals": "Both zero arguments; no plural/select/skeleton applies."
+  },
+  "findings": [
+    {
+      "id": "RU-B-M01",
+      "severity": "major",
+      "origin": "inherited namespace, outside the two approval labels",
+      "category": "untranslated human selector labels",
+      "reason": "These are Choice.label display fields, independently localized from Choice.value; raw English config values are not an exception to the operator requirement to translate all human-facing labels. Russian descriptions do not translate the visible label itself. Change display labels only, never machine values.",
+      "consumer_evidence": [
+        "settings_io.py:4715 round_robin value and _ws.web_search_strategy_choice_round_robin_label() are separate",
+        "settings_io.py:5148 auto value and _ws.bash_memory_mode_choice_auto_label() are separate",
+        "settings_io.py:5276 allowlist value and display label are separate",
+        "settings_io.py:6260 female value and display label are separate",
+        "settings_io.py:6410 client value and display label are separate",
+        "settings_io.py:2316-2325 OpenRouter default/false labels are independently localized despite the historic technical-vocabulary comment"
+      ],
+      "entries": [
+        {
+          "key": "wire.settings.bash_memory_mode.choice.auto.label",
+          "source": "auto",
+          "current": "auto",
+          "proposed": "авто",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.classification_vendor.choice.auto.label",
+          "source": "auto",
+          "current": "auto",
+          "proposed": "авто",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.compaction_strategy.choice.auto.label",
+          "source": "auto",
+          "current": "auto",
+          "proposed": "авто",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.display_nerd_icons.choice.none.label",
+          "source": "auto",
+          "current": "auto",
+          "proposed": "авто",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.model_effort.choice.unset.label",
+          "source": "auto",
+          "current": "auto",
+          "proposed": "авто",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+          "source": "auto",
+          "current": "auto",
+          "proposed": "авто",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+          "source": "auto",
+          "current": "auto",
+          "proposed": "авто",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.speech_voice_gender.choice.auto.label",
+          "source": "auto",
+          "current": "auto",
+          "proposed": "авто",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+          "source": "auto",
+          "current": "auto",
+          "proposed": "авто",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.bash_memory_mode.choice.manual.label",
+          "source": "manual",
+          "current": "manual",
+          "proposed": "вручную",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+          "source": "default",
+          "current": "default",
+          "proposed": "по умолчанию",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+          "source": "default",
+          "current": "default",
+          "proposed": "по умолчанию",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+          "source": "default",
+          "current": "default",
+          "proposed": "по умолчанию",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+          "source": "default",
+          "current": "default",
+          "proposed": "по умолчанию",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+          "source": "default",
+          "current": "default",
+          "proposed": "по умолчанию",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+          "source": "default",
+          "current": "default",
+          "proposed": "по умолчанию",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+          "source": "false",
+          "current": "false",
+          "proposed": "нет",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+          "source": "allow",
+          "current": "allow",
+          "proposed": "разрешить",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+          "source": "deny",
+          "current": "deny",
+          "proposed": "запретить",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+          "source": "true",
+          "current": "true",
+          "proposed": "да",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+          "source": "true",
+          "current": "true",
+          "proposed": "да",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+          "source": "true",
+          "current": "true",
+          "proposed": "да",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+          "source": "allowlist",
+          "current": "allowlist",
+          "proposed": "разрешённый список",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+          "source": "inherit",
+          "current": "inherit",
+          "proposed": "наследовать",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+          "source": "client",
+          "current": "client",
+          "proposed": "на стороне клиента",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+          "source": "provider",
+          "current": "provider",
+          "proposed": "на стороне провайдера",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+          "source": "off",
+          "current": "off",
+          "proposed": "отключено",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.speech_voice_gender.choice.female.label",
+          "source": "female",
+          "current": "female",
+          "proposed": "женский",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.speech_voice_gender.choice.male.label",
+          "source": "male",
+          "current": "male",
+          "proposed": "мужской",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.web_search_strategy.choice.ordered.label",
+          "source": "ordered",
+          "current": "ordered",
+          "proposed": "по порядку",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        },
+        {
+          "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+          "source": "round_robin",
+          "current": "round_robin",
+          "proposed": "по кругу",
+          "reason": "Untranslated human-facing mode/option label, not its machine value."
+        }
+      ]
+    },
+    {
+      "id": "RU-B-M02",
+      "severity": "major",
+      "origin": "inherited namespace, outside approval labels",
+      "category": "semantic accuracy and idiom",
+      "entries": [
+        {
+          "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+          "source": "Today's constant.",
+          "current": "Текущая константа.",
+          "proposed": "Обычная подача.",
+          "reason": "«Текущая константа» reads as a current mathematical/programming constant, while sidecar entry 83 explicitly defines Today’s constant as the existing standard vocal delivery, not a mathematical constant or never-varying voice."
+        }
+      ]
+    },
+    {
+      "id": "RU-B-M03",
+      "severity": "major",
+      "origin": "inherited namespace, outside approval labels",
+      "category": "untranslated human label acronym",
+      "entries": [
+        {
+          "key": "wire.settings.team_bridge_session.label",
+          "source": "CoS session",
+          "current": "Сессия CoS",
+          "proposed": "Сессия главы аппарата",
+          "reason": "CoS is the English abbreviation for the chief-of-staff role, not a command/model/brand or session identifier; the same namespace already translates this role as «глава аппарата». Consumer settings_io.py:6537 binds this to the human row label for team_bridge.session."
+        }
+      ]
+    },
+    {
+      "id": "RU-B-m01",
+      "severity": "minor",
+      "origin": "35 inherited labels plus the two approval scope labels",
+      "category": "relative width risk only",
+      "reason": "Rendered check requested for materially expanded labels. All explicit maxCells sidecar caps passed; no UI run, observed clipping or native RTL fit claim. Do not open a separate style-only remediation wave.",
+      "entries": [
+        {
+          "key": "wire.settings.aida_cadence_at.label",
+          "source": "Daily check-in time",
+          "current": "Время ежедневного выхода на связь",
+          "english_cells": 19,
+          "russian_cells": 33,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.aida_cadence_max_extra_per_day.label",
+          "source": "Extra check-ins / day",
+          "current": "Дополнительные выходы на связь в день",
+          "english_cells": 21,
+          "russian_cells": 37,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.asks_lapsed_visible_for.choice.at_expiry.label",
+          "source": "gone at expiry",
+          "current": "исчезает по истечении срока",
+          "english_cells": 14,
+          "russian_cells": 27,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.bash_heavy_jobs_enabled.label",
+          "source": "Heavy job queue",
+          "current": "Очередь тяжёлых заданий",
+          "english_cells": 15,
+          "russian_cells": 23,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.classification_maxstatechars.label",
+          "source": "↳ max state chars",
+          "current": "↳ макс. символов состояния",
+          "english_cells": 17,
+          "russian_cells": 26,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.classification_notice.label",
+          "source": "Smart hints notice",
+          "current": "Уведомление «Умных подсказок»",
+          "english_cells": 18,
+          "russian_cells": 29,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.compaction_resume_replay.label",
+          "source": "Resume replay",
+          "current": "Воспроизведение при возобновлении",
+          "english_cells": 13,
+          "russian_cells": 33,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.display_composer_rate.label",
+          "source": "Band: decode rate",
+          "current": "Полоса: скорость декодирования",
+          "english_cells": 17,
+          "russian_cells": 30,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.display_images.label",
+          "source": "Inline images",
+          "current": "Встроенные изображения",
+          "english_cells": 13,
+          "russian_cells": 22,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.display_time_format.label",
+          "source": "Wake time format",
+          "current": "Формат времени пробуждений",
+          "english_cells": 16,
+          "russian_cells": 26,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.fork_cmux_placement.choice.workspace.label",
+          "source": "new workspace",
+          "current": "новое рабочее пространство",
+          "english_cells": 13,
+          "russian_cells": 26,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.librarian_cadence_at.label",
+          "source": "Daily pass time",
+          "current": "Время ежедневного прохода",
+          "english_cells": 15,
+          "russian_cells": 25,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.librarian_cadence_paused.label",
+          "source": "Daily pass paused",
+          "current": "Ежедневный проход на паузе",
+          "english_cells": 17,
+          "russian_cells": 26,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.local_providers.models.label",
+          "source": "{name} model overrides",
+          "current": "переопределения моделей для {name}",
+          "english_cells": 22,
+          "russian_cells": 34,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.monitor_runtimeoutms.label",
+          "source": "Run timeout (ms)",
+          "current": "Тайм-аут выполнения (мс)",
+          "english_cells": 16,
+          "russian_cells": 24,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.network_sync_debounce_s.label",
+          "source": "Sync quiet period (s)",
+          "current": "Период тишины синхронизации (сек)",
+          "english_cells": 21,
+          "russian_cells": 33,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.network_sync_tick_s.label",
+          "source": "Sync check interval (s)",
+          "current": "Интервал проверки синхронизации (сек)",
+          "english_cells": 23,
+          "russian_cells": 37,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.providers_bedrock_auth.label",
+          "source": "Amazon Bedrock auth",
+          "current": "Аутентификация Amazon Bedrock",
+          "english_cells": 19,
+          "russian_cells": 29,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.providers_openai_use_max_context_window.label",
+          "source": "Use maximum OpenAI context",
+          "current": "Использовать максимальный контекст OpenAI",
+          "english_cells": 26,
+          "russian_cells": 41,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_preferred_min_throughput.label",
+          "source": "min throughput (tok/s)",
+          "current": "мин. пропускная способность (ток/с)",
+          "english_cells": 22,
+          "russian_cells": 35,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_sort.choice.throughput.label",
+          "source": "throughput",
+          "current": "пропускная способность",
+          "english_cells": 10,
+          "russian_cells": 22,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.providers_openrouter_sort.label",
+          "source": "routing policy",
+          "current": "политика маршрутизации",
+          "english_cells": 14,
+          "russian_cells": 22,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.retry_modelfallback.label",
+          "source": "Model fallback",
+          "current": "Резервный переход модели",
+          "english_cells": 14,
+          "russian_cells": 24,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.retry_pinnedfallback.label",
+          "source": "Pinned child fallback",
+          "current": "Резервный переход закреплённой дочерней сессии",
+          "english_cells": 21,
+          "russian_cells": 46,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.retry_usageawarefallback.label",
+          "source": "Usage-aware fallback",
+          "current": "Резервный переход по использованию",
+          "english_cells": 20,
+          "russian_cells": 34,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.session_cleanup_delegated_enabled.label",
+          "source": "Delegated cleanup",
+          "current": "Очистка делегированной работы",
+          "english_cells": 17,
+          "russian_cells": 29,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.static_roots.label",
+          "source": "Extra preview roots",
+          "current": "Дополнительные корни предпросмотра",
+          "english_cells": 19,
+          "russian_cells": 34,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.subagents_slim_child_knowledge.label",
+          "source": "Slim child knowledge",
+          "current": "Урезание знаний дочерних сессий",
+          "english_cells": 20,
+          "russian_cells": 31,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.supplements_denyprefixes.label",
+          "source": "↳ never list under",
+          "current": "↳ никогда не перечислять под",
+          "english_cells": 18,
+          "russian_cells": 28,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.supplements_maxcostusd.label",
+          "source": "↳ cost cap ($)",
+          "current": "↳ потолок стоимости ($)",
+          "english_cells": 14,
+          "russian_cells": 23,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.tool_approval_mode.label",
+          "source": "Tool approval mode",
+          "current": "Режим одобрения инструментов",
+          "english_cells": 18,
+          "russian_cells": 28,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.tui_sidebar_position.label",
+          "source": "Sidebar position",
+          "current": "Положение боковой панели",
+          "english_cells": 16,
+          "russian_cells": 24,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.tui_sidebar_show_subagents.label",
+          "source": "Sidebar subagent layer",
+          "current": "Слой субагентов на боковой панели",
+          "english_cells": 22,
+          "russian_cells": 33,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.wakes_triggers_max_per_day.label",
+          "source": "Max check-in wakes per day",
+          "current": "Макс. пробуждений для выхода на связь в день",
+          "english_cells": 26,
+          "russian_cells": 44,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.web_fetch_max_redirects.label",
+          "source": "Max redirects",
+          "current": "Макс. перенаправлений",
+          "english_cells": 13,
+          "russian_cells": 21,
+          "proposed": null,
+          "reason": "Material relative expansion; request a rendered narrow-layout check, not a claim of clipping."
+        },
+        {
+          "key": "wire.settings.tool_approval_mode.choice.ask.label",
+          "source": "Ask",
+          "current": "спрашивать",
+          "english_cells": 3,
+          "russian_cells": 10,
+          "proposed": null,
+          "reason": "Native phrasing is accurate; retain unless a rendered fit check requires a shorter natural phrase. No hard maxCells exists for this choice."
+        },
+        {
+          "key": "wire.settings.tool_approval_mode.choice.auto.label",
+          "source": "Automatic",
+          "current": "автоматически",
+          "english_cells": 9,
+          "russian_cells": 13,
+          "proposed": null,
+          "reason": "Native phrasing is accurate; retain unless a rendered fit check requires a shorter natural phrase. No hard maxCells exists for this choice."
+        }
+      ]
+    }
+  ],
+  "perkey_subgroups": [
+    {
+      "group": "agents",
+      "keys_read": 6,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.agents.description",
+        "wire.settings.agents.title",
+        "wire.settings.agents_auto_update_seeds.choice.false.description",
+        "wire.settings.agents_auto_update_seeds.choice.true.description",
+        "wire.settings.agents_auto_update_seeds.help",
+        "wire.settings.agents_auto_update_seeds.label"
+      ]
+    },
+    {
+      "group": "aida",
+      "keys_read": 22,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.aida.description",
+        "wire.settings.aida.title",
+        "wire.settings.aida_cadence_at.help",
+        "wire.settings.aida_cadence_at.label",
+        "wire.settings.aida_cadence_at.placeholder",
+        "wire.settings.aida_cadence_max_extra_per_day.help",
+        "wire.settings.aida_cadence_max_extra_per_day.label",
+        "wire.settings.aida_cadence_min_gap_minutes.help",
+        "wire.settings.aida_cadence_min_gap_minutes.label",
+        "wire.settings.aida_cadence_paused.choice.false.description",
+        "wire.settings.aida_cadence_paused.choice.true.description",
+        "wire.settings.aida_cadence_paused.help",
+        "wire.settings.aida_cadence_paused.label",
+        "wire.settings.aida_enabled.choice.false.description",
+        "wire.settings.aida_enabled.choice.true.description",
+        "wire.settings.aida_enabled.help",
+        "wire.settings.aida_enabled.label",
+        "wire.settings.aida_name.help",
+        "wire.settings.aida_name.label",
+        "wire.settings.aida_name.placeholder",
+        "wire.settings.aida_onboarding_nudge_days.help",
+        "wire.settings.aida_onboarding_nudge_days.label"
+      ]
+    },
+    {
+      "group": "appearance",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.appearance.description",
+        "wire.settings.appearance.title"
+      ]
+    },
+    {
+      "group": "approvals",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.approvals.description",
+        "wire.settings.approvals.title"
+      ]
+    },
+    {
+      "group": "asks",
+      "keys_read": 12,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.asks.description",
+        "wire.settings.asks.title",
+        "wire.settings.asks_lapsed_visible_for.choice.1h.description",
+        "wire.settings.asks_lapsed_visible_for.choice.1h.label",
+        "wire.settings.asks_lapsed_visible_for.choice.24h.description",
+        "wire.settings.asks_lapsed_visible_for.choice.24h.label",
+        "wire.settings.asks_lapsed_visible_for.choice.7d.description",
+        "wire.settings.asks_lapsed_visible_for.choice.7d.label",
+        "wire.settings.asks_lapsed_visible_for.choice.at_expiry.description",
+        "wire.settings.asks_lapsed_visible_for.choice.at_expiry.label",
+        "wire.settings.asks_lapsed_visible_for.help",
+        "wire.settings.asks_lapsed_visible_for.label"
+      ]
+    },
+    {
+      "group": "auto",
+      "keys_read": 4,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.auto_save_conversation.choice.false.description",
+        "wire.settings.auto_save_conversation.choice.true.description",
+        "wire.settings.auto_save_conversation.help",
+        "wire.settings.auto_save_conversation.label"
+      ]
+    },
+    {
+      "group": "bash",
+      "keys_read": 31,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+        "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+        "wire.settings.bash_heavy_jobs_enabled.help",
+        "wire.settings.bash_heavy_jobs_enabled.label",
+        "wire.settings.bash_memory_enabled.choice.false.description",
+        "wire.settings.bash_memory_enabled.choice.true.description",
+        "wire.settings.bash_memory_enabled.help",
+        "wire.settings.bash_memory_enabled.label",
+        "wire.settings.bash_memory_limit_mb.help",
+        "wire.settings.bash_memory_limit_mb.label",
+        "wire.settings.bash_memory_mode.choice.auto.description",
+        "wire.settings.bash_memory_mode.choice.auto.label",
+        "wire.settings.bash_memory_mode.choice.manual.description",
+        "wire.settings.bash_memory_mode.choice.manual.label",
+        "wire.settings.bash_memory_mode.help",
+        "wire.settings.bash_memory_mode.label",
+        "wire.settings.bash_memory_soft_fraction.help",
+        "wire.settings.bash_memory_soft_fraction.label",
+        "wire.settings.bash_query_budget_enabled.choice.false.description",
+        "wire.settings.bash_query_budget_enabled.choice.true.description",
+        "wire.settings.bash_query_budget_enabled.help",
+        "wire.settings.bash_query_budget_enabled.label",
+        "wire.settings.bash_query_budget_seconds.help",
+        "wire.settings.bash_query_budget_seconds.label",
+        "wire.settings.bash_query_budget_stop.choice.false.description",
+        "wire.settings.bash_query_budget_stop.choice.true.description",
+        "wire.settings.bash_query_budget_stop.help",
+        "wire.settings.bash_query_budget_stop.label",
+        "wire.settings.bash_shell.help",
+        "wire.settings.bash_shell.help.windows",
+        "wire.settings.bash_shell.label"
+      ]
+    },
+    {
+      "group": "bool",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.bool.off",
+        "wire.settings.bool.on"
+      ]
+    },
+    {
+      "group": "classification",
+      "keys_read": 30,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.classification.description",
+        "wire.settings.classification.title",
+        "wire.settings.classification_auto.choice.false.description",
+        "wire.settings.classification_auto.choice.true.description",
+        "wire.settings.classification_auto.help",
+        "wire.settings.classification_auto.label",
+        "wire.settings.classification_maxcandidates.help",
+        "wire.settings.classification_maxcandidates.label",
+        "wire.settings.classification_maxrecommendations.help",
+        "wire.settings.classification_maxrecommendations.label",
+        "wire.settings.classification_maxstatechars.help",
+        "wire.settings.classification_maxstatechars.label",
+        "wire.settings.classification_model.help",
+        "wire.settings.classification_model.label",
+        "wire.settings.classification_notice.help",
+        "wire.settings.classification_notice.label",
+        "wire.settings.classification_timeoutms.help",
+        "wire.settings.classification_timeoutms.label",
+        "wire.settings.classification_vendor.choice.auto.description",
+        "wire.settings.classification_vendor.choice.auto.label",
+        "wire.settings.classification_vendor.choice.openrouter.description",
+        "wire.settings.classification_vendor.choice.openrouter.label",
+        "wire.settings.classification_vendor.choice.radient.description",
+        "wire.settings.classification_vendor.choice.radient.label",
+        "wire.settings.classification_vendor.choice.typesafe.description",
+        "wire.settings.classification_vendor.choice.typesafe.label",
+        "wire.settings.classification_vendor.help",
+        "wire.settings.classification_vendor.label",
+        "wire.settings.classification_waitms.help",
+        "wire.settings.classification_waitms.label"
+      ]
+    },
+    {
+      "group": "compaction",
+      "keys_read": 48,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.compaction.description",
+        "wire.settings.compaction.title",
+        "wire.settings.compaction_auto_continue.choice.false.description",
+        "wire.settings.compaction_auto_continue.choice.true.description",
+        "wire.settings.compaction_auto_continue.help",
+        "wire.settings.compaction_auto_continue.label",
+        "wire.settings.compaction_enabled.choice.false.description",
+        "wire.settings.compaction_enabled.choice.true.description",
+        "wire.settings.compaction_enabled.help",
+        "wire.settings.compaction_enabled.label",
+        "wire.settings.compaction_idle_enabled.choice.false.description",
+        "wire.settings.compaction_idle_enabled.choice.true.description",
+        "wire.settings.compaction_idle_enabled.help",
+        "wire.settings.compaction_idle_enabled.label",
+        "wire.settings.compaction_idle_min_growth_tokens.help",
+        "wire.settings.compaction_idle_min_growth_tokens.label",
+        "wire.settings.compaction_idle_threshold_tokens.help",
+        "wire.settings.compaction_idle_threshold_tokens.label",
+        "wire.settings.compaction_keep_recent_tokens.help",
+        "wire.settings.compaction_keep_recent_tokens.label",
+        "wire.settings.compaction_mid_turn_enabled.choice.false.description",
+        "wire.settings.compaction_mid_turn_enabled.choice.true.description",
+        "wire.settings.compaction_mid_turn_enabled.help",
+        "wire.settings.compaction_mid_turn_enabled.label",
+        "wire.settings.compaction_resume_replay.choice.card.description",
+        "wire.settings.compaction_resume_replay.choice.card.label",
+        "wire.settings.compaction_resume_replay.choice.full.description",
+        "wire.settings.compaction_resume_replay.choice.full.label",
+        "wire.settings.compaction_resume_replay.help",
+        "wire.settings.compaction_resume_replay.label",
+        "wire.settings.compaction_strategy.choice.auto.description",
+        "wire.settings.compaction_strategy.choice.auto.label",
+        "wire.settings.compaction_strategy.choice.context_full.description",
+        "wire.settings.compaction_strategy.choice.context_full.label",
+        "wire.settings.compaction_strategy.choice.off.description",
+        "wire.settings.compaction_strategy.choice.off.label",
+        "wire.settings.compaction_strategy.choice.snapcompact.description",
+        "wire.settings.compaction_strategy.choice.snapcompact.label",
+        "wire.settings.compaction_strategy.help",
+        "wire.settings.compaction_strategy.label",
+        "wire.settings.compaction_threshold_percent.help",
+        "wire.settings.compaction_threshold_percent.label",
+        "wire.settings.compaction_threshold_tokens.help",
+        "wire.settings.compaction_threshold_tokens.label",
+        "wire.settings.compaction_wire_bytes_budget.help",
+        "wire.settings.compaction_wire_bytes_budget.label",
+        "wire.settings.compaction_wire_bytes_trigger.help",
+        "wire.settings.compaction_wire_bytes_trigger.label"
+      ]
+    },
+    {
+      "group": "conversation",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.conversation_length.help",
+        "wire.settings.conversation_length.label"
+      ]
+    },
+    {
+      "group": "desktop",
+      "keys_read": 7,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.desktop.description",
+        "wire.settings.desktop.title",
+        "wire.settings.desktop_launch_command.help",
+        "wire.settings.desktop_launch_command.label",
+        "wire.settings.desktop_launch_command.placeholder",
+        "wire.settings.desktop_remote_files_cache_bytes.help",
+        "wire.settings.desktop_remote_files_cache_bytes.label"
+      ]
+    },
+    {
+      "group": "detail",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.detail_length.help",
+        "wire.settings.detail_length.label"
+      ]
+    },
+    {
+      "group": "display",
+      "keys_read": 107,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.display_comfortable_rows.choice.false.description",
+        "wire.settings.display_comfortable_rows.choice.true.description",
+        "wire.settings.display_comfortable_rows.help",
+        "wire.settings.display_comfortable_rows.label",
+        "wire.settings.display_composer_band.choice.false.description",
+        "wire.settings.display_composer_band.choice.true.description",
+        "wire.settings.display_composer_band.help",
+        "wire.settings.display_composer_band.label",
+        "wire.settings.display_composer_chevron.choice.false.description",
+        "wire.settings.display_composer_chevron.choice.true.description",
+        "wire.settings.display_composer_chevron.help",
+        "wire.settings.display_composer_chevron.label",
+        "wire.settings.display_composer_command.help",
+        "wire.settings.display_composer_command.label",
+        "wire.settings.display_composer_command.placeholder",
+        "wire.settings.display_composer_command_interval.help",
+        "wire.settings.display_composer_command_interval.label",
+        "wire.settings.display_composer_context.choice.false.description",
+        "wire.settings.display_composer_context.choice.true.description",
+        "wire.settings.display_composer_context.help",
+        "wire.settings.display_composer_context.label",
+        "wire.settings.display_composer_cost.choice.false.description",
+        "wire.settings.display_composer_cost.choice.true.description",
+        "wire.settings.display_composer_cost.help",
+        "wire.settings.display_composer_cost.label",
+        "wire.settings.display_composer_cwd.choice.false.description",
+        "wire.settings.display_composer_cwd.choice.true.description",
+        "wire.settings.display_composer_cwd.help",
+        "wire.settings.display_composer_cwd.label",
+        "wire.settings.display_composer_duration.choice.false.description",
+        "wire.settings.display_composer_duration.choice.true.description",
+        "wire.settings.display_composer_duration.help",
+        "wire.settings.display_composer_duration.label",
+        "wire.settings.display_composer_model.choice.false.description",
+        "wire.settings.display_composer_model.choice.true.description",
+        "wire.settings.display_composer_model.help",
+        "wire.settings.display_composer_model.label",
+        "wire.settings.display_composer_rate.choice.false.description",
+        "wire.settings.display_composer_rate.choice.true.description",
+        "wire.settings.display_composer_rate.help",
+        "wire.settings.display_composer_rate.label",
+        "wire.settings.display_dock.choice.full.description",
+        "wire.settings.display_dock.choice.full.label",
+        "wire.settings.display_dock.choice.hidden.description",
+        "wire.settings.display_dock.choice.hidden.label",
+        "wire.settings.display_dock.choice.summary.description",
+        "wire.settings.display_dock.choice.summary.label",
+        "wire.settings.display_dock.help",
+        "wire.settings.display_dock.label",
+        "wire.settings.display_heading_markers.choice.false.description",
+        "wire.settings.display_heading_markers.choice.true.description",
+        "wire.settings.display_heading_markers.help",
+        "wire.settings.display_heading_markers.label",
+        "wire.settings.display_hide_cross_session.choice.false.description",
+        "wire.settings.display_hide_cross_session.choice.true.description",
+        "wire.settings.display_hide_cross_session.help",
+        "wire.settings.display_hide_cross_session.label",
+        "wire.settings.display_images.choice.false.description",
+        "wire.settings.display_images.choice.true.description",
+        "wire.settings.display_images.help",
+        "wire.settings.display_images.label",
+        "wire.settings.display_narration.choice.false.description",
+        "wire.settings.display_narration.choice.true.description",
+        "wire.settings.display_narration.help",
+        "wire.settings.display_narration.label",
+        "wire.settings.display_nerd_icons.choice.false.description",
+        "wire.settings.display_nerd_icons.choice.false.label",
+        "wire.settings.display_nerd_icons.choice.none.description",
+        "wire.settings.display_nerd_icons.choice.none.label",
+        "wire.settings.display_nerd_icons.choice.true.description",
+        "wire.settings.display_nerd_icons.choice.true.label",
+        "wire.settings.display_nerd_icons.help",
+        "wire.settings.display_nerd_icons.label",
+        "wire.settings.display_notification_session_name.choice.false.description",
+        "wire.settings.display_notification_session_name.choice.true.description",
+        "wire.settings.display_notification_session_name.help",
+        "wire.settings.display_notification_session_name.label",
+        "wire.settings.display_notifications.choice.false.description",
+        "wire.settings.display_notifications.choice.true.description",
+        "wire.settings.display_notifications.help",
+        "wire.settings.display_notifications.label",
+        "wire.settings.display_rail.choice.false.description",
+        "wire.settings.display_rail.choice.true.description",
+        "wire.settings.display_rail.help",
+        "wire.settings.display_rail.label",
+        "wire.settings.display_reasoning.choice.false.description",
+        "wire.settings.display_reasoning.choice.true.description",
+        "wire.settings.display_reasoning.help",
+        "wire.settings.display_reasoning.label",
+        "wire.settings.display_shimmer.choice.false.description",
+        "wire.settings.display_shimmer.choice.true.description",
+        "wire.settings.display_shimmer.help",
+        "wire.settings.display_shimmer.label",
+        "wire.settings.display_terminal_title.choice.false.description",
+        "wire.settings.display_terminal_title.choice.true.description",
+        "wire.settings.display_terminal_title.help",
+        "wire.settings.display_terminal_title.label",
+        "wire.settings.display_time_format.choice.12h.description",
+        "wire.settings.display_time_format.choice.12h.label",
+        "wire.settings.display_time_format.choice.24h.description",
+        "wire.settings.display_time_format.choice.24h.label",
+        "wire.settings.display_time_format.help",
+        "wire.settings.display_time_format.label",
+        "wire.settings.display_turn_answer_rail.choice.false.description",
+        "wire.settings.display_turn_answer_rail.choice.true.description",
+        "wire.settings.display_turn_answer_rail.help",
+        "wire.settings.display_turn_answer_rail.label"
+      ]
+    },
+    {
+      "group": "failover",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.failover.description",
+        "wire.settings.failover.title"
+      ]
+    },
+    {
+      "group": "fork",
+      "keys_read": 14,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.fork.description",
+        "wire.settings.fork.title",
+        "wire.settings.fork_cmux_placement.choice.surface.description",
+        "wire.settings.fork_cmux_placement.choice.surface.label",
+        "wire.settings.fork_cmux_placement.choice.workspace.description",
+        "wire.settings.fork_cmux_placement.choice.workspace.label",
+        "wire.settings.fork_cmux_placement.help",
+        "wire.settings.fork_cmux_placement.label",
+        "wire.settings.fork_mode.choice.switch.description",
+        "wire.settings.fork_mode.choice.switch.label",
+        "wire.settings.fork_mode.choice.window.description",
+        "wire.settings.fork_mode.choice.window.label",
+        "wire.settings.fork_mode.help",
+        "wire.settings.fork_mode.label"
+      ]
+    },
+    {
+      "group": "guardrails",
+      "keys_read": 10,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.guardrails.description",
+        "wire.settings.guardrails.title",
+        "wire.settings.guardrails_critical_override.help",
+        "wire.settings.guardrails_critical_override.label",
+        "wire.settings.guardrails_enabled.help",
+        "wire.settings.guardrails_enabled.label",
+        "wire.settings.guardrails_judge_timeout_s.help",
+        "wire.settings.guardrails_judge_timeout_s.label",
+        "wire.settings.guardrails_rules_dir.help",
+        "wire.settings.guardrails_rules_dir.label"
+      ]
+    },
+    {
+      "group": "heavy",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.heavy_jobs.description",
+        "wire.settings.heavy_jobs.title"
+      ]
+    },
+    {
+      "group": "hooks",
+      "keys_read": 8,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.hooks.description",
+        "wire.settings.hooks.title",
+        "wire.settings.hooks_forward_claude.help",
+        "wire.settings.hooks_forward_claude.label",
+        "wire.settings.hooks_forward_codex.help",
+        "wire.settings.hooks_forward_codex.label",
+        "wire.settings.hooks_native.help",
+        "wire.settings.hooks_native.label"
+      ]
+    },
+    {
+      "group": "hosting",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.hosting.help",
+        "wire.settings.hosting.label"
+      ]
+    },
+    {
+      "group": "hub",
+      "keys_read": 12,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.hub.description",
+        "wire.settings.hub.title",
+        "wire.settings.hub_auto_update_agents.choice.false.description",
+        "wire.settings.hub_auto_update_agents.choice.true.description",
+        "wire.settings.hub_auto_update_agents.help",
+        "wire.settings.hub_auto_update_agents.label",
+        "wire.settings.hub_auto_update_teams.choice.false.description",
+        "wire.settings.hub_auto_update_teams.choice.true.description",
+        "wire.settings.hub_auto_update_teams.help",
+        "wire.settings.hub_auto_update_teams.label",
+        "wire.settings.hub_check_interval_min.help",
+        "wire.settings.hub_check_interval_min.label"
+      ]
+    },
+    {
+      "group": "keymap",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.keymap.description",
+        "wire.settings.keymap.title"
+      ]
+    },
+    {
+      "group": "language",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.language.help",
+        "wire.settings.language.label"
+      ]
+    },
+    {
+      "group": "librarian",
+      "keys_read": 20,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.librarian.description",
+        "wire.settings.librarian.title",
+        "wire.settings.librarian_cadence_at.help",
+        "wire.settings.librarian_cadence_at.label",
+        "wire.settings.librarian_cadence_at.placeholder",
+        "wire.settings.librarian_cadence_max_extra_per_day.help",
+        "wire.settings.librarian_cadence_max_extra_per_day.label",
+        "wire.settings.librarian_cadence_min_gap_minutes.help",
+        "wire.settings.librarian_cadence_min_gap_minutes.label",
+        "wire.settings.librarian_cadence_paused.choice.false.description",
+        "wire.settings.librarian_cadence_paused.choice.true.description",
+        "wire.settings.librarian_cadence_paused.help",
+        "wire.settings.librarian_cadence_paused.label",
+        "wire.settings.librarian_enabled.choice.false.description",
+        "wire.settings.librarian_enabled.choice.true.description",
+        "wire.settings.librarian_enabled.help",
+        "wire.settings.librarian_enabled.label",
+        "wire.settings.librarian_name.help",
+        "wire.settings.librarian_name.label",
+        "wire.settings.librarian_name.placeholder"
+      ]
+    },
+    {
+      "group": "local",
+      "keys_read": 6,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.local_providers.base_url.help",
+        "wire.settings.local_providers.base_url.label",
+        "wire.settings.local_providers.description",
+        "wire.settings.local_providers.models.help",
+        "wire.settings.local_providers.models.label",
+        "wire.settings.local_providers.title"
+      ]
+    },
+    {
+      "group": "max",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.max_learnings_history.help",
+        "wire.settings.max_learnings_history.label"
+      ]
+    },
+    {
+      "group": "memory",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.memory_guard.description",
+        "wire.settings.memory_guard.title"
+      ]
+    },
+    {
+      "group": "mesh",
+      "keys_read": 8,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.mesh_updates.description",
+        "wire.settings.mesh_updates.title",
+        "wire.settings.mesh_moves.title",
+        "wire.settings.mesh_moves.description",
+        "wire.settings.mesh_move_working_set_max_bytes.label",
+        "wire.settings.mesh_move_working_set_max_bytes.help",
+        "wire.settings.mesh_move_working_set_roots.label",
+        "wire.settings.mesh_move_working_set_roots.help"
+      ]
+    },
+    {
+      "group": "model",
+      "keys_read": 15,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.model.description",
+        "wire.settings.model.title",
+        "wire.settings.model_effort.choice.high.description",
+        "wire.settings.model_effort.choice.low.description",
+        "wire.settings.model_effort.choice.max.description",
+        "wire.settings.model_effort.choice.medium.description",
+        "wire.settings.model_effort.choice.minimal.description",
+        "wire.settings.model_effort.choice.none.description",
+        "wire.settings.model_effort.choice.unset.description",
+        "wire.settings.model_effort.choice.unset.label",
+        "wire.settings.model_effort.choice.xhigh.description",
+        "wire.settings.model_effort.help",
+        "wire.settings.model_effort.label",
+        "wire.settings.model_name.help",
+        "wire.settings.model_name.label"
+      ]
+    },
+    {
+      "group": "monitor",
+      "keys_read": 24,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.monitor.description",
+        "wire.settings.monitor.title",
+        "wire.settings.monitor_classifymaxchars.help",
+        "wire.settings.monitor_classifymaxchars.label",
+        "wire.settings.monitor_defaultintervals.help",
+        "wire.settings.monitor_defaultintervals.label",
+        "wire.settings.monitor_deltamaxchars.help",
+        "wire.settings.monitor_deltamaxchars.label",
+        "wire.settings.monitor_maxconsecutivefailures.help",
+        "wire.settings.monitor_maxconsecutivefailures.label",
+        "wire.settings.monitor_maxdeliveriesperhour.help",
+        "wire.settings.monitor_maxdeliveriesperhour.label",
+        "wire.settings.monitor_maxdeltalines.help",
+        "wire.settings.monitor_maxdeltalines.label",
+        "wire.settings.monitor_maxmonitors.help",
+        "wire.settings.monitor_maxmonitors.label",
+        "wire.settings.monitor_normalizetimestamps.choice.false.description",
+        "wire.settings.monitor_normalizetimestamps.choice.true.description",
+        "wire.settings.monitor_normalizetimestamps.help",
+        "wire.settings.monitor_normalizetimestamps.label",
+        "wire.settings.monitor_runtimeoutms.help",
+        "wire.settings.monitor_runtimeoutms.label",
+        "wire.settings.monitor_snapshotmaxchars.help",
+        "wire.settings.monitor_snapshotmaxchars.label"
+      ]
+    },
+    {
+      "group": "network",
+      "keys_read": 34,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.network.description",
+        "wire.settings.network.title",
+        "wire.settings.network_advertise_hosts.help",
+        "wire.settings.network_advertise_hosts.label",
+        "wire.settings.network_advertise_hosts.placeholder",
+        "wire.settings.network_audit_generations.help",
+        "wire.settings.network_audit_generations.label",
+        "wire.settings.network_audit_max_age_days.help",
+        "wire.settings.network_audit_max_age_days.label",
+        "wire.settings.network_audit_max_bytes.help",
+        "wire.settings.network_audit_max_bytes.label",
+        "wire.settings.network_credentials_github_repositories.help",
+        "wire.settings.network_credentials_github_repositories.label",
+        "wire.settings.network_credentials_github_repositories.placeholder",
+        "wire.settings.network_credentials_grant_ttl_s.help",
+        "wire.settings.network_credentials_grant_ttl_s.label",
+        "wire.settings.network_credentials_offline_hold_s.help",
+        "wire.settings.network_credentials_offline_hold_s.label",
+        "wire.settings.network_listen_address.help",
+        "wire.settings.network_listen_address.label",
+        "wire.settings.network_max_handshakes.help",
+        "wire.settings.network_max_handshakes.label",
+        "wire.settings.network_port.help",
+        "wire.settings.network_port.label",
+        "wire.settings.network_rollout_on_update.choice.auto.description",
+        "wire.settings.network_rollout_on_update.choice.auto.label",
+        "wire.settings.network_rollout_on_update.choice.off.description",
+        "wire.settings.network_rollout_on_update.choice.off.label",
+        "wire.settings.network_rollout_on_update.help",
+        "wire.settings.network_rollout_on_update.label",
+        "wire.settings.network_sync_debounce_s.help",
+        "wire.settings.network_sync_debounce_s.label",
+        "wire.settings.network_sync_tick_s.help",
+        "wire.settings.network_sync_tick_s.label"
+      ]
+    },
+    {
+      "group": "openrouter",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.openrouter.description",
+        "wire.settings.openrouter.title"
+      ]
+    },
+    {
+      "group": "proactive",
+      "keys_read": 12,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.proactive.description",
+        "wire.settings.proactive.title",
+        "wire.settings.proactive_patience_backoff.help",
+        "wire.settings.proactive_patience_backoff.label",
+        "wire.settings.proactive_patience_default_ms.help",
+        "wire.settings.proactive_patience_default_ms.label",
+        "wire.settings.proactive_patience_episode_ttl_ms.help",
+        "wire.settings.proactive_patience_episode_ttl_ms.label",
+        "wire.settings.proactive_patience_max_attempts.help",
+        "wire.settings.proactive_patience_max_attempts.label",
+        "wire.settings.proactive_patience_max_pending.help",
+        "wire.settings.proactive_patience_max_pending.label"
+      ]
+    },
+    {
+      "group": "projects",
+      "keys_read": 4,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.projects.description",
+        "wire.settings.projects.title",
+        "wire.settings.projects_stale_after_hours.help",
+        "wire.settings.projects_stale_after_hours.label"
+      ]
+    },
+    {
+      "group": "providers",
+      "keys_read": 82,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.providers.description",
+        "wire.settings.providers.title",
+        "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help",
+        "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+        "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help",
+        "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label",
+        "wire.settings.providers_bedrock_auth.help",
+        "wire.settings.providers_bedrock_auth.label",
+        "wire.settings.providers_bedrock_region.help",
+        "wire.settings.providers_bedrock_region.label",
+        "wire.settings.providers_openai_api.choice.chat_completions.description",
+        "wire.settings.providers_openai_api.choice.chat_completions.label",
+        "wire.settings.providers_openai_api.choice.responses.description",
+        "wire.settings.providers_openai_api.choice.responses.label",
+        "wire.settings.providers_openai_api.help",
+        "wire.settings.providers_openai_api.label",
+        "wire.settings.providers_openai_use_max_context_window.help",
+        "wire.settings.providers_openai_use_max_context_window.label",
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.false.description",
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.description",
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "wire.settings.providers_openrouter_allow_fallbacks.help",
+        "wire.settings.providers_openrouter_allow_fallbacks.label",
+        "wire.settings.providers_openrouter_data_collection.choice.allow.description",
+        "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "wire.settings.providers_openrouter_data_collection.choice.deny.description",
+        "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "wire.settings.providers_openrouter_data_collection.choice.unset.description",
+        "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "wire.settings.providers_openrouter_data_collection.help",
+        "wire.settings.providers_openrouter_data_collection.label",
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.description",
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "wire.settings.providers_openrouter_enforce_distillable_text.label",
+        "wire.settings.providers_openrouter_ignore.help",
+        "wire.settings.providers_openrouter_ignore.label",
+        "wire.settings.providers_openrouter_ignore.placeholder",
+        "wire.settings.providers_openrouter_max_price.help",
+        "wire.settings.providers_openrouter_max_price.label",
+        "wire.settings.providers_openrouter_max_price.placeholder",
+        "wire.settings.providers_openrouter_only.help",
+        "wire.settings.providers_openrouter_only.label",
+        "wire.settings.providers_openrouter_only.placeholder",
+        "wire.settings.providers_openrouter_order.help",
+        "wire.settings.providers_openrouter_order.label",
+        "wire.settings.providers_openrouter_order.placeholder",
+        "wire.settings.providers_openrouter_order.warning",
+        "wire.settings.providers_openrouter_preferred_max_latency.help",
+        "wire.settings.providers_openrouter_preferred_max_latency.label",
+        "wire.settings.providers_openrouter_preferred_min_throughput.help",
+        "wire.settings.providers_openrouter_preferred_min_throughput.label",
+        "wire.settings.providers_openrouter_provider_affinity.help",
+        "wire.settings.providers_openrouter_provider_affinity.label",
+        "wire.settings.providers_openrouter_quantizations.help",
+        "wire.settings.providers_openrouter_quantizations.label",
+        "wire.settings.providers_openrouter_quantizations.placeholder",
+        "wire.settings.providers_openrouter_require_parameters.choice.true.description",
+        "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "wire.settings.providers_openrouter_require_parameters.choice.unset.description",
+        "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "wire.settings.providers_openrouter_require_parameters.help",
+        "wire.settings.providers_openrouter_require_parameters.label",
+        "wire.settings.providers_openrouter_sort.choice.latency.description",
+        "wire.settings.providers_openrouter_sort.choice.latency.label",
+        "wire.settings.providers_openrouter_sort.choice.price.description",
+        "wire.settings.providers_openrouter_sort.choice.price.label",
+        "wire.settings.providers_openrouter_sort.choice.throughput.description",
+        "wire.settings.providers_openrouter_sort.choice.throughput.label",
+        "wire.settings.providers_openrouter_sort.choice.unset.description",
+        "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "wire.settings.providers_openrouter_sort.help",
+        "wire.settings.providers_openrouter_sort.label",
+        "wire.settings.providers_openrouter_zdr.choice.true.description",
+        "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "wire.settings.providers_openrouter_zdr.choice.unset.description",
+        "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "wire.settings.providers_openrouter_zdr.help",
+        "wire.settings.providers_openrouter_zdr.label"
+      ]
+    },
+    {
+      "group": "query",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.query_budget.description",
+        "wire.settings.query_budget.title"
+      ]
+    },
+    {
+      "group": "remote",
+      "keys_read": 6,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.remote_compute.description",
+        "wire.settings.remote_compute.title",
+        "wire.settings.remote_compute_enabled.choice.false.description",
+        "wire.settings.remote_compute_enabled.choice.true.description",
+        "wire.settings.remote_compute_enabled.help",
+        "wire.settings.remote_compute_enabled.label"
+      ]
+    },
+    {
+      "group": "retired",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.retired.description",
+        "wire.settings.retired.title"
+      ]
+    },
+    {
+      "group": "retry",
+      "keys_read": 34,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.retry_basedelayms.help",
+        "wire.settings.retry_basedelayms.label",
+        "wire.settings.retry_connectivitybackoffcapms.help",
+        "wire.settings.retry_connectivitybackoffcapms.label",
+        "wire.settings.retry_connectivitymaxretries.help",
+        "wire.settings.retry_connectivitymaxretries.label",
+        "wire.settings.retry_enabled.choice.false.description",
+        "wire.settings.retry_enabled.choice.true.description",
+        "wire.settings.retry_enabled.help",
+        "wire.settings.retry_enabled.label",
+        "wire.settings.retry_fallbackchains.help",
+        "wire.settings.retry_fallbackchains.label",
+        "wire.settings.retry_maxretries.help",
+        "wire.settings.retry_maxretries.label",
+        "wire.settings.retry_modelfallback.choice.false.description",
+        "wire.settings.retry_modelfallback.choice.true.description",
+        "wire.settings.retry_modelfallback.help",
+        "wire.settings.retry_modelfallback.label",
+        "wire.settings.retry_pinnedfallback.choice.cross_family.description",
+        "wire.settings.retry_pinnedfallback.choice.cross_family.label",
+        "wire.settings.retry_pinnedfallback.choice.same_family.description",
+        "wire.settings.retry_pinnedfallback.choice.same_family.label",
+        "wire.settings.retry_pinnedfallback.help",
+        "wire.settings.retry_pinnedfallback.label",
+        "wire.settings.retry_usageawareaccountpick.choice.false.description",
+        "wire.settings.retry_usageawareaccountpick.choice.true.description",
+        "wire.settings.retry_usageawareaccountpick.help",
+        "wire.settings.retry_usageawareaccountpick.label",
+        "wire.settings.retry_usageawarefallback.choice.false.description",
+        "wire.settings.retry_usageawarefallback.choice.true.description",
+        "wire.settings.retry_usageawarefallback.help",
+        "wire.settings.retry_usageawarefallback.label",
+        "wire.settings.retry_usagereservepercent.help",
+        "wire.settings.retry_usagereservepercent.label"
+      ]
+    },
+    {
+      "group": "runtime",
+      "keys_read": 12,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.runtime.description",
+        "wire.settings.runtime.title",
+        "wire.settings.runtime_background_on_resume.choice.false.description",
+        "wire.settings.runtime_background_on_resume.choice.true.description",
+        "wire.settings.runtime_background_on_resume.help",
+        "wire.settings.runtime_background_on_resume.label",
+        "wire.settings.runtime_keep_alive_max.help",
+        "wire.settings.runtime_keep_alive_max.label",
+        "wire.settings.runtime_keep_alive_seconds.help",
+        "wire.settings.runtime_keep_alive_seconds.label",
+        "wire.settings.runtime_unattended_gate_timeout.help",
+        "wire.settings.runtime_unattended_gate_timeout.label"
+      ]
+    },
+    {
+      "group": "send",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.send_journal_unconfirmed.help",
+        "wire.settings.send_journal_unconfirmed.label"
+      ]
+    },
+    {
+      "group": "session",
+      "keys_read": 44,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.session.description",
+        "wire.settings.session.title",
+        "wire.settings.session_cleanup.description",
+        "wire.settings.session_cleanup.title",
+        "wire.settings.session_cleanup_delegated_enabled.choice.false.description",
+        "wire.settings.session_cleanup_delegated_enabled.choice.true.description",
+        "wire.settings.session_cleanup_delegated_enabled.help",
+        "wire.settings.session_cleanup_delegated_enabled.label",
+        "wire.settings.session_cleanup_delegated_max_age_hours.help",
+        "wire.settings.session_cleanup_delegated_max_age_hours.label",
+        "wire.settings.session_cleanup_enabled.choice.false.description",
+        "wire.settings.session_cleanup_enabled.choice.true.description",
+        "wire.settings.session_cleanup_enabled.help",
+        "wire.settings.session_cleanup_enabled.label",
+        "wire.settings.session_cleanup_max_inactive_days.help",
+        "wire.settings.session_cleanup_max_inactive_days.label",
+        "wire.settings.session_cleanup_max_sessions.help",
+        "wire.settings.session_cleanup_max_sessions.label",
+        "wire.settings.session_cleanup_max_total_bytes.help",
+        "wire.settings.session_cleanup_max_total_bytes.label",
+        "wire.settings.session_cleanup_remove_empty.choice.false.description",
+        "wire.settings.session_cleanup_remove_empty.choice.true.description",
+        "wire.settings.session_cleanup_remove_empty.help",
+        "wire.settings.session_cleanup_remove_empty.label",
+        "wire.settings.session_compression.description",
+        "wire.settings.session_compression.title",
+        "wire.settings.session_compression_after_days.help",
+        "wire.settings.session_compression_after_days.label",
+        "wire.settings.session_compression_enabled.choice.false.description",
+        "wire.settings.session_compression_enabled.choice.true.description",
+        "wire.settings.session_compression_enabled.help",
+        "wire.settings.session_compression_enabled.label",
+        "wire.settings.session_delegated.description",
+        "wire.settings.session_delegated.title",
+        "wire.settings.session_scratchpad.description",
+        "wire.settings.session_scratchpad.title",
+        "wire.settings.session_scratchpad_max_bytes.help",
+        "wire.settings.session_scratchpad_max_bytes.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.help",
+        "wire.settings.session_cleanup_temporary_idle_minutes.label"
+      ]
+    },
+    {
+      "group": "shell",
+      "keys_read": 14,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.shell_environment.description",
+        "wire.settings.shell_environment.title",
+        "wire.settings.shell_environment_exclude.help",
+        "wire.settings.shell_environment_exclude.label",
+        "wire.settings.shell_environment_exclude.placeholder",
+        "wire.settings.shell_environment_inherit.help",
+        "wire.settings.shell_environment_inherit.label",
+        "wire.settings.shell_environment_inherit.placeholder",
+        "wire.settings.shell_environment_mode.choice.allowlist.description",
+        "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "wire.settings.shell_environment_mode.choice.inherit.description",
+        "wire.settings.shell_environment_mode.choice.inherit.label",
+        "wire.settings.shell_environment_mode.help",
+        "wire.settings.shell_environment_mode.label"
+      ]
+    },
+    {
+      "group": "speech",
+      "keys_read": 48,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.speech.description",
+        "wire.settings.speech.title",
+        "wire.settings.speech_transcription_cleanup.choice.auto.description",
+        "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "wire.settings.speech_transcription_cleanup.choice.client.description",
+        "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "wire.settings.speech_transcription_cleanup.choice.off.description",
+        "wire.settings.speech_transcription_cleanup.choice.off.label",
+        "wire.settings.speech_transcription_cleanup.choice.provider.description",
+        "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "wire.settings.speech_transcription_cleanup.help",
+        "wire.settings.speech_transcription_cleanup.label",
+        "wire.settings.speech_voice_accent.help",
+        "wire.settings.speech_voice_accent.label",
+        "wire.settings.speech_voice_expressiveness.choice.high.description",
+        "wire.settings.speech_voice_expressiveness.choice.high.label",
+        "wire.settings.speech_voice_expressiveness.choice.low.description",
+        "wire.settings.speech_voice_expressiveness.choice.low.label",
+        "wire.settings.speech_voice_expressiveness.choice.medium.description",
+        "wire.settings.speech_voice_expressiveness.choice.medium.label",
+        "wire.settings.speech_voice_expressiveness.help",
+        "wire.settings.speech_voice_expressiveness.label",
+        "wire.settings.speech_voice_gender.choice.auto.description",
+        "wire.settings.speech_voice_gender.choice.auto.label",
+        "wire.settings.speech_voice_gender.choice.female.description",
+        "wire.settings.speech_voice_gender.choice.female.label",
+        "wire.settings.speech_voice_gender.choice.male.description",
+        "wire.settings.speech_voice_gender.choice.male.label",
+        "wire.settings.speech_voice_gender.help",
+        "wire.settings.speech_voice_gender.label",
+        "wire.settings.speech_voice_instructions.help",
+        "wire.settings.speech_voice_instructions.label",
+        "wire.settings.speech_voice_language.help",
+        "wire.settings.speech_voice_language.label",
+        "wire.settings.speech_voice_pace.help",
+        "wire.settings.speech_voice_pace.label",
+        "wire.settings.speech_voice_tone.choice.authoritative.description",
+        "wire.settings.speech_voice_tone.choice.authoritative.label",
+        "wire.settings.speech_voice_tone.choice.bright.description",
+        "wire.settings.speech_voice_tone.choice.bright.label",
+        "wire.settings.speech_voice_tone.choice.calm.description",
+        "wire.settings.speech_voice_tone.choice.calm.label",
+        "wire.settings.speech_voice_tone.choice.neutral.description",
+        "wire.settings.speech_voice_tone.choice.neutral.label",
+        "wire.settings.speech_voice_tone.choice.warm.description",
+        "wire.settings.speech_voice_tone.choice.warm.label",
+        "wire.settings.speech_voice_tone.help",
+        "wire.settings.speech_voice_tone.label"
+      ]
+    },
+    {
+      "group": "static",
+      "keys_read": 6,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.static.description",
+        "wire.settings.static.title",
+        "wire.settings.static_roots.help",
+        "wire.settings.static_roots.label",
+        "wire.settings.static_roots.placeholder",
+        "wire.settings.static_roots.warning"
+      ]
+    },
+    {
+      "group": "subagents",
+      "keys_read": 22,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.subagents.description",
+        "wire.settings.subagents.title",
+        "wire.settings.subagents_max_running.help",
+        "wire.settings.subagents_max_running.label",
+        "wire.settings.subagents_max_team_depth.help",
+        "wire.settings.subagents_max_team_depth.label",
+        "wire.settings.subagents_model_choice.choice.model.description",
+        "wire.settings.subagents_model_choice.choice.model.label",
+        "wire.settings.subagents_model_choice.choice.operator.description",
+        "wire.settings.subagents_model_choice.choice.operator.label",
+        "wire.settings.subagents_model_choice.help",
+        "wire.settings.subagents_model_choice.label",
+        "wire.settings.subagents_models_hi.help",
+        "wire.settings.subagents_models_hi.label",
+        "wire.settings.subagents_models_lo.help",
+        "wire.settings.subagents_models_lo.label",
+        "wire.settings.subagents_models_med.help",
+        "wire.settings.subagents_models_med.label",
+        "wire.settings.subagents_slim_child_knowledge.choice.false.description",
+        "wire.settings.subagents_slim_child_knowledge.choice.true.description",
+        "wire.settings.subagents_slim_child_knowledge.help",
+        "wire.settings.subagents_slim_child_knowledge.label"
+      ]
+    },
+    {
+      "group": "supplements",
+      "keys_read": 29,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.supplements.description",
+        "wire.settings.supplements.title",
+        "wire.settings.supplements_denyprefixes.help",
+        "wire.settings.supplements_denyprefixes.label",
+        "wire.settings.supplements_denyprefixes.placeholder",
+        "wire.settings.supplements_enabled.choice.false.description",
+        "wire.settings.supplements_enabled.choice.true.description",
+        "wire.settings.supplements_enabled.help",
+        "wire.settings.supplements_enabled.label",
+        "wire.settings.supplements_files.choice.false.description",
+        "wire.settings.supplements_files.choice.true.description",
+        "wire.settings.supplements_files.help",
+        "wire.settings.supplements_files.label",
+        "wire.settings.supplements_graphics.choice.false.description",
+        "wire.settings.supplements_graphics.choice.true.description",
+        "wire.settings.supplements_graphics.help",
+        "wire.settings.supplements_graphics.label",
+        "wire.settings.supplements_maxcostusd.help",
+        "wire.settings.supplements_maxcostusd.label",
+        "wire.settings.supplements_maxfeatured.help",
+        "wire.settings.supplements_maxfeatured.label",
+        "wire.settings.supplements_maxoutputtokens.help",
+        "wire.settings.supplements_maxoutputtokens.label",
+        "wire.settings.supplements_maxturns.help",
+        "wire.settings.supplements_maxturns.label",
+        "wire.settings.supplements_model.help",
+        "wire.settings.supplements_model.label",
+        "wire.settings.supplements_timeouts.help",
+        "wire.settings.supplements_timeouts.label"
+      ]
+    },
+    {
+      "group": "team",
+      "keys_read": 18,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.team_bridge.description",
+        "wire.settings.team_bridge.title",
+        "wire.settings.team_bridge_enabled.help",
+        "wire.settings.team_bridge_enabled.label",
+        "wire.settings.team_bridge_screening_ambient_budget_per_hour.help",
+        "wire.settings.team_bridge_screening_ambient_budget_per_hour.label",
+        "wire.settings.team_bridge_screening_budget_per_hour.help",
+        "wire.settings.team_bridge_screening_budget_per_hour.label",
+        "wire.settings.team_bridge_screening_model.help",
+        "wire.settings.team_bridge_screening_model.label",
+        "wire.settings.team_bridge_screening_sender_budget_per_hour.help",
+        "wire.settings.team_bridge_screening_sender_budget_per_hour.label",
+        "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help",
+        "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label",
+        "wire.settings.team_bridge_session.help",
+        "wire.settings.team_bridge_session.label",
+        "wire.settings.team_bridge_hold_release.label",
+        "wire.settings.team_bridge_hold_release.help"
+      ]
+    },
+    {
+      "group": "tool",
+      "keys_read": 6,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.tool_approval_mode.choice.ask.description",
+        "wire.settings.tool_approval_mode.choice.ask.label",
+        "wire.settings.tool_approval_mode.choice.auto.description",
+        "wire.settings.tool_approval_mode.choice.auto.label",
+        "wire.settings.tool_approval_mode.help",
+        "wire.settings.tool_approval_mode.label"
+      ]
+    },
+    {
+      "group": "tools",
+      "keys_read": 10,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.tools.description",
+        "wire.settings.tools.title",
+        "wire.settings.tools_defer.help",
+        "wire.settings.tools_defer.label",
+        "wire.settings.tools_search_interception_block.help",
+        "wire.settings.tools_search_interception_block.label",
+        "wire.settings.tools_search_interception_enabled.help",
+        "wire.settings.tools_search_interception_enabled.label",
+        "wire.settings.tools_search_interception_rg_excludes.help",
+        "wire.settings.tools_search_interception_rg_excludes.label"
+      ]
+    },
+    {
+      "group": "tui",
+      "keys_read": 16,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.tui_sidebar_position.choice.left.description",
+        "wire.settings.tui_sidebar_position.choice.left.label",
+        "wire.settings.tui_sidebar_position.choice.right.description",
+        "wire.settings.tui_sidebar_position.choice.right.label",
+        "wire.settings.tui_sidebar_position.help",
+        "wire.settings.tui_sidebar_position.label",
+        "wire.settings.tui_sidebar_show_subagents.choice.false.description",
+        "wire.settings.tui_sidebar_show_subagents.choice.true.description",
+        "wire.settings.tui_sidebar_show_subagents.help",
+        "wire.settings.tui_sidebar_show_subagents.label",
+        "wire.settings.tui_sidebar_visible.choice.false.description",
+        "wire.settings.tui_sidebar_visible.choice.true.description",
+        "wire.settings.tui_sidebar_visible.help",
+        "wire.settings.tui_sidebar_visible.label",
+        "wire.settings.tui_theme.help",
+        "wire.settings.tui_theme.label"
+      ]
+    },
+    {
+      "group": "update",
+      "keys_read": 6,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.update_auto_prune.choice.false.description",
+        "wire.settings.update_auto_prune.choice.true.description",
+        "wire.settings.update_auto_prune.help",
+        "wire.settings.update_auto_prune.label",
+        "wire.settings.update_keep_generations.help",
+        "wire.settings.update_keep_generations.label"
+      ]
+    },
+    {
+      "group": "updates",
+      "keys_read": 2,
+      "verdict": "clean",
+      "keys": [
+        "wire.settings.updates.description",
+        "wire.settings.updates.title"
+      ]
+    },
+    {
+      "group": "wakes",
+      "keys_read": 14,
+      "verdict": "semantic clean; width check pending",
+      "keys": [
+        "wire.settings.wakes.description",
+        "wire.settings.wakes.title",
+        "wire.settings.wakes_triggers_enabled.choice.false.description",
+        "wire.settings.wakes_triggers_enabled.choice.true.description",
+        "wire.settings.wakes_triggers_enabled.help",
+        "wire.settings.wakes_triggers_enabled.label",
+        "wire.settings.wakes_triggers_max_per_day.help",
+        "wire.settings.wakes_triggers_max_per_day.label",
+        "wire.settings.wakes_triggers_min_gap_minutes.help",
+        "wire.settings.wakes_triggers_min_gap_minutes.label",
+        "wire.settings.wakes_triggers_project_staleness_enabled.choice.false.description",
+        "wire.settings.wakes_triggers_project_staleness_enabled.choice.true.description",
+        "wire.settings.wakes_triggers_project_staleness_enabled.help",
+        "wire.settings.wakes_triggers_project_staleness_enabled.label"
+      ]
+    },
+    {
+      "group": "web",
+      "keys_read": 60,
+      "verdict": "failed",
+      "keys": [
+        "wire.settings.web_fetch.description",
+        "wire.settings.web_fetch.title",
+        "wire.settings.web_fetch_allow_private.choice.false.description",
+        "wire.settings.web_fetch_allow_private.choice.true.description",
+        "wire.settings.web_fetch_allow_private.help",
+        "wire.settings.web_fetch_allow_private.label",
+        "wire.settings.web_fetch_blocked_retry.choice.false.description",
+        "wire.settings.web_fetch_blocked_retry.choice.true.description",
+        "wire.settings.web_fetch_blocked_retry.help",
+        "wire.settings.web_fetch_blocked_retry.label",
+        "wire.settings.web_fetch_cache_ttl_seconds.help",
+        "wire.settings.web_fetch_cache_ttl_seconds.label",
+        "wire.settings.web_fetch_enabled.choice.false.description",
+        "wire.settings.web_fetch_enabled.choice.true.description",
+        "wire.settings.web_fetch_enabled.help",
+        "wire.settings.web_fetch_enabled.label",
+        "wire.settings.web_fetch_enrich.choice.false.description",
+        "wire.settings.web_fetch_enrich.choice.true.description",
+        "wire.settings.web_fetch_enrich.help",
+        "wire.settings.web_fetch_enrich.label",
+        "wire.settings.web_fetch_max_attempts.help",
+        "wire.settings.web_fetch_max_attempts.label",
+        "wire.settings.web_fetch_max_bytes.help",
+        "wire.settings.web_fetch_max_bytes.label",
+        "wire.settings.web_fetch_max_redirects.help",
+        "wire.settings.web_fetch_max_redirects.label",
+        "wire.settings.web_fetch_render_backend.choice.auto.description",
+        "wire.settings.web_fetch_render_backend.choice.auto.label",
+        "wire.settings.web_fetch_render_backend.choice.stdlib.description",
+        "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+        "wire.settings.web_fetch_render_backend.help",
+        "wire.settings.web_fetch_render_backend.label",
+        "wire.settings.web_fetch_timeout_seconds.help",
+        "wire.settings.web_fetch_timeout_seconds.label",
+        "wire.settings.web_search.description",
+        "wire.settings.web_search.title",
+        "wire.settings.web_search_deepseek_evidence.help",
+        "wire.settings.web_search_deepseek_evidence.label",
+        "wire.settings.web_search_enabled.choice.false.description",
+        "wire.settings.web_search_enabled.choice.true.description",
+        "wire.settings.web_search_enabled.help",
+        "wire.settings.web_search_enabled.label",
+        "wire.settings.web_search_excluded_providers.help",
+        "wire.settings.web_search_excluded_providers.label",
+        "wire.settings.web_search_providers.help",
+        "wire.settings.web_search_providers.label",
+        "wire.settings.web_search_read_enabled.help",
+        "wire.settings.web_search_read_enabled.label",
+        "wire.settings.web_search_searxng_endpoint.help",
+        "wire.settings.web_search_searxng_endpoint.label",
+        "wire.settings.web_search_strategy.choice.ordered.description",
+        "wire.settings.web_search_strategy.choice.ordered.label",
+        "wire.settings.web_search_strategy.choice.round_robin.description",
+        "wire.settings.web_search_strategy.choice.round_robin.label",
+        "wire.settings.web_search_strategy.help",
+        "wire.settings.web_search_strategy.label",
+        "wire.settings.web_search_timeout_seconds.help",
+        "wire.settings.web_search_timeout_seconds.label",
+        "wire.settings.web_tools.description",
+        "wire.settings.web_tools.title"
+      ]
+    }
+  ],
+  "passed_vs_uncleared": {
+    "major_uncleared_keys": [
+      "wire.settings.bash_memory_mode.choice.auto.label",
+      "wire.settings.bash_memory_mode.choice.manual.label",
+      "wire.settings.classification_vendor.choice.auto.label",
+      "wire.settings.compaction_strategy.choice.auto.label",
+      "wire.settings.display_nerd_icons.choice.none.label",
+      "wire.settings.model_effort.choice.unset.label",
+      "wire.settings.network_rollout_on_update.choice.auto.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "wire.settings.shell_environment_mode.choice.inherit.label",
+      "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "wire.settings.speech_voice_gender.choice.auto.label",
+      "wire.settings.speech_voice_gender.choice.female.label",
+      "wire.settings.speech_voice_gender.choice.male.label",
+      "wire.settings.team_bridge_session.label",
+      "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "wire.settings.web_search_strategy.choice.ordered.label",
+      "wire.settings.web_search_strategy.choice.round_robin.label"
+    ],
+    "minor_width_pending_keys": [
+      "wire.settings.aida_cadence_at.label",
+      "wire.settings.aida_cadence_max_extra_per_day.label",
+      "wire.settings.asks_lapsed_visible_for.choice.at_expiry.label",
+      "wire.settings.bash_heavy_jobs_enabled.label",
+      "wire.settings.classification_maxstatechars.label",
+      "wire.settings.classification_notice.label",
+      "wire.settings.compaction_resume_replay.label",
+      "wire.settings.display_composer_rate.label",
+      "wire.settings.display_images.label",
+      "wire.settings.display_time_format.label",
+      "wire.settings.fork_cmux_placement.choice.workspace.label",
+      "wire.settings.librarian_cadence_at.label",
+      "wire.settings.librarian_cadence_paused.label",
+      "wire.settings.local_providers.models.label",
+      "wire.settings.monitor_runtimeoutms.label",
+      "wire.settings.network_sync_debounce_s.label",
+      "wire.settings.network_sync_tick_s.label",
+      "wire.settings.providers_bedrock_auth.label",
+      "wire.settings.providers_openai_use_max_context_window.label",
+      "wire.settings.providers_openrouter_preferred_min_throughput.label",
+      "wire.settings.providers_openrouter_sort.choice.throughput.label",
+      "wire.settings.providers_openrouter_sort.label",
+      "wire.settings.retry_modelfallback.label",
+      "wire.settings.retry_pinnedfallback.label",
+      "wire.settings.retry_usageawarefallback.label",
+      "wire.settings.session_cleanup_delegated_enabled.label",
+      "wire.settings.static_roots.label",
+      "wire.settings.subagents_slim_child_knowledge.label",
+      "wire.settings.supplements_denyprefixes.label",
+      "wire.settings.supplements_maxcostusd.label",
+      "wire.settings.tool_approval_mode.choice.ask.label",
+      "wire.settings.tool_approval_mode.choice.auto.label",
+      "wire.settings.tool_approval_mode.label",
+      "wire.settings.tui_sidebar_position.label",
+      "wire.settings.tui_sidebar_show_subagents.label",
+      "wire.settings.wakes_triggers_max_per_day.label",
+      "wire.settings.web_fetch_max_redirects.label"
+    ],
+    "no_major_finding_keys": 862,
+    "fully_clear_keys_excluding_width": 825,
+    "namespace_verdict": "FAILED. Entire 895 read; 3 inherited major finding groups remain. The two approval labels are semantically clean but this is not a whole-namespace pass."
+  },
+  "exceptions": [
+    {
+      "key": "wire.settings.aida.title",
+      "text": "Aida",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.aida_name.placeholder",
+      "text": "Aida",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.openrouter.label",
+      "text": "openrouter",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.radient.label",
+      "text": "radient",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.typesafe.label",
+      "text": "typesafe",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.context_full.label",
+      "text": "context-full",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.snapcompact.label",
+      "text": "snapcompact",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.desktop_launch_command.placeholder",
+      "text": "local-operator-ui --open-session '{'session'}'",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.display_composer_command.placeholder",
+      "text": "~/bin/my-status.sh",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.display_time_format.choice.12h.description",
+      "text": "7:52 PM PDT",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.display_time_format.choice.24h.description",
+      "text": "19:52 PDT",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.hub.title",
+      "text": "Agent Hub",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.network_advertise_hosts.placeholder",
+      "text": "203.0.113.7:4097, tunnel.example.com:4100",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.network_credentials_github_repositories.placeholder",
+      "text": "damianvtran/scratch, damianvtran/sandbox",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.chat_completions.label",
+      "text": "chat_completions",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.responses.label",
+      "text": "responses",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_ignore.placeholder",
+      "text": "deepseek, groq, mistral, …",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_max_price.placeholder",
+      "text": "'{'\"prompt\": 1, \"completion\": 2'}'",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_only.placeholder",
+      "text": "deepseek, groq, mistral, …",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_order.placeholder",
+      "text": "deepseek, groq, mistral, …",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_quantizations.placeholder",
+      "text": "int8, fp8, mxfp4, …",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.shell_environment_exclude.placeholder",
+      "text": "OPENROUTER_API_KEY, …",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.shell_environment_inherit.placeholder",
+      "text": "LOCAL_OPERATOR_CONFIG_DIR, LANG, …",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.static_roots.placeholder",
+      "text": "~/Documents, /Volumes/data/reports",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.supplements_denyprefixes.placeholder",
+      "text": "~/clients, ~/Documents/private",
+      "reason": "Literal example path, command, environment variable, repository identifier, API JSON or numeric-format code; not natural-language prose."
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+      "text": "stdlib",
+      "reason": "Named provider/API/algorithm/backend identifier, product/entity name, or 12/24-hour format specimen; not an English instruction or generic mode label."
+    }
+  ],
+  "controls": {
+    "pairs": 895,
+    "parsed_messages": 1790,
+    "ru_rendered": 895,
+    "errors": [],
+    "args": [
+      [
+        "wire.settings.local_providers.base_url.label",
+        [
+          [
+            "name",
+            "simple"
+          ]
+        ]
+      ],
+      [
+        "wire.settings.local_providers.models.label",
+        [
+          [
+            "name",
+            "simple"
+          ]
+        ]
+      ]
+    ],
+    "missing_arg_negative": [
+      [
+        "wire.settings.local_providers.base_url.label",
+        "PASS: rejected missing argument"
+      ],
+      [
+        "wire.settings.local_providers.models.label",
+        "PASS: rejected missing argument"
+      ]
+    ],
+    "plural_messages": [],
+    "select_messages": [],
+    "skeleton_messages": [],
+    "markup_mismatches": [],
+    "NFC_violations": [],
+    "bidi_controls": [],
+    "CLDR": [
+      [
+        0,
+        "many"
+      ],
+      [
+        1,
+        "one"
+      ],
+      [
+        2,
+        "few"
+      ],
+      [
+        4,
+        "few"
+      ],
+      [
+        5,
+        "many"
+      ],
+      [
+        11,
+        "many"
+      ],
+      [
+        21,
+        "one"
+      ],
+      [
+        22,
+        "few"
+      ],
+      [
+        25,
+        "many"
+      ],
+      [
+        1.5,
+        "other"
+      ]
+    ],
+    "width": [],
+    "new_labels": [
+      [
+        "wire.settings.tool_approval_mode.choice.ask.label",
+        3,
+        10,
+        "⟦спрашивать~~~~⟧",
+        16,
+        "synthetic bidi preserved",
+        []
+      ],
+      [
+        "wire.settings.tool_approval_mode.choice.auto.label",
+        9,
+        13,
+        "⟦автоматически~~~~⟧",
+        19,
+        "synthetic bidi preserved",
+        []
+      ]
+    ]
+  },
+  "control_evidence": {
+    "path": "/Users/damian/.local-operator/sessions/870397d651f4/scratchpad/approval-ru-B-control-results.json",
+    "sha256": "0d428cdec4a66a714d6723f5cfe456b8aafba1fc776becb2656f5cc1f801342b",
+    "method": "Fresh isolated env -i HOME=$LOCAL_OPERATOR_SCRATCHPAD PYTHONPATH=<pinned worktree> primary .venv Python; pure i18n runtime/format/rich helpers only; no settings manager, suite, app or real session access. Parsed all 1790 EN/RU messages and rendered 895 RU messages; compared argument names/kinds, AST skeletons/selectors, tag-like markup. Two real argument-bearing messages each reject missing arguments. Russian CLDR representative categories checked. Literal pseudo expansion and isolated bidi carrier round-tripped through actual render_message for new2."
+  },
+  "limits": [
+    "No native speaker/human sign-off claimed: independent LLM semantic audit.",
+    "No real renderer, browser, native UI or whole-UI coverage; relative width flags are not observed clipping.",
+    "No ICU plural/select/number/date skeleton messages exist in these 895; CLDR samples are helper controls, not plural-message coverage.",
+    "The audit reviews only wire.settings in ru; no all-locales, merge or release clearance.",
+    "No catalogue edits, retranslation, ledger changes, generated output, git operations, testsuites, settings/credential changes or dependency installs. Proposals are findings only."
+  ]
+}

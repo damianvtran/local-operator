@@ -145,6 +145,9 @@ def _engine_context(**kwargs) -> ToolContext:
         # which every real session's context carries (session_factory sets
         # ``memory_config_dir``). Presence-only: never read or written here.
         memory_config_dir="/stub-profile-root",
+        # ``integrations`` (Team Integrations, RFC §8.1) is createIf-gated on
+        # the session's consent seam — presence-only here, like the doors above.
+        integration_consent=object(),
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -203,6 +206,10 @@ def _force_browser_available(monkeypatch):
     monkeypatch.setattr(music_tool, "radient_available", lambda *a, **k: True)
 
     monkeypatch.setattr(artifact_data_tool, "anthropic_grant_stored", lambda *a, **k: True)
+    # ``integrations`` reads the machine's stored Radient OAuth row.
+    from local_operator.tools import integrations_tool
+
+    monkeypatch.setattr(integrations_tool, "_gate_bridge_login", lambda *a, **k: True)
 
 
 def test_default_set_builds_all_builtin_tools() -> None:
@@ -256,7 +263,9 @@ def test_default_set_drops_ask_without_a_host_that_can_answer_it() -> None:
     withhook = [tool.name for tool in create_tools(_engine_context())]
     without = [tool.name for tool in create_tools(_engine_context(ask_user=None))]
     assert "ask" in withhook
-    assert without == [name for name in withhook if name != "ask"]
+    # ``integrations`` leaves with it: provisioning needs a person to answer
+    # its approval card, so the same absent hook keeps it off (RFC §8.1 S-83).
+    assert without == [name for name in withhook if name not in {"ask", "integrations"}]
 
 
 def test_default_set_keeps_ask_for_a_host_with_a_hook_but_no_frontend_store() -> None:
@@ -345,14 +354,17 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     default (both DEFERRED, so off the wire until fetched) and appended them,
     in that order, at the end of BOTH tables -- ``skill`` is no longer an
     opt-in builder-only tail. The async music tools (``generate_music``,
-    ``modify_music``, ``music_status``) are the newest append after that."""
+    ``modify_music``, ``music_status``) appended after that, and ``integrations``
+    (Team Integrations provisioning, createIf-gated and deferred) is the newest."""
+    assert list(TOOL_BUILDERS)[-1] == "integrations"
+    assert DEFAULT_TOOL_NAMES[-1] == "integrations"
     music = ["generate_music", "modify_music", "music_status"]
-    assert list(TOOL_BUILDERS)[-3:] == music
-    assert DEFAULT_TOOL_NAMES[-3:] == music
-    builders = list(TOOL_BUILDERS)[:-3]
-    assert DEFAULT_TOOL_NAMES[-5:-3] == ["profile_proposal", "skill"]
+    assert list(TOOL_BUILDERS)[-4:-1] == music
+    assert DEFAULT_TOOL_NAMES[-4:-1] == music
+    builders = list(TOOL_BUILDERS)[:-4]
+    assert DEFAULT_TOOL_NAMES[-6:-4] == ["profile_proposal", "skill"]
     assert builders[-2:] == ["profile_proposal", "skill"]
-    builders, defaults = builders[:-2], DEFAULT_TOOL_NAMES[:-5]
+    builders, defaults = builders[:-2], DEFAULT_TOOL_NAMES[:-6]
     assert defaults[-1] == "notify"
     assert builders[-1] == "notify"
     assert defaults[-2] == "artifact_data"
@@ -1213,3 +1225,37 @@ def test_edit_reports_diff_counts(tmp_path) -> None:
     )
     assert result.details is not None
     assert (result.details["added"], result.details["removed"]) == (1, 1)
+
+
+def test_no_published_schema_carries_a_developer_docstring() -> None:
+    """Wave 2 (2026-11-19): pydantic turns a params class docstring into the
+    schema's top-level ``description``, and those were developer notes ("Parameters
+    for the ``sessions`` tool (see ...)", "Arguments for the ...") billed on
+    every request. ``create_tools`` strips the top level for EVERY builtin on the
+    real surface; field and nested ``$defs`` descriptions stay."""
+    from scripts.real_tool_surface import build_real_tools
+
+    tools = build_real_tools(".")
+    assert len(tools) == len(DEFAULT_TOOL_NAMES)
+    leaked = {
+        tool.name: (tool.parameters or {}).get("description")
+        for tool in tools
+        if (tool.parameters or {}).get("description")
+    }
+    assert not leaked, leaked
+    # The named shapes, stated so a re-added docstring fails with its words. A
+    # FIELD may legitimately read "Arguments for that call." (``monitor``), so
+    # only the top level is checked.
+    assert not [
+        tool.name
+        for tool in tools
+        if str((tool.parameters or {}).get("description", "")).startswith(
+            ("Parameters for", "Arguments for")
+        )
+    ]
+    # Field descriptions are the model's docs and are untouched.
+    sessions = next(tool for tool in tools if tool.name == "sessions")
+    assert all(prop.get("description") for name, prop in sessions.parameters["properties"].items())
+    # The one docstring that was a usage rule now lives in the description.
+    sound = next(tool for tool in tools if tool.name == "generate_sound_effect")
+    assert "never both" in sound.description

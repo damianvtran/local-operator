@@ -1,0 +1,433 @@
+{
+  "schema": "approval-repair-r3-K2-source-binding/v1",
+  "integrator_session": "22522732cf63",
+  "actual_model": "openai/gpt-6.1-sol",
+  "model_provenance": "host model-switch notice: quota fallback from anthropic/claude-opus-5-5",
+  "allocation": "integration-only <=20min; no publication/native/network/tests/history generation",
+  "base_K": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+  "new_head_binding": "This receipt is committed atomically with the two catalogues and two author receipts; K2 is its containing commit, recorded externally after commit to avoid a circular hash.",
+  "products": {
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+      "before_sha256": "9cf60be5d36c7fe9f8359dc779cc03d9a2039496356e1d5001519e806394f43a",
+      "after_sha256": "36132ff7f31a6a42c941661fb983f8b14b54954bdaf54f268f8f69eb9672c52b",
+      "changed_keys": [
+        "wire.settings.providers_openrouter_allow_fallbacks.help",
+        "wire.settings.providers_openrouter_data_collection.help",
+        "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "wire.settings.providers_openrouter_require_parameters.help",
+        "wire.settings.providers_openrouter_sort.help",
+        "wire.settings.providers_openrouter_zdr.help",
+        "wire.settings.shell_environment_mode.help"
+      ],
+      "key_count": 895,
+      "key_order_identical": true,
+      "inverse_byte_patch_exact": true,
+      "unchanged_values": 888,
+      "author_receipt_sha256": "ab08a0f810bdff3acc453f8da01119bab6f7fe445393153b7f9d5149aa9bb9ad"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+      "before_sha256": "29f7b24c09420c3dfb5e54bb0c836f7abed5cda07c128ab22b200cc78c39fcb1",
+      "after_sha256": "100fc2ccedd6bc0def2837912b4332d9b0438c1f0dc5451e072d37bf94e1e964",
+      "changed_keys": [
+        "wire.settings.display_nerd_icons.help",
+        "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "wire.settings.providers_openrouter_zdr.help",
+        "wire.settings.web_fetch_render_backend.help"
+      ],
+      "key_count": 895,
+      "key_order_identical": true,
+      "inverse_byte_patch_exact": true,
+      "unchanged_values": 891,
+      "author_receipt_sha256": "8ea9955f5a2958d4d585ef795878f57b0c210b63e5036a2b2c30a6007bfddd79"
+    }
+  },
+  "five_clean_stream_compatibility": [
+    {
+      "locale": "zh-CN",
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "K_raw_sha256": "c17c1cf7e60d836a2e15bfdb341977ceab0ff15d4c62cfa92e7f03b8ed2e53ba",
+      "candidate_raw_sha256": "c17c1cf7e60d836a2e15bfdb341977ceab0ff15d4c62cfa92e7f03b8ed2e53ba",
+      "key_count": 895,
+      "approved_K_envelope_sha256": "0a5d86bc93aed322c629905a1f7ce7e995f694d1b4397055329a44ccf1ab6d83",
+      "A_B_receipts": [
+        {
+          "side": "A",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/zh-A.json",
+          "sha256": "857122c0a9a2694131a9a47e819f84612861e5caeb5cf4621bfee99a50e7a726",
+          "fresh_pointer": "/coverage/fresh_decisions",
+          "retained_pointer": "/retention/per_key_records"
+        },
+        {
+          "side": "B",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/zh-B.json",
+          "sha256": "58ef1782be215667c4a77f9af03afe52f83efdd5b075cdc4eb4d2ece649cc5fa",
+          "fresh_pointer": "/per_key_R2_decisions",
+          "retained_pointer": "/retained_840_records"
+        }
+      ],
+      "compatibility": "exact target/source/context bytes; retain prior whole-namespace attestations, not a new pass"
+    },
+    {
+      "locale": "fr",
+      "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+      "K_raw_sha256": "e093d4481ac0d477c86b562ff8ab1f59c2a00e948fddce1b3f34c1da73064ffa",
+      "candidate_raw_sha256": "e093d4481ac0d477c86b562ff8ab1f59c2a00e948fddce1b3f34c1da73064ffa",
+      "key_count": 895,
+      "approved_K_envelope_sha256": "0908ec27c12a67a5fcfea065afe1e41d32f16a0c976e76be2940e00ba1e277ac",
+      "A_B_receipts": [
+        {
+          "side": "A",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/fr-A.json",
+          "sha256": "7cf0718177880cf515076fbb1798fddc21614fcd9f4242164a48b286561d0fa3",
+          "fresh_pointer": "/fresh_key_decisions",
+          "retained_pointer": "/retained_per_key_compatibility"
+        },
+        {
+          "side": "B",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/fr-B.json",
+          "sha256": "6aa8034ab21b3acef0244b6a560aafbd6041ab9ba92fae84cc49c00409579bcc",
+          "fresh_pointer": "/fresh_decisions",
+          "retained_pointer": "/retention/per_key"
+        }
+      ],
+      "compatibility": "exact target/source/context bytes; retain prior whole-namespace attestations, not a new pass"
+    },
+    {
+      "locale": "ru",
+      "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+      "K_raw_sha256": "5c50edd1aa20e5755f5704f95835117852dd9e0e39b222ce421bf6c47f003651",
+      "candidate_raw_sha256": "5c50edd1aa20e5755f5704f95835117852dd9e0e39b222ce421bf6c47f003651",
+      "key_count": 895,
+      "approved_K_envelope_sha256": "d02b2b66f514b794a1309fb349b6236fd02786cbc34e24f3b3de1d6c88e00848",
+      "A_B_receipts": [
+        {
+          "side": "A",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/ru-A.json",
+          "sha256": "13c66554a633a761fe33da6b48c93f8d5f0ecd30db47ed78f392d19636c38f7a",
+          "fresh_pointer": "/fresh_decisions",
+          "retained_pointer": "/retained_records"
+        },
+        {
+          "side": "B",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/ru-B.json",
+          "sha256": "c1c916440ba7989e27988042c449b2d129a40d8b3371f2060cfa418c843611de",
+          "fresh_pointer": "/fresh_decisions",
+          "retained_pointer": "/retained_per_key_compatibility"
+        }
+      ],
+      "compatibility": "exact target/source/context bytes; retain prior whole-namespace attestations, not a new pass"
+    },
+    {
+      "locale": "hi",
+      "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+      "K_raw_sha256": "b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a",
+      "candidate_raw_sha256": "b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a",
+      "key_count": 895,
+      "approved_K_envelope_sha256": "504bc524811de4012caa9b040bd4e697dcb46277636d7dc24556af97d30ad418",
+      "A_B_receipts": [
+        {
+          "side": "A",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/hi-A.json",
+          "sha256": "a58762cd180e8ed17c317641e15e345318a965bc03fc62c684db2e4ac9c26e37",
+          "fresh_pointer": "/decisions",
+          "retained_pointer": "/coverage/retained_per_key_proof"
+        },
+        {
+          "side": "B",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/hi-B.json",
+          "sha256": "3b76370ea1c6816c2e89fbb8a2afcc8189faf1a03bd458ba991642633e6285b7",
+          "fresh_pointer": "/per_key_R2_decisions",
+          "retained_pointer": "/retained_records"
+        }
+      ],
+      "compatibility": "exact target/source/context bytes; retain prior whole-namespace attestations, not a new pass"
+    },
+    {
+      "locale": "ur",
+      "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "K_raw_sha256": "66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b",
+      "candidate_raw_sha256": "66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b",
+      "key_count": 895,
+      "approved_K_envelope_sha256": "1eb49bedaaae1880005cf5ba5d114524d2863c00acc585338b27a953c0acf5c7",
+      "A_B_receipts": [
+        {
+          "side": "A",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/ur-A.json",
+          "sha256": "eb6f8ab7775afde03ca6c379c524717d94dfa4fe6f38f7a24a931d0b6eeaf1e2",
+          "fresh_pointer": "/keyed_decisions",
+          "retained_pointer": "/retention/validated_records"
+        },
+        {
+          "side": "B",
+          "path": "i18n/audits/evidence/approval-repair-r2-originals/ur-B.json",
+          "sha256": "d5c1fcedc8d79efff2e17784aea581ceff4f65fd50d4cb639591a6fce9302f51",
+          "fresh_pointer": "/per_key_decisions",
+          "retained_pointer": "/retained_records/records"
+        }
+      ],
+      "compatibility": "exact target/source/context bytes; retain prior whole-namespace attestations, not a new pass"
+    }
+  ],
+  "English": {
+    "path": "/Users/damian/.local-operator/sessions/0be89bc16927/scratchpad/Englishvoiceconstant-full-en-approved-capture.json",
+    "envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "original_checkout_head": "90009effa833836ce4471e99d90d3b6438de7f60",
+    "bound_head": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+    "official_public_copy": true,
+    "repository_verified": true,
+    "canonical_sha256": "8df2396d637f817a9b184aaf6f5c46fbde24f29532c9c8dd937a58fc3ecf3ae9",
+    "raw_file_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "key_count": 895,
+    "retention_proof": "Exact EN bytes at 90009 and K equal; approved map canonical equals raw map canonical. No fresh English call needed.",
+    "candidate_raw_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "K_exact": true
+  },
+  "context": {
+    "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+    "sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "entries": 104,
+    "K_exact": true
+  },
+  "r2_raw_original_bindings": [
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/zh-A.json",
+      "source_path": "/Users/damian/.local-operator/sessions/46477cf7eb33/scratchpad/approval-repair-audit-zh-CN-A-r2.json",
+      "sha256": "857122c0a9a2694131a9a47e819f84612861e5caeb5cf4621bfee99a50e7a726",
+      "bytes": 709248,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/zh-B.json",
+      "source_path": "/Users/damian/.local-operator/sessions/f11074ee208d/scratchpad/approval-repair-audit-zh-CN-B-r2.json",
+      "sha256": "58ef1782be215667c4a77f9af03afe52f83efdd5b075cdc4eb4d2ece649cc5fa",
+      "bytes": 2369994,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/fr-A.json",
+      "source_path": "/Users/damian/.local-operator/sessions/d85317d32b42/scratchpad/approval-repair-audit-fr-A-r2.json",
+      "sha256": "7cf0718177880cf515076fbb1798fddc21614fcd9f4242164a48b286561d0fa3",
+      "bytes": 689937,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/fr-B.json",
+      "source_path": "/Users/damian/.local-operator/sessions/a65929487d09/scratchpad/approval-repair-audit-fr-B-r2.json",
+      "sha256": "6aa8034ab21b3acef0244b6a560aafbd6041ab9ba92fae84cc49c00409579bcc",
+      "bytes": 1936466,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/es-A.json",
+      "source_path": "/Users/damian/.local-operator/sessions/62b5777013c2/scratchpad/approval-repair-audit-es-A-r2.json",
+      "sha256": "b6124224ca10a08c1b60130752af8244b87e5b61bb17922924cab454d70ac8b7",
+      "bytes": 1152812,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/es-B.json",
+      "source_path": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json",
+      "sha256": "af116da3d3ee3b3d8b6d0bf798f725ee50639470fbc5cffe52d7cd87a581f1bb",
+      "bytes": 863478,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/ru-A.json",
+      "source_path": "/Users/damian/.local-operator/sessions/119c681eb085/scratchpad/approval-repair-audit-ru-A-r2.json",
+      "sha256": "13c66554a633a761fe33da6b48c93f8d5f0ecd30db47ed78f392d19636c38f7a",
+      "bytes": 618768,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/ru-B.json",
+      "source_path": "/Users/damian/.local-operator/sessions/40d37dadb2dc/scratchpad/approval-repair-audit-ru-B-r2.json",
+      "sha256": "c1c916440ba7989e27988042c449b2d129a40d8b3371f2060cfa418c843611de",
+      "bytes": 1703082,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/vi-A.json",
+      "source_path": "/Users/damian/.local-operator/sessions/e764273c566b/scratchpad/approval-repair-audit-vi-A-r2.json",
+      "sha256": "ee52cb63498d3f353e30aa650284d0166dcfa240649c1d290f3ab5dfe4a32134",
+      "bytes": 785478,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/vi-B.json",
+      "source_path": "/Users/damian/.local-operator/sessions/465096fd021d/scratchpad/approval-repair-audit-vi-B-r2.json",
+      "sha256": "f4080d71e211a1812fab58bf0fe7060c8f2cfc03537ad79981e3a1c2217a540a",
+      "bytes": 771890,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/hi-A.json",
+      "source_path": "/Users/damian/.local-operator/sessions/bfd433d0c3db/scratchpad/approval-repair-audit-hi-A-r2.json",
+      "sha256": "a58762cd180e8ed17c317641e15e345318a965bc03fc62c684db2e4ac9c26e37",
+      "bytes": 705321,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/hi-B.json",
+      "source_path": "/Users/damian/.local-operator/sessions/3ece276fdbf2/scratchpad/approval-repair-audit-hi-B-r2.json",
+      "sha256": "3b76370ea1c6816c2e89fbb8a2afcc8189faf1a03bd458ba991642633e6285b7",
+      "bytes": 763246,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/ur-A.json",
+      "source_path": "/Users/damian/.local-operator/sessions/24912b8fdad9/scratchpad/approval-repair-audit-ur-A-r2.json",
+      "sha256": "eb6f8ab7775afde03ca6c379c524717d94dfa4fe6f38f7a24a931d0b6eeaf1e2",
+      "bytes": 691274,
+      "original_source_exact": true
+    },
+    {
+      "path": "i18n/audits/evidence/approval-repair-r2-originals/ur-B.json",
+      "source_path": "/Users/damian/.local-operator/sessions/8a8a999ccce7/scratchpad/approval-repair-audit-ur-B-r2.json",
+      "sha256": "d5c1fcedc8d79efff2e17784aea581ceff4f65fd50d4cb639591a6fce9302f51",
+      "bytes": 706520,
+      "original_source_exact": true
+    }
+  ],
+  "r2_ledger_sha256": "45c0e8e7f97e9dcb1af71d44324ff777fa9dd51fd3ba37ff10e1092f4b0abd53",
+  "r2_majors_all_in_delta": [
+    {
+      "id": "R2-M01",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help"
+    },
+    {
+      "id": "R2-M02",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_data_collection.help"
+    },
+    {
+      "id": "R2-M03",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help"
+    },
+    {
+      "id": "R2-M04",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_require_parameters.help"
+    },
+    {
+      "id": "R2-M05",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_sort.help"
+    },
+    {
+      "id": "R2-M06",
+      "locale": "es",
+      "key": "wire.settings.providers_openrouter_zdr.help"
+    },
+    {
+      "id": "R2-M07",
+      "locale": "es",
+      "key": "wire.settings.shell_environment_mode.help"
+    },
+    {
+      "id": "R2-M08",
+      "locale": "vi",
+      "key": "wire.settings.display_nerd_icons.help"
+    }
+  ],
+  "author_exclusions": [
+    "811ce9672eb0",
+    "a81f7a3e8d73",
+    "22f04bc8ec0d",
+    "c1a5d7b1fa3c",
+    "08046d0f2aac",
+    "0b83e6902e55",
+    "c8c42578bc8c",
+    "bbd6a68c6d69",
+    "abee2a135156"
+  ],
+  "other_tracked_paths_changed": [],
+  "untracked_inventory_at_start": {
+    "i18n/audits/evidence/approval-choice-postauthor-input-cache.json": "319e6a8f0024bd98d48eabf2fbd1889c1b0994e95d4cd4daef44cb6263d67595",
+    "i18n/audits/evidence/approval-choice-postauthor-manifest.json": "32f10398c98e0396c6e6aed4678417844dedae052cf5060888ca9b935cfef24c",
+    "i18n/audits/evidence/approval-full-artifact-manifest.json": "e721b80b8b119620cf58a71d079b53968d89c263f2b285ce06b4815ba06810c3",
+    "i18n/audits/evidence/approval-full-deduplicated-ledger.json": "49545fbab400cf28b982979241348787f5132da4c63f1825c3f1bf52da7585d1",
+    "i18n/audits/evidence/approval-full-deduplicated-ledger.md": "6664b77f9b4c49ddb96d0cd9273a8eeb0cc867411eb3dede72e6a3d51c8e6e08",
+    "i18n/audits/evidence/approval-full-es-A-controls-original.json": "addb175a09fd74a49d99746f53d33e88bf092ee5898ed8641cc61dcedbe831bb",
+    "i18n/audits/evidence/approval-full-es-A-original.json": "a358c64f26216f1f1f64b16106280ce68930e10e0da78064c5bf4dc09677c58f",
+    "i18n/audits/evidence/approval-full-es-B-original.json": "71f78716b085361399a1eb11972f29f63b1939a7824e512277ab2c115c14143b",
+    "i18n/audits/evidence/approval-full-fr-A-completion-original.json": "bd893fcc27192a4278c7bbe98db1e0e8a3070d18554f87975b9c7a8c004d205c",
+    "i18n/audits/evidence/approval-full-fr-A-original.json": "fc01b10cc9654466b8d7642ac8abc56a7134b6f65f366c14c92d7e10828ec260",
+    "i18n/audits/evidence/approval-full-fr-B-original.json": "91f97ad0d5a0eee3bbd725f95e7557afeec9b6c4c88432797095808ea76f3403",
+    "i18n/audits/evidence/approval-full-hi-A-original.json": "5ac08be8343013a12e7ddb7c67f76e2f39e77f9187a4fdba311c8e638f56712e",
+    "i18n/audits/evidence/approval-full-hi-B-original.json": "e4e1d05e7b637bc9268e3aab267f21f1a0469208113cb8081c5b393267a23ba6",
+    "i18n/audits/evidence/approval-full-hi-B-supplement-original.json": "4ff4d63195be535d53353bd40cad86badf907a3c47e27a8d4591fcd7c271e33b",
+    "i18n/audits/evidence/approval-full-inputs/Englishvoiceconstant-full-en-approved-capture.json": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "i18n/audits/evidence/approval-full-inputs/en-approved-envelope.json": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+    "i18n/audits/evidence/approval-full-inputs/es-approved-envelope.json": "ba48ba9c815b8a17b106c6b7d31248ca3d9dc41e1a8a7fd024e396f0011e5c3d",
+    "i18n/audits/evidence/approval-full-inputs/fr-approved-envelope.json": "447eb746d2587c0a9f9e751de50ac1eab3f0ca86fd1304c1b4556e2ea3fcdbd3",
+    "i18n/audits/evidence/approval-full-inputs/hi-approved-envelope.json": "444e3b4284616f74b29316a4086e57acd9ba2a3cfdc7b6bef5223ea947c62399",
+    "i18n/audits/evidence/approval-full-inputs/manifest.json": "f449f139ce2ea003f4c462c8b4e881b5aa12b92e5afdd8bf4e856dbd662216cf",
+    "i18n/audits/evidence/approval-full-inputs/ru-approved-envelope.json": "5456f858a3d0e6313a94516363026f64bea9275ab84f8ff0337fa2e2c77a0efc",
+    "i18n/audits/evidence/approval-full-inputs/ur-approved-envelope.json": "409c3ef0a5e038d9d7f946f4deef6320fe3a1b3b84d506664b29b9fe3a7a8cc3",
+    "i18n/audits/evidence/approval-full-inputs/vi-approved-envelope.json": "52e670c402ed50980476898f124309bff68fd2d7fbe290e6fb72f6339fc10791",
+    "i18n/audits/evidence/approval-full-inputs/zh-CN-approved-envelope.json": "1f2b4b9dddcd1059cc52c023b8bacd05de07a7695b222a3cbe82ba77672e4849",
+    "i18n/audits/evidence/approval-full-root-adjudication.json": "eb7019f1489f26e7f2aec5dee38aa082cf3e45fb6bef5cce609f5ddc5663f0d8",
+    "i18n/audits/evidence/approval-full-ru-A-original.json": "64132c31b410d70ec6141b01a2a73381ce96d631eb98be4dfae20e6bc9552487",
+    "i18n/audits/evidence/approval-full-ru-B-original.json": "e32d06161fb91b228db83f62303203fe020e666a34b53eb80822b1789203a067",
+    "i18n/audits/evidence/approval-full-ur-A-controls-original.json": "76e689b6c0d3ecf738cda184d27c07487918bddcc539184d29bcd758add64e32",
+    "i18n/audits/evidence/approval-full-ur-A-original.json": "aa7b06e7e8bc644b545c6e67ceb69c0668b0a1ba8c0b31996e36de59f91b1f2e",
+    "i18n/audits/evidence/approval-full-ur-A-scoped-observation-original.json": "0e4d30af753d54f339836222604c6a1e41877c02ad30d4c47b99aa6961dd84e9",
+    "i18n/audits/evidence/approval-full-ur-B-completed-original.json": "02d5d916f1b0b633ec537fb9d44dfca774278dcfe6330e81407595d0928b9ea2",
+    "i18n/audits/evidence/approval-full-ur-B-original.json": "0da17ff84bc19726461c72d63a4b4c2a6147f3a8f1f8aa11c5114caf291fe429",
+    "i18n/audits/evidence/approval-full-vi-A-controls-original.json": "70284ba1ca7b10085f9a85013f59ca15b741316713ba6d92159c0e60fce6d0bf",
+    "i18n/audits/evidence/approval-full-vi-A-original.json": "e8b01da98da13e3dd13920082996c326fc9cef187dc7e611e5e2b28139df7fe9",
+    "i18n/audits/evidence/approval-full-vi-B-original.json": "216f6ddc816932cf7d933311f191f2f3235d2ea732bb74d14a67ffe476aaedf2",
+    "i18n/audits/evidence/approval-full-zh-CN-A-original.json": "3dd534f7a038b3b9584307c4e2daf678b09589c976d8417e479121d8bcffce26",
+    "i18n/audits/evidence/approval-full-zh-CN-B-original.json": "fc9c9490aef2a16e6263965c63647188eb2073b404524a3d951b4e114676935c",
+    "i18n/audits/evidence/approval-r2-parent-primary-receipt-index.json": "647195e73a62969f06417f03f54ae3a8d6e7cef836f3db2b6848dad804e18b7d",
+    "i18n/audits/evidence/approval-repair-explicit-retention-manifest.json": "0dc939448569a364402ab29e8e69fa463e98bcdfa7c7914d8392c8a130871fde",
+    "i18n/audits/evidence/approval-repair-parent-count-verification.json": "322a955f93dd7aa616741bf95847d28caa13881c0d3c202ceba0f432ae7c107a",
+    "i18n/audits/evidence/approval-repair-postauthor-inputs/es-approved-envelope.json": "c6695c9c7498c0da21bebc643199c5fe50f979beb4adb47cac9761e04e210265",
+    "i18n/audits/evidence/approval-repair-postauthor-inputs/fr-approved-envelope.json": "0908ec27c12a67a5fcfea065afe1e41d32f16a0c976e76be2940e00ba1e277ac",
+    "i18n/audits/evidence/approval-repair-postauthor-inputs/hi-approved-envelope.json": "504bc524811de4012caa9b040bd4e697dcb46277636d7dc24556af97d30ad418",
+    "i18n/audits/evidence/approval-repair-postauthor-inputs/manifest.json": "ded49b2ba05e698f284de1676ee4fa16ee5f89a91dc23be4fc714f4175595390",
+    "i18n/audits/evidence/approval-repair-postauthor-inputs/ru-approved-envelope.json": "d02b2b66f514b794a1309fb349b6236fd02786cbc34e24f3b3de1d6c88e00848",
+    "i18n/audits/evidence/approval-repair-postauthor-inputs/ur-approved-envelope.json": "1eb49bedaaae1880005cf5ba5d114524d2863c00acc585338b27a953c0acf5c7",
+    "i18n/audits/evidence/approval-repair-postauthor-inputs/vi-approved-envelope.json": "4a1da59eb3602aa4ffa2a7c426431605a16cd4aaeddfc6da09b02bcc0d469792",
+    "i18n/audits/evidence/approval-repair-postauthor-inputs/zh-CN-approved-envelope.json": "0a5d86bc93aed322c629905a1f7ce7e995f694d1b4397055329a44ccf1ab6d83",
+    "i18n/audits/evidence/approval-repair-private-freeze-controls.json": "4da0496e51e46c1037993d59ac267e147374364ff5267f10de3cad694c406486",
+    "i18n/audits/evidence/approval-repair-r2-artifact-manifest.json": "048f396174a2783f055e2933a6ed811196e5c7f2e5d71979070f852cd1a5c345",
+    "i18n/audits/evidence/approval-repair-r2-clean-stream-retention.json": "fb7e4ed48a23810e663e02bb3ada7c1f0c7a3f20b77c27957d64de77dff947b9",
+    "i18n/audits/evidence/approval-repair-r2-deduplicated-ledger.json": "45c0e8e7f97e9dcb1af71d44324ff777fa9dd51fd3ba37ff10e1092f4b0abd53",
+    "i18n/audits/evidence/approval-repair-r2-deduplicated-ledger.md": "fd32221ac37ae6f0259d9bb7a8bd4ff5f3122d801aa0ec2a7b940f796700adf8",
+    "i18n/audits/evidence/approval-repair-r2-exit-matrix.json": "5ddc342728f15a70d3fdf9c1e4c5aa03e54cf209ed0d713725920d30f762fb67",
+    "i18n/audits/evidence/approval-repair-r2-exit-matrix.md": "b7440ca338e1a8e555a95d1c7901caa30eedf0f0788cd6f33e833431f130fd48",
+    "i18n/audits/evidence/approval-repair-r2-originals/es-A.json": "b6124224ca10a08c1b60130752af8244b87e5b61bb17922924cab454d70ac8b7",
+    "i18n/audits/evidence/approval-repair-r2-originals/es-B.json": "af116da3d3ee3b3d8b6d0bf798f725ee50639470fbc5cffe52d7cd87a581f1bb",
+    "i18n/audits/evidence/approval-repair-r2-originals/fr-A.json": "7cf0718177880cf515076fbb1798fddc21614fcd9f4242164a48b286561d0fa3",
+    "i18n/audits/evidence/approval-repair-r2-originals/fr-B.json": "6aa8034ab21b3acef0244b6a560aafbd6041ab9ba92fae84cc49c00409579bcc",
+    "i18n/audits/evidence/approval-repair-r2-originals/hi-A.json": "a58762cd180e8ed17c317641e15e345318a965bc03fc62c684db2e4ac9c26e37",
+    "i18n/audits/evidence/approval-repair-r2-originals/hi-B.json": "3b76370ea1c6816c2e89fbb8a2afcc8189faf1a03bd458ba991642633e6285b7",
+    "i18n/audits/evidence/approval-repair-r2-originals/ru-A.json": "13c66554a633a761fe33da6b48c93f8d5f0ecd30db47ed78f392d19636c38f7a",
+    "i18n/audits/evidence/approval-repair-r2-originals/ru-B.json": "c1c916440ba7989e27988042c449b2d129a40d8b3371f2060cfa418c843611de",
+    "i18n/audits/evidence/approval-repair-r2-originals/ur-A.json": "eb6f8ab7775afde03ca6c379c524717d94dfa4fe6f38f7a24a931d0b6eeaf1e2",
+    "i18n/audits/evidence/approval-repair-r2-originals/ur-B.json": "d5c1fcedc8d79efff2e17784aea581ceff4f65fd50d4cb639591a6fce9302f51",
+    "i18n/audits/evidence/approval-repair-r2-originals/vi-A.json": "ee52cb63498d3f353e30aa650284d0166dcfa240649c1d290f3ab5dfe4a32134",
+    "i18n/audits/evidence/approval-repair-r2-originals/vi-B.json": "f4080d71e211a1812fab58bf0fe7060c8f2cfc03537ad79981e3a1c2217a540a",
+    "i18n/audits/evidence/approval-repair-r2-originals/zh-A.json": "857122c0a9a2694131a9a47e819f84612861e5caeb5cf4621bfee99a50e7a726",
+    "i18n/audits/evidence/approval-repair-r2-originals/zh-B.json": "58ef1782be215667c4a77f9af03afe52f83efdd5b075cdc4eb4d2ece649cc5fa",
+    "i18n/audits/evidence/approval-repair-r2-referenced-support/0be89bc16927-Englishvoiceconstant-full-en-approved-capture.json": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "i18n/audits/evidence/approval-repair-r2-referenced-support/119c681eb085-ru-r2-derived-controls.json": "04bf5c115fecfbbb604da6ed98fda5ecca98abc25222a4dafde842e0a9b4fd54",
+    "i18n/audits/evidence/approval-repair-r2-referenced-support/46477cf7eb33-audit-checks.json": "a3cbb5efaf373559bdad5109caf07c09ffc8c1903533b39ddd524b68446d134a",
+    "i18n/audits/evidence/approval-repair-r2-referenced-support/465096fd021d-vi-B-r2-validation.json": "fdbcff4df5904283edb9816367f701e1d51146ddd4ebfcc8025f55bc1258b7c4",
+    "i18n/audits/evidence/approval-repair-r2-referenced-support/e764273c566b-vi-A-r2-verification.json": "ac2fbc9d10d3a2ed84c11e459a728d21fc5b6424728eca90fd410e6b5e3e9eb5",
+    "i18n/audits/evidence/approval-repair-r2-referenced-support/e764273c566b-vi_r2_semantics.json": "ac9b1ad355767d2f34f1bf197e770297c379688dea3206d504a3c947f418bcfa",
+    "i18n/audits/evidence/approval-repair-r3-author-es.json": "ab08a0f810bdff3acc453f8da01119bab6f7fe445393153b7f9d5149aa9bb9ad",
+    "i18n/audits/evidence/approval-repair-r3-author-vi.json": "8ea9955f5a2958d4d585ef795878f57b0c210b63e5036a2b2c30a6007bfddd79",
+    "i18n/audits/evidence/approval-repair-r3-frozen-transition-matrix.json": "9710eecefb1c36f8a6e85fd3c23e3da9e933b3dc83e4bd534723631b470455ff",
+    "i18n/audits/evidence/approval-repair-root-ready-readerbrief.json": "e06649f101e397c32acd49b83cdc816209687d86c0f491fcafa12be03f9adf29"
+  },
+  "publication": "not attempted; no transport diagnostics permitted",
+  "independent_delta_passes": "pending four fresh ES/VI A/B private readers; no semantic/render/native/global pass claimed",
+  "history_policy": "No append or generated eligibility before all four delta readers PASS; preserve raw failures unchanged",
+  "metadata_disposition": "Other untracked evidence preserved, unstaged; later PR owner must explicitly choose disposition, never glob stage."
+}

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import threading
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -636,3 +638,229 @@ async def test_the_desktop_poll_and_run_repoint_a_dead_pin(desktop, upstream, mo
         f"Reconnected phone access to this device’s newer sign-in for the same "
         f"account (credential {fresh})."
     )
+
+
+# --- Remedy kinds and the background reconnect (U10, D5) ----------------------
+
+
+@pytest.mark.parametrize(
+    "step,blocked_on,kind,has_url",
+    [
+        ("disabled", "disabled", "open_console", True),
+        ("network", "network", "wait_network", False),
+        ("radient_unavailable", "radient_unavailable", "wait_radient", False),
+        ("billing_lapsed", "balance", "add_credit", True),
+        ("balance", "balance", "add_credit", True),
+        ("reconnect", "none", "run", False),
+        ("quote", "quote", "accept_quote", False),
+        ("reconnecting", "reconnecting", "wait_reconnect", False),
+    ],
+)
+def test_each_new_step_maps_to_its_remedy_kind(monkeypatch, step, blocked_on, kind, has_url):
+    monkeypatch.setattr(setup, "local_credential_choices", lambda: [])
+    result = routes._contract(
+        {"step": step, "ready": False, "remedy": "sentence", "receipts": []}, local=True
+    )
+    assert result["blocked_on"] == blocked_on
+    assert result["remedy"]["kind"] == kind
+    # D5: add credit and the console carry the console URL as DATA, so the UI
+    # never guesses one.
+    assert (result["remedy"]["url"] == routes._CONSOLE_URL) is has_url
+
+
+def test_the_route_console_url_mirrors_the_gateway():
+    from local_operator.tunnels import gateway
+
+    assert routes._CONSOLE_URL == gateway.CONSOLE_URL
+
+
+def _hold_background_run():
+    """The post-sign-in run's two facts: its journal, and the held lock."""
+    from local_operator.tunnels import autosetup
+
+    autosetup.write_journal({"state": "running", "pid": os.getpid()})
+    return nonblocking_file_claim(config.directory() / "setup.lock")
+
+
+@pytest.mark.asyncio
+async def test_a_poll_during_the_background_run_reads_reconnecting(desktop):
+    client, _app, _tmp = desktop
+    with _hold_background_run() as acquired:
+        assert acquired
+        result = (await client.get(PATH)).json()["result"]
+    assert result["step"] == "reconnecting"
+    assert result["remedy"]["kind"] == "wait_reconnect"
+    assert result["ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_run_posted_during_the_background_run_answers_reconnecting_not_409(
+    desktop, upstream
+):
+    client, _app, _tmp = desktop
+    with _hold_background_run() as acquired:
+        assert acquired
+        response = await client.post(PATH, json={"action": "run", "credential_id": 17})
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["step"] == "reconnecting"
+    assert result["remedy"]["kind"] == "wait_reconnect"
+
+
+@pytest.mark.asyncio
+async def test_a_lock_held_by_someone_else_is_still_setup_in_progress(desktop, upstream):
+    """Without the run's journal, a held lock is another owner: unchanged 409."""
+    client, _app, _tmp = desktop
+    with nonblocking_file_claim(config.directory() / "setup.lock") as acquired:
+        assert acquired
+        response = await client.post(PATH, json={"action": "run", "credential_id": 17})
+    assert response.status_code in (200, 409)
+    if response.status_code == 200:
+        assert response.json()["result"]["step"] != "reconnecting"
+
+
+@pytest.mark.asyncio
+async def test_a_reconnecting_reply_never_echoes_an_unknown_credential_id(desktop, upstream):
+    """Q4: the identity comes from the local plan; an id this device lacks is refused."""
+    client, _app, _tmp = desktop
+    with _hold_background_run() as acquired:
+        assert acquired
+        unknown = await client.post(PATH, json={"action": "plan", "credential_id": 999})
+        known = await client.post(PATH, json={"action": "plan", "credential_id": 17})
+    assert unknown.status_code == 200, unknown.text
+    refused = unknown.json()["result"]
+    assert refused["step"] == "owner_choice"
+    assert refused["credential_id"] is None
+    assert "999" not in unknown.text
+    assert known.json()["result"]["step"] == "reconnecting"
+    assert known.json()["result"]["credential_id"] == 17
+
+
+def test_setup_text_kinds_match_the_route(monkeypatch):
+    """One vocabulary: the text surfaces' kind per step equals the route's."""
+    monkeypatch.setattr(setup, "local_credential_choices", lambda: [])
+    for step, kind in setup.STEP_REMEDY_KIND.items():
+        result = routes._contract(
+            {"step": step, "ready": False, "remedy": "sentence", "receipts": []}, local=True
+        )
+        assert result["remedy"]["kind"] == kind, step
+
+
+# --- No terminal commands where nobody has a terminal (#3945 U1) ---------------
+#
+# local-operator-ui renders `remedy.text` verbatim, and two steps handed a
+# desktop user `lop tunnel start` / `lop login-status` as the whole fix. The
+# check is STRUCTURAL and generated: every step the route knows (its own
+# `_BLOCKERS` table, plus one it does not), every kind that yields, both the
+# desktop contract and the TUI card, each fed a CLI sentence that IS a command
+# so that leaking `plan["remedy"]` anywhere fails here.
+
+# The `lop` CLI by name, a code span, or a `--flag`.
+_SHELL = re.compile(r"(?<![\w/.-])lop\s+[a-z]|`|(?:^|\s)--[a-z]")
+# A slash command (`/mobile enable`): the TUI's own input, meaningless on the desktop.
+_SLASH = re.compile(r"(?:^|[\s(])/[a-z]+")
+_POISON = "Run `lop tunnel start --now`, then lop login-status."
+
+
+def _plans():
+    for step in [*routes._BLOCKERS, "a_step_from_another_build"]:
+        for extra in (
+            {},
+            {"credential_choices": [17, 23]},
+            {"activation_required": True, "monthly_price_usd": "0.05"},
+            {"accepted_price_usd": "0.04", "monthly_price_usd": "0.05"},
+            # A click on a stopped tunnel that billing/the console blocked:
+            # its own copy variants (#3958 Q1) are covered too.
+            {"resuming": True},
+        ):
+            yield {
+                "step": step,
+                "ready": step in ("apply", "repoint", "reconnect", "stopped"),
+                "verified": False,
+                "remedy": _POISON,
+                "receipts": [],
+                "url": None,
+                "credential_id": 17,
+                **extra,
+            }
+
+
+def test_no_remedy_text_on_a_graphical_surface_names_a_command(monkeypatch):
+    monkeypatch.setattr(setup, "local_credential_choices", lambda: [])
+    kinds_seen = set()
+    for plan in _plans():
+        for local in (True, False):
+            result = routes._contract(dict(plan), local=local)
+            text = result["remedy"]["text"]
+            kinds_seen.add(result["remedy"]["kind"])
+            assert text and not _SHELL.search(text), (plan["step"], text)
+            assert not _SLASH.search(text), (plan["step"], text)
+        card = setup.text(dict(plan), surface="tui", include_receipts=False)
+        assert not _SHELL.search(card.replace("--credential-id", "")), (plan["step"], card)
+    # Generated over every kind the route can answer, not a hand-picked few.
+    assert kinds_seen == set(routes._KINDS.values()), set(routes._KINDS.values()) - kinds_seen
+
+
+def test_every_locale_keeps_the_plain_remedies_free_of_commands():
+    """The table's copy, in every shipped catalogue: translations keep it plain."""
+    from pathlib import Path
+
+    root = Path(setup.__file__).resolve().parents[1] / "i18n" / "catalogues"
+    codes = {
+        build({"step": step, "monthly_price_usd": "0.05", "resuming": resuming}).code
+        for step, build in setup._PLAIN_REMEDY.items()
+        for resuming in (False, True)
+    } | {setup._PLAIN_REMEDY["quote"]({}).code}
+    locales = sorted(p.name for p in root.iterdir() if (p / "mobile.setup.json").exists())
+    assert len(locales) >= 8, locales
+    for locale in locales:
+        catalogue = json.loads((root / locale / "mobile.setup.json").read_text())
+        for code in codes:
+            text = catalogue[code]
+            assert not _SHELL.search(text) and not _SLASH.search(text), (locale, code, text)
+
+
+@pytest.mark.parametrize("step", ["stopped", "owner_missing"])
+def test_the_two_reported_steps_are_plain_and_actionable(monkeypatch, step):
+    monkeypatch.setattr(setup, "local_credential_choices", lambda: [])
+    plan = {"step": step, "ready": step == "stopped", "remedy": _POISON, "receipts": []}
+    result = routes._contract(plan, local=True)
+    if step == "stopped":
+        # The desktop's run button: `canRun` needs kind `run` and `ready`.
+        assert result["remedy"]["kind"] == "run" and result["ready"] is True
+        assert result["remedy"]["text"].startswith("Phone access is turned off")
+    else:
+        # Rendered by the desktop as its sign-in control.
+        assert result["remedy"]["kind"] == "restore_owner"
+        assert "Sign in with that account" in result["remedy"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_posted_run_is_a_click_and_the_poll_never_applies(desktop, monkeypatch):
+    """The route is the click: its POST carries `resume_stopped`, its GET never applies."""
+    client, _app, _tmp = desktop
+    seen: list[dict[str, object]] = []
+    stopped = {
+        "step": "stopped",
+        "ready": True,
+        "verified": False,
+        "remedy": _POISON,
+        "receipts": [],
+        "credential_id": 17,
+    }
+
+    async def apply(selected, accepted, **kwargs):
+        seen.append(kwargs)
+        return {**stopped, "step": "complete", "verified": True, "url": "https://x.test"}
+
+    monkeypatch.setattr(setup, "apply", apply)
+    monkeypatch.setattr(setup, "observe_local", AsyncMock(return_value=stopped))
+    monkeypatch.setattr(setup, "local_credential_choices", lambda: [])
+
+    polled = (await client.get(PATH)).json()["result"]
+    assert polled["step"] == "stopped" and polled["remedy"]["kind"] == "run"
+    assert seen == []
+
+    response = await client.post(PATH, json={"action": "run", "credential_id": 17})
+    assert response.status_code == 200, response.text
+    assert [call.get("resume_stopped") for call in seen] == [True]

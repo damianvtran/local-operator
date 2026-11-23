@@ -50,6 +50,7 @@ from local_operator.model.configure import (
     _openrouter_retire_below_tps,
 )
 from local_operator.projects import stale_after_s
+from local_operator.providers.bedrock import connection as bedrock_connection
 from local_operator.providers.failover import RetrySettings
 from local_operator.saver.gate import configured_mode
 from local_operator.session.session import Session
@@ -284,6 +285,24 @@ def _screening_budget() -> Any:
     return screening_budget_from_config(config_dir())
 
 
+def _hold_release_gate() -> bool:
+    """Whether the receiver's work-scope release path is open, read the way it is.
+
+    ``team_bridge.hold_release`` (PR #4317 added its ``/settings`` row) gates
+    the owner-release path: the receiver and the Deliver route ask
+    ``hold_release.enabled_for(paths.config_dir(), <hold code>)`` per decision,
+    which re-reads config.yml every call, so a write from another process
+    lands on the next hold with no restart — hence LIVE. The probe reads that
+    exact gate for the work-scope code (the one this key owns; review codes
+    follow ``review_held``), never ``TeamBridgeSettings`` alone: an allowlisted
+    key the gate ignored would pass a settings-object probe and still hold.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.team_bridge import hold_release
+
+    return hold_release.enabled_for(config_dir(), hold_release.WORK_SCOPE_HOLD)
+
+
 def _lapsed_choice(watcher: ConfigWatcher) -> str:
     """The ``asks.lapsed_visible_for`` choice the reader resolves, by its window."""
     from local_operator.asks.store import LAPSED_VISIBLE_FOR_S
@@ -315,6 +334,39 @@ def _native_hooks(_watcher: ConfigWatcher) -> bool:
     from local_operator.hook_forwarding import native_hooks_enabled
 
     return native_hooks_enabled()
+
+
+async def _heavy_job_slot(_session: Session, _watcher: ConfigWatcher) -> bool:
+    """Observe the real per-call gate, not just the stored boolean.
+
+    A live disable must stop taking a flock; enabling again must take it on
+    the next call without constructing a new session or reloading the module.
+    No build is spawned: the lease itself is the behavior this switch controls.
+    """
+    from local_operator import heavy_lease, memory_guard
+    from local_operator.tools.builtin import BashParams, _acquire_heavy_lease
+
+    result = await _acquire_heavy_lease(
+        "syn-live-heavy-job",
+        BashParams(command="pnpm build"),
+        None,
+        None,
+        None,
+        heavy_lease.HeavyClass(reason="pnpm build"),
+        memory_guard.compute_budget(override_mb=64),
+    )
+    if result is None:
+        available = heavy_lease.try_acquire(heavy_lease.lease_dir(), 1)
+        assert available is not None, "disabled gate left the heavy-job slot locked"
+        available.release()
+        return False
+    assert isinstance(result, heavy_lease.Lease), result
+    try:
+        # The enabled arm must hold an actual OS lock, not merely report one.
+        assert heavy_lease.try_acquire(heavy_lease.lease_dir(), 1) is None
+        return True
+    finally:
+        result.release()
 
 
 def _query_budget(watcher: ConfigWatcher) -> Budget:
@@ -479,6 +531,13 @@ def _librarian_policy(watcher: Any):
     return proactive.policy(watcher.config_dir)
 
 
+def _workset() -> Any:
+    """``network.workset``, imported at observe time like the other per-use readers."""
+    from local_operator.network import workset
+
+    return workset
+
+
 def _librarian_name(watcher: Any) -> str:
     from local_operator.librarian import bootstrap
 
@@ -494,6 +553,7 @@ def _librarian_name(watcher: Any) -> str:
 #: attribute to observe) read the watcher's snapshot — the mapping those
 #: consumers are being pointed at.
 LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
+    "bash.heavy_jobs.enabled": (False, _heavy_job_slot),
     # -- notification sound: re-read from config.yml on every notification -----
     # Not a session attribute: `notifications.sound.configured()` (which
     # `resolve()` builds the plan from) reads `config_dir()`'s config.yml per
@@ -567,6 +627,20 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "providers.openai.api": (
         "chat_completions",
         lambda s, w: _openai_api_mode(s.routing_settings),
+    ),
+    # -- bedrock: re-read from config on every request / credential census ----
+    # Like ``session.scratchpad.max_bytes``, not a session attribute: the two
+    # readers resolve ``providers.bedrock.*`` through ``config_dir()`` at call
+    # time when handed no mapping, which is why the rows are LIVE. Observed
+    # through those exact readers. ``eu-west-1`` and ``ambient`` are the
+    # non-default values (both default to "" = inherit / no ambient chain).
+    "providers.bedrock.region": (
+        "eu-west-1",
+        lambda s, w: bedrock_connection.configured_region(),
+    ),
+    "providers.bedrock.auth": (
+        "ambient",
+        lambda s, w: bedrock_connection.configured_auth(),
     ),
     # -- openrouter: the routing object the NEXT client build will send -------
     # Same discipline as the two probes above: observed through the exact
@@ -925,6 +999,10 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # probe values are the shipped defaults nudged inside their nesting (each is
     # a valid set against its siblings, so the write path accepts it and the
     # clamp never has to correct it).
+    # The owner-release hold gate. Shipped default is ON (a person-controlled
+    # hold, never an admit), hence the probe value is False: the write must
+    # close the receiver's work-scope release gate, not just change the file.
+    "team_bridge.hold_release": (False, lambda s, w: _hold_release_gate()),
     "team_bridge.screening.budget_per_hour": (
         420,
         lambda s, w: _screening_budget().account,
@@ -969,6 +1047,23 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         lambda s, w: _librarian_policy(w).max_extra_per_day,
     ),
     "librarian.cadence.min_gap_minutes": (30, lambda s, w: _librarian_policy(w).min_gap_minutes),
+    # -- mesh moves: the working-set readers a move calls per request ----------
+    # No ``Session`` holds these: the move handlers in ``network/workset_move.py``
+    # and ``network/mobility.py`` call ``workset.cap_bytes(server.root)`` /
+    # ``workset.restore_roots(server.root)`` on every move, and each opens
+    # config.yml afresh through ``store.read_config``. Observing those readers on
+    # the watcher's directory (the config root a mesh server is handed) is the
+    # exact read the next move makes, so a row moving here is the LIVE claim. 64 MiB
+    # sits inside the registry's 1 MiB–16 GiB range; the roots compare as a list
+    # because the reader returns a tuple.
+    "mesh.move.working_set_max_bytes": (
+        64 * 1024 * 1024,
+        lambda s, w: _workset().cap_bytes(w.config_dir),
+    ),
+    "mesh.move.working_set_roots": (
+        ["~/code", "~/work"],
+        lambda s, w: list(_workset().restore_roots(w.config_dir)),
+    ),
 }
 
 #: LIVE sections whose keys have no session-side apply because a HOST owns
@@ -1105,6 +1200,13 @@ HOST_OWNED_LIVE_SECTIONS = {
     "speech",
     "static",
     "mesh_updates",
+    # ``updates`` is host-owned in the ``mesh_updates`` shape: its two keys decide
+    # what an UPDATE does to older install generations, not what a session does.
+    # ``update.auto_prune_policy`` re-reads config.yml at every promotion tail, so
+    # an edit applies to the next update with no restart. The live half is proven
+    # in ``tests/unit/test_capacity_recovery.py`` (the off switch and keep margin
+    # rewritten between updates in one process take effect on the next one).
+    "updates",
     # ``console`` is host-owned in the ``desktop``/``runtime`` shape: the limits are
     # admission policy for the DESKTOP CONSOLE HOST, not for a Python ``Session`` —
     # nothing in ``Session`` reads the ``console`` block, so a probe in this file
@@ -1116,6 +1218,25 @@ HOST_OWNED_LIVE_SECTIONS = {
     # (``scripts/console-host.test.mjs``: the registry's admission against
     # ``policy.maxLive``/``userReserved``), the same split ``desktop`` uses.
     "console",
+    # ``phone_access`` is host-owned in the ``static`` shape: its one key,
+    # ``tunnel.auto_setup_after_login``, gates what a verified Radient SIGN-IN
+    # does next, not what a session does. ``tunnels.install.auto_setup_enabled``
+    # re-reads config.yml on EVERY call (``read_config_values``, no memo of its
+    # own), and ``auto_setup_after_login`` calls it once per sign-in — invoked by
+    # ``providers.auth_store`` after each verified credential write, in whichever
+    # process wrote it (``lop serve``, the desktop, the TUI). No ``Session``
+    # holds the switch, so a probe here could watch nothing move. Proven in
+    # ``tests/unit/test_tunnel_remedies.py::
+    # test_a_config_write_reaches_the_next_sign_in_without_a_restart`` (on → a
+    # ``write_setting`` false → the next sign-in declines → true → it runs, in
+    # one process with no reload).
+    "phone_access",
+    # ``voice`` is host-owned in the ``static`` shape: ``voice.max_spoken_chars`` is
+    # read PER REQUEST off config.yml by ``POST /v1/desktop/voice/text``
+    # (``desktop_voice._max_spoken_chars``), and no ``Session`` holds it, so a probe
+    # here could watch nothing move. Proven in ``tests/unit/server/
+    # test_desktop_voice.py::test_text_honours_the_configured_cap_read_from_disk``.
+    "voice",
 }
 
 
@@ -1139,6 +1260,9 @@ async def test_a_write_from_another_process_reaches_the_running_session(
     # `ConfigManager`). Pointing the env at the watched directory is what makes
     # those probes read the file under test instead of the operator's real one.
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    if key == "bash.heavy_jobs.enabled":
+        monkeypatch.setenv("LOCAL_OPERATOR_HEAVY_JOB_SLOTS", "1")
+        monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", "syn-live-heavy-job")
     # A real file to diff against. ``hosting`` is seeded to the session's own
     # provider (``MODEL`` is ``test/m``) so the ``model_name`` probe exercises
     # the common case — a bare ``model_name`` edit with ``hosting`` unchanged —
@@ -1186,6 +1310,13 @@ async def test_a_write_from_another_process_reaches_the_running_session(
 
         assert change is not None and key in change.changed_keys
         assert await observed() == value
+        if key == "bash.heavy_jobs.enabled":
+            # Complete the on -> off -> on cycle via the same external-write
+            # and watcher path, proving the gate resumes in this session.
+            write_from_another_process(config_dir, key, True)
+            restored = watcher.poll_now()
+            assert restored is not None and key in restored.changed_keys
+            assert await observed() is True
     finally:
         await session.dispose()
 

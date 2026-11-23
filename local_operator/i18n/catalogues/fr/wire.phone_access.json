@@ -1,0 +1,12 @@
+{
+  "wire.phone_access.title": "Accès téléphone",
+  "wire.phone_access.description": "Comment cet ordinateur maintient son tunnel Radient pour l’application mobile. Les modifications s’appliquent à la prochaine connexion.",
+  "wire.phone_access.auto_setup.label": "Reconnecter l’accès téléphone après la connexion",
+  "wire.phone_access.auto_setup.help": "Quand vous vous connectez à Radient sur un ordinateur qui dispose déjà de l’accès téléphone, son tunnel est reconnecté ou réparé en arrière-plan. Cela n’active jamais la facturation et ne dépense jamais de crédit ; tout prix ou crédit manquant vous est présenté à la place.",
+  "wire.phone_access.away_after.label": "Envoyer au téléphone quand je suis loin de mon ordinateur depuis",
+  "wire.phone_access.away_after.help": "Durée sans saisie au clavier ni à la souris au-delà de laquelle une tâche terminée, qui vous serait signalée ici, est envoyée à votre téléphone. Le verrouillage de l’écran compte immédiatement comme une absence. Nécessite l’application de bureau.",
+  "wire.phone_access.away_after.choice.1m.label": "1 minute",
+  "wire.phone_access.away_after.choice.2m.label": "2 minutes",
+  "wire.phone_access.away_after.choice.5m.label": "5 minutes",
+  "wire.phone_access.away_after.choice.10m.label": "10 minutes"
+}

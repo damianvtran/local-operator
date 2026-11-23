@@ -998,6 +998,14 @@ export async function resolveInitialLocale(): Promise<void> {
 /* Per-session projection streams, refcounted                          */
 /* ------------------------------------------------------------------ */
 
+/* A connected boolean survives an invisible lease rotation, so it cannot
+   identify the boundary between live progress and a reconnect snapshot.
+   Tag accepted objects locally instead of adding a field to the wire. */
+const projectionEpochs = new WeakMap<SessionProjection, object>();
+export function projectionRevealEpoch(projection: SessionProjection | null, connected: boolean): object | undefined {
+	return projection && connected ? projectionEpochs.get(projection) : undefined;
+}
+
 const projectionStreams = new Map<
 	string,
 	{ close: () => void; refs: number; linger: ReturnType<typeof setTimeout> | null }
@@ -1012,8 +1020,17 @@ export function retainProjectionStream(sessionId: string): () => void {
 	} else {
 		projections.set(sessionId, { projection: null, connected: false });
 		let awaitingSnapshot = true;
+		let revealEpoch = {};
 		const close = openEventStream(
-			`/api/sessions/${encodeURIComponent(sessionId)}/events`,
+			/* STEER JOURNAL ORDER (`capabilities.steer_journal_order`, docs/mobile.md):
+			   the relay moves a delivered phone steer from its send-time slot to
+			   its journal slot (as a `user` row) so this stream agrees with
+			   `/history`. Declared unconditionally: an older relay ignores the
+			   parameter, and this client is safe with the move either way — the
+			   transcript's held list upserts by `rowKey` (the id), so a held row
+			   keeps the slot it already has, and a fresh mount takes the frame's
+			   (journal) order (`transcript.steer-journal-order.test.tsx`). */
+			`/api/sessions/${encodeURIComponent(sessionId)}/events?steer_journal_order=1`,
 			"projection",
 			(data, connected) => {
 				let incoming: SessionProjection;
@@ -1033,7 +1050,12 @@ export function retainProjectionStream(sessionId: string): () => void {
 				) {
 					return false;
 				}
+				if (current?.projection?.pid !== incoming.pid) revealEpoch = {};
 				awaitingSnapshot = false;
+				// Tag the accepted recovery seed even while it is still hidden
+				// from motion. onRecovered reuses this snapshot as the baseline;
+				// lookup still requires a connected, authenticated projection.
+				if (incoming.pid > 0) projectionEpochs.set(incoming, revealEpoch);
 				projections.set(sessionId, { projection: incoming, connected });
 				emitStream();
 				return true;
@@ -1042,6 +1064,7 @@ export function retainProjectionStream(sessionId: string): () => void {
 				// Connection establishment alone does not validate the old rendered
 				// result. Only the new source's first snapshot makes it viewable.
 				awaitingSnapshot = true;
+				revealEpoch = {};
 			},
 			() => {
 				// Outage reporting can land during a new leg's stability window.

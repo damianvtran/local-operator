@@ -50,6 +50,11 @@ export class HttpError extends Error {
 		readonly status: number,
 		message: string,
 		readonly code = "",
+		/** The refusal's other machine fields (`same_key`, `request_id`,
+		    `retry_after_s` on the pairing routes). Kept whole rather than one
+		    typed field per route so a caller that keys on `code` can read its
+		    route's extras without this class learning every route. */
+		readonly body: Readonly<Record<string, unknown>> = {},
 	) {
 		super(message);
 		this.name = "HttpError";
@@ -101,14 +106,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	if (!res.ok) {
 		let detail = `${res.status}`;
 		let code = "";
+		let extras: Record<string, unknown> = {};
 		try {
 			const body = (await res.json()) as { error?: string; code?: string };
 			if (body.error) detail = body.error;
 			if (typeof body.code === "string") code = body.code;
+			if (body && typeof body === "object") extras = body as Record<string, unknown>;
 		} catch {
 			/* A non-JSON error body carries no more than the status did. */
 		}
-		throw new HttpError(res.status, detail, code);
+		throw new HttpError(res.status, detail, code, extras);
 	}
 	return (await res.json()) as T;
 }
@@ -616,10 +623,16 @@ function recordingFilename(blob: Blob): string {
 
     `signal` is for U5's cancel: the composer's status row aborts an in-flight
     transcription rather than only hiding the wait; a fetch aborted through it
-    rejects with an AbortError, which the caller already treats as a discard. */
+    rejects with an AbortError, which the caller already treats as a discard.
+
+    `client`/`sessionId` are DIAGNOSTIC fields, not routing: the daemon logs
+    which surface a refusal happened on and which conversation it belonged to,
+    so a report ("transcription failed") can be found in `mobile.log` and the
+    request log's `reason` stops being blank. The daemon drops anything that is
+    not its own session-id shape, so a value from an unexpected route is safe. */
 export function transcribeAudio(
 	blob: Blob,
-	signal?: AbortSignal,
+	options: { signal?: AbortSignal; sessionId?: string } = {},
 ): Promise<{
 	text: string;
 	provider: string;
@@ -628,13 +641,15 @@ export function transcribeAudio(
 }> {
 	const form = new FormData();
 	form.append("audio", blob, recordingFilename(blob));
+	form.append("client", "web");
+	if (options.sessionId) form.append("session_id", options.sessionId);
 	// The daemon normalises this to an ISO-639-1 code before it reaches Radient
 	// or the client rules; an unmapped tag (e.g. fil-PH -> fil) is omitted, not
 	// guessed. English-only cleanup on a Tagalog take is the failure direction
 	// the cleanup design refuses.
 	const language = typeof navigator !== "undefined" ? navigator.language : "";
 	if (language) form.append("language", language);
-	return fetch("/api/transcribe", { method: "POST", body: form, signal }).then(async (res) => {
+	return fetch("/api/transcribe", { method: "POST", body: form, signal: options.signal }).then(async (res) => {
 		if (res.status === 401) {
 			handleUnauthorized();
 			throw new Error("unauthorized");
@@ -746,6 +761,106 @@ export function pairingStatus(deviceId: string): Promise<{
 	operator_spki?: string;
 }> {
 	return request(`/api/pair/${encodeURIComponent(deviceId)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Terminal-free pairing (design v2 §2.2, A1): availability → claim → file →
+// status → certificate. The routes sit behind the same relay gate as the rest of
+// this module; every refusal is keyed on its `code` (see `HttpError.body` for the
+// extras), never on the English `error` sentence.
+// ---------------------------------------------------------------------------
+
+export type PairAvailability = {
+	available: boolean;
+	reason: "ok" | "no_operator_authority" | "unsupported" | string;
+};
+
+/** Whether the computer can approve a phone right now. A 404 here means a daemon
+    from before terminal-free pairing; the caller treats it as `unsupported`. */
+export function pairAvailability(): Promise<PairAvailability> {
+	return request("/api/pair/availability");
+}
+
+/** Step 1 (claim): the phone's public point plus `commit = sha256(np)`. The
+    computer answers with ITS nonce before the phone reveals its own, which is
+    what stops a relay from steering the six digits. */
+export function pairClaim(input: { spki: string; commit: string }): Promise<{
+	nd: string;
+	computer_id_pub: string;
+	anchor?: string;
+	expires_at?: number;
+}> {
+	return request("/api/pair/request", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(input),
+	});
+}
+
+/** The filed request record, as far as the phone reads it. */
+export type PairRecord = {
+	approval_id: string;
+	request_id: string;
+	state: string;
+	expires_at?: number;
+	device?: { device_id?: string };
+	what?: {
+		pair_phone?: {
+			via?: { route?: string; account?: string; attested?: string };
+			computer_id_pub?: string;
+		};
+	};
+};
+
+/** Step 2 (reveal + file). Idempotent for the same body, so a retry after a
+    dropped response gets the same record back rather than a second request. */
+export function pairFile(input: {
+	request_id: string;
+	spki: string;
+	commit: string;
+	np: string;
+	name: string;
+	platform: "web";
+}): Promise<PairRecord> {
+	return request("/api/pair/request", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(input),
+	});
+}
+
+export type PairReason =
+	| "waiting"
+	| "signing"
+	| "admin_prompt_open"
+	| "failed_retryable"
+	| "strikes_exhausted"
+	| "denied_by_user"
+	| "withdrawn"
+	| "expired"
+	| "paired";
+
+export type PairRequestStatus = {
+	state: string;
+	reason: PairReason | string;
+	mode?: "confirm" | "code";
+	device_id?: string;
+	expires_at?: number;
+};
+
+export function pairRequestStatus(requestId: string): Promise<PairRequestStatus> {
+	return request(`/api/pair/request/${encodeURIComponent(requestId)}`);
+}
+
+/** Cancel the phone's own request. `sig` is the device key's DER signature (hex)
+    over `"lop-pair-withdraw-v1" ‖ request_id`, so a relay cannot cancel a request
+    it merely observed. */
+export function pairWithdraw(requestId: string, sig: string): Promise<{ state: string }> {
+	return request(`/api/pair/request/${encodeURIComponent(requestId)}/withdraw`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ sig }),
+	});
 }
 
 /** URL for one image attachment on a user turn. The bytes are served lazily
@@ -880,6 +995,19 @@ export function supplementRestart(
 	job: string,
 ): Promise<CommandReceipt> {
 	return sendCommand(sessionId, { op: "supplement_restart", anchor, job });
+}
+
+/** The admitted body (or held/refused/pending state) behind one inbound Team
+    Bridge card, keyed by the transcript row the phone already reads (design
+    §4; `lib/bridge-card-body.ts` parses it). Ask only when the relay advertises
+    `features.team_bridge_card_body`. The route answers `private, no-store` and
+    this client keeps no copy either: a revoked body must disappear on the
+    next read. */
+export function getBridgeCardBody(sessionId: string, entryId: string, signal?: AbortSignal): Promise<unknown> {
+	return request(
+		`/api/sessions/${encodeURIComponent(sessionId)}/bridge-cards/${encodeURIComponent(entryId)}/body`,
+		{ signal, cache: "no-store" },
+	);
 }
 
 /** Older transcript entries for lazy loading. ``before`` is the id of the

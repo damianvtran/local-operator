@@ -857,53 +857,233 @@ def test_span_aware_truncation_never_cuts_a_span(store: VariableStore) -> None:
     assert clipped.count(IDENTIFIER_SPAN_OPEN) == clipped.count(IDENTIFIER_SPAN_CLOSE)
 
 
+def _marked_text(store: VariableStore, kilobytes: int) -> tuple[str, int]:
+    """``kilobytes`` of 1 KB lines with one own span per 256 KB, and the span count."""
+    unit = ("x" * 1024 + "\n") * (kilobytes + 1)
+    text = unit[: kilobytes * 1024]
+    chunks: list[str] = []
+    step = 64 * 1024
+    spans = 0
+    for offset in range(0, len(text), step):
+        chunks.append(text[offset : offset + step])
+        if offset % (256 * 1024) == 0:
+            chunks.append(store.identifier_span(SLUG))
+            spans += 1
+    return "".join(chunks), spans
+
+
+#: Sizes for the SCALING arm, 4x apart. Smaller than the traced 1 MB pass on
+#: purpose: the ratio is size-independent for a linear walk, and every extra
+#: round at 1 MB costs ~2-8 s of coverage-instrumented CPU on a CI runner.
+_SCALE_SMALL_KB, _SCALE_LARGE_KB = 64, 256
+#: Interleaved rounds per size; the MINIMUM of each is compared. CPU time can
+#: only be inflated by interference (cache/SMT contention, a frequency dip, a
+#: core migration), never deflated below the work itself, so the minimum is the
+#: estimate closest to the extraction's own cost. Five, not three: with
+#: equal-work samples (below) the measured maximum under an injected long-lived
+#: worker heap plus coverage was 1.11 over 22 runs at five rounds; see
+#: ``_per_byte_cost_ratio`` for the distribution.
+_SCALE_ROUNDS = 5
+#: A linear walk costs the same per byte at both sizes (measured 0.95-1.04, see
+#: the test's docstring); a quadratic one costs 4x more per byte at the 4x size
+#: (the control measures 3.9-4.2). 1.5 sits between the two with room on both
+#: sides.
+_SCALE_PER_BYTE_LIMIT = 1.5
+
+
+def _per_byte_cost_ratio(extract, small: str, large: str) -> tuple[float, float, float]:
+    """``(large per-byte CPU / small per-byte CPU, min small s, min large s)``.
+
+    ``time.thread_time`` and not ``time.process_time``: process time sums EVERY
+    thread of the process, and an xdist worker that has run thousands of tests
+    carries threads it did not start here (servers, relays, executors). A
+    sibling thread spinning while only the larger size is measured is a
+    superlinear reading of linear code — 1 MB 13.71 s vs 256 KB 1.99 s on PR
+    #3727's CI shard (job 130906509457). Measured with two spinning sibling
+    threads: process_time 0.107-0.154 s / 0.395-0.484 s (ratio 2.6-4.5 for a
+    4x input), thread_time 0.037-0.038 s / 0.150-0.152 s (ratio 4.0).
+
+    EQUAL WORK PER SAMPLE. One small sample extracts ``small`` as many times
+    as fit in ``large`` (4x), so every sample — small or large — covers the
+    same number of bytes and therefore the same span of time. The minimum is
+    only an unbiased estimator when both sizes draw from the same window
+    length: CPU rate on a shared runner drifts (SMT siblings, frequency,
+    core migration), and the minimum of a 50 ms window lands in a fast phase
+    far more often than the minimum of a 330 ms one. With one extraction per
+    sample the small size's minimum was biased low, which reads as a
+    superlinear ratio for linear code: CI py3.13 xdist workers read 1.64
+    (#4120, job 133354102922: 0.328 s / 0.050 s) and 1.56 (#4060, job
+    133294578456: 0.433 s / 0.069 s) while single-process runs read
+    0.98-1.06. Reproduced under coverage with a 1.5M-object live heap and
+    allocation churn between runs: one-extraction samples read 0.76-1.74
+    (red 7/22); equal-work samples read 0.81-1.11 (red 0/22) on the same load.
+    A ``gc.callbacks`` probe saw no collection inside any sample there, and the
+    one-extraction statistic still went red (1.52) with GC disabled, so this is
+    not a GC effect and ``gc.disable``/``gc.freeze`` would not fix it; the
+    reds were all a small minimum that ran in a fast phase (0.035 s vs a
+    typical 0.050 s) the long sample never reached.
+
+    Order alternates per round so neither size always runs second (after the
+    other has warmed or cooled caches and allocator state). A quadratic
+    extractor still reads 4x per byte: four ``n^2`` walks against one
+    ``(4n)^2`` walk.
+    """
+    repeats = round(len(large) / len(small))
+    small_best = large_best = float("inf")
+    for round_index in range(_SCALE_ROUNDS):
+        order = (small, large) if round_index % 2 == 0 else (large, small)
+        for text in order:
+            count = repeats if text is small else 1
+            started = time.thread_time()
+            for _ in range(count):
+                extract(text)
+            elapsed = time.thread_time() - started
+            if text is small:
+                small_best = min(small_best, elapsed)
+            else:
+                large_best = min(large_best, elapsed)
+    # A zero reading would make the ratio meaningless rather than small; the
+    # walk over 64 KB is milliseconds even uninstrumented, far above the clock.
+    assert small_best > 0, "the small extraction read 0 s of thread CPU; the clock is not live"
+    ratio = (large_best / len(large)) / (small_best / (repeats * len(small)))
+    return ratio, small_best, large_best
+
+
+def _assert_extractor_scales_linearly(store: VariableStore) -> None:
+    """The scaling arm, driven through ``store._extract_identifier_spans``.
+
+    A helper rather than inline so the negative control can run this exact
+    guard against a store whose extractor was swapped for a quadratic one.
+    """
+    small, _ = _marked_text(store, _SCALE_SMALL_KB)
+    large, _ = _marked_text(store, _SCALE_LARGE_KB)
+    ratio, t0, t1 = _per_byte_cost_ratio(store._extract_identifier_spans, small, large)
+    assert ratio <= _SCALE_PER_BYTE_LIMIT, (
+        f"{_SCALE_LARGE_KB}KB costs {ratio:.2f}x per byte what {_SCALE_SMALL_KB}KB does "
+        f"(min of {_SCALE_ROUNDS}: {t1:.3f}s vs {t0:.3f}s thread CPU for equal bytes): "
+        "superlinear extraction"
+    )
+
+
+# QUARANTINED, not fixed: the thread-CPU ratio bound is the defect (hard-coded
+# timing, not counted work). Remove in the same PR that derives the bound.
+@pytest.mark.skip(
+    reason=(
+        "QUARANTINED 2026-11-19 flaky-sweep ledger lopdev-E01 'Time-assertion backlog': "
+        "`256KB costs 1.69x per byte what 64KB does (min of 5: 0.428s vs 0.253s thread "
+        "CPU)` (#4235 gate job 135207196293, test (3.12, 1)); owner: lopdev E01 / "
+        "time-assertion batch 2; real fix: derive the scaling bound from a measured "
+        "calibration or counted work (comparisons), not a wall/CPU ratio; remove when "
+        "the bound is derived"
+    )
+)
 def test_extractor_scales_to_megabyte_text(store: VariableStore) -> None:
     """R3-3: one piece per segment/span, not one 3-tuple per character.
 
     The 4 MB case was not viable on the shared coverage runner: 0.5 s in this
     worktree venv, 10-37.5 s under coverage/load, repeatedly busting a ceiling
-    that still had to be below the per-character cut. The sizes are therefore
-    256 KB and 1 MB (4x the work), and the tracemalloc peak is the PRIMARY
-    discriminator: the per-character structure measured ~91 MB at 1 MB (367 MB
-    at 4 MB), while the segment walk is ~4 MB at 1 MB. The absolute ceilings
-    are a loose second guard; the relative bound catches superlinearity.
+    that still had to be below the per-character cut. The structural pass is
+    therefore 1 MB, and the tracemalloc peak is the PRIMARY discriminator: the
+    per-character structure measured ~91 MB at 1 MB (367 MB at 4 MB), while
+    the segment walk is ~4 MB at 1 MB. The absolute ceiling is a loose second
+    guard.
+
+    THE SCALING ARM (superlinear extraction) is a per-byte CPU ratio between
+    two sizes 4x apart, the minimum of interleaved rounds of the extraction's
+    OWN thread CPU, with tracemalloc off (its per-allocation hook is overhead
+    the ratio does not need). It used to be one traced ``process_time`` sample
+    per size against ``t1 <= 6*t0 + 1.0``, which failed a green tree on CI
+    (PR #3727, 13.71 s vs 1.99 s): see ``_per_byte_cost_ratio`` for why that
+    clock reads other threads' work, and why the minimum is the stable
+    statistic. The fixed ``+ 1.0`` s also made the bound blind outside
+    coverage, where 1 MB takes ~0.15 s: the real extractor with a quadratic
+    line recount spliced into its segment walk passed the old bound 3/3
+    uninstrumented, and reads 1.84-1.88x per byte (red, 5/5) here. A ratio has
+    no such floor. ``test_the_scale_guard_rejects_a_quadratic_extractor``
+    keeps proving this arm can still fail.
+
+    Measured on a shared 8-vCPU host (64 KB / 256 KB, min of 3, before samples
+    were equal-work): per-byte ratio
+    0.99-1.01 uninstrumented, 0.95-1.00 with two spinning sibling threads, and
+    0.98-1.04 under coverage (~16x slower per byte); the quadratic control
+    reads 3.9-4.2 in all three. Green 20/20 under ``--cov`` with 12 CPU burners,
+    with and without a sibling thread spinning through every large extraction.
     """
     import tracemalloc
 
-    elapsed_by_size: dict[int, float] = {}
-    peak_by_size: dict[int, float] = {}
-    for kilobytes, ceiling in ((256, 10.0), (1024, 20.0)):
-        unit = ("x" * 1024 + "\n") * (kilobytes + 1)
-        text = unit[: kilobytes * 1024]
-        chunks: list[str] = []
-        step = 64 * 1024
-        spans = 0
-        for offset in range(0, len(text), step):
-            chunks.append(text[offset : offset + step])
-            if offset % (256 * 1024) == 0:
-                chunks.append(store.identifier_span(SLUG))
-                spans += 1
-        marked = "".join(chunks)
-        # Start AFTER constructing the input: only the extraction is measured.
-        tracemalloc.start()
-        try:
-            started = time.process_time()
-            _protected, extracted = store._extract_identifier_spans(marked)
-            elapsed = time.process_time() - started
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-        assert len(extracted) == spans
-        assert elapsed < ceiling, f"{kilobytes}KB took {elapsed:.1f}s"
-        elapsed_by_size[kilobytes] = elapsed
-        peak_by_size[kilobytes] = peak / 1024 / 1024
+    marked, spans = _marked_text(store, 1024)
+    # Start AFTER constructing the input: only the extraction is measured.
+    tracemalloc.start()
+    try:
+        started = time.thread_time()
+        _protected, extracted = store._extract_identifier_spans(marked)
+        elapsed = time.thread_time() - started
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(extracted) == spans
+    assert elapsed < 20.0, f"1024KB took {elapsed:.1f}s"
+    assert peak / 1024 / 1024 < 40, f"1MB peak {peak / 1024 / 1024:.0f}MB"
 
-    t0, t1 = elapsed_by_size[256], elapsed_by_size[1024]
-    # RELATIVE guard: absolute ceilings alone cannot see a return to
-    # superlinear behaviour, and coverage inflates both sizes by the same
-    # factor. 1 MB is ~4x the work, so 6x plus a fixed second is the bound.
-    assert t1 <= 6 * t0 + 1.0, f"1MB {t1:.2f}s vs 256KB {t0:.2f}s (superlinear)"
-    assert peak_by_size[1024] < 40, f"1MB peak {peak_by_size[1024]:.0f}MB"
+    _assert_extractor_scales_linearly(store)
+
+
+def test_the_scale_guard_rejects_a_quadratic_extractor(store: VariableStore) -> None:
+    """The negative control: the scaling arm above must go RED on O(n^2) work.
+
+    The stand-in recomputes a line number from the START of the text at every
+    256-character step — the classic accidental quadratic (``count`` over the
+    consumed prefix instead of a running total). It is the quadratic term
+    ALONE, not added to the real extraction: under coverage the real walk costs
+    ~2 µs per character and would bury a C-speed quadratic term at these sizes,
+    and the point here is the guard's arithmetic, not this stand-in's speed.
+    Without this, a future edit to the guard (a looser limit, a different
+    statistic) could leave it unable to fail while the real test stays green
+    and believed.
+    """
+
+    def quadratic(text: str) -> int:
+        lines = 0
+        for consumed in range(0, len(text), 256):
+            lines = text.count("\n", 0, consumed)
+        return lines
+
+    small, _ = _marked_text(store, _SCALE_SMALL_KB)
+    large, _ = _marked_text(store, _SCALE_LARGE_KB)
+    ratio, t0, t1 = _per_byte_cost_ratio(quadratic, small, large)
+    assert ratio > _SCALE_PER_BYTE_LIMIT, (
+        f"a quadratic stand-in read {ratio:.2f}x per byte ({t1:.4f}s vs {t0:.4f}s), "
+        "inside the limit: the scaling guard can no longer see superlinear extraction"
+    )
+
+
+def test_the_scale_guard_fails_a_store_with_a_quadratic_extractor(
+    store: VariableStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation control for the guard the real test runs, end to end.
+
+    ``test_the_scale_guard_rejects_a_quadratic_extractor`` checks the ratio
+    arithmetic; this installs a quadratic extractor ON THE STORE and asserts
+    ``_assert_extractor_scales_linearly`` — the exact call the megabyte test
+    makes — goes red. Equal-work samples change how the small size is timed,
+    so this pins that the change did not also blunt the guard: a regression
+    that makes extraction O(n^2) must still fail it. The stand-in is the same
+    accidental quadratic as the control (a prefix ``count`` per 256-character
+    step). It is the quadratic term ALONE for the reason the control gives:
+    under coverage the real walk would bury a C-speed term at these sizes.
+    Measured 2.2-5.8x per byte through the equal-work guard over 36 runs
+    (coverage on and off, idle and with a 1.5M-object heap): the lowest
+    reading still clears the 1.5 limit by 1.46x.
+    """
+
+    def quadratic_extract(text: str) -> tuple[str, dict[str, str]]:
+        for consumed in range(0, len(text), 256):
+            text.count("\n", 0, consumed)
+        return text, {}
+
+    monkeypatch.setattr(store, "_extract_identifier_spans", quadratic_extract)
+    with pytest.raises(AssertionError, match="superlinear extraction"):
+        _assert_extractor_scales_linearly(store)
 
 
 # --- round 4: splitlines parity and search-window marking -------------------

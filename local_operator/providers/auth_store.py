@@ -100,6 +100,15 @@ if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
     from local_operator.providers.usage import QuotaHealth, UsageReport
     from local_operator.providers.usage_cache import UsageCacheStore
 
+from local_operator.providers.account_selection_trace import (
+    SelectionExplanation,
+    capture_selection,
+    record_demotion,
+    record_order,
+    selected_reason,
+    selection_active,
+)
+
 logger = logging.getLogger("local_operator.providers.auth_store")
 
 OAUTH_REFRESH_SKEW_MS = 60_000  # pre-emptive refresh trigger
@@ -219,6 +228,13 @@ REFRESH_SEND_UNCONFIRMED_KEY = "refresh_send_unconfirmed"
 #: them) and the unit follows its writer's clock helper, ``_now_ms``.
 GRANT_DEAD_AT_KEY = "grant_dead_at"
 
+#: Payload key: WHY the grant died, when the IdP said so in a way worth telling
+#: the user (today only ``callback_server.REAUTH_REASON_SESSION_POLICY``, Google
+#: Cloud session control's ``invalid_rapt``). Written with, and cleared with,
+#: :data:`GRANT_DEAD_AT_KEY`; it is never a verdict on its own -- a row without
+#: the tombstone is alive whatever this says.
+GRANT_DEAD_REASON_KEY = "grant_dead_reason"
+
 #: Payload key: an operator-signed delegation is IN FORCE for this login, so this
 #: device must not present its refresh token (design §3.2, Fence 1). Written by the
 #: owner's mint and cleared by its handback adoption or revoke.
@@ -235,6 +251,30 @@ GRANT_DEAD_AT_KEY = "grant_dead_at"
 #: a POST can happen — the record has to be readable from the seam that decides it,
 #: not through a second hop that a future edit could forget to take.
 REFRESH_DELEGATE_KEY = "refresh_delegate"
+
+#: Payload key (epoch ms): this row's login is LENT for renewal to a node
+#: (``network/credentials/renewal.py``, state ``lent``) and the IdP refused the
+#: owner's own refresh token. That is NOT a dead grant while a write-back is still
+#: possible — the node may have renewed the family and be about to hand it back
+#: (design mesh-credential-renewal §B.4). So the tombstone is withheld, the row
+#: refuses to present again (``RefreshDelegatedError``), and the node's write-back
+#: clears it. Only a lent row ever carries it.
+AWAITING_WRITEBACK_KEY = "awaiting_writeback_at"
+
+#: How long :data:`AWAITING_WRITEBACK_KEY` may hold a lent login (ms). Equal to
+#: ``network/credentials/renewal.RETURN_CAP_S`` (a test pins the equality; this
+#: module cannot import the network package): past it the node has certainly
+#: dropped anything newer, so the refused token was the family's last and the row
+#: reads as signed out ("sign in again") instead of waiting for ever (#3955 M2).
+AWAITING_WRITEBACK_CAP_MS = 7 * 86_400_000
+
+#: Payload key: this row is a node's CUSTODY of a login another device lent it
+#: (``renewal.node_store``), named ``<owner device>:<credential key>``. It gives
+#: the row its OWN dedupe identity (:func:`_identity_key_for`), so a lent pair can
+#: never land on — and overwrite — the node's own sign-in to the same account
+#: (#3955 M4). The node's own login keeps its account identity; the two rows
+#: never meet.
+MESH_CUSTODY_IDENTITY_KEY = "mesh_custody_identity"
 
 #: Payload key: this login's family has MOVED — a delegated node reported that the
 #: family was refreshed somewhere this device cannot see (§3.5). A tombstone with
@@ -770,6 +810,18 @@ class RefreshDelegatedError(AuthStoreError):
         self.not_after = not_after
 
 
+class LendClaimPendingError(RefreshDelegatedError):
+    """The OWNER did not present a LENT login's refresh token yet (mesh-credential-
+    renewal §B.3 R3/R4): the node holding it is being asked, or has not answered.
+
+    A separate class so :meth:`AuthStore.get_api_key` can tell it from a refusal
+    that is about the login (#3955 Q2): "checking with <node>" is a question in
+    flight, not a broken credential, and the 60 s backoff a real refusal earns
+    would keep the login unusable long after the node answered. Nothing was
+    presented; the next request re-asks the fence, which is a row read.
+    """
+
+
 @dataclasses.dataclass
 class StoredCredential:
     """One row of ``auth_credentials`` with its parsed payload."""
@@ -820,6 +872,12 @@ def credential_identity(credential: "StoredCredential | Mapping[str, Any]") -> s
         data: Mapping[str, Any] = credential.data
     else:
         data = getattr(credential, "data", credential)
+    # An Amazon Bedrock row names itself by its connection label ("dev ·
+    # us-east-1"), never by its descriptor ``key`` (design §8): the label is
+    # what the operator chose, and the descriptor is storage plumbing.
+    bedrock = data.get("bedrock")
+    if isinstance(bedrock, Mapping) and bedrock.get("label"):
+        return str(bedrock["label"])[:IDENTITY_LIMIT]
     for field in ("email", "account_id", "org_name"):
         value = data.get(field)
         if value:
@@ -930,6 +988,10 @@ class OAuthAccess:
     #: the row. A mesh borrower carries the OWNER's ref here; its own synthetic
     #: credential id must never be hashed into one.
     account_ref: str | None = None
+    # Owner-local audit observation, never routing/identity equality evidence.
+    selection: SelectionExplanation | None = dataclasses.field(
+        default=None, compare=False, repr=False, kw_only=True
+    )
 
 
 def default_db_path() -> Path:
@@ -1179,8 +1241,24 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     row — otherwise two logins leave two rows and the older one carries a
     dead rotated refresh token that the cascade keeps selecting.
     """
+    if provider == "bedrock":
+        # BEFORE the api-key early return: a Bedrock row is an api_key-typed
+        # CONNECTION (profile + Region, ambient + Region ...), and re-saving
+        # the same connection must replace its row instead of piling up
+        # duplicates that rotation would then walk. Raw API keys still never
+        # dedupe (``identity_key`` returns None for them).
+        from local_operator.providers.bedrock.store import identity_key
+
+        bedrock_identity = identity_key(credential)
+        if bedrock_identity is not None:
+            return bedrock_identity
     if credential.get("type") == "api_key" or credential.get("source") == "login":
         return None
+    custody = credential.get(MESH_CUSTODY_IDENTITY_KEY)
+    if isinstance(custody, str) and custody:
+        # A lent pair held for another device: never the node's own account row,
+        # whatever email/account fields the owner's payload carries (#3955 M4).
+        return f"mesh-custody:{custody}"
     if provider == "radient":
         binding = _radient_account_identity(credential)
         if binding is not None:
@@ -1436,6 +1514,84 @@ def _release_detached_refresh(task: asyncio.Task[dict[str, Any] | None], store: 
     store.close()
 
 
+#: Primary result codes meaning "another connection holds the lock", the only
+#: reservation failures :meth:`AuthStore._update_payload` may treat as a
+#: best-effort skipped write. Compared on the low byte because CPython exposes
+#: EXTENDED codes (``SQLITE_BUSY_SNAPSHOT`` is 517, not 5).
+_LOCK_CONTENTION_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+
+
+def _is_lock_contention(error: sqlite3.Error) -> bool:
+    """Whether ``error`` is verified lock contention, never a read failure.
+
+    ``BEGIN IMMEDIATE`` reads the database header and schema before it takes the
+    reservation, so it can fail with an I/O or corruption error that means the
+    row could not be read. Only contention may be downgraded to "write skipped";
+    everything else must propagate (PR #4269 security review, S2).
+
+    The code is authoritative when present. Without it (an error raised by a
+    wrapper, or an interpreter that does not set ``sqlite_errorcode``) the two
+    messages SQLite itself uses for BUSY and LOCKED are the only remaining
+    signal, and anything else is treated as not contention: misclassifying a
+    read failure as contention is the failure this guard exists to prevent.
+    """
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is not None:
+        primary = code & 0xFF
+        return isinstance(error, sqlite3.OperationalError) and primary in _LOCK_CONTENTION_CODES
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    text = str(error).lower()
+    # SQLite appends the table name to the LOCKED message ("database table is
+    # locked: auth_credentials"), so that one is a prefix match.
+    return text == "database is locked" or text.startswith("database table is locked")
+
+
+class _FetchedCursor:
+    """A cursor's results, drained while :class:`_SerializedConnection` held its lock.
+
+    Exposes the subset of :class:`sqlite3.Cursor` this store's callers use, so no
+    call site changes, and no caller can step a shared statement unlocked.
+    """
+
+    __slots__ = ("_rows", "_pos", "description", "lastrowid", "rowcount")
+
+    def __init__(self, cursor: sqlite3.Cursor) -> None:
+        # Read every attribute before the caller's lock is released: `rowcount`
+        # and `lastrowid` are connection-wide in sqlite and a later statement on
+        # another thread would overwrite them.
+        self._rows: list[Any] = cursor.fetchall()
+        self._pos = 0
+        self.description = cursor.description
+        self.lastrowid = cursor.lastrowid
+        self.rowcount = cursor.rowcount
+        cursor.close()
+
+    def fetchone(self) -> Any:
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchall(self) -> list[Any]:
+        rows = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return rows
+
+    def fetchmany(self, size: int = 1) -> list[Any]:
+        rows = self._rows[self._pos : self._pos + size]
+        self._pos += len(rows)
+        return rows
+
+    def __iter__(self) -> Iterator[Any]:
+        while (row := self.fetchone()) is not None:
+            yield row
+
+    def close(self) -> None:
+        self._pos = len(self._rows)
+
+
 class _SerializedConnection:
     """A sqlite connection whose statements are serialized by a mutex.
 
@@ -1449,9 +1605,22 @@ class _SerializedConnection:
     Wrapping instead of editing every call site keeps the ~27 existing
     ``self._conn.execute(...)`` uses exactly as they read, and means a
     statement added later is serialized by construction rather than by the
-    author remembering a lock. ``execute`` returns the cursor, so
-    ``.fetchall()``, ``.fetchone()`` and ``.lastrowid`` keep working; the lock
-    covers producing the cursor, which is where the shared state is touched.
+    author remembering a lock. ``execute`` returns a :class:`_FetchedCursor`,
+    so ``.fetchall()``, ``.fetchone()``, iteration, ``.rowcount`` and
+    ``.lastrowid`` keep working.
+
+    THE ROWS ARE FETCHED UNDER THE LOCK. sqlite3 steps a SELECT lazily: the
+    first row is produced by ``execute`` but every later ``fetch*`` steps the
+    same underlying statement machinery the connection shares. Locking only the
+    ``execute`` call (as this class first did) left ``fetchone()`` racing another
+    thread's statement, and a two-thread ``get_credential`` loop on one store
+    measured 10,402 ``None`` rows plus 3,865 TypeError/JSONDecodeError/
+    InterfaceError per 100k reads (zero with one thread). That surfaced as the
+    mesh renewal owner reading a lent login as GONE (``renewal_stale``) or as a
+    ``NoneType`` payload while a background claim read the same row. Draining
+    the cursor before the lock is released costs a list per statement -- every
+    read here is one row or a handful -- and makes a correct read independent
+    of which caller-side ``fetch*`` pattern is used.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -1461,9 +1630,18 @@ class _SerializedConnection:
         # also executes must not deadlock against itself.
         self._lock = threading.RLock()
 
-    def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+    @property
+    def lock(self) -> threading.RLock:
+        """The statement mutex, for a caller that must hold it across statements.
+
+        :meth:`AuthStore._update_payload` holds it across its read, mutation and
+        write so another thread's read-modify-write cannot interleave.
+        """
+        return self._lock
+
+    def execute(self, *args: Any, **kwargs: Any) -> _FetchedCursor:
         with self._lock:
-            return self._conn.execute(*args, **kwargs)
+            return _FetchedCursor(self._conn.execute(*args, **kwargs))
 
     def executescript(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
         with self._lock:
@@ -1555,6 +1733,8 @@ class AuthStore:
         #: ``None`` is every ordinary construction site, and it is what keeps this
         #: module's behaviour unchanged for a device that holds no delegation.
         self._refresh_fence: Callable[[int, dict[str, Any]], str | None] | None = None
+        #: The OWNER-side fence for a login lent for renewal (see :meth:`set_lend_fence`).
+        self._lend_fence: Any = None
         #: The outcome half of the same seam (see :meth:`set_refresh_fence`).
         self._refresh_watch: Any = None
         self._store_uid: str | None = None
@@ -1579,6 +1759,13 @@ class AuthStore:
         # pool whose members are all equally valid.
         self._deprioritized: dict[str, dict[int, int]] = {}
         self._refresh_locks: dict[int, asyncio.Lock] = {}
+        #: Row id -> the provider's own sentence for a refresh it refused before
+        #: sending because LOCAL configuration can never work (e.g. a custom
+        #: Vertex OAuth client id with no secret). Process-local on purpose: it
+        #: is re-earned by the next attempt, cleared by any attempt that gets
+        #: past configuration, and read by the failover walk so the user is told
+        #: what to configure instead of "wait for the limit to reset".
+        self._refresh_config_refusals: dict[int, str] = {}
         #: Identity of this process in lease rows, so a release only frees a
         #: lease THIS process took. Same shape as :class:`UsageCacheStore`.
         self._refresh_holder = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -2087,6 +2274,19 @@ class AuthStore:
         self._refresh_fence = fence
         self._refresh_watch = watch
 
+    def set_lend_fence(self, fence: Any) -> None:
+        """Install the owner's fence for LENT logins (mesh-credential-renewal §B.3 R3).
+
+        ``fence(credential_id, data)`` returns ``None`` to allow this OWNER's POST of
+        a lent login's refresh token, or a sentence to refuse it; ``fence.posted(
+        credential_id, data)`` (optional) runs after a successful POST so the new
+        pair reaches the renewing node. Consulted ONLY for a row whose
+        :data:`REFRESH_DELEGATE_KEY` record is in state ``lent``: every other row
+        is untouched. A lent row with NO fence installed is refused (fail closed) —
+        presenting it unasked could burn a family the node already rotated.
+        """
+        self._lend_fence = fence
+
     def set_fallback_resolver(
         self, provider: str, resolver: Callable[[str], str | None] | None
     ) -> None:
@@ -2209,6 +2409,59 @@ class AuthStore:
         if include_disabled:
             return creds
         return [c for c in creds if c.disabled_cause is None]
+
+    def current_credential_ids(self, provider: str) -> frozenset[int] | None:
+        """Enabled owner-row ids, or None when inventory is not authoritative.
+
+        A mesh cooldown can name a row that disappeared since the holder saw it.
+        Dropping such an exclusion is safe only after a successful CURRENT read:
+        list_credentials intentionally maps a missing connection to [], whereas
+        policy must distinguish that unknown from a verified empty pool. Read
+        metadata only; choosing a cascade needs no decrypted bearer payloads.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None or (self._read_only and self.read_only_sidecar_present()):
+            return None
+        try:
+            rows = conn.execute(
+                "SELECT id FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL",
+                (self._storage_id(provider),),
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        return frozenset(int(row[0]) for row in rows)
+
+    def credential_identity_digest(self) -> tuple[tuple[Any, ...], ...] | None:
+        """Which credentials exist and whether each can authorize, and nothing else.
+
+        WHY: the phone relay memoises its model sheet under a key that must
+        move on a login, a logout or a disable, and must NOT move on the writes
+        that share this database without changing who is logged in -- refresh
+        leases, blocks, token refreshes (``updated_at``, ``data``). Measured on
+        the operator's machine: ``auth.db-wal`` is rewritten several times a
+        minute by those writes alone, so a key built from file stats rebuilt
+        the sheet on nearly every open (PR #4020 agent review, R1).
+
+        ``login_incarnation`` is minted per login, so re-logging the same
+        identity still moves the digest. Secrets (``data``) are never selected.
+
+        ``None`` means "could not tell" (an unreadable database, or a stale
+        immutable read-only handle), which a caller must treat as "changed";
+        ``()`` is a genuinely empty or absent store. Works on a read-only store.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return None if self.read_only_unavailable() else ()
+        if self._read_only and self.read_only_sidecar_present():
+            return None
+        try:
+            rows = conn.execute(
+                "SELECT provider, credential_type, identity_key, disabled_cause,"
+                " login_incarnation FROM auth_credentials ORDER BY id"
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        return tuple(tuple(row) for row in rows)
 
     def retained_radient_login_ids(self) -> tuple[int, ...]:
         """Safe status references, never a route back into credential selection.
@@ -2370,9 +2623,23 @@ class AuthStore:
             eligibility.clear(root)
         except Exception:  # noqa: BLE001 — a logout must not fail over the org hub
             logger.debug("org hub gate clear after logout failed", exc_info=True)
+        # Team Bridge display bodies are third-party text retained for the
+        # account that just left (bridge-body design §2: sign-out deletes
+        # them). Purging HERE, at the one sign-out hook both logout hosts and
+        # the desktop's account removal share, makes it eager rather than "on
+        # the next card view" (review R3 / QA Q1). All rows go: a remaining
+        # Radient login re-earns its own through the hub backfill.
+        try:
+            from local_operator.team_bridge.display_bodies import DisplayBodyStore
+
+            DisplayBodyStore(root).purge()
+        except Exception:  # noqa: BLE001 — a logout must not fail over display retention
+            logger.debug("bridge display purge after logout failed", exc_info=True)
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
-        """Seal Muse secrets before metadata serialization; preserve other providers."""
+        """Seal Muse/Bedrock secrets before metadata serialization; preserve other providers."""
+        if self._storage_id(provider) == "bedrock":
+            return self._upsert_bedrock_credential(credential)
         if self._storage_id(provider) != "meta-muse":
             return self._upsert_credential_metadata(provider, credential)
         from local_operator.providers.meta_muse_credentials import (
@@ -2397,6 +2664,48 @@ class AuthStore:
         for old in old_rows:
             if old.id == row.id:
                 delete_key(old.data, self._config_dir or self._db_path.parent)
+        return row
+
+    def _upsert_bedrock_credential(self, credential: dict[str, Any]) -> StoredCredential:
+        """Bedrock seal hook: secret -> encrypted store, descriptor -> auth.db.
+
+        Same order and compensation as the Muse branch above: seal first (a
+        fresh ref per write, so a failed metadata write never clobbers a
+        working connection's secret), write metadata, and on failure delete
+        the new ref unless a committed row already owns it. After success the
+        REPLACED row's old ref (same identity, same row id) is deleted. A row
+        with nothing to seal (profile / ambient / env-bearer descriptors) is
+        written as-is.
+        """
+        from local_operator.providers.bedrock.store import (
+            delete_key,
+            needs_seal,
+            seal_credential,
+        )
+
+        base = self._config_dir or self._db_path.parent
+        if not needs_seal(credential):
+            old_rows = self.list_credentials("bedrock", include_disabled=True)
+            row = self._upsert_credential_metadata("bedrock", credential)
+            for old in old_rows:
+                if old.id == row.id and old.data.get("key") != row.data.get("key"):
+                    delete_key(old.data, base)
+            return row
+        old_rows = self.list_credentials("bedrock", include_disabled=True)
+        sealed = seal_credential(credential, base)
+        try:
+            row = self._upsert_credential_metadata("bedrock", sealed)
+        except BaseException:
+            self._conn.rollback()
+            if not any(
+                existing.data.get("key") == sealed["key"]
+                for existing in self.list_credentials("bedrock", include_disabled=True)
+            ):
+                delete_key(sealed, base)
+            raise
+        for old in old_rows:
+            if old.id == row.id and old.data.get("key") != sealed["key"]:
+                delete_key(old.data, base)
         return row
 
     def _upsert_credential_metadata(
@@ -2451,6 +2760,7 @@ class AuthStore:
         # own distinct key, so the provider send-marker reset stays unchanged.
         if provider != "mcp-oauth":
             payload.pop(GRANT_DEAD_AT_KEY, None)
+            payload.pop(GRANT_DEAD_REASON_KEY, None)
         payload.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
         # Unlike updated_at this is a login event, not a refresh timestamp.
         # MCP refresh also uses upsert, so it cannot attest an incarnation yet.
@@ -2464,7 +2774,13 @@ class AuthStore:
                 "AND identity_key = ? ORDER BY id",
                 (provider, identity),
             ).fetchone()
-            if provider == "radient" and credential_type == "oauth":
+            if (
+                provider == "radient"
+                and credential_type == "oauth"
+                # A custody row has its own namespace; Radient's account-binding
+                # upgrade would otherwise match (and refuse) the node's own login.
+                and not payload.get(MESH_CUSTODY_IDENTITY_KEY)
+            ):
                 binding = _radient_account_identity(payload)
                 if row is not None and binding is None:
                     previous = self.get_credential(row[0])
@@ -2812,6 +3128,22 @@ class AuthStore:
             return
         if note:
             logger.info("%s (provider=%s)", note, provider)
+        if verified_login:
+            # AFTER the heal and re-arm, and only for a VERIFIED sign-in (a token
+            # refresh writes this row too, and must never start a setup run): the
+            # unattended no-spend setup brings back a tunnel that is merely
+            # suspended or half-installed. Skipped when the heal acted (it
+            # returned above: the connector is already restarting on the moved
+            # pin) and when the re-arm did, for the same reason. Every other
+            # guard — phone access wanted, no stop or park, the config switch,
+            # real home — is `auto_setup_after_login`'s own; it never raises.
+            started = (
+                ""
+                if note
+                else install.auto_setup_after_login(provider=provider, credential_id=credential_id)
+            )
+            if started:
+                logger.info("%s (provider=%s)", started, provider)
 
     def _reread_after_write(self, credential_id: int | None) -> StoredCredential:
         """Re-read a row this connection just wrote.
@@ -2894,6 +3226,20 @@ class AuthStore:
     def delete_credential(self, credential_id: int) -> None:
         """Remove a row entirely (logout)."""
         row = self.get_credential(credential_id)
+        if row is not None and row.provider == "bedrock":
+            # Metadata first, then the sealed secret: a failed delete must
+            # never leave a row pointing at a ref that no longer exists.
+            # (``delete_credentials_for_provider`` loops through here.)
+            from local_operator.providers.bedrock.store import delete_key
+
+            self._conn.execute(
+                "DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,)
+            )
+            self._conn.execute("DELETE FROM auth_credentials WHERE id = ?", (credential_id,))
+            self._conn.commit()
+            self._publish_account_file()
+            delete_key(row.data, self._config_dir or self._db_path.parent)
+            return
         if row is not None and row.provider == "meta-muse":
             from local_operator.providers.meta_muse_credentials import (
                 reversible_key_deletion,
@@ -3277,6 +3623,7 @@ class AuthStore:
         mutate: Callable[[dict[str, Any]], bool],
         *,
         moves_write_stamp: bool = False,
+        best_effort: bool = True,
     ) -> bool:
         """Read-modify-write one row's payload under ``mutate``.
 
@@ -3308,31 +3655,131 @@ class AuthStore:
 
         Returns whether the write happened. A row that is GONE (a racing logout)
         is ``False`` and never a re-created row: an explicitly removed credential
-        stays removed. Best-effort on a sqlite error, like every other marker
-        write here — losing a marker restores the pre-marker behaviour rather
-        than failing the request that triggered it.
+        stays removed. Best-effort on a sqlite error while WRITING (the UPDATE,
+        the commit), like every other marker write here — losing a marker
+        restores the pre-marker behaviour rather than failing the request that
+        triggered it. Taking the reservation is best-effort ONLY for verified
+        lock contention (``SQLITE_BUSY``/``SQLITE_LOCKED``, see
+        :func:`_is_lock_contention`): ``BEGIN IMMEDIATE`` can itself read the
+        database header and schema, so a disk I/O or corruption error there is a
+        failed READ in disguise and propagates. A sqlite error while READING the
+        row propagates too, as it always did: "could not read" is not "no
+        marker", and a refresh caller that treated it as one would present a
+        token whose send marker it never saw. Every propagated error first rolls
+        back a transaction this call opened, with the rollback's own failure
+        suppressed so the ORIGINAL error is the one the caller sees.
+
+        ``best_effort=False`` is for a write that must NOT be lost quietly: the
+        post-refresh persist in :meth:`_ensure_oauth_fresh`, where the IdP has
+        already consumed the presented refresh token, so a skipped write of a
+        rotation strands the only live token in memory. There, reservation
+        contention and write-phase sqlite errors propagate (after the release)
+        exactly as that path's former bare UPDATE did, and a read-only store
+        raises instead of reporting ``False``. ``False`` then means only what the
+        caller's ``mutate`` decided, or a row that is gone.
+
+        ONE READ-MODIFY-WRITE. The read, ``mutate`` and the write run under the
+        connection's statement lock and, when no transaction is already open, a
+        ``BEGIN IMMEDIATE`` reservation. Without them this was a lost update:
+        the mesh renewal claim (``renewal._record_claim``, thread
+        mesh-control-conn) read the lent row, the owner's ``owner_return``
+        (thread mesh-slow_0) read it and committed an ADOPTION, then the claim
+        committed its stale whole payload over it -- re-opening the
+        ``awaiting_writeback_at`` wait the adoption had just closed, while its
+        epoch guard had checked the stale read, not the row it overwrote. The
+        lock closes that in-process; the reservation closes it against another
+        process sharing the database. ``mutate`` must therefore stay a pure
+        transform of ``data`` (the lock is reentrant, so a store read inside it
+        still works, but a slow callback holds every other statement up).
         """
-        row = self.get_credential(credential_id)
-        if row is None or not isinstance(row.data, dict):
+        if self._read_only:
+            # A metadata-only store has no writable connection to reserve.
+            if not best_effort:
+                raise AuthStoreError("auth store is read-only; the credential cannot be written")
             return False
-        data = dict(row.data)
-        if not mutate(data):
-            return False
-        try:
-            if moves_write_stamp:
-                self._conn.execute(
-                    "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
-                    (json.dumps(data), self._now_ms(), credential_id),
-                )
-            else:
-                self._conn.execute(
-                    "UPDATE auth_credentials SET data = ? WHERE id = ?",
-                    (json.dumps(data), credential_id),
-                )
-            self._conn.commit()
-        except sqlite3.Error:
-            logger.debug("auth payload marker write failed", exc_info=True)
-            return False
+        conn = self._conn
+        with conn.lock:
+            # Transaction state is sampled BEFORE BEGIN, not inferred from BEGIN
+            # having returned: the wrapped `execute` can open the transaction and
+            # still raise afterwards (draining the cursor, reading its
+            # attributes), and a flag set only on return would then skip the
+            # rollback and leave the reservation held on this shared connection.
+            owned = not conn.in_transaction
+
+            def release() -> None:
+                if owned and conn.in_transaction:
+                    conn.rollback()
+
+            def release_before_raise() -> None:
+                # On the way out with an error already in flight, a rollback that
+                # fails too must not replace it: the caller needs the error that
+                # explains the failure, not a secondary one from the cleanup.
+                with suppress(sqlite3.Error):
+                    release()
+
+            try:
+                if owned:
+                    conn.execute("BEGIN IMMEDIATE")
+                # else: a caller's transaction is already open; read and write
+                # inside it and let our commit below land it, exactly as the
+                # pre-reservation code committed within the caller's transaction.
+            except sqlite3.Error as exc:
+                if not best_effort or not _is_lock_contention(exc):
+                    # Not contention: BEGIN IMMEDIATE failed reading the database
+                    # itself (I/O, corruption, misuse). That is "could not read",
+                    # which the READ phase below already refuses to downgrade. Or a
+                    # `best_effort=False` write, whose contention must surface too.
+                    release_before_raise()
+                    raise
+                # Another writer holds the reservation: a write-side failure,
+                # best-effort like the UPDATE below.
+                release()
+                logger.debug("auth payload marker reservation busy", exc_info=True)
+                return False
+            except BaseException:
+                release_before_raise()
+                raise
+            try:
+                # READ phase. A sqlite error here propagates (after cleanup) as it
+                # did before the reservation existed: a caller such as the refresh
+                # path must not proceed as though the marker were absent when the
+                # row simply could not be read.
+                row = self.get_credential(credential_id)
+                if row is None or not isinstance(row.data, dict):
+                    release()
+                    return False
+                data = dict(row.data)
+                if not mutate(data):
+                    release()
+                    return False
+            except BaseException:
+                # A raising read or `mutate` must not leave the reservation held:
+                # the next statement on this shared connection would run inside it.
+                release_before_raise()
+                raise
+            try:
+                # WRITE phase: best-effort on a sqlite error (see docstring).
+                if moves_write_stamp:
+                    conn.execute(
+                        "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps(data), self._now_ms(), credential_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE auth_credentials SET data = ? WHERE id = ?",
+                        (json.dumps(data), credential_id),
+                    )
+                conn.commit()
+            except sqlite3.Error:
+                if not best_effort:
+                    release_before_raise()
+                    raise
+                release()
+                logger.debug("auth payload marker write failed", exc_info=True)
+                return False
+            except BaseException:
+                release_before_raise()
+                raise
         return True
 
     def _arm_send_marker(
@@ -3545,7 +3992,39 @@ class AuthStore:
             and self._grant_dead_at(row.data) is not None
         )
 
-    def _mark_grant_dead(self, credential_id: int, *, rejected_refresh_token: str | None) -> bool:
+    def refresh_configuration_error(self, credential_id: int) -> str | None:
+        """Why this row's last refresh was refused locally as misconfigured, if it was.
+
+        Set only when a provider refused BEFORE sending because its own
+        configuration cannot work (a ``ConfigurationError`` under
+        ``RefreshNotSentError``), cleared by the next attempt that gets further.
+        The failover walk reads it so a missing client secret is reported as
+        what it is, not as a resting quota.
+        """
+        return self._refresh_config_refusals.get(credential_id)
+
+    def grant_dead_reason(self, credential_id: int) -> str | None:
+        """The recorded cause of a dead grant, or ``None`` (alive, or no cause known).
+
+        Read-only, like :meth:`grant_is_dead`, so ``login-status`` and the
+        fallback notice can say "your Workspace requires a fresh sign-in" rather
+        than a bare "expired" without presenting the token again.
+        """
+        row = self.get_credential(credential_id)
+        if row is None or not isinstance(row.data, dict):
+            return None
+        if self._grant_dead_at(row.data) is None:
+            return None
+        reason = row.data.get(GRANT_DEAD_REASON_KEY)
+        return reason if isinstance(reason, str) and reason else None
+
+    def _mark_grant_dead(
+        self,
+        credential_id: int,
+        *,
+        rejected_refresh_token: str | None,
+        reason: str | None = None,
+    ) -> bool:
         """Record that this row's refresh token was refused by the IdP for good.
 
         The tombstone is the OUTCOME of a refusal the caller has already
@@ -3578,7 +4057,20 @@ class AuthStore:
                         credential_id,
                     )
                     return False
+            record = data.get(REFRESH_DELEGATE_KEY)
+            if isinstance(record, dict) and record.get("state") == "lent":
+                # A LENT login (renewal.LENT_STATE): the node may hold a newer pair of
+                # this family, so the refusal is not yet a verdict. Wait for its
+                # write-back instead of tombstoning (§B.4); the read gate below
+                # refuses to present the rejected token again meanwhile.
+                data[AWAITING_WRITEBACK_KEY] = self._now_ms()
+                data.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
+                return True
             data[GRANT_DEAD_AT_KEY] = self._now_ms()
+            if reason:
+                data[GRANT_DEAD_REASON_KEY] = reason
+            else:
+                data.pop(GRANT_DEAD_REASON_KEY, None)
             # The refusal IS the definitive answer to the send marker: the IdP
             # told us what happened to the presented token, so there is nothing
             # left for the marker to protect. This pop is deliberately NOT
@@ -3976,7 +4468,57 @@ class AuthStore:
                 f"the family may have moved with it, so the copy frozen here is not presented "
                 f"and cannot be refreshed; run /login {row.provider} to sign in again"
             )
+        awaiting = creds.get(AWAITING_WRITEBACK_KEY)
+        if awaiting and self._needs_refresh(creds, force=force):
+            # The IdP refused this LENT login's token and the node's write-back is
+            # still possible (AWAITING_WRITEBACK_KEY): presenting the same token
+            # again could only be refused again — or, if the node renewed, burn the
+            # family it is about to return.
+            try:
+                waited_ms = self._now_ms() - int(awaiting)
+            except (TypeError, ValueError):
+                waited_ms = 0
+            if waited_ms >= AWAITING_WRITEBACK_CAP_MS:
+                # THE CAP (#3955 M2), a pure read like ``_delegated``'s ceiling: past
+                # it no write-back can still arrive, so the refusal was final.
+                raise CredentialInvalidError(
+                    f"OAuth grant for '{row.provider}' was refused by the provider and "
+                    f"the device it was lent to never handed back a newer one; run "
+                    f"/login {row.provider} to sign in again"
+                )
+            record = creds.get(REFRESH_DELEGATE_KEY)
+            node = str((record or {}).get("device_name") or (record or {}).get("device") or "")
+            # ASK THE NODE (#3955 M2): only its answer ends this wait while it stays
+            # connected — a write-back adopts, a "nothing newer" proves the refusal
+            # was final. Without this nudge nothing would ask, because the claim
+            # fence below is never reached from here. Background, never raising.
+            nudge = getattr(self._lend_fence, "nudge", None)
+            if nudge is not None:
+                try:
+                    nudge(row.id, creds)
+                except Exception:  # noqa: BLE001 — the wait still stands
+                    logger.debug("lend fence nudge failed", exc_info=True)
+            raise LendClaimPendingError(
+                f"Waiting for {node or 'the node'} to hand back your {row.provider} login. "
+                f"It comes back as soon as {node or 'that device'} reconnects. Or sign in "
+                f"again here (/login {row.provider}).",
+                device=str((record or {}).get("device") or ""),
+            )
         delegated = self._delegated(creds, now_ms=self._now_ms())
+        if (
+            delegated is not None
+            and delegated.get("custody")
+            and self._needs_refresh(creds, force=force)
+        ):
+            # A node's CUSTODY of a lent login (renewal B1): plain words, because
+            # nothing here was signed by anyone (#3955 Q5).
+            owner = str(delegated.get("device") or "the device that lent it")
+            raise RefreshDelegatedError(
+                f"OAuth refresh for '{row.provider}' was not attempted on this device: "
+                f"{owner} lent this login here and renews it itself, so this device "
+                "only keeps a copy",
+                device=str(delegated.get("device") or ""),
+            )
         if delegated is not None and self._needs_refresh(creds, force=force):
             raise RefreshDelegatedError(
                 f"OAuth refresh for '{row.provider}' was not attempted: "
@@ -4104,6 +4646,7 @@ class AuthStore:
             # re-adding it as a top-level import. This is a refresh path that
             # has already paid for the module, so the cost is zero here.
             from local_operator.providers.oauth.callback_server import (
+                ConfigurationError,
                 InvalidGrantError,
                 LoginError,
                 RefreshNotSentError,
@@ -4150,6 +4693,30 @@ class AuthStore:
                         f"{self_clearing_window()}; sign in again only if it persists "
                         "past that"
                     )
+                lent = fresh.get(REFRESH_DELEGATE_KEY)
+                if presented and isinstance(lent, dict) and lent.get("state") == "lent":
+                    # THE OWNER'S CLAIM FENCE (mesh-credential-renewal §B.3 R3): this
+                    # login is lent for renewal, so the node that holds it is asked
+                    # first. Off the event loop for the same reason as the node fence.
+                    lend_fence = self._lend_fence
+                    if lend_fence is None:
+                        raise LendClaimPendingError(
+                            f"OAuth refresh for '{row.provider}' was not attempted: this "
+                            "login is lent for renewal and this process cannot ask the "
+                            "device holding it first; nothing about the login has changed",
+                            device=str(lent.get("device") or ""),
+                        )
+                    try:
+                        lend_refusal = await asyncio.to_thread(lend_fence, row.id, fresh)
+                    except Exception as exc:  # noqa: BLE001 — cannot tell = stop
+                        lend_refusal = (
+                            "the lent login could not be checked with the device holding it "
+                            f"({type(exc).__name__}), so it was not presented"
+                        )
+                    if lend_refusal is not None:
+                        raise LendClaimPendingError(
+                            str(lend_refusal), device=str(lent.get("device") or "")
+                        )
                 if presented:
                     # THE NODE'S PRE-POST FENCE (§3.4), and here rather than
                     # earlier on purpose: this is the last statement before the
@@ -4160,7 +4727,12 @@ class AuthStore:
                     fence = self._refresh_fence
                     if fence is not None:
                         try:
-                            refusal = fence(row.id, fresh)
+                            # OFF THE EVENT LOOP: the owner-side fence of a LENT login
+                            # may wait (bounded, ``renewal.CLAIM_INLINE_S``) for the
+                            # renewing node's claim answer, and that wait must not
+                            # stall every other coroutine of this process. The node
+                            # fence is a file read either way.
+                            refusal = await asyncio.to_thread(fence, row.id, fresh)
                         except Exception as exc:  # noqa: BLE001 — cannot tell = stop
                             refusal = (
                                 "the delegated refresh could not be re-checked before "
@@ -4189,6 +4761,14 @@ class AuthStore:
                     # round 1, R4). A fired cap lands in the generic arm below with
                     # the marker left armed, which is right: the request was handed
                     # over, so the outcome is in doubt.
+                    # What the provider was handed, frozen before the call: the
+                    # persist below merges only what the refresh CHANGED relative to
+                    # this, because the providers return `dict(creds)` plus the new
+                    # tokens, so the whole returned dict carries stale copies of every
+                    # other field (claims, markers, delegate records) as they stood
+                    # before the POST.
+                    sent = json.loads(json.dumps(fresh))
+                    self._refresh_config_refusals.pop(row.id, None)
                     async with asyncio.timeout(PROVIDER_REFRESH_TOTAL_BUDGET_S):
                         refreshed = await refresh(fresh)
                 except AuthStoreError:
@@ -4205,6 +4785,8 @@ class AuthStore:
                     # refusal still surfaces as the store's own error type, as
                     # every refresh failure here does.
                     self._clear_send_marker(row.id, armed)
+                    if isinstance(exc.__cause__, ConfigurationError):
+                        self._refresh_config_refusals[row.id] = str(exc)
                     raise AuthStoreError(
                         f"OAuth refresh for '{row.provider}' was refused before sending: {exc}"
                     ) from exc
@@ -4245,7 +4827,13 @@ class AuthStore:
                     # refresh attempt to re-earn it, and only an interactive login
                     # clears it. The marker is resolved by the write — the IdP told
                     # us what happened to the presented token.
-                    self._mark_grant_dead(row.id, rejected_refresh_token=presented)
+                    self._mark_grant_dead(
+                        row.id,
+                        rejected_refresh_token=presented,
+                        # ``ReauthRequiredError`` carries the policy cause; a
+                        # plain dead grant has none.
+                        reason=getattr(exc, "reason", None),
+                    )
                     # §3.5's node-side stop (R1-5): past the race guard the token we
                     # presented was this row's OWN current token, so the family moved
                     # outside this device. The watch wipes the delegated material,
@@ -4303,52 +4891,85 @@ class AuthStore:
                     raise AuthStoreError(
                         f"OAuth refresh failed for '{row.provider}': {detail}"
                     ) from exc
-                merged = dict(fresh)
-                merged.update(refreshed)
-                # Restore identity fields from the stored credential — NEVER
-                # rewritten by refresh, whatever the refresh fn returns.
-                for field in ("org_id", "org_name", "authorized_at"):
-                    if field in fresh:
-                        merged[field] = fresh[field]
-                    else:
-                        merged.pop(field, None)
                 # The response IS the acknowledgement the marker was waiting for:
                 # the exchange ran, so the token it presented is consumed and the
-                # row holds its replacement. Skipped here rather than trusted from
-                # ``fresh``, which was read BEFORE the arm — and this write is not
-                # ownership-gated for the same reason the tombstone's pop is not:
-                # it replaces the very token any marker in this payload was about,
-                # after the guard below has established that token, so what it drops
-                # is dead for every process rather than live for a peer.
-                merged.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
-                # Cross-process guard: the server's job processes each build their
-                # own AuthStore, so the per-process refresh lock does not cover
-                # them. Two processes racing a rotating refresh token both POST
-                # the same token; the IdP rotates and the loser's new token is
-                # dead. If the stored refresh token changed under us (another
-                # process won), skip our write — overwriting would clobber the
-                # winner's live token with our dead one and soft-delete the row.
-                now_row = self.get_credential(row.id)
-                if (
-                    now_row is not None
-                    and self._presented_refresh_token(dict(now_row.data)) != presented
-                ):
+                # row holds its replacement.
+                #
+                # ONE READ-MODIFY-WRITE through `_update_payload`, never a whole
+                # payload built from `fresh`. `fresh` was read before the POST, and
+                # anything another writer committed since -- a renewal
+                # `_record_claim`, a delegate-record or marker change, from this
+                # process or another sharing the database -- was silently written
+                # over by the former `UPDATE ... SET data = <fresh + refreshed>`
+                # whenever the guards below passed (#4269 round 1, deferred). So the
+                # row is re-read INSIDE the reservation, both guards run on THAT
+                # read (no guard->write window left for a peer), and only the
+                # fields the refresh actually changed are laid onto it.
+                #
+                # `best_effort=False`: the IdP has already consumed the presented
+                # token, so a rotation that is not persisted is a live token that
+                # exists only in memory. Contention and write errors raise, as the
+                # bare UPDATE did, rather than returning a token the row lacks.
+                outcome: dict[str, Any] = {}
+
+                def persist(current: dict[str, Any]) -> bool:
+                    # Cross-process guard: the server's job processes each build
+                    # their own AuthStore, so the per-process refresh lock does not
+                    # cover them. Two processes racing a rotating refresh token both
+                    # POST the same token; the IdP rotates and the loser's new token
+                    # is dead. If the stored refresh token changed under us (another
+                    # process won, or the user signed in again), skip our write --
+                    # overwriting would clobber the winner's live token with our
+                    # dead one and soft-delete the row.
+                    if self._presented_refresh_token(current) != presented:
+                        outcome["raced"] = dict(current)
+                        return False
+                    if self._grant_dead_at(current) is not None:
+                        # A sibling tombstoned the grant while our POST was in
+                        # flight, and the IdP then answered US with a rotation. A
+                        # token minted by a refresh belongs to the family the IdP
+                        # revoked, so it must not resurrect the login: the rotation
+                        # is dropped and the tombstone stands. Checked AFTER the
+                        # refresh-race guard because a rotated token is the more
+                        # specific explanation of a moved row.
+                        outcome["dead"] = True
+                        return False
+                    # Identity is fixed at login (PR-12): whatever the refresh fn
+                    # returns, org fields stay as the stored row has them.
+                    identity = {
+                        f: current[f]
+                        for f in ("org_id", "org_name", "authorized_at")
+                        if f in current
+                    }
+                    current.update(
+                        {
+                            key: value
+                            for key, value in refreshed.items()
+                            if key not in sent or sent[key] != value
+                        }
+                    )
+                    for field in ("org_id", "org_name", "authorized_at"):
+                        if field in identity:
+                            current[field] = identity[field]
+                        else:
+                            current.pop(field, None)
+                    # Not ownership-gated, for the same reason the tombstone's pop
+                    # is not: it replaces the very token any marker in this payload
+                    # was about, after the guard above has established that token,
+                    # so what it drops is dead for every process rather than live
+                    # for a peer.
+                    current.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
+                    outcome["merged"] = dict(current)
+                    return True
+
+                self._update_payload(row.id, persist, moves_write_stamp=True, best_effort=False)
+                if "raced" in outcome:
                     logger.warning(
                         "refresh race on %s: another process refreshed first; " "keeping its token",
                         row.id,
                     )
-                    return dict(now_row.data)
-                if now_row is not None and self._grant_dead_at(dict(now_row.data)) is not None:
-                    # A sibling tombstoned the grant while our POST was in flight,
-                    # and the IdP then answered US with a rotation. A token minted
-                    # by a refresh belongs to the family the IdP revoked, so it
-                    # must not resurrect the login: the rotation is dropped, the
-                    # tombstone the sibling wrote stands, and the caller is told
-                    # the truth instead of being handed a token out of a dead
-                    # family. Checked AFTER the refresh-race guard because a
-                    # rotated token is the more specific explanation of a moved
-                    # row, and the guard's outcome keeps the peer's payload
-                    # untouched either way.
+                    return outcome["raced"]
+                if outcome.get("dead"):
                     logger.warning(
                         "refresh on %s minted a token after the grant was marked dead; "
                         "the tombstone is kept and the rotation is not persisted",
@@ -4358,11 +4979,19 @@ class AuthStore:
                         f"OAuth grant for '{row.provider}' was refused by the identity "
                         f"provider; run /login {row.provider} to sign in again"
                     )
-                self._conn.execute(
-                    "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
-                    (json.dumps(merged), self._now_ms(), row.id),
-                )
-                self._conn.commit()
+                merged = outcome.get("merged")
+                if merged is None:
+                    # The row is gone (a racing logout): nothing is re-created, and
+                    # the caller still gets the token it paid a POST for, as the
+                    # former UPDATE-of-no-row did.
+                    merged = dict(fresh)
+                    merged.update(refreshed)
+                    for field in ("org_id", "org_name", "authorized_at"):
+                        if field in fresh:
+                            merged[field] = fresh[field]
+                        else:
+                            merged.pop(field, None)
+                    merged.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
                 # The POST is durable: tell the watch so `max_refreshes` counts it
                 # (R1-3). Guarded: a watch fault must never fail a refresh that
                 # already succeeded, and a lost increment only makes the bound
@@ -4373,6 +5002,19 @@ class AuthStore:
                         watch.posted(row.id, merged)
                     except Exception:  # noqa: BLE001
                         logger.debug("refresh watch.posted failed", exc_info=True)
+                lent_now = merged.get(REFRESH_DELEGATE_KEY)
+                posted_hook = getattr(self._lend_fence, "posted", None)
+                if (
+                    posted_hook is not None
+                    and isinstance(lent_now, dict)
+                    and lent_now.get("state") == "lent"
+                ):
+                    # The owner renewed a LENT login: bump its epoch and push the new
+                    # pair to the node, whose copy is now spent (§B.3 R3).
+                    try:
+                        posted_hook(row.id, merged)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("lend fence posted hook failed", exc_info=True)
                 return merged
             finally:
                 self._release_refresh_lease(row.id)
@@ -4678,7 +5320,7 @@ class AuthStore:
             self._tentative_credential_id(ordered, provider, session_id),
         }
         preferred = [r for r in ordered if r.id not in movable]
-        return preferred + [r for r in ordered if r.id in movable]
+        return record_demotion(preferred + [r for r in ordered if r.id in movable])
 
     def configure_account_selection_policy(self, policy: str) -> None:
         from local_operator.providers.account_policy import ACCOUNT_SELECTION_POLICIES
@@ -4910,14 +5552,22 @@ class AuthStore:
             provider_key = f"{provider}:any"
             start = self._round_robin.get(provider_key, 0) % len(rows)
             self._round_robin[provider_key] = start + 1
-            return rows[start:] + rows[:start]
+            return record_order(rows[start:] + rows[:start], "round_robin")
         eligible_ids = reset_ranked_ids(candidates, session_id, tie_order=tie_order)
         anchored_id = self._affinity_credential_id(rows, provider, session_id, model_id)
         if anchored_id is not None:
-            return [by_id[anchored_id], *(row for row in rows if row.id != anchored_id)]
+            return record_order(
+                [by_id[anchored_id], *(row for row in rows if row.id != anchored_id)],
+                "affinity",
+                fallback_basis="affinity_fallback",
+            )
         tentative = self._tentative_credential_id(rows, provider, session_id)
         if tentative is not None:
-            return [by_id[tentative], *(row for row in rows if row.id != tentative)]
+            return record_order(
+                [by_id[tentative], *(row for row in rows if row.id != tentative)],
+                "request_pick",
+                fallback_basis="request_fallback",
+            )
         # Outside the one-request boundary, a pointer is not successful
         # inference and cannot turn expiry into indefinite account binding.
         from local_operator.providers.account_affinity import current_selection_policy
@@ -4926,7 +5576,7 @@ class AuthStore:
             self, "_account_selection_policy", "reset-soonest"
         )
         if policy == "reset-soonest":
-            return [by_id[cid] for cid in eligible_ids]
+            return record_order([by_id[cid] for cid in eligible_ids], "reset_rank")
         # Eligibility precedes EVERY preference, including fair spread.
         # Preserve reserve as last resort rather than inventing a hard ban.
         ordered = []
@@ -4944,7 +5594,7 @@ class AuthStore:
                     else self._hash_order(sorted(group, key=lambda row: row.id), session_id or "")
                 )
             )
-        return ordered
+        return record_order(ordered, "headroom_rank" if policy == "headroom" else "fair_hash")
 
     def _reset_candidates(
         self, rows: list[StoredCredential], provider: str, model_id: str
@@ -5543,6 +6193,7 @@ class AuthStore:
         model_id: str = "",
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
+        persisted_kinds: frozenset[str] | None = None,
     ) -> OAuthAccess | None:
         """The identity-carrying record for wire clients.
 
@@ -5558,20 +6209,40 @@ class AuthStore:
         :attr:`~local_operator.harness.types.ChatRequest.isolated`.
         ``exclude_keys`` / ``exclude_credential_ids`` hide the rows they name
         from THIS resolve alone — see :meth:`_resolve`.
+        ``persisted_kinds`` opts into the existing stored-row-only cascade. A
+        broker hiding owner rows must reach an eligible stored API key rather
+        than stop at an ambient winner that its safety backstop must discard.
+        None preserves the ordinary cascade, including override short-circuiting.
         """
-        if self._runtime_overrides.get(provider) or self._config_overrides.get(provider):
+        if persisted_kinds is None and (
+            self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
+        ):
             return None
-        key, row = await self._resolve(
-            provider,
-            session_id,
-            force_refresh=force_refresh,
-            read_only=read_only,
-            model_id=model_id,
-            exclude_keys=exclude_keys,
-            exclude_credential_ids=exclude_credential_ids,
-        )
+        # An inherited ContextVar value is a shared object, not a deep copy.
+        # Give EACH getter a collector so nested provider lookups or parallel
+        # getters under one opt-in cannot overwrite the returning row's rank.
+        # Ordinary callers remain unobserved; no selector is invoked twice.
+        with capture_selection(enabled=selection_active()):
+            key, row = await self._resolve(
+                provider,
+                session_id,
+                force_refresh=force_refresh,
+                read_only=read_only,
+                model_id=model_id,
+                exclude_keys=exclude_keys,
+                exclude_credential_ids=exclude_credential_ids,
+                persisted_kinds=persisted_kinds,
+            )
+            # Refresh may skip a candidate and re-read the successful row. Bind
+            # its creation stamp, not a mutable pointer or a fresh ranking read.
+            reason = selected_reason(row)
         if key is None:
             return None
+        selection = (
+            SelectionExplanation(credential_identity(row) if row is not None else None, reason)
+            if reason is not None
+            else None
+        )
         if row is not None and row.credential_type == "oauth":
             data = row.data
             return OAuthAccess(
@@ -5585,6 +6256,7 @@ class AuthStore:
                 raw=data,
                 account_created_at=row.created_at,
                 account_ref=self._account_ref_for_row(row),
+                selection=selection,
             )
         from local_operator.providers.local import LOCAL_PROVIDER_IDS
 
@@ -5600,6 +6272,7 @@ class AuthStore:
             api_endpoint=endpoint if isinstance(endpoint, str) else None,
             account_created_at=row.created_at if row is not None else 0,
             account_ref=self._account_ref_for_row(row) if row is not None else None,
+            selection=selection,
         )
 
     async def get_catalogue_access(
@@ -5999,6 +6672,10 @@ class AuthStore:
         ):
             try:
                 creds = await self._ensure_oauth_fresh(row, force=force_refresh)
+            except LendClaimPendingError:
+                # A question in flight, not a bad login (#3955 Q2): no backoff, so the
+                # first request after the node's answer gets the key.
+                continue
             except AuthStoreError:
                 if not read_only:
                     self.block_credential(row.id, provider)  # try a sibling
@@ -6304,8 +6981,14 @@ class AuthStore:
         # left usable and only the sticky pointer moves, which is enough to send
         # THIS attempt to a sibling.
         server_side = is_server_side_failure(error)
+        # Same reasoning for a failure the error itself declares row-neutral
+        # (``ProviderError.block_on_rotate=False``: a Bedrock credential chain
+        # that did not resolve, re-read every attempt). Move the sticky pointer
+        # so a sibling serves this attempt, but write no block that would
+        # outlive the user's fix (R3-1 / Q8).
+        row_neutral = server_side or getattr(error, "block_on_rotate", True) is False
         if failing is not None:
-            if server_side:
+            if row_neutral:
                 self.deprioritize_credential(provider, failing.id)
             else:
                 retry_after = retry_after_ms_from_error(error)

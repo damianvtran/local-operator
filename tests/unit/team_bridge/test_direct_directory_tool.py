@@ -25,6 +25,7 @@ from local_operator.team_bridge.tool import (
     build_bridge_tool,
     execute_bridge,
 )
+from tests.unit.team_bridge.ref_text import without_ref
 from tests.unit.team_bridge.test_channel_tool import RecordingClient, _runtime
 
 
@@ -59,6 +60,14 @@ class DirectoryClient(RecordingClient):
                 {"account_id": "acc_2", "kind": "agent", "endpoint_id": "bep_2", "state": "active"},
             ],
         }
+
+    async def directory_cached_read(
+        self, tenant_id: str, *, expected_account_id: str | None = None, refresh: bool = False
+    ) -> tuple[Any, bool]:
+        # The tool reads the directory through the client's cache; this fake has
+        # no cache, so every read reaches ``directory``, is recorded there, and
+        # reports itself as fetched (so a miss is believed without a re-read).
+        return await self.directory(tenant_id, expected_account_id=expected_account_id), True
 
     async def directory(
         self, tenant_id: str, *, expected_account_id: str | None = None
@@ -227,7 +236,7 @@ async def test_dm_resolves_a_current_agent_and_posts_as_runtime_identity(runtime
         "origin_session_id": "sess_1",
     }
     assert post["conversation_id"] == "bcv_direct01"
-    assert post["tenant_id"] == "ten_1" and post["text"] == "hello"
+    assert post["tenant_id"] == "ten_1" and without_ref(post["text"]) == "hello"
     assert post["actor_endpoint_id"] == "bep_1" and post["origin_session_id"] == "sess_1"
     assert post["client_ref"] and post["thread_root_id"] is None
     assert post["expected_account_id"] == "acc_1"
@@ -295,6 +304,9 @@ async def test_unreachable_agent_never_creates_or_posts(runtime, state):
     result = await execute_bridge(runtime, {"op": "dm", "account_id": "acc_2", "body": "hi"})
     assert result["ok"] is False and result["code"] == "not_reachable"
     assert result["reason"] == f"agent_{state}"
+    # The fake has no cache, so this read was fetched fresh: the miss is
+    # believed without a second read (the warm-cache re-read is pinned by the
+    # ``directory_cached_read`` tests below).
     assert [c["method"] for c in runtime.client.calls] == ["directory"]
 
 
@@ -327,6 +339,8 @@ async def test_unknown_or_self_target_has_no_write(runtime, address, code, reaso
     result = await execute_bridge(runtime, {"op": "dm", **address, "body": "hi"})
     assert result["ok"] is False and result["code"] == code
     assert result.get("reason") == reason
+    # One fresh read either way: a miss on a just-fetched copy is not re-read,
+    # and a self-target is not about freshness.
     assert [c["method"] for c in runtime.client.calls] == ["directory"]
 
 
@@ -484,3 +498,374 @@ def test_new_ops_publish_read_write_tiers_and_no_actor_override(runtime):
     assert props["target"]["enum"] == ["agent", "human"]
     assert "account_id" in props and "endpoint_id" in props
     assert "actor_endpoint_id" not in props and "origin_session_id" not in props
+
+
+@pytest.mark.asyncio
+async def test_a_teammate_missing_from_the_cached_directory_is_found_by_one_re_read(runtime):
+    """The directory is cached (incident 2026-11-17); a newly joined teammate is
+    absent from the cached answer, and the ONE forced re-read finds them."""
+
+    fresh = runtime.client.directory_result
+    stale = {"members": [m for m in fresh["members"] if m["account_id"] != "acc_2"]}
+    refreshes: list[bool] = []
+
+    async def cached(tenant_id, *, expected_account_id=None, refresh=False):
+        # The first answer comes from the cache (not fetched by this call).
+        refreshes.append(refresh)
+        return (fresh, True) if refresh else (stale, False)
+
+    runtime.client.directory_cached_read = cached
+    result = await execute_bridge(runtime, {"op": "dm", "account_id": "acc_2", "body": "hi"})
+    assert result["ok"] is True, result
+    assert refreshes == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_a_member_absent_after_the_re_read_is_refused_after_one_refresh_only(runtime):
+    refreshes: list[bool] = []
+
+    async def cached(tenant_id, *, expected_account_id=None, refresh=False):
+        refreshes.append(refresh)
+        return runtime.client.directory_result, refresh
+
+    runtime.client.directory_cached_read = cached
+    result = await execute_bridge(runtime, {"op": "dm", "account_id": "acc_gone", "body": "hi"})
+    assert result["ok"] is False and result["reason"] == "not_a_member"
+    assert refreshes == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_a_member_absent_from_a_just_fetched_directory_is_refused_without_a_re_read(
+    runtime,
+):
+    """A cold read is already fresh: its not-a-member answer stands on one read."""
+
+    refreshes: list[bool] = []
+
+    async def cached(tenant_id, *, expected_account_id=None, refresh=False):
+        refreshes.append(refresh)
+        return runtime.client.directory_result, True
+
+    runtime.client.directory_cached_read = cached
+    result = await execute_bridge(runtime, {"op": "dm", "account_id": "acc_gone", "body": "hi"})
+    assert result["ok"] is False and result["reason"] == "not_a_member"
+    assert refreshes == [False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", ["https://api.radienthq.com/v1", "https://custom.example/v1"])
+@pytest.mark.parametrize("feature", ["missing", None, True, "1", 0, 2, 1])
+async def test_session_display_live_feature_wire_types(tmp_path, monkeypatch, base, feature):
+    """Hostname and stale positive UI caches cannot enable the optional object."""
+    from dataclasses import replace
+
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from local_operator.team_bridge.tool import _session_display_send_kwargs
+    from tests.unit.team_bridge.test_client import FakeStore, _ok
+
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed", lambda _: True
+    )
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda _: None)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if request.method == "GET":
+            return _ok(
+                {
+                    "features": (
+                        {}
+                        if feature == "missing"
+                        else {"team_bridge_agent_session_display": feature}
+                    )
+                }
+            )
+        return _ok({"id": "bcmsg_display01", "seq": 1}, status=201)
+
+    client = TeamBridgeClient(
+        base_url=base, store=FakeStore(), transport=httpx.MockTransport(handler), credential_id=1
+    )
+    runtime = _runtime(client, config_dir=tmp_path)
+    runtime.owner = replace(runtime.owner, canonical_base_url=base)
+    # Deliberately seed a positive cache decoy; the direct status route wins.
+    from local_operator.team_bridge.client import StatusDiscipline
+
+    monkeypatch.setattr(
+        StatusDiscipline,
+        "cached_conversation_features",
+        lambda self: {"team_bridge_agent_session_display": 1},
+    )
+    kwargs = await _session_display_send_kwargs(runtime, "Host task")
+    await client.conversation_send(
+        "bcv_abcd1234",
+        client_ref="same-ref",
+        text="exact body",
+        tenant_id=runtime.tenant_id,
+        actor_endpoint_id="bep_1",
+        origin_session_id="sess_1",
+        **kwargs,
+    )
+    assert [r.method for r in calls] == ["GET", "POST"]
+    body = json.loads(calls[-1].content)
+    assert body == {
+        "client_ref": "same-ref",
+        "body": "exact body",
+        "tenant_id": runtime.tenant_id,
+        "actor_endpoint_id": "bep_1",
+        "origin_session_id": "sess_1",
+        **(
+            {"agent_session": {"display_label": "Host task"}}
+            if type(feature) is int and feature == 1
+            else {}
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_display_rollback_and_racy_400_never_strip_retry(tmp_path, monkeypatch):
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from local_operator.team_bridge.tool import _session_display_send_kwargs
+    from tests.unit.team_bridge.test_client import FakeStore, _ok
+
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed", lambda _: True
+    )
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda _: None)
+    bodies = []
+    statuses = [1, None, 1, None]
+
+    def handler(request):
+        if request.method == "GET":
+            value = statuses.pop(0)
+            return _ok(
+                {"features": {} if value is None else {"team_bridge_agent_session_display": value}}
+            )
+        body = json.loads(request.content)
+        bodies.append(body)
+        if len(bodies) == 3:
+            return httpx.Response(400, json={"error": "invalid request body"})
+        return _ok({"id": "bcmsg_display01", "seq": 1}, status=201)
+
+    client = TeamBridgeClient(
+        base_url="https://hub.example",
+        store=FakeStore(),
+        transport=httpx.MockTransport(handler),
+        credential_id=1,
+    )
+    runtime = _runtime(client, config_dir=tmp_path)
+    for index in range(4):
+        kwargs = await _session_display_send_kwargs(runtime, "Host task")
+
+        async def send():
+            return await client.conversation_send(
+                "bcv_abcd1234",
+                client_ref=f"ref-{index}",
+                text="body",
+                actor_endpoint_id="bep_1",
+                origin_session_id="sess_1",
+                **kwargs,
+            )
+
+        if index == 2:
+            with pytest.raises(BridgeRefusal) as caught:
+                await send()
+            assert caught.value.http_status == 400
+            assert len(bodies) == 3
+        else:
+            await send()
+    assert ["agent_session" in b for b in bodies] == [True, False, True, False]
+    assert [b["client_ref"] for b in bodies] == [f"ref-{i}" for i in range(4)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["owner", "base", "source", "credential"])
+async def test_session_display_discards_late_status_after_source_change(
+    tmp_path, monkeypatch, change
+):
+    from dataclasses import replace
+
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from local_operator.team_bridge.tool import _session_display_send_kwargs
+    from tests.unit.team_bridge.test_client import FakeStore, _ok
+
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed", lambda _: True
+    )
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda _: None)
+    calls = []
+
+    def handler(request):
+        calls.append(request.method)
+        if change == "base":
+            client._base_url = "https://other.example"
+        elif change == "source":
+            client._store = FakeStore()
+        elif change == "credential":
+            client._pinned_credential_id = 2
+        else:
+            runtime.owner = replace(runtime.owner, enrollment_generation=2)
+        return _ok({"features": {"team_bridge_agent_session_display": 1}})
+
+    client = TeamBridgeClient(
+        base_url="https://hub.example",
+        store=FakeStore(),
+        transport=httpx.MockTransport(handler),
+        credential_id=1,
+    )
+    runtime = _runtime(client, config_dir=tmp_path)
+    with pytest.raises(BridgeRefusal, match="authority changed"):
+        await _session_display_send_kwargs(runtime, "Host task")
+    assert calls == ["GET"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+async def test_session_display_status_authority_vs_optional_failure(tmp_path, monkeypatch, status):
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from local_operator.team_bridge.tool import _session_display_send_kwargs
+    from tests.unit.team_bridge.test_client import FakeStore
+
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed", lambda _: True
+    )
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda _: None)
+
+    def handler(request):
+        return httpx.Response(status, json={"error": "denied"})
+
+    client = TeamBridgeClient(
+        base_url="https://hub.example",
+        store=FakeStore(),
+        transport=httpx.MockTransport(handler),
+        credential_id=1,
+    )
+    runtime = _runtime(client, config_dir=tmp_path)
+    if status == 500:
+        assert "agent_session" not in await _session_display_send_kwargs(runtime, "Host task")
+    else:
+        with pytest.raises((BridgeRefusal, ValueError)):
+            await _session_display_send_kwargs(runtime, "Host task")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"available": False},
+        {"api_version": "1", "available": True, "tenants": []},
+        {
+            "api_version": "1",
+            "available": True,
+            "tenants": [
+                {
+                    "tenant_id": "ten_1",
+                    "eligible": False,
+                    "endpoint": {"id": "bep_1", "state": "active"},
+                }
+            ],
+        },
+    ],
+)
+async def test_session_display_status_definitive_disabled_payload_never_posts(
+    tmp_path, monkeypatch, payload
+):
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from local_operator.team_bridge.tool import _session_display_send_kwargs
+    from tests.unit.team_bridge.test_client import FakeStore, _ok
+
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed", lambda _: True
+    )
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda _: None)
+    methods = []
+
+    def handler(request):
+        methods.append(request.method)
+        return _ok({**payload, "features": {"team_bridge_agent_session_display": 1}})
+
+    client = TeamBridgeClient(
+        base_url="https://hub.example",
+        store=FakeStore(),
+        transport=httpx.MockTransport(handler),
+        credential_id=1,
+    )
+    with pytest.raises(BridgeRefusal):
+        await _session_display_send_kwargs(_runtime(client, config_dir=tmp_path), "Host task")
+    assert methods == ["GET"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("display", [None, "", "  ", "Host task"])
+@pytest.mark.parametrize("feature", [None, 2])
+async def test_unnamed_vs_named_unsupported_probe_preserves_legacy_wire(
+    tmp_path, monkeypatch, display, feature
+):
+    """Only attachable displays acquire probe latency; support is never latched."""
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from local_operator.team_bridge.tool import _session_display_send_kwargs
+    from tests.unit.team_bridge.test_client import FakeStore, _ok
+
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed", lambda _: True
+    )
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda _: None)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if request.method == "GET":
+            assert request.url.path.endswith("/messaging/status")
+            return _ok(
+                {
+                    "features": (
+                        {} if feature is None else {"team_bridge_agent_session_display": feature}
+                    )
+                }
+            )
+        return _ok({"id": "bcmsg_display01", "seq": 1}, status=201)
+
+    client = TeamBridgeClient(
+        base_url="https://hub.example",
+        store=FakeStore(),
+        transport=httpx.MockTransport(handler),
+        credential_id=1,
+    )
+    runtime = _runtime(client, config_dir=tmp_path)
+    # Two independent logical sends prove a prior negative answer cannot turn
+    # the next named send into a cached/no-probe send. Unnamed sends add no GET.
+    named = bool(display and display.strip())
+    for index in range(2):
+        start = len(calls)
+        kwargs = await _session_display_send_kwargs(runtime, display)
+        await client.conversation_send(
+            "bcv_abcd1234",
+            client_ref=f"logical-{index}",
+            text="exact body",
+            tenant_id=runtime.tenant_id,
+            actor_endpoint_id="bep_1",
+            origin_session_id="sess_1",
+            **kwargs,
+        )
+        attempt = calls[start:]
+        assert [request.method for request in attempt] == (["GET", "POST"] if named else ["POST"])
+        assert json.loads(attempt[-1].content) == {
+            "client_ref": f"logical-{index}",
+            "body": "exact body",
+            "tenant_id": runtime.tenant_id,
+            "actor_endpoint_id": "bep_1",
+            "origin_session_id": "sess_1",
+        }
+    assert sum(request.method == "GET" for request in calls) == (2 if named else 0)

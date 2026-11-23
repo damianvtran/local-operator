@@ -1,0 +1,7 @@
+[
+  {
+    "key": "cli.serve_readiness.not_reporting",
+    "before": "est enregistré mais ne répond pas (son heartbeat s’est arrêté)",
+    "after": "est enregistré mais ne répond pas (il n’envoie plus de signal de vie)"
+  }
+]

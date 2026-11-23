@@ -1,0 +1,20 @@
+{
+  "tui.tool_card.status.cut_off": "कट गया",
+  "tui.tool_card.status.error": "त्रुटि",
+  "tui.tool_card.status.interrupted": "रोका गया",
+  "tui.tool_card.status.not_run": "कभी नहीं चला",
+  "tui.tool_card.status.partial": "आंशिक",
+  "tui.tool_card.status.queued": "कतार में",
+  "tui.tool_card.status.running": "चल रहा",
+  "tui.tool_card.status.send.delivery_unconfirmed": "डिलीवरी अपुष्ट",
+  "tui.tool_card.status.send.no_new_wake": "नई जागृति नहीं",
+  "tui.tool_card.status.send.not_delivered": "पहुँचा नहीं",
+  "tui.tool_card.status.send.receipt_reused": "पिछली रसीद ली",
+  "tui.tool_card.status.send.wake_unconfirmed": "जागृति अपुष्ट",
+  "tui.tool_card.status.session_reset": "सत्र रीसेट",
+  "tui.tool_card.status.switch.partial": "बदला गया (त्रुटि)",
+  "tui.tool_card.status.switch.pending": "लंबित",
+  "tui.tool_card.status.switch.switched": "बदला गया",
+  "tui.tool_card.status.switch.unchanged": "कोई बदलाव नहीं",
+  "tui.tool_card.status.waiting": "स्वीकृति बाकी"
+}

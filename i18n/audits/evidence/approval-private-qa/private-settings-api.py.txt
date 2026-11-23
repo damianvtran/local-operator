@@ -1,0 +1,91 @@
+"""Real ASGI presentation and raw-value controls, with explicit synthetic desktop capability."""
+import scripts.probe_isolation as isolation
+import json,os,sys,dataclasses,hashlib
+from pathlib import Path
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from local_operator import settings_io
+from local_operator.config import ConfigManager
+from local_operator.i18n.text import set_active_locale,active_locale
+from local_operator.i18n import catalogues
+from local_operator.server.routes import settings as routes
+from local_operator.team_bridge import availability
+ROOT=Path('/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad')
+assert isolation.SANDBOX.is_relative_to(ROOT)
+manager=ConfigManager(Path(os.environ['LOCAL_OPERATOR_CONFIG_DIR']))
+for key,value in {'tool_approval_mode':'ask','providers.openrouter.enforce_distillable_text':'true','display.nerd_icons':None,'shell_environment.mode':'inherit'}.items():settings_io.write_setting(manager,settings_io.BY_KEY[key],value)
+availability.record(manager.config_dir,visible=True,state='ready',checked_at=0)
+app=FastAPI();app.include_router(routes.router)
+app.dependency_overrides[routes.get_config_manager]=lambda:manager
+app.dependency_overrides[routes.require_desktop]=lambda:None
+config=manager.config_dir/'config.yml';original=config.read_bytes();changes=json.loads((ROOT/'catalogue-changes.json').read_text());results=[]
+def registry_slots():
+ out={}
+ for rec in (*settings_io.SECTIONS,*settings_io.SETTINGS):
+  for f in dataclasses.fields(rec):
+   value=getattr(rec,f.name)
+   if getattr(value,'message',None):out[value.message.code]=str(value)
+   elif f.name=='choices':
+    for c in value:
+     for cf in dataclasses.fields(c):
+      v=getattr(c,cf.name)
+      if getattr(v,'message',None):out[v.message.code]=str(v)
+ return out
+with TestClient(app) as client:
+ reference=None
+ for locale in ('en','fr','zh-CN','hi','ur','es','ru','vi'):
+  set_active_locale(locale);assert active_locale()==locale
+  response=client.get('/v1/settings');assert response.status_code==200,response.text
+  rows={r['key']:r for r in response.json()['result']['settings']}
+  wire={k:{'value':r['value'],'default':r['default'],'choices':[c['value'] for c in r['choices']]} for k,r in rows.items()}
+  if reference is None:reference=wire
+  assert wire==reference
+  slots=registry_slots();catalogue=catalogues.load_catalogue(locale,'wire.settings'); mapped=0;checked=[];unmapped=[]
+  if locale!='en':
+   for code,delta in changes[locale].items():
+    if code not in slots:
+     from local_operator.i18n.messages import Msg
+     from local_operator.i18n.text import tr
+     assert tr('wire.settings')(Msg(code))==delta['after'],(locale,code)
+     unmapped.append(code)
+     continue
+    # Exact current raw strings; unmapped historical slots are resolver-only, not real-consumer proof.
+    assert slots[code]==delta['after'],(locale,code,slots[code],delta['after'])
+    checked.append(code);mapped+=1
+  for key,record in rows.items():
+   s=settings_io.BY_KEY[key]
+   assert record['label']==str(s.label) and record['help']==str(s.help),(locale,key)
+   for c,wirec in zip(s.resolved_choices,record['choices']):
+    assert str(c.label)==wirec['label'] and str(c.description)==wirec['description']
+  assert config.read_bytes()==original
+  result={'locale':locale,'GET':response.status_code,'settings':len(rows),'changed_registry_slots_exact':mapped,'resolver_only_slots':unmapped,'codes':checked,'typed_wire_identity':True,'config_unchanged':True}
+  results.append(result);print('GET_RESULT',json.dumps({k:v for k,v in result.items() if k!='codes'}),flush=True)
+ set_active_locale('fr')
+ for key,value in [('tool_approval_mode','auto'),('providers.openrouter.enforce_distillable_text','true'),('display.nerd_icons',True),('display.nerd_icons',False),('display.nerd_icons',None)]:
+  r=client.patch('/v1/settings/'+key,json={'value':value});assert r.status_code==200,r.text
+  stored=settings_io.read_setting(manager,settings_io.BY_KEY[key]);assert type(stored) is type(value) and stored==value
+  results.append({'PATCH':key,'status':r.status_code,'value':stored,'type':type(stored).__name__})
+ label=next(c.label for c in settings_io.BY_KEY['tool_approval_mode'].choices if c.value=='ask')
+ before=config.read_bytes();r=client.patch('/v1/settings/tool_approval_mode',json={'value':str(label)})
+ assert r.status_code==422,r.text;assert config.read_bytes()==before
+ results.append({'invalid_translated_label':str(label),'status':r.status_code,'response':r.json(),'config_unchanged':True})
+ r=client.patch('/v1/settings/providers.openrouter.enforce_distillable_text',json={'value':True})
+ assert r.status_code==422,r.text;assert config.read_bytes()==before
+ results.append({'invalid_bool_for_string_enum':True,'status':r.status_code,'response':r.json(),'config_unchanged':True})
+ # Technical/wire paint controls never enter config or JSON raw values.
+ for k in ('tool_approval_mode','shell_environment.mode','providers.openrouter.enforce_distillable_text'):
+  value=settings_io.read_setting(manager,settings_io.BY_KEY[k]);assert not any(c in str(value) for c in '\u2066\u2067\u2068\u2069')
+ # Counterfactual 1: the exact native-copy predicate must reject actual old bytes.
+ negatives=[]
+ for locale,delta in changes.items():
+  old=json.loads((ROOT/'baseline-catalogues'/locale/'wire.settings.json').read_text())
+  rejects=sum(old[code]!=pair['after'] for code,pair in delta.items())
+  assert rejects==len(delta);negatives.append({'locale':locale,'old_native_predicate_rejections':rejects})
+ results.append({'old_copy_negative_control':negatives})
+ # Counterfactual 2: legitimate product kill-switch chooses English, not a private bypass.
+ os.environ['LOP_I18N']='0';set_active_locale('fr');assert active_locale()=='en'
+ r=client.get('/v1/settings');assert r.status_code==200
+ english=registry_slots();fr=changes['fr'];rejected=sum(english[k]!=v['after'] for k,v in fr.items() if k in english);assert rejected>0
+ results.append({'kill_switch_active_locale':active_locale(),'GET':200,'native_predicate_rejections':rejected,'intentional_english_not_native_pass':True})
+print(json.dumps(results,ensure_ascii=False,indent=2),flush=True)
+(ROOT/'private-api-result.json').write_text(json.dumps(results,ensure_ascii=False,indent=2))

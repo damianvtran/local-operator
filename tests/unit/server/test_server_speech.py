@@ -220,6 +220,231 @@ async def test_the_agent_less_descriptor_request_runs_a_byo_key(tmp_path, monkey
     assert response.headers["x-radient-speech-path"] == "provider_tts_elevenlabs"
 
 
+# -- speech.provider: the Speak button follows the chosen provider ----------------
+
+
+def _choose_provider(tmp_path: Path, provider: Optional[str]) -> ConfigManager:
+    """``_voiced_config`` with ``speech.provider`` written the way the page writes it."""
+    from local_operator import settings_io
+
+    config = _voiced_config(tmp_path)
+    settings_io.write_setting(config, settings_io.BY_KEY["speech.provider"], provider)
+    return config
+
+
+class _ElevenLabsRecorder:
+    """Stands in for the ElevenLabs HTTP client and counts the calls it gets."""
+
+    calls = 0
+    error: Optional[APIError] = None
+
+    def __init__(self, _api_key, **_kwargs):
+        pass
+
+    async def synthesize(self, *_args, **_kwargs):
+        from local_operator.tts.clients import TtsClientResult
+
+        _ElevenLabsRecorder.calls += 1
+        if _ElevenLabsRecorder.error is not None:
+            raise _ElevenLabsRecorder.error
+        return TtsClientResult(audio=b"own-key", model="eleven_turbo_v2_5", provider="elevenlabs")
+
+
+@pytest.fixture
+def elevenlabs_recorder(monkeypatch):
+    from local_operator.tts import clients as tts_clients
+
+    _ElevenLabsRecorder.calls = 0
+    _ElevenLabsRecorder.error = None
+    monkeypatch.setattr(tts_clients, "ElevenLabsTtsClient", _ElevenLabsRecorder)
+    return _ElevenLabsRecorder
+
+
+@pytest.mark.asyncio
+async def test_unset_keeps_the_whole_cascade_so_a_radient_login_still_wins(
+    tmp_path, elevenlabs_recorder
+):
+    """The Speak button's behaviour before any provider is chosen: unchanged."""
+    client = _credentialed_client()
+    response = await create_speech(
+        _agent_less_request(),
+        client,
+        _speech_store(tmp_path, elevenlabs="el-key"),
+        _choose_provider(tmp_path, None),
+        _env_config(),
+    )
+    assert response.headers["x-radient-speech-path"] == "provider_tts_radient"
+    assert elevenlabs_recorder.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_the_elevenlabs_choice_speaks_with_that_key_though_radient_is_signed_in(
+    tmp_path, elevenlabs_recorder
+):
+    client = _credentialed_client()
+    response = await create_speech(
+        _agent_less_request(),
+        client,
+        _speech_store(tmp_path, elevenlabs="el-key"),
+        _choose_provider(tmp_path, "elevenlabs"),
+        _env_config(),
+    )
+    assert response.status_code == 200 and response.body == b"own-key"
+    assert response.headers["x-radient-speech-path"] == "provider_tts_elevenlabs"
+    client.create_speech_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_the_radient_choice_speaks_through_radient_though_a_key_is_stored(
+    tmp_path, elevenlabs_recorder
+):
+    client = _credentialed_client()
+    response = await create_speech(
+        _agent_less_request(),
+        client,
+        _speech_store(tmp_path, elevenlabs="el-key"),
+        _choose_provider(tmp_path, "radient"),
+        _env_config(),
+    )
+    assert response.headers["x-radient-speech-path"] == "provider_tts_radient"
+    client.create_speech_response.assert_called_once()
+    assert elevenlabs_recorder.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_the_radient_choice_signed_out_refuses_and_does_not_fall_to_a_stored_key(
+    tmp_path, elevenlabs_recorder
+):
+    client = _credentialed_client()
+    with pytest.raises(HTTPException) as exc_info:
+        await create_speech(
+            _agent_less_request(),
+            client,
+            _speech_store(tmp_path, radient=False, elevenlabs="el-key"),
+            _choose_provider(tmp_path, "radient"),
+            _env_config(),
+        )
+    assert exc_info.value.status_code == 401
+    assert _media_envelope(exc_info.value.detail)["text"] == (
+        "Sign in to Radient in Settings to enable speaking aloud."
+    )
+    client.create_speech_response.assert_not_called()
+    assert elevenlabs_recorder.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_the_elevenlabs_choice_without_a_key_refuses_with_its_own_reason(
+    tmp_path, elevenlabs_recorder
+):
+    client = _credentialed_client()
+    with pytest.raises(HTTPException) as exc_info:
+        await create_speech(
+            _agent_less_request(),
+            client,
+            _speech_store(tmp_path),  # Radient IS signed in; there is no ElevenLabs key
+            _choose_provider(tmp_path, "elevenlabs"),
+            _env_config(),
+        )
+    assert exc_info.value.status_code == 401
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["code"] == "voice_unavailable"
+    assert "No ElevenLabs API key is stored." in detail["text"]
+    client.create_speech_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_radient_402_under_the_radient_choice_keeps_radients_words_and_stays_there(
+    tmp_path, elevenlabs_recorder
+):
+    client = _credentialed_client()
+    client.create_speech_response.side_effect = APIError("no credit", status_code=402)
+    with pytest.raises(HTTPException) as exc_info:
+        await create_speech(
+            _agent_less_request(),
+            client,
+            _speech_store(tmp_path, elevenlabs="el-key"),
+            _choose_provider(tmp_path, "radient"),
+            _env_config(),
+        )
+    assert exc_info.value.status_code == 402
+    assert _media_envelope(exc_info.value.detail)["text"] == (
+        "Your Radient credit balance is too low for speech. "
+        "Add credits in the Radient Console to continue."
+    )
+    assert elevenlabs_recorder.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_request_naming_its_own_provider_ignores_the_choice(tmp_path, elevenlabs_recorder):
+    """The legacy shape is byte-for-byte what it was: the hub gets the caller's pin."""
+    client = _credentialed_client()
+    response = await create_speech(
+        _agent_less_request(provider="elevenlabs"),
+        client,
+        _speech_store(tmp_path, elevenlabs="el-key"),
+        _choose_provider(tmp_path, "radient"),
+        _env_config(),
+    )
+    assert response.status_code == 200
+    assert client.create_speech_response.call_args.kwargs["provider"] == "elevenlabs"
+    assert "voice_descriptor" not in client.create_speech_response.call_args.kwargs
+    assert elevenlabs_recorder.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_the_agent_speech_route_follows_the_choice(tmp_path, elevenlabs_recorder):
+    client = _credentialed_client()
+    agent_registry = MagicMock()
+    agent_registry.get_agent.return_value = _agent()
+    with (
+        patch("local_operator.server.routes.speech.configure_model", return_value=MagicMock()),
+        patch(
+            "local_operator.server.routes.speech.determine_voice",
+            new_callable=AsyncMock,
+            return_value="female",
+        ),
+    ):
+        response = await create_agent_speech(
+            "test-agent",
+            _agent_speech_request(),
+            client,
+            agent_registry,
+            _speech_store(tmp_path, elevenlabs="el-key"),
+            _choose_provider(tmp_path, "elevenlabs"),
+            _env_config(),
+        )
+    assert response.headers["x-radient-speech-path"] == "provider_tts_elevenlabs"
+    client.create_speech_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_the_agent_speech_route_refuses_a_pinned_provider_before_any_work(
+    tmp_path, elevenlabs_recorder
+):
+    client = _credentialed_client()
+    agent_registry = MagicMock()
+    agent_registry.get_agent.return_value = _agent()
+    with (
+        patch("local_operator.server.routes.speech.configure_model") as configure_call,
+        patch("local_operator.server.routes.speech.determine_voice") as voice_call,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await create_agent_speech(
+                "test-agent",
+                _agent_speech_request(),
+                client,
+                agent_registry,
+                _speech_store(tmp_path, radient=False, elevenlabs="el-key"),
+                _choose_provider(tmp_path, "radient"),
+                _env_config(),
+            )
+    assert exc_info.value.status_code == 401
+    configure_call.assert_not_called()
+    voice_call.assert_not_called()
+    client.create_speech_response.assert_not_called()
+    assert elevenlabs_recorder.calls == 0
+
+
 @pytest.mark.asyncio
 async def test_an_explicit_provider_keeps_the_direct_pass_through(tmp_path):
     """A caller naming a provider is asking for the legacy shape, and gets it.

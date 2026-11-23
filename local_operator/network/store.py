@@ -81,7 +81,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from secrets import token_hex
-from typing import Any, Callable, Iterator, TextIO
+from typing import Any, Callable, Collection, Iterator, TextIO
 
 from local_operator.network.identity import ensure_network_root, network_root
 from local_operator.network.types import (
@@ -92,6 +92,7 @@ from local_operator.network.types import (
     MeshRefusal,
     NetworkRecord,
     PairDecision,
+    PairPreApproval,
     PeerRecord,
     PendingJoin,
     PendingPairing,
@@ -338,6 +339,97 @@ def _write_private_json(target: Path, payload: Any) -> Path:
         return _stage_private(target, emit)
 
 
+def _sync_private_directory(directory: Path) -> None:
+    """Strict opt-in directory durability; legacy writers deliberately do not call it."""
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise OSError("file_device_durability_unavailable")
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _ensure_private_directory_durable(directory: Path) -> None:
+    """Persist every new directory entry, not just the final file's rename.
+
+    The file-device authority owner opts into host-crash durability. Existing
+    network stores retain their documented process-durability semantics. A
+    failure is propagated: callers must treat it as potentially committed,
+    never as proof that nothing changed on disk.
+    """
+    missing: list[Path] = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    _sync_private_directory(current)
+    for child in reversed(missing):
+        try:
+            child.mkdir(mode=0o700)
+        except FileExistsError:
+            pass  # Another creator still has to pass the no-follow directory open.
+        _sync_private_directory(child)
+        _sync_private_directory(child.parent)
+
+
+def _read_private_json_durable(target: Path, *, max_bytes: int | None = None) -> Any:
+    """Read back and sync the exact current inode and containing entry.
+
+    Used for explicit recovery/readback of new security state, not a positive
+    reconstruction from approval history. No absent file/directory is created.
+    """
+    import stat
+
+    fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077:
+            raise OSError("file_device_state_unconfirmed")
+
+        def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("file_device_state_duplicate_key")
+                result[key] = value
+            return result
+
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            raw = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+        if max_bytes is not None and len(raw) > max_bytes:
+            raise ValueError("file_device_state_over_limit")
+        result = json.loads(raw, object_pairs_hook=unique_pairs)
+        os.fsync(fd)
+        _sync_private_directory(target.parent)
+        current = target.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise OSError("file_device_state_unconfirmed")
+        return result
+    finally:
+        os.close(fd)
+
+
+def _write_private_json_durable(target: Path, payload: Any) -> Path:
+    """Narrow file-authority opt-in; the old writer and its defaults stay intact.
+
+    Reuse its staging/rename and reentrant per-target lock, then require file
+    metadata, parent entries and exact readback before acknowledging success.
+    An exception AFTER rename is indeterminate, not a rollback. Retrying must
+    reconcile that same signed generation rather than mint another operation.
+    """
+    expected = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    with _write_lock(target):
+        _ensure_private_directory_durable(target.parent)
+        if target.is_symlink():
+            raise OSError("file_device_state_unconfirmed")
+        _write_private_json(target, payload)
+        actual = _read_private_json_durable(target)
+        if json.dumps(actual, ensure_ascii=False, sort_keys=True, allow_nan=False) != expected:
+            raise OSError("file_device_state_unconfirmed")
+    return target
+
+
 def _write_private_text(target: Path, text: str) -> Path:
     """Staged 0600 text write, then rename — the invite token's path.
 
@@ -482,6 +574,16 @@ def decision_path(invite_id: str, root: Path | None = None) -> Path:
     return pending_dir(root) / f"{invite_id}.decision.json"
 
 
+def pre_approval_path(invite_id: str, root: Path | None = None) -> Path:
+    """Onboarding's :class:`PairPreApproval` — deliberately NOT the decision file.
+
+    A separate file is what lets the relay's stage-2 flip clear every generic
+    decision for the invite and still find the one record allowed to answer for a
+    person (security review round 2, S-R2-1).
+    """
+    return pending_dir(root) / f"{invite_id}.preapproval.json"
+
+
 def parked_join_path(invite_id: str, root: Path | None = None) -> Path:
     """The JOINING device's parked ceremony — the mirror of :func:`pending_path`.
 
@@ -559,6 +661,38 @@ def pair_decision(invite_id: str, root: Path | None = None) -> PairDecision | No
 
 def clear_pair_decision(invite_id: str, root: Path | None = None) -> None:
     decision_path(invite_id, root).unlink(missing_ok=True)
+
+
+def save_pre_approval(approval: PairPreApproval, root: Path | None = None) -> Path:
+    """Write onboarding's one-shot pre-approval, 0600 (see :class:`PairPreApproval`)."""
+    ensure_pending_dir(root)
+    return _write_private_json(pre_approval_path(approval.invite_id, root), approval.to_json())
+
+
+def pre_approval(
+    invite_id: str, root: Path | None = None, *, now: float | None = None
+) -> PairPreApproval | None:
+    """The OPEN pre-approval for ``invite_id``, or ``None``.
+
+    An expired one is removed as it is found: it expires with its invite, and a
+    stale approval must never be read as an answer to a later ceremony.
+    """
+    data = _read_json(pre_approval_path(invite_id, root))
+    if data is None:
+        return None
+    try:
+        approval = PairPreApproval.from_json(data)
+    except (TypeError, ValueError):
+        _quarantine(pre_approval_path(invite_id, root))
+        return None
+    if not approval.is_open(now):
+        clear_pre_approval(invite_id, root)
+        return None
+    return approval
+
+
+def clear_pre_approval(invite_id: str, root: Path | None = None) -> None:
+    pre_approval_path(invite_id, root).unlink(missing_ok=True)
 
 
 def save_pending_join(pending: PendingJoin, root: Path | None = None) -> Path:
@@ -747,6 +881,14 @@ def purge_network_artifacts(
             continue
         pending_file.unlink()
         clear_pair_decision(row.invite_id, root)
+        removed["pending"] += 1
+    # Onboarding pre-approvals for a purged network: attributed by their own
+    # ``network_id``, like the parked rows above, and counted with them.
+    for approval_file in sorted(pending_dir(root).glob("*.preapproval.json")):
+        data = _read_json(approval_file)
+        if data is None or str(data.get("network_id") or "") not in targets:
+            continue
+        clear_pre_approval(approval_file.name[: -len(".preapproval.json")], root)
         removed["pending"] += 1
     # And the ceremonies THIS device parked as the joiner, attributed the same exact
     # way. ``removed["pending"]`` counts them together with the inviter's rows because
@@ -987,7 +1129,9 @@ def prune(record: NetworkRecord, *, now: float | None = None) -> dict[str, int]:
     }
 
 
-def prune_invites(record: NetworkRecord, *, now: float | None = None) -> list[InviteRecord]:
+def prune_invites(
+    record: NetworkRecord, *, now: float | None = None, keep: Collection[str] = ()
+) -> list[InviteRecord]:
     """Drop the invite entries that are dead and past retention; return the dropped.
 
     THE INVITE HALF OF :func:`prune`, split out because it is the half a live relay
@@ -1010,13 +1154,22 @@ def prune_invites(record: NetworkRecord, *, now: float | None = None) -> list[In
     refuses ``not invite.is_fresh(now)``), so a row dropped here is one no
     redemption could have accepted. A redeemed entry is kept for the window after
     its redemption as well, so a ceremony in flight never loses its row.
+
+    ``keep`` (PR #4030 review R2-M1): invite ids a RETAINED signed onboarding
+    approval names (:func:`binding_invite_ids`). Such a row, once consumed as
+    ``admitted`` by a device still an active, unburned member here, is the only
+    Mac-written link from that onboarding to the node's handshake-authenticated
+    mesh id (``operator_binding._backfill_one``); dropping it 24 h after
+    redemption left every older node unbindable. Bounded: the approvals'
+    own prune ages the naming approvals out, and the row then goes here.
     """
     moment = time.time() if now is None else now
     kept: list[InviteRecord] = []
     dropped: list[InviteRecord] = []
     for invite in record.invites:
         if (
-            invite.is_fresh(moment)
+            (keep and invite.invite_id in keep and _admitted_active(record, invite))
+            or invite.is_fresh(moment)
             or moment - invite.minted_at <= INVITE_PRUNE_AGE_S
             or (
                 invite.redeemed_at is not None and moment - invite.redeemed_at <= INVITE_PRUNE_AGE_S
@@ -1027,6 +1180,29 @@ def prune_invites(record: NetworkRecord, *, now: float | None = None) -> list[In
             dropped.append(invite)
     record.invites = kept
     return dropped
+
+
+def _admitted_active(record: NetworkRecord, invite: InviteRecord) -> bool:
+    """The invite admitted a device that is still an active, unburned member (S5)."""
+    if invite.state != "consumed" or invite.outcome != "admitted" or not invite.redeemed_by:
+        return False
+    if record.is_burned(invite.redeemed_by):
+        return False
+    return any(m.device_id == invite.redeemed_by for m in record.active_members())
+
+
+def binding_invite_ids(root: Path | None = None) -> frozenset[str]:
+    """Invite ids :func:`prune_invites` must keep for the operator binding. Never raises.
+
+    Read from the approvals store only (no network record), so every minting
+    caller can compute it BEFORE taking :func:`mutate`'s lock.
+    """
+    try:
+        from local_operator.network.operator_binding import retained_invite_ids
+
+        return retained_invite_ids(root)
+    except Exception:  # noqa: BLE001 — a failed read keeps nothing extra, prunes as before
+        return frozenset()
 
 
 def forget_invite_tokens(dropped: list[InviteRecord], root: Path | None = None) -> None:
@@ -1054,10 +1230,11 @@ def sweep_invites(root: Path | None = None, *, now: float | None = None) -> int:
     races the relay's own writers.
     """
     total = 0
+    keep = binding_invite_ids(root)
     for listed in list_networks(root):
         try:
             with mutate(listed.network_id, root) as record:
-                dropped = prune_invites(record, now=now)
+                dropped = prune_invites(record, now=now, keep=keep)
                 if dropped:
                     save(record, root)
         except FileNotFoundError:

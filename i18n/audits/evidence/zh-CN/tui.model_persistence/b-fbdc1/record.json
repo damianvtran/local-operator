@@ -1,0 +1,87 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "audit_kind": "new current independent B",
+  "source_audit_revision": "87d87ec8b02ef3c279fda673302ce775f4a0329e",
+  "auditor": {
+    "agent": "i18n-auditor-B",
+    "session": "fbdc1a799cf0",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "58dee179aac0",
+    "independent_from_auditor_A_session": "26adce0a0cfa",
+    "independent_from_source_author_session": "a97c7f76d5ee",
+    "actual_model_source": "Host [model switch] message: openai/gpt-6.1-sol, quota fallback before assessment",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.model_persistence.json",
+      "sha256": "c9fb6447f1e19037cf40808089111d4980f5fd96d3e905d843f797230b9329b0"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "B-F1"
+    ],
+    "minor_count": 1
+  },
+  "audit_notes_not_execution_log": "report.md contains native reasoning; audit.log and attempt1.log are actual process output",
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "limitations": [
+    "No actual styled NoticeBlock integration; Rich string probes use assumed insets 4/8",
+    "No native shaping or global UI certificate",
+    "No ledger append: root centralizes append; translator model unknown here",
+    "No A conclusions read; historical A blocked artifacts untouched"
+  ],
+  "execution": {
+    "interpreter": "/Users/damian/local-operator/.venv/bin/python",
+    "isolation": "env -i; HOME session scratch b-home; LOCAL_OPERATOR_CONFIG_DIR=b-home/config; PYTHONPATH=worktree; TERM=xterm-256color; CMUX absent",
+    "command": "env -i HOME=<session-scratch>/b-home LOCAL_OPERATOR_CONFIG_DIR=<session-scratch>/b-home/config PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=<worktree> /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/zh-CN/tui.model_persistence/b-fbdc1/script.py.txt",
+    "final_exit_code": 0,
+    "attempt1_exit_code": 1,
+    "attempt1_reason": "Rig searched opaque label for /model; corrected negative control to inspect route string only",
+    "validator": "check.check_catalogues with mocked enumeration en/zh-CN, tui.model_persistence only",
+    "wrap_probes": 108
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/b-fbdc1/attempt1.log",
+      "sha256": "fa2c8397b2542eb23833edf47629532ff47fcf653c30072e66b2ea31c6da7ed6"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/b-fbdc1/audit.log",
+      "sha256": "207ffd39a5ebf3459e8d71da9cf75bf8d3fdbde12d2020bae53232548dc9f77f"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/b-fbdc1/receipt.json",
+      "sha256": "f1a14e53dbb1c8975d4819c9ec372df0d1b030a5b81214758b51023dc761c75b"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/b-fbdc1/report.md",
+      "sha256": "715d86ca52469d91722ded68dcab4bee268847ef557311fdfb8e70b66f70b07a"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.model_persistence/b-fbdc1/script.py.txt",
+      "sha256": "5a81f5ddcd977c16830d4e5e9cb7f9d36c4c378cc884fa4514a3223aadd60a64"
+    }
+  ]
+}

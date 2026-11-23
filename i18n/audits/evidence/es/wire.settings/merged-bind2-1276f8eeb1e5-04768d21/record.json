@@ -1,0 +1,227 @@
+{
+  "schema": 1,
+  "audit_id": "merged-bind2-1276f8eeb1e5-04768d21",
+  "audit_kind": "merged-source binding to the union of two independently approved, key-disjoint parent changes; no new translation, no native certification, no retranslation of approved unchanged copy",
+  "locale": "es",
+  "namespace": "wire.settings",
+  "audit_date": "2026-11-15",
+  "key_count": 869,
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team, role task) — merged-source binding audit (bind2) for PR #4052; not a translator or first/second auditor of either parent key",
+    "session": "1276f8eeb1e5",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-15",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator_session": true,
+    "actual_model_source": "session system prompt declares Model: anthropic/claude-opus-5-5; no fallback observed"
+  },
+  "status": "passed",
+  "source_head": "d9872af215651bbc84bb6a9e41066cacef072177",
+  "parent_revisions": [
+    "9cc1f2b4ad8323f1d42aa3f7b413a7b489cf7918",
+    "f0689a27c2af546e71be2a2783e6c6e86bc5004d"
+  ],
+  "common_base": "cb85fcb96216c14f43c5c35e2472609c59dd4ccd",
+  "source_path": "local_operator/i18n/catalogues/en/wire.settings.json",
+  "source_sha256": "04768d21849206c2617d17f000e8f513a0cd47cb4217d6a06d627da932e764d7",
+  "base_source_sha256": "99abc7c2ebaaf0d498650af7f32e9ab51e4ee25dc79ae0285408314ad4453e64",
+  "target_path": "local_operator/i18n/catalogues/es/wire.settings.json",
+  "target_sha256": "a3dc525bf4b0e330e4e575402105915055ff1679a5f5a145ad5d1c56f59c79d4",
+  "base_target_sha256": "f3958b6d17300da2808d084e745c61ffc8a25b6a06d6c0330f83083eae77758f",
+  "context_path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+  "context_sha256": "9925a7b5ef5cf3c30379c75798459f5294b21303c6cb0b463b1832e082e3fd58",
+  "context_composition": "main changed no context entry; merged context bytes equal the PR parent context (9925a7b5ef5cf3c3)",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "04768d21849206c2617d17f000e8f513a0cd47cb4217d6a06d627da932e764d7"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "9925a7b5ef5cf3c30379c75798459f5294b21303c6cb0b463b1832e082e3fd58"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+      "sha256": "a3dc525bf4b0e330e4e575402105915055ff1679a5f5a145ad5d1c56f59c79d4"
+    }
+  },
+  "parents": [
+    {
+      "side": "feature (PR #4052)",
+      "revision": "9cc1f2b4ad8323f1d42aa3f7b413a7b489cf7918",
+      "source_sha256": "2261c91b3577c347cca8b098b402cdf11c8cdec38571fc4b36106133813fd0bc",
+      "target_sha256": "51758ab915fbe26f5d7490c8f6268875a4b367a3805f3790a91ca49f7185275f",
+      "receipt_index": 16,
+      "receipt_canonical_sha256": "473df603adf823e17fbd9b135e850f777188fdd67c060ec5af7e51f70c45275a",
+      "evidence_path": "i18n/audits/evidence/es/wire.settings/merged-bind-1276f8eeb1e5-2261c91b/record.json",
+      "evidence_sha256": "c6dc26600ea8a4132e0615903e4d4afa5d9ed8283f01c578166f43bc9fd0bbaa",
+      "keys_changed": [
+        "wire.settings.network_credentials_github_repositories.help"
+      ],
+      "delta": {
+        "added": [],
+        "removed": [],
+        "changed": [
+          "wire.settings.network_credentials_github_repositories.help"
+        ]
+      },
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team, role task) — merged-source binding audit for PR #4052; not a translator or first/second auditor of either parent change",
+        "session": "1276f8eeb1e5",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "second_audit": {
+        "status": "passed",
+        "agent": "i18n-auditor (second independent pass; not the translator and not the first auditor)",
+        "session": "dbf144330553",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none",
+        "scope": "1 key wire.settings.network_credentials_github_repositories.help at en source fa6a7d8e6a81, target bytes b0a7ccd76e1c; PR #4052 parent 270d4c087d78",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "evidence": "i18n/audits/evidence/es/wire.settings/gh4052s2/record.json",
+        "evidence_sha256": "c32d12dd4f9ab64fd2dbdb35f79aa80aaaa86d4268d65f0438810eb1da75f18e",
+        "retained_from": "PR #4052 parent receipt (source fa6a7d8e); covers only wire.settings.network_credentials_github_repositories.help, carried unchanged into this source — not a second audit of this binding",
+        "first_audit_session": "91d1e05d2d82"
+      },
+      "note": "this parent row is itself the bind of PR #4052 to cb85fcb9 by this same auditor session (2261c91b); the PR key was audited by 91d1e05d2d82 + second pass dbf144330553"
+    },
+    {
+      "side": "main (#3990 merged at e6acf2aa2e41)",
+      "revision": "f0689a27c2af546e71be2a2783e6c6e86bc5004d",
+      "source_sha256": "f5c40bc8a0762c3ffa8fea5ca6ab7c377f9fba8644fefed9153d760823a05da7",
+      "target_sha256": "f058e22129eed8f95113cad47d97a87b230bdbc7949b4b4fb6f415fbaa02a731",
+      "receipt_index": 15,
+      "receipt_canonical_sha256": "0738697c6c3a367312a310b05fd3f10bf9e3cb9548e928cea609c6a590536cef",
+      "evidence_path": "i18n/audits/evidence/es/wire.settings/merged-bind-5b334e35ef01-f5c40bc8/record.json",
+      "evidence_sha256": "b3f8588071c76a034cd81693752342589801a9df0f53e5c481c317584848dded",
+      "keys_changed": [
+        "wire.settings.display_notification_session_name.help"
+      ],
+      "delta": {
+        "added": [],
+        "removed": [],
+        "changed": [
+          "wire.settings.display_notification_session_name.help"
+        ]
+      },
+      "translator": {
+        "agent": "i18n-translator subagent (role task) under the radientdev manager (commit 66ce330dd739) — relayed by the manager, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none (as relayed by the manager)",
+        "date": "2026-11-15"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (radientdev team, role task) — merged-source binding audit for PR #3990; not a translator or first/second auditor of either parent change in this session",
+        "session": "5b334e35ef01",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "second_audit": {
+        "status": "passed",
+        "agent": "copy-reviewer (radientdev team member, second independent i18n-auditor; not the translator and not the first auditor)",
+        "session": "937c6ecbae86",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none",
+        "scope": "1 key wire.settings.display_notification_session_name.help at en source 413b00d1f41c, target bytes 8d731ce82e28; PR #3990 at 51f41a416a52 (translation 66ce330dd739)",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "first_audit_session": "d62d8ba8b744",
+        "note": "0 blocker/0 major, 0 nit. Verdict formed before reading the first-audit note. Safety meaning checked for a user deciding whether to keep the setting on: the text says session name, last line and error causes reach the lock screen and paired phones, and that phone delivery goes through Radient's push service. Fidelity: name, last line and error causes; desktop banners incl. lock screen; paired phones' notifications delivered through Radient's push service (que les llegan a través del servicio push de Radient). The off-machine path to paired phones via Radient is explicit. avisos = banners as in choice.false; teléfonos emparejados matches corpus; push kept per es guide; usted-neutral impersonal register. No ICU placeholders (0=0); no Cf/bidi controls; copy_scan 0 findings. Same model family as translator and first auditor (claude-opus-5-5): disclosed.",
+        "retained_from": "PR #3990 parent receipt (source 413b00d1); covers only wire.settings.display_notification_session_name.help, carried unchanged into this source — not a second audit of this binding"
+      }
+    }
+  ],
+  "proof": {
+    "key_count": 869,
+    "base_keys_carried_unchanged": 867,
+    "pr_delta_keys": [
+      "wire.settings.network_credentials_github_repositories.help"
+    ],
+    "main_delta_keys": [
+      "wire.settings.display_notification_session_name.help"
+    ],
+    "collision_count": 0,
+    "composition_value_exact": true,
+    "keyset_exact": true,
+    "target_key_from_pr_equals_pr_parent_bytes": true,
+    "target_keys_equal_main_parent": 868,
+    "en_proof": {
+      "pr_delta": {
+        "added": [],
+        "removed": [],
+        "changed": [
+          "wire.settings.network_credentials_github_repositories.help"
+        ]
+      },
+      "main_delta": {
+        "added": [],
+        "removed": [],
+        "changed": [
+          "wire.settings.display_notification_session_name.help"
+        ]
+      },
+      "keyset_exact": true,
+      "composition_value_exact": true,
+      "keys_equal_main_parent": 868
+    },
+    "context_proof": {
+      "pr_delta": {
+        "added": [
+          "wire.settings.network_credentials_github_repositories.help"
+        ],
+        "removed": [],
+        "changed": []
+      },
+      "main_delta": {
+        "added": [],
+        "removed": [],
+        "changed": []
+      },
+      "keyset_exact": true,
+      "composition_value_exact": true
+    },
+    "history_composition": "index history = 13 base receipts + 3 main receipts + 4 PR receipts, each parent suffix canonical-identical; nothing reordered, dropped or rewritten",
+    "parent_receipts_passed_and_bound": {
+      "pr": true,
+      "main": true
+    },
+    "counterfactual": "before this receipt the last row bound PR parent source 2261c91b, not merged 04768d21; the manager reported test_shards_and_aggregate_yield_identical_shipped_set failing at d9872af21565 for that reason"
+  },
+  "semantic_read": "Read in en and each target: the PR key (owner/repo list for lending GitHub access; never-set = every push-able repository minus opt-outs; clearing a previously shared hand-picked list stops lending; literal `lop network credential github repos --use-default`) and the #3990 key (session name, last line, error causes on banners, lock screen and paired phones, delivered via Radient's push service). Both present and faithful in this locale; command literal intact; no ICU placeholders. hi पुश / zh-CN 推送 render the notification push service, not the git `push` operation that glossary §Wave-2 keeps in Latin, so no conflict. Unrelated settings; composition changes neither meaning.",
+  "retained_upstream_findings": [],
+  "new_findings": [],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_notes_not_execution_log": "proof values were produced by executing proof.py against git blobs at the four revisions; this record is not itself an execution log",
+  "not_verified": [
+    "native-speaker certification",
+    "new rendered/RTL evidence",
+    "a second independent binding audit of this merged source",
+    "other namespaces in the merge"
+  ],
+  "proof_scripts": "operator scratchpad pr4052-bind2/{proof.py,build2.py} with catalogue-proof.json (session 1276f8eeb1e5)"
+}

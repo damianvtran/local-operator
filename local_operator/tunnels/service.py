@@ -36,26 +36,92 @@ from local_operator.tunnels.errors import (
     LocalPrerequisite,
     LoginRequired,
     ReenrolmentRequired,
+    RequestFailed,
+    TunnelInactive,
 )
 from local_operator.tunnels.gateway import (
     AUTHORIZATION_DEFERRED,
+    AUTHORIZATION_UNAVAILABLE,
+    BILLING_INACTIVE,
+    BILLING_LAPSED,
     CONTROL_PLANE_TIMEOUT,
     CREDENTIAL_STORE_BUSY,
     LOCAL_PREREQUISITE,
     LOGIN_REQUIRED,
     REENROLMENT_REQUIRED,
     REFUSED,
+    SERVER_UNAVAILABLE,
     TERMINAL_DETAIL,
+    TRANSIENT_REASONS,
+    TUNNEL_DISABLED,
+    TUNNEL_INACTIVE,
     UNREACHABLE,
     Gateway,
+    terminal_detail,
 )
 from local_operator.tunnels.relay.connector import (
     RelayConnector,
     RelayGrant,
     parse_grant,
 )
+from local_operator.tunnels.request_log import REQUEST_LOG_NAME, RequestLog
 
 POLL_SECONDS = 10
+#: The longest the poller waits between checks while Radient gives no definitive
+#: answer. It equals the edge WAF's own window and hint ("retry in 300
+#: seconds", `rate-backend-edge` 2000 requests / 5 min per IP), so a block is
+#: waited out in about one request instead of thirty, and every blocked request
+#: the WAF would count against this computer's IP is one not sent.
+TRANSIENT_BACKOFF_CAP_S = 300.0
+#: The cap for transient causes where Radient did NOT answer (no network, a
+#: timeout, this computer's own store busy). Those requests never reach the WAF,
+#: so backing off to its 300 s window protects nothing, and after the grace has
+#: run out the cap IS the worst-case delay between the network returning and the
+#: relay reopening: 60 s keeps that within one minute (it was ~10 s before the
+#: backoff existed) while still not re-asking every 10 s through a long outage.
+#: PR #4168 review R3.
+UNANSWERED_BACKOFF_CAP_S = 60.0
+#: The transient causes where Radient (or its edge) did answer, with "not now":
+#: only these get the WAF-sized backoff above.
+_ANSWERED_TRANSIENT_REASONS = frozenset({AUTHORIZATION_UNAVAILABLE, SERVER_UNAVAILABLE})
+
+
+def transient_poll_delay(
+    failures: int, retry_after: float | None, *, grace_left: float, reason: str
+) -> float:
+    """How long the poller waits after its ``failures``-th transient failure in a row.
+
+    Radient's own hint wins when it gave one (`RequestFailed.retry_after`);
+    otherwise exponential from the 10 s cadence, capped by ``reason``: 300 s
+    when Radient answered "not now", 60 s when it was not reached at all
+    (`UNANSWERED_BACKOFF_CAP_S`). Two further bounds, both deliberate:
+    never below `POLL_SECONDS` (a hint of 1 s must not make the poller faster
+    than it is when healthy), and never so long that the grace runs out before
+    the next check — one cadence before its end, so a recovery inside the grace
+    is seen before the relay would close.
+    """
+    if retry_after is not None:
+        delay = retry_after
+    else:
+        delay = POLL_SECONDS * 2 ** max(0, failures - 1)
+    cap = (
+        TRANSIENT_BACKOFF_CAP_S
+        if reason in _ANSWERED_TRANSIENT_REASONS
+        else UNANSWERED_BACKOFF_CAP_S
+    )
+    delay = min(delay, cap)
+    if grace_left > 0:
+        delay = min(delay, grace_left - POLL_SECONDS)
+    return max(float(POLL_SECONDS), delay)
+
+
+def _retry_after(failure: BaseException) -> float | None:
+    """The wait Radient asked for anywhere in the failure's chain, or ``None``."""
+    for link in _failure_chain(failure):
+        if isinstance(link, RequestFailed) and link.retry_after is not None:
+            return link.retry_after
+    return None
+
 
 #: cloudflared's own origin idle timeout (`originRequest.keepAliveTimeout`,
 #: default 1m30s): the dual-run's other client of this gateway.
@@ -452,6 +518,214 @@ def _is_a_deferred_refresh(failure: BaseException) -> bool:
     return any(isinstance(link, RefreshUnconfirmedError) for link in _failure_chain(failure))
 
 
+def _is_a_server_error(failure: BaseException) -> bool:
+    """Whether Radient answered with a 5xx anywhere in the failure's chain.
+
+    A 5xx is the control plane failing on ITS side: it says nothing about the
+    login, so it must never fall through to the `REFUSED` fallback (a field
+    report: a 503 from `/v1/tunnels` printed "authorization refused" and sent the
+    operator to sign in again). Read off the chain for the same reason as
+    `_is_a_dead_login`: a raise site may wrap `RequestFailed`, and the status the
+    client recorded is the fact, not the wrapper's prose.
+    """
+    return any(
+        isinstance(link, RequestFailed) and link.status >= 500 for link in _failure_chain(failure)
+    )
+
+
+#: Radient answered, and the answer is "not now": 429 (rate limited — the edge
+#: WAF's `rate-backend-edge` among others) or 408 (it timed the request out).
+RATE_LIMIT_STATUSES = frozenset({408, 429})
+
+
+def _is_a_rate_limit(failure: BaseException) -> bool:
+    """Whether Radient answered 429/408 anywhere in the failure's chain.
+
+    Read off the chain for the same reason as `_is_a_server_error`.
+    """
+    return any(
+        isinstance(link, RequestFailed) and link.status in RATE_LIMIT_STATUSES
+        for link in _failure_chain(failure)
+    )
+
+
+def _inactive_reason(failure: BaseException) -> str | None:
+    """The inactive-tunnel reason Radient's answer carries, or ``None``.
+
+    Radient ANSWERED, and declined to serve this tunnel: `/connect` returns 403
+    for any tunnel whose status is not `active`, and 402 is reserved for billing.
+    Before this arm both fell through to the `REFUSED` fallback, whose remedy is
+    a sign-in that can never clear a billing or console state (the field report
+    this exists for: a freshly signed-in phone saying the tunnel "isn't active").
+
+    ONLY a `TunnelInactive` counts, and only the `/connect` raise site in `run()`
+    makes one (#3945 round 1, R2). A bare 402/403 anywhere else is NOT this:
+    the poller's `GET <tunnel>` answers 200 with a non-active record for a
+    suspended tunnel (its `else` branch restarts on that), so a 403 there is an
+    authorization refusal and keeps `REFUSED`; mapping it here sent a refused
+    grant to a "billing is in order — reconnect" sentence. Read off the chain
+    like `_is_a_server_error`, because a raise site may wrap the error.
+    """
+    for link in _failure_chain(failure):
+        if isinstance(link, TunnelInactive):
+            return link.reason
+    return None
+
+
+#: The refined inactive cause, cached per tunnel (`tunnels/inactive-cause.json`).
+#:
+#: WHY: the connector retries forever at the supervisor's 10 s floor while a
+#: tunnel stays inactive, and every cold start used to add `GET /billing` and
+#: `GET <tunnel>` to its `/connect` — ~3 Radient calls per 10 s instead of 1,
+#: indefinitely (#3945 round 1, R3). The cause changes on a human timescale (a
+#: top-up, a console toggle), so one refinement per 5 minutes is enough.
+#:
+#: INVARIANT: the cache only ever NAMES a cause; it never decides whether to
+#: connect. `/connect` itself is still called on every attempt, so a tunnel that
+#: becomes active is picked up on the very next try whatever the cache says, and
+#: the cache is invalidated on that successful connect and when a setup run
+#: claims `setup.lock` (`invalidate_refinement`). The key includes the trigger
+#: (402, 403 or an inactive record), so a different refusal re-refines at once.
+#: Worst case: a cause that changes WHILE the tunnel stays inactive (lapsed ->
+#: switched off) is reported up to `REFINE_TTL_S` late.
+REFINE_CACHE = "inactive-cause.json"
+REFINE_TTL_S = 300
+
+
+def _refine_key(value: dict[str, Any], default: str, from_record: bool) -> str:
+    return f"{tunnel_path(value)}|{default}|{'record' if from_record else 'status'}"
+
+
+def _cached_refinement(key: str, *, now: float | None = None) -> str | None:
+    import json
+
+    try:
+        cached = json.loads((config.directory() / REFINE_CACHE).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cached, dict) or cached.get("key") != key:
+        return None
+    at = cached.get("at")
+    reason = cached.get("reason")
+    current = time.time() if now is None else now
+    if not isinstance(at, (int, float)) or not 0 <= current - at < REFINE_TTL_S:
+        return None
+    # Only this package's own vocabulary is ever returned from disk.
+    return reason if reason in _REFINABLE else None
+
+
+def _store_refinement(key: str, reason: str) -> None:
+    import json
+
+    with contextlib.suppress(OSError):
+        config.private_write(
+            config.directory() / REFINE_CACHE,
+            json.dumps({"key": key, "reason": reason, "at": int(time.time())}) + "\n",
+        )
+
+
+def invalidate_refinement() -> None:
+    """Forget the cached inactive cause (a connect succeeded, or setup ran)."""
+    with contextlib.suppress(OSError):
+        (config.directory() / REFINE_CACHE).unlink(missing_ok=True)
+
+
+_REFINABLE = frozenset({TUNNEL_INACTIVE, TUNNEL_DISABLED, BILLING_INACTIVE, BILLING_LAPSED})
+
+
+async def refine_inactive_cached(
+    api: RadientTunnels,
+    value: dict[str, Any],
+    *,
+    default: str,
+    record: dict[str, Any] | None = None,
+) -> str:
+    """`refine_inactive`, read through the per-tunnel cache above."""
+    key = _refine_key(value, default, record is not None)
+    cached = _cached_refinement(key)
+    if cached is not None:
+        return cached
+    reason = await _refine(api, value, record=record)
+    if reason is None:
+        # Not cached: the reads failed, and a blip must not pin the bare
+        # status's reason for five minutes.
+        return default
+    _store_refinement(key, reason)
+    return reason
+
+
+async def refine_inactive(
+    api: RadientTunnels,
+    value: dict[str, Any],
+    *,
+    default: str,
+    record: dict[str, Any] | None = None,
+) -> str:
+    """Name WHY Radient will not serve this tunnel, from fresh owner-pinned reads.
+
+    The status code alone cannot tell "credit ran out" from "switched off in the
+    console" from "billing never activated", and each has a different fix, so the
+    connector asks the same two endpoints `setup.observe` reads: the tunnel
+    record (`enabled`) and `/billing` (`active` = ever activated, `eligible` =
+    currently paid up, `balance_usd`).
+
+    ONE PRECEDENCE with `setup.observe` (#3945 round 1, Q3): a console
+    switch-off wins over any billing state, because it is the owner's explicit
+    choice and adding credit would not bring the tunnel back while it stands.
+    Lapsed needs all three facts `observe` checks (R4): billing active, not
+    eligible, and a balance that is not positive. Active-but-ineligible WITH
+    credit is a re-acceptance (e.g. a price change), which is the quote step,
+    so it reads as `BILLING_INACTIVE` (accept the price), not "add credit".
+
+    READ-ONLY and best-effort: any failure to read keeps ``default`` (the bare
+    status's reason), because a refinement that could not run must not turn a
+    known refusal into an unknown one. Never activates anything — the only
+    billing write in this package is `cli._ensure_billing`, behind an exact
+    accepted price.
+    """
+    return await _refine(api, value, record=record) or default
+
+
+async def _refine(
+    api: RadientTunnels, value: dict[str, Any], *, record: dict[str, Any] | None
+) -> str | None:
+    """`refine_inactive`'s reads; ``None`` when `/billing` could not be read."""
+    # Lazy: `tunnels.cli` imports this module.
+    from local_operator.tunnels.cli import _positive_balance
+
+    if record is None:
+        try:
+            fetched = await api.request("GET", tunnel_path(value))
+        except (ValueError, httpx.HTTPError):
+            fetched = None
+        record = fetched if isinstance(fetched, dict) else None
+    if isinstance(record, dict) and record.get("enabled") is False:
+        return TUNNEL_DISABLED
+    try:
+        quote = await api.request("GET", "/billing")
+    except (ValueError, httpx.HTTPError):
+        quote = None
+    if not isinstance(quote, dict):
+        return None
+    if quote.get("active") is False:
+        return BILLING_INACTIVE
+    if quote.get("eligible") is not True:
+        if quote.get("active") is True and not _positive_balance(quote):
+            return BILLING_LAPSED
+        return BILLING_INACTIVE
+    # Billing is in order and the console has not switched it off: the tunnel
+    # is merely suspended, which a reconnect (no spend) clears.
+    return TUNNEL_INACTIVE
+
+
+def _requires_client_update(failure: BaseException) -> bool:
+    # Read typed status across wrappers, never prose/provider data. An older API
+    # wrapper may retain 426 without the dedicated new exception type.
+    return any(
+        isinstance(link, RequestFailed) and link.status == 426 for link in _failure_chain(failure)
+    )
+
+
 def authorization_failure_reason(failure: BaseException) -> str:
     """Name why the poller could not renew the relay authorization lease.
 
@@ -468,6 +742,10 @@ def authorization_failure_reason(failure: BaseException) -> str:
     transport error it hit while refreshing. The wording each reason produces
     lives with the gateway, so one cause cannot drift into two sentences.
     """
+    if _requires_client_update(failure):
+        from local_operator.tunnels.upgrade import REASON
+
+        return REASON
     local = _local_cause(failure)
     if local is not None:
         return local
@@ -483,6 +761,16 @@ def authorization_failure_reason(failure: BaseException) -> str:
         # fault whatever it is chained to, and BEFORE the `REFUSED` fallback, which
         # would blame the login for a wait.
         return AUTHORIZATION_DEFERRED
+    if _is_a_server_error(failure):
+        return SERVER_UNAVAILABLE
+    if _is_a_rate_limit(failure):
+        # BEFORE the `REFUSED` fallback: a 429 is Radient (here, its edge WAF's
+        # per-IP limit) asking this computer to slow down, which says nothing
+        # about the login or the plan (field report 2026-11-17).
+        return AUTHORIZATION_UNAVAILABLE
+    inactive = _inactive_reason(failure)
+    if inactive is not None:
+        return inactive
     return REFUSED
 
 
@@ -521,6 +809,10 @@ def classify_failure(failure: BaseException) -> Failure:
     two families it catches (fail closed, with a traceback) rather than parking
     on a shape it cannot describe.
     """
+    if _requires_client_update(failure):
+        from local_operator.tunnels import upgrade
+
+        return Failure("terminal_config", upgrade.REASON, upgrade.detail())
     local = _local_cause(failure)
     if local is not None:
         # Transient: both clear by themselves (see `_local_cause`).
@@ -536,6 +828,13 @@ def classify_failure(failure: BaseException) -> Failure:
         # asymmetry. It is named all the same, because "transient" without a cause
         # is the flat refusal that sent a working machine to a sign-in page.
         return Failure("transient", AUTHORIZATION_DEFERRED, TERMINAL_DETAIL[AUTHORIZATION_DEFERRED])
+    if _is_a_server_error(failure) and not isinstance(
+        failure, (LocalPrerequisite, ReenrolmentRequired)
+    ):
+        # Transient, on the supervisor's existing 10 s floor: Radient's own outage
+        # clears without anyone on this machine acting, and naming it keeps the
+        # retry line from blaming the login (see `_is_a_server_error`).
+        return Failure("transient", SERVER_UNAVAILABLE, terminal_detail(SERVER_UNAVAILABLE, ""))
     if isinstance(failure, LocalPrerequisite):
         # The sentence is the failure's own, and that is safe: every ValueError
         # this package raises is a fixed module literal (see `main`), and these
@@ -543,6 +842,22 @@ def classify_failure(failure: BaseException) -> Failure:
         return Failure("terminal_config", LOCAL_PREREQUISITE, str(failure))
     if isinstance(failure, ReenrolmentRequired):
         return Failure("terminal_remote", REENROLMENT_REQUIRED, str(failure))
+    if _is_a_rate_limit(failure) and not isinstance(
+        failure, (LocalPrerequisite, ReenrolmentRequired)
+    ):
+        # Same as the 5xx arm: transient, named, never the login's fault.
+        return Failure(
+            "transient",
+            AUTHORIZATION_UNAVAILABLE,
+            terminal_detail(AUTHORIZATION_UNAVAILABLE, ""),
+        )
+    inactive = _inactive_reason(failure)
+    if inactive is not None:
+        # Transient for the reason the fallback below gives: each of these clears
+        # from OUTSIDE this process (a top-up, a console toggle, Radient lifting a
+        # suspension), and the next attempt at the 10 s floor picks it up. Named,
+        # so the retry line and the status surfaces point at the real fix.
+        return Failure("transient", inactive, terminal_detail(inactive, ""))
     # Everything else keeps today's behaviour, including a tunnel the cloud says
     # is suspended or disabled: that one RESUMES by itself at the 10-second floor
     # once the operator tops up credit or reactivates it (see the poller below),
@@ -565,7 +880,16 @@ def _retry_detail(verdict: Failure, failure: BaseException) -> str:
     # The two local causes join it: a timeout's own text is often EMPTY (the
     # builtin TimeoutError, httpcore's timeouts), which left this line ending
     # in nothing, and the busy store's text is a shared literal too.
-    if verdict.reason in (AUTHORIZATION_DEFERRED, CONTROL_PLANE_TIMEOUT, CREDENTIAL_STORE_BUSY):
+    if verdict.reason in (
+        AUTHORIZATION_DEFERRED,
+        CONTROL_PLANE_TIMEOUT,
+        CREDENTIAL_STORE_BUSY,
+        # `TunnelInactive`'s own text is a shared literal; the verdict names it.
+        TUNNEL_INACTIVE,
+        TUNNEL_DISABLED,
+        BILLING_INACTIVE,
+        BILLING_LAPSED,
+    ):
         return verdict.detail
     return str(failure)
 
@@ -725,6 +1049,7 @@ async def run() -> int:
     gateway: Gateway | None = None
     relay: RelayConnector | None = None
     relay_task: asyncio.Task[None] | None = None
+    request_log: RequestLog | None = None
     restart = False
     try:
         # Proxy configuration and environment credentials are not forwarded to
@@ -733,9 +1058,21 @@ async def run() -> int:
             trust_env=False, timeout=httpx.Timeout(15, read=None)
         ) as client:
             api = RadientTunnels(int(value["credential_id"]), client)
-            connection = config.validate_connection(
-                await api.request("POST", tunnel_path(value) + "/connect")
-            )
+            try:
+                connection = config.validate_connection(
+                    await api.request("POST", tunnel_path(value) + "/connect")
+                )
+            except RequestFailed as failure:
+                if failure.status not in (402, 403):
+                    raise
+                # Radient refuses `/connect` for any non-active tunnel. Name the
+                # actual blocker (billing never activated, lapsed, switched off,
+                # or merely suspended) so every surface offers the fix that
+                # clears it instead of a sign-in (see `refine_inactive`).
+                default = BILLING_INACTIVE if failure.status == 402 else TUNNEL_INACTIVE
+                raise TunnelInactive(
+                    await refine_inactive_cached(api, value, default=default)
+                ) from failure
             if not active(connection["tunnel"]):
                 # Deliberately NOT parked. A suspended or disabled tunnel resumes
                 # by itself — the operator tops up credit or reactivates it in the
@@ -743,10 +1080,15 @@ async def run() -> int:
                 # picks it up, which is what this same branch documents in the
                 # poller below. Parking would trade retry noise for a device that
                 # does not come back until someone runs a local command, and no
-                # local command is the remedy here.
-                raise ValueError(
-                    "Tunnel disabled or billing suspended. Review it in the Radient console."
+                # local command is the remedy here. Refined from the same reads
+                # the 403 arm above uses, so both paths speak one vocabulary.
+                raise TunnelInactive(
+                    await refine_inactive_cached(
+                        api, value, default=TUNNEL_INACTIVE, record=connection["tunnel"]
+                    )
                 )
+            # Served: a cached inactive cause is stale from here on (R3 invariant).
+            invalidate_refinement()
             if connection["gateway_port"] != value["gateway_port"]:
                 # ReenrolmentRequired: retrying re-sends a /connect the cloud will
                 # keep answering the same way, and the remedy (lop tunnel connect)
@@ -855,7 +1197,13 @@ async def run() -> int:
                     ready_file.unlink(missing_ok=True)
                     token_file.unlink(missing_ok=True)
 
-            server = uvicorn.Server(gateway_server_config(gateway.app(), value["gateway_port"]))
+            # Every relayed request, bounded and redacted, beside service.log, so
+            # "the phone says Not answering" can be checked against what reached
+            # this computer (`tunnels/request_log.py`; read by `lop tunnel status`).
+            request_log = RequestLog(config.directory() / REQUEST_LOG_NAME)
+            server = uvicorn.Server(
+                gateway_server_config(gateway.logged_app(request_log), value["gateway_port"])
+            )
             stop = asyncio.Event()
             loop = asyncio.get_running_loop()
             # ONE helper for every server boot path: `add_signal_handler` is
@@ -869,7 +1217,11 @@ async def run() -> int:
             async def poll() -> None:
                 nonlocal restart
                 assert gateway is not None
+                # Consecutive transient failures, for the backoff; any answer
+                # that is not transient resets it.
+                transient_failures = 0
                 while not stop.is_set():
+                    delay: float = POLL_SECONDS
                     # Read outside the try: this is this device's own file, not
                     # Radient's answer, and an unreadable one must not be
                     # recorded as a refusal. It ends the poll task, which the
@@ -886,7 +1238,24 @@ async def run() -> int:
                         # failure is recorded rather than discarded: the phone's
                         # 503 and `lop tunnel status` both report which cause it
                         # was. authorize() clears it on the next success.
-                        gateway.note_authorization_failure(authorization_failure_reason(failure))
+                        #
+                        # A TRANSIENT cause (no definitive answer about this
+                        # tunnel) keeps the gateway serving on its last positive
+                        # check for a bounded grace, and the next check waits for
+                        # Radient's own hint or backs off: re-asking a WAF every
+                        # 10 s only keeps this IP over its limit (2026-11-17).
+                        reason = authorization_failure_reason(failure)
+                        if reason in TRANSIENT_REASONS:
+                            transient_failures += 1
+                            delay = transient_poll_delay(
+                                transient_failures,
+                                _retry_after(failure),
+                                grace_left=gateway.grace_remaining(),
+                                reason=reason,
+                            )
+                        else:
+                            transient_failures = 0
+                        gateway.note_authorization_failure(reason, retry_after=delay)
                     else:
                         # Configuration changes invalidate all signed requests
                         # from the old version. Restart for a new proof context,
@@ -910,10 +1279,11 @@ async def run() -> int:
                             stop.set()
                             return
                         gateway.authorize()
+                        transient_failures = 0
                         if relay is not None:
                             await reconcile_cloudflared(record)
                     try:
-                        await asyncio.wait_for(stop.wait(), timeout=POLL_SECONDS)
+                        await asyncio.wait_for(stop.wait(), timeout=delay)
                     except TimeoutError:
                         pass
 
@@ -933,6 +1303,7 @@ async def run() -> int:
             else:
                 assert child is not None
                 exited = asyncio.create_task(child.wait())
+            crash: BaseException | None = None
             try:
                 # `scanner` belongs in this set: a poller that dies of a failure
                 # this loop does not classify must stop the unit rather than
@@ -954,6 +1325,7 @@ async def run() -> int:
                         crash is not None
                         and relay is not None
                         and not (relay.revoked.is_set() or relay.withdrawn.is_set())
+                        and not _requires_client_update(crash)
                     ):
                         # A connector bug must not become a silent restart loop:
                         # name the exception type (never its args, which could
@@ -971,6 +1343,10 @@ async def run() -> int:
                     await asyncio.wait_for(
                         asyncio.gather(scanner, return_exceptions=True), timeout=5
                     )
+            if crash is not None and _requires_client_update(crash):
+                # Preserve a renewal-time protocol refusal through connector task
+                # teardown; main owns the permanent park and safe local guidance.
+                raise crash
             # Crashes, a dead poller and remote suspension are restartable. Only
             # an explicit local stop exits successfully and stays stopped under
             # supervision.
@@ -992,6 +1368,8 @@ async def run() -> int:
             await serve_task
         if child is not None and child.returncode is None:
             await _terminate(child)
+        if request_log is not None:
+            request_log.close()
         listener.close()
         token_file.unlink(missing_ok=True)
         ready_file.unlink(missing_ok=True)

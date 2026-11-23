@@ -50,6 +50,14 @@ Placeholders below: `<GHSA>` is the advisory id (`GHSA-xxxx-xxxx-xxxx`),
    publication ordering in phases 4 and 5 is not obvious and getting it wrong
    cannot be undone (an advisory published before the fix is on PyPI produces
    Dependabot alerts with no safe version to upgrade to).
+5. Check for duplicates before investing in a second fix. GitHub practice is one
+   advisory and one CVE per vulnerability: two advisories for the same flaw give
+   scanners two identifiers for one fix and split the reporters' credit. Keep
+   the earliest report as the primary, close the later one as a duplicate with a
+   courteous note on its thread (the later reporter did real work and should
+   hear why it was closed), and add the later reporter to the primary's
+   `credits` as an independent rediscovery. Example: GHSA-xmmq-jhr9-8h59 was
+   closed as a duplicate of GHSA-cjv2-5fqm-h4gm.
 
 ## 2. Private fix branch and reproduction
 
@@ -119,11 +127,15 @@ they are vulnerable with no version to move to.
 1. Merge the fix PR to `main` once the gate is clean.
 2. **Get the fix into a release window; never bump `pyproject.toml` yourself.**
    Releases here are combined and cut by one release owner per window, and the
-   lock on a window is an open `chore(release):` PR — see "One release owner
+   lock on a window is an open release PR (branch `release-next*` or
+   `release/claim*`, or title `chore(release)…`) — see "One release owner
    per window" in `AGENTS.md` for the mechanics, which this runbook does not
    repeat. What the advisory handler does:
-   - Look for the lock:
-     `gh pr list --search '"chore(release)" in:title' --state open`.
+   - Look for the lock by listing open PRs and matching locally, never with
+     `--search` (a title search misses claim PRs when the phrase is not quoted
+     exactly):
+     `gh pr list --state open --limit 500 --json number,title,headRefName,createdAt --jq '.[] | select((.headRefName | startswith("release-next") or startswith("release/claim")) or (.title | startswith("chore(release)")))'`.
+     Any output means the window has an owner.
    - If a window is owned, `send` the owner (the pid named in that PR's body)
      the fix PR number, its merge SHA and its `Release:` line, and wait for
      that window's tag and PyPI upload. Tell the owner it is a security fix so
@@ -181,6 +193,13 @@ They live inside each element of the `vulnerabilities` array. Severity is
 derived from the CVSS vector, so set the vector rather than a separate severity
 label.
 
+A component not distributed on PyPI (the browser extension) uses
+`"ecosystem": "other"` with its own name and version range in
+`vulnerabilities[]`. Dependabot and `pip-audit` cannot match an `other`
+package, so they will never tell anyone to upgrade it: put its fix path (the
+Chrome Web Store auto-update) in the `description`, and expect phase 7 to apply
+only to its GHSA Database entry (7a), not to OSV, PyPI or `pip-audit`.
+
 ```sh
 # Set the affected package/range/fix, CWE, CVSS and credit in one PATCH.
 gh api -X PATCH "repos/<owner>/<repo>/security-advisories/<GHSA>" \
@@ -210,6 +229,19 @@ gh api "repos/<owner>/<repo>/security-advisories/<GHSA>" \
 
 # Publish. Only after PyPI has <X> (phase 4 step 4).
 gh api -X PATCH "repos/<owner>/<repo>/security-advisories/<GHSA>" -f state=published
+```
+
+If the fix landed through a neutral public PR rather than the advisory's
+temporary private fork, the advisory still shows "you must merge or close
+outstanding pull requests" and refuses publication until the fork's PR is
+closed. `gh pr close` fails on these workspace repositories ("This action is
+forbidden on workspace repositories (addComment)") because commenting is
+forbidden there, so close it through the REST API instead, and record why the
+fork PR was not merged in the advisory text, since that PR cannot carry a
+comment and publication deletes the fork along with it:
+
+```sh
+gh api -X PATCH "repos/<owner>/<repo>-ghsa-<id>/pulls/<n>" -f state=closed
 ```
 
 Credits are shown publicly only once the credited user accepts them, so ask

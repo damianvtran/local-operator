@@ -1,4 +1,4 @@
-"""A finished turn or a ``notify`` on ANOTHER device, raised on the session's origin.
+"""A ``notify`` on ANOTHER device, raised on the session's origin (turn-ends are not).
 
 WHY THIS MODULE EXISTS (remote-session-parity, 2026-11-11). A session the
 operator starts on their head device and runs on a mesh node (``/new remote``,
@@ -25,8 +25,8 @@ beside ``park_edges``:
   ``wire.REMOTE_ATTENTION_V1``. Another member of the mesh
   sees neither: a completion is the operator's fact about THEIR session, and a
   co-member listing the node's sessions is not that operator.
-* ORIGIN SIDE (:class:`RemoteAttentionWatcher`): one edge per completion token
-  and per (owner item, revision), written through the SAME
+* ORIGIN SIDE (:class:`RemoteAttentionWatcher`): one edge per (owner item,
+  revision) — completions are no longer raised, see below — written through the SAME
   ``NotificationStore.notify`` door every other item uses — the kill switch
   (``notify_enabled``), the read/dismiss marks, the priority ladder and the
   store's retention are the shipped ones.
@@ -53,20 +53,48 @@ title and the "runs on <device>" body, which a renamed session or a host that
 read a nameless row would change (review round 1, m1). No cross-process lock or
 ledger is needed.
 
-PRIORITY AND BANNERS. A completion's ROW is ``normal`` (the reel and badge carry
-it, and the item ladder never banners ``normal``), but a NEW completion also
-raises the same clickable OS banner a local background completion raises
-(review round 1, M1: a remote completion must be as visible as a local one).
-That banner is :func:`_deliver_done_banner`, claimed per revision through
-``NotificationStore.claim_delivery`` so the TUI's watcher and ``lop serve``'s
-raise exactly one between them; its click carries the session id to ``lop
-resume-click``, whose ladder (desktop viewer, desktop launch, TUI viewer, then
-a terminal running ``lop --resume <id>``) opens a peer session by id — the same
-id ``lop --resume`` resolves to a remote viewer. A notice passes its own priority through,
-so a ``high`` notice on the node is a banner-eligible ``high`` row here, raised
-through the item ladder (``notifications.delivery.deliver_item``) whose
-per-revision claim keeps the TUI, the desktop feed and this writer to one
-banner between them.
+REMOTE TURN-ENDS ARE NOT NOTIFICATIONS (operator rule, 2026-11-13). This module
+used to raise a ``remote-done:<device>:<session>`` row (plus an OS banner) for
+every finished turn the owner stamped. The first serve poll after v0.102.2
+installed wrote 127 such rows in four seconds — one per historic node session,
+because every completion that predated the feature was "unacknowledged" — and
+34 ``remote-notice:`` rows for notices months old, all unread and stamped with
+the sync time. The operator's rule: the inbox carries ONLY what an agent
+deliberately posted (``notify``) or asked, so the completion producer and its
+banner are gone. The owner still stamps ``attention`` (the sidebar and the
+settle below read it), and :func:`settle_unclaimed_done_items` stays so a
+``remote-done:`` row an older build wrote is still marked read once the owner
+acknowledges it — it only ever marks read, never writes a row.
+
+A FORWARDED NOTICE MUST BE NEW AND THE OPERATOR'S. Three filters, same date:
+
+* only an explicit ``notify`` item (``NOT_FORWARDED_PREFIXES`` keeps parks,
+  this module's own rows and bridge notices out — unchanged);
+* never from a session another AGENT created on the owner (``origin.kind ==
+  "agent"`` on the mesh stamp, :data:`AGENT_ORIGIN_KIND`): a reviewer/QA/probe
+  child reports to the agent that spawned it, not to the operator — dropped by
+  the owner in :func:`stamp_rows_for_viewer`, save its operator-signed site
+  cards, which reach the verified operator link only
+  (:func:`signed_card_target`); and, DEFAULT-DENY, a ``notify``
+  item travels only when the stamp positively says the operator started the
+  session (``started_by: operator``, :data:`STARTED_BY_FIELD`) — the origin
+  re-applies this to every listing (``session/peer_rows``), so an owner too old
+  to filter cannot reopen the flood. A session STARTED on the node and bound to
+  the operator's device (``network.operator_binding``) carries its ``notify``
+  items only when no agent started it (:func:`is_non_agent_session`, 2026-11-15).
+  Open asks are exempt;
+* NO BACKFILL: the owner carries each notice's own ``updated_at`` (``at``, ms)
+  and the origin raises only a notice newer than its persisted first-contact
+  baseline for that device (:func:`origin_baseline_ms`), writing the row with
+  the owner's timestamp rather than "now". A notice with no ``at`` (an owner
+  older than this rule) cannot prove it is new, so it is not raised. A
+  forwarded OPEN ASK (``remote-ask:``) is exempt: it is still awaiting the
+  operator, not history (QA round 3, Q3-1; see ``RemoteAttentionWatcher.observe``).
+
+A notice passes its own priority through, so a ``high`` notice on the node is a
+banner-eligible ``high`` row here, raised through the item ladder
+(``notifications.delivery.deliver_item``) whose per-revision claim keeps the
+TUI, the desktop feed and this writer to one banner between them.
 
 WHAT THIS DOES NOT DO. Phone push reads ``attention.db``, not this inbox
 (``mobile/push_worker.py``: its completion scan is built on ``AttentionStore``
@@ -82,7 +110,9 @@ BEST-EFFORT BY CONTRACT, like the park module: nothing here raises.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import threading
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -95,9 +125,6 @@ logger = logging.getLogger(__name__)
 #: forwarded row from a local one by its key alone.
 DONE_PREFIX = "remote-done"
 NOTICE_PREFIX = "remote-notice"
-
-#: A completion's row priority: informational, the turn is not blocked on anyone.
-DONE_PRIORITY = "normal"
 
 #: Owner-side items NEVER forwarded as a notice. ``gate:`` rows are parks, which
 #: reach the origin through ``pending`` (``remote_park``) — forwarding them here
@@ -113,7 +140,341 @@ NOT_FORWARDED_PREFIXES: tuple[str, ...] = (
     f"{DONE_PREFIX}:",
     f"{NOTICE_PREFIX}:",
     "team-bridge-",
+    # Reserved for :func:`open_ask_notices` below: an agent ``notify`` that
+    # happened to use this key would otherwise be mistaken on the origin for a
+    # forwarded ask, and retired when it left the listing.
+    "remote-ask:",
 )
+
+#: ``origin.kind`` on a mesh stamp for a session an AGENT created on this device
+#: (``lop network sessions --create`` run from an agent's shell, or the
+#: ``sessions spawn peer=`` tool; ``network/cli.py`` sets it). Its notices are
+#: never forwarded: see the module doc, "A FORWARDED NOTICE MUST BE NEW AND THE
+#: OPERATOR'S".
+AGENT_ORIGIN_KIND = "agent"
+
+#: DEFAULT-DENY ATTESTATION (operator rule, 2026-11-14): "notifications reach the
+#: dashboard ONLY when an agent deliberately calls notify (or asks) ... remote
+#: mesh session turn-ends must not become notifications." ``origin.kind`` cannot
+#: carry that promise: the owner's create op has defaulted a missing kind to
+#: ``user`` since the mesh core, so every session an agent placed on a peer before
+#: #3902 (and every one an older origin places) reads ``user`` — five agent-lane
+#: workers on lop-remote-node-2 reached the inbox that way after v0.103.0. So a
+#: second field, written ONLY by a build that knows who asked
+#: (``relay._ctl_peer_create`` derives it from the attributed ``origin``), says
+#: ``started_by: operator``; its absence — a legacy stamp, an older origin, a move
+#: or a replica — denies. Asks are exempt: a question still waiting on the
+#: operator always travels (:func:`stamp_rows_for_viewer`).
+STARTED_BY_FIELD = "started_by"
+
+#: The ``origin.kind`` values a peer CREATE writes (the owner defaults a missing
+#: kind to ``user``). Only these are subject to the ``started_by`` default-deny on
+#: the node's ``notify`` mount: a ``moved``/``fork`` stamp is a session the
+#: operator carried to this device, and the owner never forwards its items anyway.
+PEER_CREATE_ORIGIN_KINDS: frozenset[str] = frozenset({"user", AGENT_ORIGIN_KIND})
+OPERATOR_STARTED = "operator"
+
+
+def started_by_for_origin(origin_kind: str) -> str:
+    """The ``started_by`` attestation for an ATTRIBUTED create (``user``/``agent``).
+
+    Called only where the caller's identity was actually decided (the origin's
+    control op, after ``network/cli._create_origin`` or the desktop route), never
+    on the owner from a frame that may predate the field.
+    """
+    # Anything but an exact ``user`` — ``agent``, an empty or a future kind —
+    # deliberately maps to ``agent``: default-deny means an attestation is only
+    # ever OPERATOR when the caller was positively identified as the operator.
+    return OPERATOR_STARTED if origin_kind == "user" else AGENT_ORIGIN_KIND
+
+
+def origin_is_operator_started(origin: Any) -> bool:
+    """Whether a mesh stamp's ``origin`` POSITIVELY says the operator started it.
+
+    Default-deny: a missing/odd origin, a missing ``started_by`` (legacy stamps,
+    moves, replicas) or an ``agent`` kind all answer NO. See
+    :data:`STARTED_BY_FIELD` for why ``kind == "user"`` alone is not enough.
+    """
+    if not isinstance(origin, dict):
+        return False
+    if str(origin.get("kind") or "") == AGENT_ORIGIN_KIND:
+        return False
+    return str(origin.get(STARTED_BY_FIELD) or "") == OPERATOR_STARTED
+
+
+#: ``path -> (stamp, {child: origin} | None)`` for the lineage registry: a
+#: listing classifies every row, and the registry is append-only, so it is
+#: re-read only when its stat stamp moves. ``None`` is a registry that EXISTS
+#: but cannot be trusted (S6-r3), which classifies every session as an agent's.
+#: The stamp carries ``st_ctime_ns`` and ``st_mode`` because a ``chmod`` changes
+#: neither size nor mtime, and a memo keyed on those alone would keep serving
+#: the rows read before the registry was made unreadable.
+_lineage_memo: dict[str, tuple[tuple[int, int, int, int, int], dict[str, str] | None]] = {}
+
+
+def _read_lineage_strict(path: Path) -> dict[str, str] | None:
+    """``{child: origin}`` from an EXISTING registry, or ``None`` if it is not trustworthy.
+
+    ``provenance.read_lineage`` deliberately swallows every error (a spawn's
+    adoption logic must never fail on it), which here would read "no agent rows"
+    — the permissive answer. This reader distinguishes the cases S6-r3 needs:
+    an open/read error (permission, IO, a symlink refused by ``O_NOFOLLOW``),
+    a 0-byte file and a file with no parseable row all answer ``None``.
+    ``record_lineage`` only ever appends complete JSON rows and never truncates,
+    so none of those is a state the harness itself leaves behind. Same
+    first-row-wins semantics as ``provenance.read_lineage``.
+    """
+    out: dict[str, str] = {}
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                child = row.get("child") if isinstance(row, dict) else None
+                if isinstance(child, str) and child and child not in out:
+                    out[child] = str(row.get("origin") or "")
+    except OSError:
+        return None
+    return out or None
+
+
+def _lineage_says_agent(root: Path, session_id: str) -> bool:
+    """The harness lineage registry records ``session_id`` as agent-opened (S6).
+
+    FAIL CLOSED (security review S6-r3, manager direction): a registry that
+    EXISTS but cannot be read, is empty, or has no parseable row is evidence of
+    tampering — the session's own approved interpreter call can reach the file
+    (HIGH), and emptying or ``chmod 000``-ing it would otherwise erase every
+    agent row and let an agent session's ``notify`` travel. Such a registry
+    answers "agent" for every session. Only an ABSENT registry (a fresh install
+    whose first spawn has not happened) says nothing, and the ``origin.json``
+    rule decides as in round 2. Asks never reach this function's verdict.
+    """
+    from local_operator.guardrails import provenance
+
+    path = provenance.lineage_path(root)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    stamp = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_ino)
+    cached = _lineage_memo.get(str(path))
+    if cached is None or cached[0] != stamp:
+        if len(_lineage_memo) > 16:
+            _lineage_memo.clear()
+        _lineage_memo[str(path)] = (stamp, _read_lineage_strict(path))
+        cached = _lineage_memo[str(path)]
+    origins = cached[1]
+    if origins is None:
+        return True
+    origin = origins.get(session_id)
+    return origin is not None and origin not in provenance._HUMAN_ORIGINS  # noqa: SLF001
+
+
+def is_non_agent_session(root: Path, session_id: str, origin: Any, *, started_here: bool) -> bool:
+    """Whether ``session_id``'s ``notify`` items may reach the operator's devices.
+
+    THE ONE PREDICATE FOR "NOT AN AGENT'S SESSION" (manager rule, 2026-11-15,
+    confirming two operator rules): asks from any session always travel; a
+    ``notify`` item travels only from a session NO AGENT started, because
+    "child/reviewer/QA sessions never notify the operator directly"
+    (2026-11-13) and "remote mesh session turn-ends must not become
+    notifications" (#4001, 2026-11-14). There is no carve-out by notify kind:
+    the store's session-scoped, un-prefixed items ARE the ``notify`` tool's
+    (every other writer keys under :data:`NOT_FORWARDED_PREFIXES`), so this
+    decides by who started the session, nothing else. Kept in one place so the
+    pending operator decision (ask a-1075) can flip it here.
+
+    * STAMPED (placed here by another device): #4001's default-deny unchanged —
+      only a stamp attesting ``started_by: operator``
+      (:func:`origin_is_operator_started`).
+    * STARTED HERE (``started_here``: no foreign origin, bound to the operator's
+      device by :func:`notice_target`): no agent child (``origin.kind``), no
+      ``started_by: agent``, and the local ``origin.json`` marker absent (a
+      session a human opened) or ``fork`` (the human's own branch). Every other
+      marker — ``subagent``, ``agent-shell``, ``agent-workstream``,
+      ``agent-config``, a future value, or one that cannot be parsed — is an
+      agent's or unknown, and DENIES: the default-deny direction of #4001.
+      The marker is written by the session's creator on this device, before
+      the notify tool is ever offered (``session._session_was_agent_spawned``
+      reads the same marker to withhold the tool), so a stampless human
+      session and an agent-started one ARE distinguishable here.
+    * THE LINEAGE REGISTRY FIRST (security review S6): ``origin.json`` is
+      reachable by the session's own approved interpreter call (HIGH, not
+      CRITICAL), and a deleted marker read as "human". The harness-written
+      registry ``<config>/guardrails/lineage.jsonl``
+      (``guardrails.provenance.record_lineage``, appended at the spawn sites by
+      ``resume.mark_session_origin``; CRITICAL to write from the shell and file
+      tools) records every session opened on an agent's behalf, so any row
+      there with a non-human origin is an agent's, whatever ``origin.json``
+      says or whether it exists.
+    """
+    if not started_here:
+        return origin_is_operator_started(origin)
+    if isinstance(origin, dict) and (
+        str(origin.get("kind") or "") == AGENT_ORIGIN_KIND
+        or str(origin.get(STARTED_BY_FIELD) or "") == AGENT_ORIGIN_KIND
+    ):
+        return False
+    import json
+
+    from local_operator.resume import ORIGIN_FORK, ORIGIN_NAME
+
+    if not session_id:
+        return False
+    if _lineage_says_agent(Path(root), session_id):
+        return False
+    marker = Path(root) / "sessions" / session_id / ORIGIN_NAME
+    try:
+        raw = marker.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("origin") or "") in ("", ORIGIN_FORK)
+
+
+def is_operator_signed_card(record: Any) -> bool:
+    """Whether a queued ask record is a card ONLY the operator's signature answers.
+
+    Today that is exactly a browser site card: a question whose ``question_id``
+    is a site digest (``browser_bridge.site_approval.is_site_question_id``).
+    ``asks/decision.py`` refuses a plain answer for one and routes it through
+    ``verify_site_card`` and the signed ``bridge_decide`` door, so no agent —
+    the session's own parent included — can answer it. Deliberately narrow:
+    ``human_required`` alone is NOT this (any human at any surface may answer
+    such an ask).
+
+    Team Bridge request asks (``asks/decision.py``'s module docstring) also
+    need the operator's signature, yet are left out on purpose: only the
+    designated chief-of-staff session receives inbound bridge requests and
+    raises their asks (``team_bridge/host.py``: "the designated CoS remains the
+    ONLY inbound recipient"; subagents inherit no bridge runtime), so they never
+    arise on a session an agent spawned on a node, and including them would
+    widen this exception for no row it could reach.
+
+    THE PREFIX IS NOT ENOUGH (security review S1-1): any writer of the node's
+    multi-writer ask log can mint ``site:v1:<anything>``, and this predicate is
+    what lets the ask of an agent child the operator's own device did NOT
+    place (:func:`agent_child_forwards_ordinary_asks` false, the
+    ``signed_only`` leg of :func:`open_ask_notices`) past the "agent children
+    notify nobody" drop. (On the operator-placed leg every open ask travels,
+    so a forged card there is just a plain ask with no extra reach.) So a
+    question counts only when it carries the structured ``site``
+    block :func:`~local_operator.browser_bridge.site_approval.site_ask_question`
+    writes AND its ``question_id`` is the digest of that block's inputs — the
+    first check the signer's ``verify_site_card`` makes. A forged id, or a real
+    id beside a block it was not computed from, stays on the node.
+    """
+    if not isinstance(record, dict):
+        return False
+    return any(_is_bound_site_question(question) for question in record.get("questions") or ())
+
+
+def _is_bound_site_question(question: Any) -> bool:
+    """A site question whose ``question_id`` is the digest of its own ``site`` block."""
+    from local_operator.browser_bridge.site_approval import (
+        is_site_question_id,
+        site_question_id,
+    )
+
+    if not isinstance(question, dict) or not is_site_question_id(question.get("question_id")):
+        return False
+    site = question.get("site")
+    if not isinstance(site, dict):
+        return False
+    raw = {key: site.get(key) for key in ("node_device_id", "entry_id", "origin", "scope")}
+    if not all(isinstance(value, str) for value in raw.values()):
+        return False
+    fields: dict[str, str] = {key: str(value) for key, value in raw.items()}
+    return question["question_id"] == site_question_id(**fields)
+
+
+def signed_card_target(origin: Any, *, operator_device_id: str = "") -> str:
+    """Where an AGENT CHILD's open asks go: the verified operator, or nowhere.
+
+    THE EXCEPTION TO "AN AGENT'S CHILD NEVER NOTIFIES THE OPERATOR"
+    (2026-11-13), which keeps governing its ``notify`` items: its open ASKS
+    travel. First for :func:`is_operator_signed_card` asks (manager rule,
+    2026-11-15: "human-only signed cards ... forward to the bound operator
+    device even from agent-origin and stampless sessions") — the parent agent
+    cannot answer a site card, only the operator's signature can, so dropping
+    it strands the agent until the request lapses (sessions 1c31cfff075b's
+    a-652b/a-d271 on lop-remote-node-2, spawned by an agent on the operator's
+    Mac, lapsed with nothing on the Mac). ORDINARY asks follow the same target
+    only under :func:`agent_child_forwards_ordinary_asks` (2026-11-21,
+    remote-parity lane): the child was placed by the operator's OWN device.
+    Every other agent child keeps the signed-cards-only leg.
+
+    Only for a row :func:`notice_origin` calls an agent child (the set the
+    catalogue leg drops; every other row's asks already travel by
+    :func:`notice_target`), and only to ``operator_device_id`` — the caller's
+    VERIFIED binding (``is_operator_link`` on the catalogue leg). Never to "the
+    viewer the origin names": a co-member that placed the child here, even the
+    origin itself, gets nothing unless it is the bound operator device. ``""``
+    when the row is no agent child or no operator is verified.
+
+    DELIBERATE ASYMMETRY (decision 79bddc262663, security review S1-2): an
+    agent child a co-member placed here sends its SITE CARDS to the OPERATOR,
+    while that co-member's own non-agent session's cards (every ask of it) go
+    to the co-member, as :func:`notice_target` has always routed them. The
+    co-member's agent cannot sign a site card and its human may not be the
+    operator, whereas a session the co-member's human opened has that human to
+    answer it.
+    """
+    if not operator_device_id or not notice_origin(origin)[1]:
+        return ""
+    return operator_device_id
+
+
+def agent_child_forwards_ordinary_asks(origin: Any, *, operator_device_id: str = "") -> bool:
+    """Whether an agent child's ORDINARY asks (not just its site cards) reach the operator.
+
+    Only when the stamp's ``origin.source_device`` IS the verified operator
+    device: the operator's own agent placed this session here, so it is the
+    remote twin of a LOCAL agent-started session, whose asks already reach the
+    operator's inbox (``session.py`` ``_notify_tool_callable``: "asks must
+    still reach the inbox"). The operator mandate (2026-11-21, remote-parity
+    lane) is remote notifications delivered to the head node like local ones;
+    session d83f5525a563's a-e9c5 on a node never reached the Mac.
+
+    WHY NOT EVERY AGENT CHILD (security review P1, decision: narrow gate over
+    a rate limit). ``origin.kind`` is the PLACING device's own claim
+    (``relay.py`` ``_ctl_peer_create``: ``"kind": frame.get("origin")``), so a
+    co-member could stamp any session it places ``agent`` and, were ordinary
+    asks forwarded for every agent child, put high-priority, banner-raising
+    ask text into the operator's inbox — up to ``NOTICES_ON_WIRE`` per session,
+    times sessions. ``source_device`` is NOT a claim: the owner writes it from
+    the creating link's AUTHENTICATED device id, and ``operator_device_id`` is
+    set only through ``is_operator_link``. So this gate removes the channel
+    rather than metering it, and costs nothing for the mandate's case (agents
+    on the operator's own device placing node sessions). A co-member's agent
+    child still sends its operator-signed site cards — ask text the operator
+    cannot be spammed into answering, since only the operator's signature
+    answers one — exactly as before. A co-member reaching the operator's inbox
+    with ordinary asks is a separate decision, if it is ever wanted.
+    """
+    source_device, is_agent_child = notice_origin(origin)
+    return bool(operator_device_id) and is_agent_child and source_device == operator_device_id
+
+
+#: The OWNER-side key namespace of a forwarded open ask, inside the existing
+#: ``notices`` wire block: ``remote-ask:<ask id>``. Distinct from the store's
+#: ``ask:`` read-mark refs (``store.ASK_REF_PREFIX``) and from every prefix
+#: above. The origin row is therefore ``remote-notice:<dev>:<sess>:remote-ask:<id>``
+#: and :func:`settle_unlisted_ask_items` finds it by this infix.
+ASK_NOTICE_PREFIX = "remote-ask:"
 
 #: How many notices one row carries for its origin, newest first (review round 1,
 #: M2: carrying only the newest lost every earlier unread notice, ``high`` ones
@@ -158,8 +519,66 @@ def notice_key(device_id: str, session_id: str, key: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def notice_origin(origin: Any) -> tuple[str, bool]:
+    """``(source_device, is_agent_child)`` of a stamp's ``origin`` mapping.
+
+    THE ONE READING OF "WHO WOULD THIS SESSION'S NOTICES GO TO" (PR #4029
+    review R1-1). Both the owner's catalogue leg (:func:`stamp_rows_for_viewer`)
+    and the ``notify`` result (:func:`notice_forwarding`) decide on it, so the
+    tool can never say "not forwarded" about a row the catalogue does put on
+    the wire, or the reverse. It reads ``origin.source_device`` ONLY — never
+    ``placement.mode``: the catalogue row carries ``stamp.origin`` whatever the
+    mode, and a replica recovered by ``sync.promote_replica`` is stamped
+    ``mode="local"`` with its old owner as ``source_device``, so its notices
+    ARE forwarded to that owner. ``is_agent_child`` is the agent-origin drop
+    (:data:`AGENT_ORIGIN_KIND`): such a row may still match a viewer for its
+    completion badge, but its notify items are never put on the wire — its
+    open asks (site cards included) go to the verified operator link only
+    (:func:`signed_card_target`). A non-mapping
+    (no stamp, no origin) is ``("", False)``.
+    """
+    if not isinstance(origin, dict):
+        return "", False
+    return (
+        str(origin.get("source_device") or ""),
+        str(origin.get("kind") or "") == AGENT_ORIGIN_KIND,
+    )
+
+
+def notice_target(
+    origin: Any, *, self_device_id: str = "", operator_device_id: str = ""
+) -> tuple[str, bool, bool]:
+    """``(target_device, is_agent_child, via_operator_binding)`` for one session.
+
+    :func:`notice_origin` extended by the OPERATOR BINDING (2026-11-15), and,
+    like it, the one reading BOTH legs use (:func:`stamp_rows_for_viewer` with
+    the link's verdict, :func:`notice_forwarding` with the stored proof's) so the
+    tool result and the catalogue cannot disagree.
+
+    * A session with an origin other than this device goes to that origin —
+      unchanged, whatever the binding says (a row co-member X placed here is
+      X's alone).
+    * A session STARTED here (no origin, or this device's own id) goes to the
+      verified operator device when there is one (``network.operator_binding``:
+      the operator's signed onboarding decision, checked against this node's
+      root-owned anchor), else nowhere.
+    * An agent's child goes nowhere new: it reports to that agent.
+    """
+    source, agent_child = notice_origin(origin)
+    if source and source != self_device_id:
+        return source, agent_child, False
+    if agent_child or not operator_device_id:
+        return "", agent_child, False
+    return operator_device_id, False, True
+
+
 def stamp_rows_for_viewer(
-    root: Path, rows: Sequence[dict[str, Any]], viewer_device_id: str
+    root: Path,
+    rows: Sequence[dict[str, Any]],
+    viewer_device_id: str,
+    *,
+    operator_viewer: bool = False,
+    self_device_id: str = "",
 ) -> None:
     """Add ``attention``/``notices`` to the rows whose ORIGIN is the viewer. In place.
 
@@ -171,6 +590,20 @@ def stamp_rows_for_viewer(
     row (``state_many``) and one bounded inbox page per qualifying row; a device
     with no peer-originated sessions pays one dict scan and nothing else.
 
+    ``operator_viewer`` (the relay's :func:`network.operator_binding.is_operator_link`
+    verdict for this link) widens it to sessions STARTED on this device
+    (:func:`notice_target`): their open asks — site cards included — and
+    ``notify`` items reach the operator's device. Their COMPLETIONS do not: the
+    request was "asks and notices", and a long-lived node session finishing a
+    turn is not something the operator asked to be paged for.
+
+    An AGENT'S CHILD puts only its open asks on the operator link's wire —
+    never a ``notify`` item — and nothing on any other link's beyond what it
+    did before (:func:`signed_card_target`): ordinary questions and site cards
+    when the operator's own device placed it
+    (:func:`agent_child_forwards_ordinary_asks`), its site cards alone
+    otherwise.
+
     Never raises: a listing is not an error path, and a store that cannot be
     read leaves the rows exactly as the build before this one wrote them.
     """
@@ -179,13 +612,28 @@ def stamp_rows_for_viewer(
     # The caller checked the viewer's capability, so this origin collects
     # forwarded items: recorded for the node's ``notify`` sentence (m2).
     record_forwarding_origin(Path(root), viewer_device_id)
-    mine = [
-        row
-        for row in rows
-        if isinstance(row.get("origin"), dict)
-        and str(row["origin"].get("source_device") or "") == viewer_device_id
-        and str(row.get("session_id") or "")
-    ]
+    operator = viewer_device_id if operator_viewer else ""
+    via_operator: set[str] = set()
+    cards_only: set[str] = set()
+    mine = []
+    for row in rows:
+        target, _agent, bound = notice_target(
+            row.get("origin"), self_device_id=self_device_id, operator_device_id=operator
+        )
+        if not str(row.get("session_id") or ""):
+            continue
+        if target != viewer_device_id:
+            # An agent child placed by ANOTHER device (or started here) still
+            # owes the operator its open asks (:func:`signed_card_target`);
+            # nothing else of it — no completion badge — reaches this viewer.
+            if signed_card_target(row.get("origin"), operator_device_id=operator) != (
+                viewer_device_id
+            ):
+                continue
+            cards_only.add(str(row["session_id"]))
+        mine.append(row)
+        if bound:
+            via_operator.add(str(row["session_id"]))
     if not mine:
         return
     try:
@@ -205,14 +653,19 @@ def stamp_rows_for_viewer(
         logger.debug("remote attention: inbox open failed", exc_info=True)
     for row in mine:
         session_id = str(row["session_id"])
-        if states is None:
+        state: dict[str, Any] = {}
+        if session_id in via_operator or session_id in cards_only:
+            # Notices only (see the docstring): no ``attention``, and no
+            # ``attention_unknown`` either — the origin keeps no done row for a
+            # session it never started, so there is nothing to protect.
+            pass
+        elif states is None:
             # A FAILED READ IS NOT "NOTHING UNSEEN" (review round 2, R2-m2): a
             # row with no ``attention`` is what an acknowledgement looks like,
             # and the origin settles its done row on it — losing the badge of a
             # completion nobody saw. Saying "unknown" makes the origin leave
             # its row alone until a read that could see the store.
             row["attention_unknown"] = True
-            state: dict[str, Any] = {}
         else:
             state = states.get(f"session/{session_id}") or {}
         token = state.get("completion_token")
@@ -220,9 +673,58 @@ def stamp_rows_for_viewer(
         # the attention contract): honoured here exactly as the local legs do.
         if token and state.get("unseen") and state.get("notify", True):
             row["attention"] = {"token": str(token), "outcome": str(state.get("kind") or "")}
-        notices = _newest_notices(store, session_id) if store is not None else []
+        if notice_origin(row["origin"])[1]:
+            # AN AGENT'S CHILD NEVER NOTIFIES THE OPERATOR (2026-11-13): a
+            # session another agent created here (a reviewer, QA or probe run
+            # spawned with ``peer=``) reports to that agent, so its ``notify``
+            # items stay in this device's inbox and are never put on the wire.
+            # Its open asks go to the VERIFIED operator link only
+            # (:func:`signed_card_target`), never to any other viewer (a
+            # co-member, or the device the origin names when its link is not
+            # the operator's). WHICH asks is NARROW (security review P1):
+            # ordinary questions and site cards alike only when the operator's
+            # OWN device placed it (authenticated ``source_device`` == the
+            # verified operator, :func:`agent_child_forwards_ordinary_asks`) —
+            # the remote twin of a local agent-started session, whose asks
+            # reach the local inbox. Any other agent child (a co-member chose
+            # ``origin.kind`` itself) sends its operator-signed site cards
+            # alone, exactly as before, so a co-member cannot put ordinary ask
+            # text into the operator's inbox by stamping ``kind: agent``.
+            if signed_card_target(row.get("origin"), operator_device_id=operator) == (
+                viewer_device_id
+            ):
+                asks = open_ask_notices(
+                    Path(root),
+                    session_id,
+                    signed_only=not agent_child_forwards_ordinary_asks(
+                        row.get("origin"), operator_device_id=operator
+                    ),
+                )
+                if asks is None:
+                    row["asks_unknown"] = True
+                elif asks:
+                    row["notices"] = asks[:NOTICES_ON_WIRE]
+            continue
+        # Open asks FIRST: a question the agent is waiting on outranks an
+        # informational notice for the bounded slots (``NOTICES_ON_WIRE``).
+        asks = open_ask_notices(Path(root), session_id)
+        if asks is None:
+            # A FAILED ASK READ IS NOT "NO OPEN ASKS" (PR #3934 review R1-2),
+            # the ``attention_unknown`` rule: the origin retires a forwarded ask
+            # by its absence, so a missing ask here must say "unknown" or an
+            # EIO would dismiss a question that is still owed — for good, since
+            # the row's revision never changes and re-raising it is a no-op.
+            row["asks_unknown"] = True
+        notices = list(asks or [])
+        # NOTIFY ITEMS ONLY FROM A NON-AGENT SESSION (:func:`is_non_agent_session`:
+        # #4001's attestation for a stamped row, the local marker for one started
+        # here); the open asks above travel either way.
+        if store is not None and is_non_agent_session(
+            Path(root), session_id, row.get("origin"), started_here=session_id in via_operator
+        ):
+            notices += _newest_notices(store, session_id)
         if notices:
-            row["notices"] = notices
+            row["notices"] = notices[:NOTICES_ON_WIRE]
 
 
 def _newest_notices(store: Any, session_id: str) -> list[dict[str, Any]]:
@@ -250,11 +752,96 @@ def _newest_notices(store: Any, session_id: str) -> list[dict[str, Any]]:
                 "revision": int(item.get("revision") or 1),
                 "priority": str(item.get("priority") or "normal"),
                 "title": str(item.get("title") or ""),
+                # The item's OWN time (ms, this device's clock), so the origin
+                # can refuse a backfill and keep the original timestamp rather
+                # than stamping the sync moment (module doc, "NO BACKFILL").
+                "at": int(item.get("updated_at") or 0),
             }
         )
         if len(out) >= NOTICES_ON_WIRE:
             break
     return out
+
+
+def open_ask_notices(
+    root: Path, session_id: str, *, signed_only: bool = False
+) -> list[dict[str, Any]] | None:
+    """``session_id``'s OPEN queued asks as ``notices`` wire blocks, oldest first.
+
+    ``None`` — not ``[]`` — when the ask log could not be read: the caller
+    stamps ``asks_unknown`` so the origin settles nothing on that listing.
+
+    WHY (2026-11-13). A queued ask is not a ``NotificationStore`` row on the
+    device it was asked on — the local inbox merges open asks from the ask
+    index (``notifications/items.py``) — so :func:`_newest_notices` never saw
+    one, and a session running on a mesh node asked its question where nobody
+    was looking. Riding the EXISTING ``notices`` block (rather than a new wire
+    field) means the origin's shipped watcher (:func:`raise_notice_item`, its
+    ``high`` banner, the inbox row that deep-links to the session) carries it
+    with no new parse, and an origin that predates this change still shows it.
+
+    READ FROM DISK, not from the runtime: the session's own ``asks.jsonl``
+    folded at "now", so an ask stays forwarded while the runtime is cold and a
+    past-deadline ask folds to ``timed_out`` and drops out like an answered one.
+    NOT through ``Session.notify``: the open-ask dedupe (``asks/dedupe.py``)
+    would fold it into the ask and mark it read, and read items never travel.
+
+    NO NEW AUTHORITY: the block is a fact (id + question text). Answering
+    happens in the session the row opens, over the permissioned ``ask_respond``
+    wire op (or the signed ``bridge_decide`` for a mirrored ask) — never here.
+    Generic on purpose: any open ask in the queue (a browser-site question
+    included) reaches the origin through this one function. Never raises.
+
+    The title is the local inbox's own (``items.ask_item``: the first question,
+    excerpted to the store's 120-char cap) and so is the priority: the wire
+    sizing under ``NOTICES_ON_WIRE`` assumes bounded titles (review R1-4).
+    """
+    try:
+        from local_operator.asks import store as ask_store
+        from local_operator.notifications.items import (
+            ASK_PRIORITY,
+            excerpt,
+            first_question,
+        )
+
+        events = ask_store.read_events(ask_store.session_dir(root, session_id), strict=True)
+    except Exception:  # noqa: BLE001 — unknown, never "none" (R1-2)
+        logger.debug("remote attention: ask read failed for %s", session_id, exc_info=True)
+        return None
+    try:
+        if not events:
+            return []
+        records = ask_store.fold(events, ask_store.now_ms(), session_id=session_id)
+        out: list[dict[str, Any]] = []
+        for record in ask_store.outstanding_asks(records):
+            # ``signed_only``: an agent child NOT placed by the operator's own
+            # device (:func:`agent_child_forwards_ordinary_asks`) carries its
+            # operator-signed cards and nothing else.
+            if signed_only and not is_operator_signed_card(record):
+                continue
+            ask_id = str(record.get("ask_id") or "")
+            title = excerpt(first_question(record), 120)
+            if not ask_id or not title:
+                continue
+            out.append(
+                {
+                    "key": f"{ASK_NOTICE_PREFIX}{ask_id}",
+                    # An ask's question does not change once queued (a
+                    # revision rewrites the ANSWER), so one episode per ask.
+                    "revision": 1,
+                    "priority": ASK_PRIORITY,
+                    "title": title,
+                    # The ask's OWN queue time, like ``_newest_notices``'s
+                    # ``at``: the origin drops a notice with no time (or one
+                    # older than its first contact, "NO BACKFILL", PR #3902), so
+                    # an ask block without it would never be raised there.
+                    "at": int(record.get("created_at") or 0),
+                }
+            )
+        return out[:NOTICES_ON_WIRE]
+    except Exception:  # noqa: BLE001 — a listing whose asks did not fold says "unknown"
+        logger.debug("remote attention: ask fold failed for %s", session_id, exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -276,84 +863,20 @@ def _location(device_label: str) -> str:
     return remote_session_location(device_label)
 
 
-def raise_done_item(
-    root: Path,
-    *,
-    session_id: str,
-    device_id: str,
-    token: str,
-    outcome: str = "complete",
-    device_name: str = "",
-    name: str = "",
-    deliver: bool = True,
-) -> str | None:
-    """Create or update the origin's row for one finished turn on ``device_id``.
+def _ask_body(device_label: str, key: str, started_by_agent_on: str) -> str:
+    """A forwarded row's body: who started an agent child's ASK, else :func:`_location`.
 
-    The TITLE is the conversation's name (the local completion banner's own
-    title rule) and the BODY is the same house sentence a local completion of
-    that kind carries, then where it ran. ``token`` is the store's ``episode``:
-    the same completion re-raised is ``unchanged`` (no unread flip), a new one
-    is an update that is unread again. A new completion also raises the
-    completion banner off-thread (``deliver``; :func:`_deliver_done_banner`).
-    Returns the store's action, or ``None`` when nothing was written.
+    Only a forwarded ask (``remote-ask:``) from a row the receiving device
+    labelled as agent-started (``peer_rows._agent_starter_label``) gets the
+    "runs on <device> · started by an agent on <X>" line; every
+    other row keeps the plain "runs on <device>" body byte for byte.
+    Display-only: nothing here decides where a row goes.
     """
-    if not session_id or not device_id or not token:
-        return None
-    try:
-        if not _inbox_reads_here():
-            return None
-        from local_operator.notifications.store import NotificationStore
-        from local_operator.tui import notify as notify_copy
+    if started_by_agent_on and key.startswith(ASK_NOTICE_PREFIX):
+        from local_operator.tui.notify import remote_agent_ask_location
 
-        label = device_name or device_id
-        body = notify_copy.BODIES.get(outcome or "complete", notify_copy.BODY_COMPLETE)
-        store = NotificationStore(root)
-        existing = store.get_by_key(session_id, done_key(device_id, session_id))
-        if existing is not None and str(existing.get("anchor_id") or "") == token:
-            # THIS completion is already the row's (a restarted watcher, or a
-            # second host). Answered before the write rather than left to the
-            # digest, because the digest also covers the title: a session
-            # renamed since would otherwise turn a repeat into an update and
-            # flip a row the operator had read back to unread.
-            return "unchanged"
-        result = store.notify(
-            session_id=session_id,
-            title=name or notify_copy.BACKGROUND_FALLBACK_TITLE,
-            body_md=f"{body}\n\n{_location(label)}",
-            priority=DONE_PRIORITY,
-            key=done_key(device_id, session_id),
-            anchor_id=token,
-            session_title=name,
-            episode=token,
-        )
-        if result.action == "absorbed":
-            # A NEW completion on a row the operator dismissed: the store keeps
-            # an unescalated update dismissed, but a dismissed "it finished"
-            # must not swallow the next finish. Same reasoning as
-            # ``remote_park._reopen``; the episode makes this reachable only
-            # for a new token.
-            _undismiss(store, session_id, done_key(device_id, session_id))
-        if deliver and result.action in ("created", "updated", "revived", "absorbed"):
-            # Re-read: ``_undismiss`` may have moved the row, and the banner is
-            # claimed against the row's CURRENT revision.
-            row = store.get_by_key(session_id, done_key(device_id, session_id))
-            if row is not None:
-                kind = outcome if outcome in notify_copy.CONTEXTS else "complete"
-                _deliver_done_banner(
-                    root,
-                    item_id=str(row["id"]),
-                    revision=int(row["revision"]),
-                    session_id=session_id,
-                    title=name,
-                    body=body,
-                    subtitle=notify_copy.CONTEXTS.get(kind, ""),
-                )
-        return str(result.action)
-    except Exception:  # noqa: BLE001 — chrome; never the failure
-        logger.warning(
-            "remote attention: could not raise done row for %s", session_id, exc_info=True
-        )
-        return None
+        return remote_agent_ask_location(started_by_agent_on, device_label)
+    return _location(device_label)
 
 
 def settle_done_item(root: Path, *, session_id: str, device_id: str, token: str) -> bool:
@@ -435,8 +958,7 @@ def settle_unclaimed_done_items(
             if key not in listed:
                 continue
             if listed[key]:
-                # Still claimed (this token, or a newer one ``raise_done_item``
-                # moves the row to on this same read): not acknowledged.
+                # Still claimed (this token, or a newer one): not acknowledged.
                 continue
             if int(item.get("updated_at") or 0) >= int(listed_at_ms):
                 # Written from a read newer than this listing (Q3, above).
@@ -453,6 +975,90 @@ def settle_unclaimed_done_items(
         return 0
 
 
+def settle_unlisted_ask_items(
+    root: Path, rows: Iterable[Any], *, listed_at_ms: int | None = None
+) -> int:
+    """Retire (dismiss) every undismissed forwarded ASK row the listing no longer carries.
+
+    A forwarded notice is never settled by its absence — the owner's unread
+    notice just aged out of the bounded list — but an ask's absence IS its
+    answer (or decline, dismissal, timeout): it is no longer owed, and the row
+    must stop asking, the way a local answered ask leaves the inbox. Dismissed
+    rather than read for that reason — and READ rows too, unlike the
+    ``remote-done:`` settle (which only marks unread rows read, so a read row
+    is already where it should end): a read ask row is still an open card
+    until dismissed, and the ``ask`` relay re-raises an undismissed row as live
+    (:func:`resurface_forwarded_ask`; PR #4082 review round 1, R1-1). Rows a
+    person dismissed are not touched — the query skips every dismissed row.
+    Forwarded NOTICE rows share the namespace but are never retired by absence;
+    the ``:remote-ask:`` infix filter keeps them out.
+
+    Absence is trusted only when it can mean that: the session IS in this
+    listing (a silent device or a deleted session settles nothing), the owner
+    could read its ask log (``asks_unknown``, R1-2), its ``notices`` list is
+    not full OF ASKS (asks are stamped first, so a full list that still carries
+    any non-ask claim proves every open ask fit — and a busy session's list is
+    full on every read, its notifies never being read on the node; R1-1), and
+    the listing's read started after the row was last written
+    (``listed_at_ms``; the done settle's Q3 rule — a cached listing older than
+    the row predates the ask rather than answering it). ``None`` settles
+    nothing. Returns how many rows were dismissed. Never raises.
+    """
+    if listed_at_ms is None:
+        return 0
+    try:
+        listed: dict[tuple[str, str], set[str]] = {}
+        for row in rows:
+            device_id = str(getattr(row, "owner_device", "") or "")
+            session_id = str(getattr(row, "id", "") or "")
+            if not device_id or not session_id:
+                continue
+            if getattr(row, "remote_asks_unknown", False):
+                continue
+            claims = tuple(getattr(row, "remote_notices", None) or ())
+            if len(claims) >= NOTICES_ON_WIRE and all(
+                claim and str(claim[0]).startswith(ASK_NOTICE_PREFIX) for claim in claims
+            ):
+                continue
+            listed[(device_id, session_id)] = {str(claim[0]) for claim in claims if claim}
+        if not listed:
+            return 0
+        from local_operator.notifications.store import NotificationStore
+
+        store = NotificationStore(root)
+        settled = 0
+        for item in store.undismissed_with_key_prefix(
+            f"{NOTICE_PREFIX}:", containing=f":{ASK_NOTICE_PREFIX}"
+        ):
+            key = str(item.get("key") or "")
+            infix = key.find(f":{ASK_NOTICE_PREFIX}")
+            if infix < 0:
+                continue
+            # ``remote-notice:<device>:<session>:remote-ask:<id>`` — the
+            # session is the row's own column, so the device is what precedes it.
+            owner_key = key[infix + 1 :]
+            session_id = str(item.get("session_id") or "")
+            middle = key[len(NOTICE_PREFIX) + 1 : infix]
+            if not session_id or not middle.endswith(f":{session_id}"):
+                continue
+            device_id = middle[: -(len(session_id) + 1)]
+            still = listed.get((device_id, session_id))
+            if still is None or owner_key in still:
+                continue
+            if int(item.get("updated_at") or 0) >= int(listed_at_ms):
+                continue
+            result: Any = store.apply(
+                "dismiss",
+                ids=[(str(item["id"]), int(item["revision"]))],
+                via="remote-attention",
+            )
+            settled += int(bool(result.changed))
+        return settled
+    except Exception:  # noqa: BLE001
+        logger.debug("remote attention: ask settle failed", exc_info=True)
+        return 0
+
+
 def raise_notice_item(
     root: Path,
     *,
@@ -465,8 +1071,13 @@ def raise_notice_item(
     device_name: str = "",
     name: str = "",
     deliver: bool = True,
+    at_ms: int = 0,
+    started_by_agent_on: str = "",
 ) -> str | None:
     """Mirror one owner ``notify`` item onto the origin's inbox.
+
+    ``started_by_agent_on`` (display-only, :func:`_ask_body`): the name of the
+    device whose agent started the session, which labels a forwarded ask.
 
     The title is the agent's own (already redacted by the owner's ``notify``
     before it was stored there); the body says where it ran. ``priority`` passes
@@ -484,6 +1095,7 @@ def raise_notice_item(
         if priority not in PRIORITIES:
             priority = "normal"
         label = device_name or device_id
+        body = _ask_body(label, key, started_by_agent_on)
         store = NotificationStore(root)
         row_key = notice_key(device_id, session_id, key)
         existing = store.get_by_key(session_id, row_key)
@@ -499,12 +1111,15 @@ def raise_notice_item(
         result = store.notify(
             session_id=session_id,
             title=title,
-            body_md=_location(label),
+            body_md=body,
             priority=priority,
             key=row_key,
             anchor_id=f"rev:{int(revision)}",
             session_title=name,
             episode=f"rev:{int(revision)}",
+            # THE OWNER'S TIME, not the sync moment (2026-11-13): the row sorts
+            # where the agent posted it. ``None`` (no ``at``) keeps "now".
+            now=int(at_ms) if int(at_ms or 0) > 0 else None,
         )
         # An ``absorbed`` notice (the operator dismissed this row and the owner's
         # item was updated without escalating) STAYS dismissed: that is the
@@ -512,7 +1127,7 @@ def raise_notice_item(
         # not be harder to set aside than a local one. An escalation revives it
         # through the store itself.
         if deliver and priority == "high":
-            _deliver_async(root, result, session_id=session_id, title=title, body=_location(label))
+            _deliver_async(root, result, session_id=session_id, title=title, body=body)
         return str(result.action)
     except Exception:  # noqa: BLE001
         logger.warning("remote attention: could not raise notice for %s", session_id, exc_info=True)
@@ -532,17 +1147,6 @@ def _notice_rev(row: dict[str, Any]) -> int:
         return int(anchor[4:])
     except ValueError:
         return 0
-
-
-def _undismiss(store: Any, session_id: str, key: str) -> None:
-    row = store.get_by_key(session_id, key)
-    if row is not None and row["dismissed"]:
-        store.apply(
-            "undismiss", ids=[(str(row["id"]), int(row["revision"]))], via="remote-attention"
-        )
-    row = store.get_by_key(session_id, key)
-    if row is not None and row["read"]:
-        store.apply("unread", ids=[(str(row["id"]), int(row["revision"]))], via="remote-attention")
 
 
 def _deliver_async(root: Path, outcome: Any, *, session_id: str, title: str, body: str) -> None:
@@ -575,99 +1179,6 @@ def _deliver_async(root: Path, outcome: Any, *, session_id: str, title: str, bod
     threading.Thread(target=run, name="remote-notice-banner", daemon=True).start()
 
 
-#: The claimant a done banner records in ``delivered_by``: distinct from the
-#: item ladder's ``runtime`` so a release can never undo another leg's claim.
-DONE_BANNER_CLAIMANT = "remote-done"
-
-
-def _deliver_done_banner(
-    root: Path,
-    *,
-    item_id: str,
-    revision: int,
-    session_id: str,
-    title: str,
-    body: str,
-    subtitle: str = "",
-    notify: Any = None,
-    background: bool = True,
-) -> None:
-    """Raise the completion banner for one NEW remote completion, at most once.
-
-    WHY NOT THE ITEM LADDER (review round 1, M1). ``deliver_item`` banners only a
-    ``high`` row, and both of its other rungs — the desktop feed and the TUI's
-    banner tick — read ``undelivered(priority="high")``, so handing a ``normal``
-    done row to it (or promoting the row to ``high``, which would also reorder
-    the reel and badge) either raises nothing or changes what the row IS. A
-    local background completion is announced by its own leg
-    (``OperatorApp._deliver_background_completion``) with a claim, a clickable
-    ``detached_notify`` and the house title/body; this is that leg for a
-    completion the origin only knows through its inbox row.
-
-    THE CLAIM IS THE ROW'S ``claim_delivery``, so the TUI's watcher and ``lop
-    serve``'s — both of which see the same new token — raise ONE banner
-    between them, and a row the operator already read (or dismissed) before
-    the claim is refused by the store. A notifier that started nothing hands
-    the claim back, the local leg's rule: a watermark must not assert a banner
-    nobody received.
-
-    GATES AND PRIVACY mirror the local leg: the notifications switch and the
-    rig guard (``delivery.gates_refuse``) refuse BEFORE the claim, so a gated
-    revision stays claimable for a process with the gates open; the title is
-    the conversation's name only when ``session_names_in_notifications`` allows
-    it (else the brand), and the body is the house sentence for the outcome,
-    never model-written text. ``session_id`` makes the banner clickable: it
-    rides to ``lop resume-click``, which opens the peer session by id.
-
-    Runs on a daemon thread by default so a slow notifier never stalls the
-    poll; ``background=False`` is the tests' synchronous seam.
-    """
-
-    def run() -> None:
-        try:
-            from local_operator.notifications.delivery import gates_refuse
-            from local_operator.notifications.store import NotificationStore
-            from local_operator.tui import notify as notify_copy
-
-            if gates_refuse():
-                return
-            store = NotificationStore(root)
-            row = store.get(item_id)
-            if row is None or int(row["revision"]) != int(revision):
-                # Superseded by a newer completion: that write raises its own.
-                return
-            # ``per_revision``: one banner per completion with no cooldown, the
-            # local leg's per-token rule (R2-M1; see ``claim_delivery``).
-            if not store.claim_delivery(item_id, DONE_BANNER_CLAIMANT, per_revision=True):
-                return
-            banner_title = (
-                notify_copy.sanitize_text(title) or notify_copy.BACKGROUND_FALLBACK_TITLE
-                if notify_copy.session_names_in_notifications()
-                else notify_copy.APP_NAME
-            )
-            send = notify if notify is not None else notify_copy.detached_notify
-            try:
-                started = bool(
-                    send(
-                        notify_copy.argv_safe(banner_title),
-                        notify_copy.argv_safe(body),
-                        session_id=session_id,
-                        subtitle=subtitle,
-                    )
-                )
-            except Exception:  # noqa: BLE001 — a banner is chrome; the row is durable
-                started = False
-            if not started:
-                store.release_delivery(item_id, int(revision), DONE_BANNER_CLAIMANT)
-        except Exception:  # noqa: BLE001
-            logger.debug("remote attention: done banner failed", exc_info=True)
-
-    if not background:
-        run()
-        return
-    threading.Thread(target=run, name="remote-done-banner", daemon=True).start()
-
-
 # ---------------------------------------------------------------------------
 # The watcher both hosts share
 # ---------------------------------------------------------------------------
@@ -684,7 +1195,6 @@ class RemoteAttentionWatcher:
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
-        self._done: dict[tuple[str, str], str] = {}
         self._notice: dict[tuple[str, str, str], int] = {}
 
     def observe(
@@ -704,7 +1214,6 @@ class RemoteAttentionWatcher:
         """
         try:
             from local_operator.session.peer_rows import (
-                completion_edges,
                 listing_read_at_ms,
                 notice_edges,
             )
@@ -713,22 +1222,48 @@ class RemoteAttentionWatcher:
                 listed_at_ms = listing_read_at_ms(self.root, rows)
             rows = tuple(rows)
             silent = tuple(unanswered)
-            done, done_state = completion_edges(self._done, rows, unanswered=silent)
-            self._done = done_state
+            # No completion edges: a remote turn-end is never an inbox row
+            # (module doc, operator rule 2026-11-13). The settle stays — it
+            # only marks an older build's ``remote-done:`` row read once the
+            # owner acknowledged it, and never writes one.
             settle_unclaimed_done_items(self.root, rows, listed_at_ms=listed_at_ms)
-            for edge in done:
-                raise_done_item(
-                    self.root,
-                    session_id=edge.session_id,
-                    device_id=edge.device_id,
-                    token=edge.token,
-                    outcome=edge.outcome,
-                    device_name=edge.device_name,
-                    name=edge.name,
-                )
+            # Before raising: a row raised by THIS read is newer than the
+            # listing, so the settle could not touch it anyway (Q3 rule).
+            settle_unlisted_ask_items(self.root, rows, listed_at_ms=listed_at_ms)
             notices, notice_state = notice_edges(self._notice, rows, unanswered=silent)
             self._notice = notice_state
+            # FIRST CONTACT is the listing, not the first notice (R1-1): every
+            # owner device named here gets its baseline before any notice is
+            # judged, so the first deliberate notice after contact is raised.
+            baselines = origin_baselines_ms(
+                self.root, (str(getattr(row, "owner_device", "") or "") for row in rows)
+            )
             for notice in notices:
+                baseline = baselines.get(notice.device_id)
+                if baseline is None:
+                    baseline = origin_baseline_ms(self.root, notice.device_id)
+                if not notice.key.startswith(ASK_NOTICE_PREFIX) and (
+                    notice.at_ms <= 0 or notice.at_ms < baseline
+                ):
+                    # NO BACKFILL: posted before this device first watched
+                    # that one (or by an owner too old to say when). Skipped
+                    # deterministically, so a restart skips it again.
+                    #
+                    # A FORWARDED OPEN ASK IS EXEMPT (QA round 3, Q3-1). The
+                    # rule targets FINISHED notices — history the operator
+                    # never asked to see; an ask in the listing is still
+                    # waiting on the operator now, however long ago it was
+                    # queued. Judged by the ask's ``created_at`` it was dropped
+                    # forever whenever it predated the first listing (the
+                    # baseline only ever moves earlier) or whenever the owner's
+                    # clock ran behind this one — the time comparison mixes two
+                    # clocks, so the exemption is also what makes asks
+                    # skew-immune. Bounded without it: an ask rides the wire
+                    # only while the owner lists it as outstanding, the settle
+                    # above retires it once a fresh listing drops it, and
+                    # ``raise_notice_item``'s revision check keeps one row per
+                    # ask across watchers and restarts.
+                    continue
                 raise_notice_item(
                     self.root,
                     session_id=notice.session_id,
@@ -739,6 +1274,8 @@ class RemoteAttentionWatcher:
                     title=notice.title,
                     device_name=notice.device_name,
                     name=notice.name,
+                    at_ms=notice.at_ms,
+                    started_by_agent_on=notice.started_by_agent_on,
                 )
         except Exception:  # noqa: BLE001 — a poll that cannot forward is still a poll
             logger.debug("remote attention watch failed", exc_info=True)
@@ -841,8 +1378,393 @@ def forwarding_origins(root: Path) -> dict[str, float]:
     return {str(k): float(v) for k, v in data.items() if isinstance(v, (int, float))}
 
 
+#: The ORIGIN's record of when it first watched each owner device:
+#: ``{device_id: first-seen epoch ms}``, directly under the config root beside
+#: :data:`ORIGINS_FILE` (its owner-side twin) and for the same reason it is not
+#: in the networks directory. WHY PERSISTED (2026-11-13): the backfill flood came
+#: from a FIRST CONTACT treating every historic unread item as news; a baseline
+#: kept in memory would be "first contact" again after every restart. Written
+#: once per device, the first listing that names it; never moved later,
+#: so reconnects and restarts compare against the same instant. The comparison
+#: is against the OWNER's clock (``at``): skew between the two devices shifts the
+#: cut-off by that skew, which only matters for a notice posted within seconds of
+#: the very first contact.
+BASELINES_FILE = "remote-attention-baselines.json"
+_baselines_lock = threading.Lock()
+
+
+def _valid_baseline(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def origin_baselines_ms(root: Path, device_ids: Iterable[str]) -> dict[str, int]:
+    """This origin's first-contact instant (ms) for each of ``device_ids``.
+
+    A device not yet recorded is recorded NOW. :meth:`RemoteAttentionWatcher.observe`
+    calls this for every owner device in a listing BEFORE it looks at notices
+    (review round 1, R1-1): recording lazily, on the first notice, stamped that
+    notice's own observation instant as the baseline, so the first deliberate
+    notice from a newly watched device was always older than its baseline and
+    was dropped for good. Recorded at first contact, a notice posted after the
+    first listing that named the device is raised; one posted before is the
+    backfill this file exists to skip.
+
+    CROSS-PROCESS (R1-4): the TUI and ``lop serve`` both run the watcher, so the
+    read-merge-replace runs under an ``fcntl.flock`` on a sidecar lock file (the
+    ``network/approvals.py`` pattern) as well as the in-process lock, and a
+    device already in the file keeps its EARLIEST value — two writers can never
+    move a baseline later and silently swallow the notices in between.
+
+    Never raises: anything unreadable or unwritable answers "now" for the
+    devices it could not settle, the conservative direction — a notice that
+    cannot be shown to be new is not raised, which costs at worst a missed
+    notice, never a flood.
+    """
+    import json
+    import os
+    import time
+
+    wanted = sorted({str(d) for d in device_ids if d})
+    now = int(time.time() * 1000)
+    if not wanted:
+        return {}
+    try:
+        import fcntl
+
+        with _baselines_lock:
+            path = Path(root) / BASELINES_FILE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            lock_fd = os.open(path.with_name(f".{path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                try:
+                    try:
+                        known = json.loads(path.read_text(encoding="utf-8"))
+                    except (FileNotFoundError, ValueError):
+                        # Absent, or unparseable (rewritten below rather than
+                        # leaving every later poll to answer "now" forever).
+                        known = {}
+                    if not isinstance(known, dict):
+                        known = {}
+                    missing = [d for d in wanted if not _valid_baseline(known.get(d))]
+                    if missing:
+                        for device_id in missing:
+                            known[device_id] = now
+                        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+                        # 0600 like ``ORIGINS_FILE``: it names the mesh devices this one reads.
+                        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                            handle.write(json.dumps(known, sort_keys=True))
+                        os.replace(tmp, path)
+                    return {d: int(known[d]) for d in wanted}
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+    except Exception:  # noqa: BLE001 — see the docstring: unknown is "now"
+        logger.debug("remote attention: baselines unavailable", exc_info=True)
+        return {d: now for d in wanted}
+
+
+def origin_baseline_ms(root: Path, device_id: str) -> int:
+    """:func:`origin_baselines_ms` for one device (recording it now if new)."""
+    import time
+
+    return origin_baselines_ms(root, (device_id,)).get(device_id, int(time.time() * 1000))
+
+
+#: :func:`notice_forwarding` verdicts. ``FORWARDED``: an origin known to collect
+#: forwarded items will raise it. ``ORIGIN_NOT_COLLECTING``: the session has an
+#: origin device (:func:`notice_origin`, any placement mode), but that origin is
+#: not recorded as collecting. ``LOCAL_ONLY``: nothing will carry the item to any
+#: other device — a session of an agent's child (its notices report to that
+#: agent, never the wire, whatever the mesh), or one with no origin device on a
+#: mesh node (started here). ``NOT_OPERATOR_STARTED``: the origin collects, but
+#: the stamp lacks the operator attestation (:func:`origin_is_operator_started`),
+#: so the owner's default-deny (#4001) keeps the item here. ``NOT_APPLICABLE``:
+#: no clause at all (no mesh here, or a key this module never forwards).
+FORWARDED = "forwarded"
+ORIGIN_NOT_COLLECTING = "origin_not_collecting"
+NOT_OPERATOR_STARTED = "not_operator_started"
+LOCAL_ONLY = "local_only"
+NOT_APPLICABLE = "not_applicable"
+
+
+def notice_forwarding(root: Path, session_id: str, key: str = "") -> tuple[str, str]:
+    """Will a ``notify`` from ``session_id`` reach another of the operator's devices?
+
+    Returns ``(verdict, origin_device_id)``; the verdict is one of the module
+    constants above and the origin is ``""`` unless the session carries one.
+
+    THE ONE PLACE THIS IS DECIDED (2026-11-15). A ``notify`` always lands in
+    THIS device's inbox; whether it travels further is the forwarding leg's
+    business (:func:`stamp_rows_for_viewer` keeps only stamped, non-agent rows).
+    The ``notify`` tool result must say which happened, or the model tells the
+    operator they were told when the item never left this node — the bug this
+    fixes: a session STARTED on a mesh node has no stamp, so the old sentence
+    was empty and read as delivered. Keep every "will it be forwarded?" rule
+    here so the surfaces cannot drift; the operator-binding work extends THIS
+    function (e.g. ``FORWARDED`` only to a verified operator device, else
+    ``LOCAL_ONLY``) rather than adding a second predicate beside it.
+
+    A device in no mesh (no trusted network with another active member) gets
+    ``NOT_APPLICABLE``: a single-device operator has nowhere else to be told,
+    so their result stays byte-for-byte what it was. Never raises.
+
+    THE OPERATOR BINDING (2026-11-15): a session STARTED here is ``FORWARDED``
+    (to the operator's device id) exactly when the catalogue leg would put its
+    notices on that device's link — a stored proof that still verifies against
+    this node's root-owned anchor for an active member
+    (``network.operator_binding.operator_device``), and that device recorded as
+    collecting forwarded items, and no agent started the session
+    (:func:`is_non_agent_session`, the catalogue leg's own predicate). Otherwise
+    it stays ``LOCAL_ONLY``.
+    """
+    verdict, device, _via_operator = _notice_decision(root, session_id, key)
+    return verdict, device
+
+
+def _notice_decision(root: Path, session_id: str, key: str = "") -> tuple[str, str, bool]:
+    """:func:`notice_forwarding` plus whether the target came from the operator binding."""
+    try:
+        if key and key.startswith(NOT_FORWARDED_PREFIXES):
+            # Parks, gates and this module's own rows travel by their own
+            # routes (or deliberately not at all); the clause is unchanged.
+            return NOT_APPLICABLE, "", False
+        from local_operator.session.placement import read_stamp
+
+        stamp = read_stamp(Path(root), session_id)
+        origin_map = stamp.origin if stamp is not None else None
+        source, agent_child = notice_origin(origin_map)
+        self_id = ""
+        operator = ""
+        if not agent_child:
+            # Only a session with no foreign origin can ride the binding, so the
+            # (cached) proof check runs only for those.
+            self_id = _self_device_id(Path(root))
+            if not source or source == self_id:
+                from local_operator.network.operator_binding import operator_device
+
+                operator, _network = operator_device(Path(root))
+        # Decided exactly as the catalogue leg is (notice_target over
+        # notice_origin), NOT on placement.mode: a promote_replica stamp is
+        # mode="local" yet its notices are forwarded to the old owner (PR #4029
+        # review R1-1).
+        target, agent_child, via_operator = notice_target(
+            origin_map, self_device_id=self_id, operator_device_id=operator
+        )
+        if agent_child:
+            # Mirrors the drop in stamp_rows_for_viewer: an agent's child
+            # reports to that agent, so no notify item is put on the wire (its
+            # open asks travel to the verified operator, but are asks, not
+            # notify items: signed_card_target).
+            return LOCAL_ONLY, source, False
+        if target and not _is_active_peer(Path(root), target):
+            # PR #4029 review R2-1: an origin (or bound device) that is no longer
+            # an active member of an active, trusted network here has no link
+            # that will carry the item, whatever the collector marker remembers.
+            # Fall through to the honest node-only answer.
+            target = ""
+            via_operator = False
+            source = ""
+        if via_operator and not is_non_agent_session(
+            Path(root), session_id, origin_map, started_here=True
+        ):
+            # Started here BY AN AGENT: its asks still reach the bound device,
+            # its notify items stay here (the catalogue leg's own predicate).
+            return LOCAL_ONLY, "", False
+        if target:
+            if target not in forwarding_origins(Path(root)):
+                if via_operator:
+                    # Bound, but that device has not read this node's catalogue
+                    # with this build yet: nothing is carrying it today.
+                    return LOCAL_ONLY, "", False
+                # Main's precedence since #4001, kept byte for byte: an origin
+                # that does not collect gets the not-collecting sentence whatever
+                # the attestation (#4001's "brought home" test pins it).
+                return ORIGIN_NOT_COLLECTING, target, False
+            # For the bound leg (``via_operator``) this re-check is redundant — the
+            # agent case already returned above — and always passes; it decides
+            # only STAMPED rows (review R2-n1).
+            if not is_non_agent_session(
+                Path(root), session_id, origin_map, started_here=via_operator
+            ):
+                # Mirrors #4001's default-deny in stamp_rows_for_viewer: notify
+                # items travel only for a stamp attesting ``started_by:
+                # operator`` — the SAME predicate on the SAME mapping.
+                return NOT_OPERATOR_STARTED, target, False
+            return FORWARDED, target, via_operator
+        if _is_mesh_node(Path(root)):
+            # Started here (or no origin) and no verified operator device: the
+            # forwarding leg drops the row, so the item stays on this node.
+            return LOCAL_ONLY, "", False
+        return NOT_APPLICABLE, "", False
+    except Exception:  # noqa: BLE001 — a tool result never fails on this
+        return NOT_APPLICABLE, "", False
+
+
+#: Verdicts of :func:`resurface_forwarded_ask`. Words, not booleans, because the
+#: relay that asks answers its model a different sentence for each: a wrong id,
+#: a card the node already settled, and a card the operator put away are three
+#: different next steps.
+RESURFACED = "resurfaced"
+RESURFACE_UNKNOWN = "unknown"
+RESURFACE_SETTLED = "settled"
+RESURFACE_PUT_AWAY = "put_away"
+#: The row is ALREADY unread (nobody has looked since it was raised or last
+#: re-surfaced): nothing is written — a relay loop must not bump the revision,
+#: re-sort the feed or grow ``item_history`` (PR #4082 review round 1, R1-2).
+RESURFACE_PENDING = "pending"
+#: The inbox or the network store could not be read (busy store, I/O error):
+#: nothing is known about the ref, which is NOT the same as "names no ask" —
+#: the model should retry, not conclude the id is wrong (R1-4).
+RESURFACE_UNREADABLE = "unreadable"
+
+#: The ``dismissed_via`` :func:`settle_unlisted_ask_items` writes: the node's
+#: listing stopped carrying the ask, i.e. it was answered, declined, dismissed or
+#: lapsed THERE. Any other dismissal of a forwarded ask row is a person's.
+_RETIRED_VIA = "remote-attention"
+
+
+def resurface_forwarded_ask(root: Path, session_id: str, ask_id: str) -> tuple[str, str]:
+    """Raise a NODE session's forwarded ask card again in THIS device's inbox.
+
+    ``(verdict, device label)``. The ``ask`` tool's ``relay`` reaches here when
+    ``<session_id>/<ask_id>`` names no ask in a local session's log
+    (``asks.queue.AskQueue.enqueue_relay``): a head-node coordinator pointing at
+    a card a node session forwarded (E2E session 44ab2361d833 on
+    lop-remote-node-2, cards a-1f70/a-4452, 2026-11-15, refused with "names no
+    ask in the original session's log").
+
+    THE ONE CARD, NEVER A SECOND. This device holds only the forwarded row —
+    the first question's 120-char title, a "runs on" body and the key
+    (:func:`raise_notice_item`) — so it could not render, let alone answer, a
+    copy; the answer stays on the existing path (open the row → the node's
+    session → ``ask_respond``, or the operator-signed ``bridge_decide`` for a
+    site card). Re-surfacing is the store's own :meth:`NotificationStore.notify`
+    with the row's own title, body, priority, key and owner anchor, so nothing
+    the operator reads is altered; only a writer ``episode`` changes, which is
+    what makes the write a new unread revision the banner ladder may claim. The
+    owner anchor (``rev:<N>``) is kept so the watcher's revision short-circuit
+    still reads this row as current and never flips it back, and the node's
+    answer still retires it through :func:`settle_unlisted_ask_items`.
+
+    ATTESTED ROWS ONLY. A row resolves only under the key of an ACTIVE member
+    of an ACTIVE (trusted) network here — the same members whose catalogue the
+    watcher reads — so a row left by a removed or burned device, or a key no
+    member could have written, answers ``unknown``: what this inbox would not
+    raise today a relay may not raise either.
+
+    A ROW A PERSON PUT AWAY STAYS AWAY (``put_away``): the store's collapse rule
+    keeps an operator dismissal through a same-priority update, and
+    :meth:`NotificationStore.reopen` refuses one by design. A row this module
+    retired (``settled``) means the node no longer holds the ask. A row that is
+    still unread is left untouched (``pending``). Repeat re-surfaces of a READ
+    row are allowed — each is one new revision, and the store's per-row
+    ``BANNER_COOLDOWN_MS`` bounds the banners a loop of relays could raise.
+    Never raises (``unreadable`` on any failure).
+    """
+    if not session_id or not ask_id:
+        return RESURFACE_UNKNOWN, ""
+    try:
+        from local_operator.network import store as net_store
+        from local_operator.notifications.store import NotificationStore
+
+        candidates: list[tuple[str, str]] = []
+        for record in net_store.list_networks(root):
+            if record.trust != "active":
+                continue
+            for member in record.active_members():
+                device_id = str(member.device_id or "")
+                if not device_id or device_id == record.self_device_id:
+                    continue
+                if record.is_burned(device_id):
+                    continue
+                candidates.append((device_id, str(member.name or "") or device_id))
+        if not candidates:
+            return RESURFACE_UNKNOWN, ""
+        store = NotificationStore(root)
+        owner_key = f"{ASK_NOTICE_PREFIX}{ask_id}"
+        for device_id, label in candidates:
+            item = store.get_by_key(session_id, notice_key(device_id, session_id, owner_key))
+            if item is None:
+                continue
+            if item.get("dismissed_at") is not None:
+                if str(item.get("dismissed_via") or "") == _RETIRED_VIA:
+                    return RESURFACE_SETTLED, label
+                return RESURFACE_PUT_AWAY, label
+            if int(item.get("read_rev") or 0) < int(item.get("revision") or 0):
+                return RESURFACE_PENDING, label
+            anchor = str(item.get("anchor_id") or "")
+            outcome = store.notify(
+                session_id,
+                title=str(item.get("title") or ""),
+                body_md=str(item.get("body_md") or ""),
+                priority=str(item.get("priority") or "normal"),
+                key=str(item.get("key") or ""),
+                anchor_id=anchor,
+                episode=f"{anchor}:resurfaced:{int(item.get('revision') or 0)}",
+            )
+            if outcome.action != "updated":
+                # A dismissal that landed between the read and the write
+                # (``absorbed``); the store kept the person's choice.
+                return RESURFACE_PUT_AWAY, label
+            if outcome.priority == "high":
+                _deliver_async(
+                    root,
+                    outcome,
+                    session_id=session_id,
+                    title=str(item.get("title") or ""),
+                    body=str(item.get("body_md") or ""),
+                )
+            return RESURFACED, label
+        return RESURFACE_UNKNOWN, ""
+    except Exception:  # noqa: BLE001 — a relay that cannot read the inbox resolves nothing
+        logger.debug("remote attention: resurface failed for %s", session_id, exc_info=True)
+        return RESURFACE_UNREADABLE, ""
+
+
+def _self_device_id(root: Path) -> str:
+    """This install's mesh id, or ``""``; never mints one."""
+    from local_operator.network import identity
+
+    try:
+        mine = identity.load(root)
+    except (OSError, ValueError):
+        return ""
+    return mine.device_id if mine is not None else ""
+
+
+def _is_active_peer(root: Path, device_id: str) -> bool:
+    """``device_id`` is an ACTIVE member of an ACTIVE (trusted) network here."""
+    from local_operator.network import store as net_store
+
+    for record in net_store.list_networks(root):
+        if record.trust != "active" or record.is_burned(device_id):
+            continue
+        if any(m.device_id == device_id for m in record.active_members()):
+            return True
+    return False
+
+
+def _is_mesh_node(root: Path) -> bool:
+    """This device is in a trusted network that has at least one OTHER active member.
+
+    Only then could the operator expect a notice on another device; a network
+    created here that nobody has joined yet has no "other devices" to mention.
+    """
+    from local_operator.network import store as net_store
+
+    for record in net_store.list_networks(root):
+        if record.trust != "active":
+            continue
+        if any(m.device_id != record.self_device_id for m in record.active_members()):
+            return True
+    return False
+
+
 def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str:
-    """The clause a peer-placed session's ``notify`` result adds, or ``""``.
+    """The clause a ``notify`` result adds on a mesh device, or ``""``.
 
     Model-facing English (a tool result, like the sentence it extends), so not
     catalogued. A bare "Notified" on the node read as if the operator had been
@@ -851,23 +1773,34 @@ def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str
     "Will be forwarded" is said ONLY for an origin recorded as collecting
     forwarded items (:func:`record_forwarding_origin`); any other origin — an
     older build, or one that has not read this device since updating — gets
-    "it stays on <this device>" (review round 1, m2). ``""`` for every session
-    not placed here by another device, and for a ``key`` this module never
-    forwards — an ordinary local session's result is unchanged byte for byte.
+    "it stays on <this device>" (review round 1, m2), and so does a session whose
+    stamp lacks the operator attestation (:func:`origin_is_operator_started`, the
+    owner's own forward filter — QA round 2, Q1). ``""`` for every session
+    on a device in no mesh, and for a ``key`` this module never forwards — a
+    single-device operator's result is unchanged byte for byte. A session on a
+    mesh node whose item goes nowhere else (started here, or an agent's child)
+    says so: "Notified" alone read as if the operator had been told (2026-11-15).
+    The decision is :func:`notice_forwarding`'s; this only words it.
     """
     try:
-        if key and key.startswith(NOT_FORWARDED_PREFIXES):
-            return ""
-        from local_operator.session.placement import read_stamp
-
-        stamp = read_stamp(Path(root), session_id)
-        if stamp is None or stamp.placement.mode != "peer":
-            return ""
-        origin = str((stamp.origin or {}).get("source_device") or "")
-        if not origin:
+        verdict, origin, via_operator = _notice_decision(Path(root), session_id, key)
+        if verdict == NOT_APPLICABLE:
             return ""
         here, there = _device_names(Path(root), origin)
-        if origin in forwarding_origins(Path(root)):
+        if verdict == LOCAL_ONLY:
+            return f" Shown on {here} only; it was not forwarded to your other devices."
+        if verdict == NOT_OPERATOR_STARTED:
+            # #4001's wording, byte for byte: the origin collects, so the
+            # reason the item stays is the missing operator attestation.
+            return (
+                f" Posted on {here}; it stays on {here}, because only notices from"
+                f" sessions the operator started on {there} are forwarded there, and"
+                " this one was moved, forked or placed here otherwise."
+            )
+        if verdict == FORWARDED and via_operator:
+            # A session started HERE, bound to the operator's verified device.
+            return f" Posted on {here}; it will be forwarded to {there}, the operator's device."
+        if verdict == FORWARDED:
             return (
                 f" Posted on {here}; it will be forwarded to {there}, where this session started."
             )

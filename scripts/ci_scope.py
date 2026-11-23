@@ -476,6 +476,24 @@ UNGATED_JOBS: dict[str, str] = {
     ),
 }
 
+#: COST gates: jobs a heavy job `needs:` that are NOT scope flags. Scope flags
+#: (`JOB_FLAGS`) are FAIL-OPEN: a heavy job runs unless `needs.changes.outputs.X
+#: != 'false'`, so a broken classifier costs money, never coverage. A cost gate
+#: is the opposite, an independent FAIL-CLOSED prerequisite (GH #4074: the same
+#: head's fast CI is known green before the ~380-minute full suite is paid for).
+#: Every heavy job must test BOTH `needs.<gate>.result == 'success'` and
+#: `needs.<gate>.outputs.ok == 'true'` in addition to `!cancelled()` and its
+#: scope flag; an ambiguous, dead or skipped gate means the heavy job does NOT
+#: run and the aggregate (which also `needs:` it) goes red. Anything not named
+#: here is still an unknown dependency and still rejected by the hygiene tests.
+COST_GATES: dict[str, str] = {
+    "precondition": (
+        "full-suite.yml: proves the head's fast CI succeeded (scripts/"
+        "fast_gate_check.py, fetched from the trusted gate_base tree) before any "
+        "heavy job is scheduled; always scheduled after `changes`, no scope flag"
+    ),
+}
+
 #: Dependency pairs that may use the PERMISSIVE clause
 #: (`needs.D.result == 'success' || needs.D.result == 'skipped'`) instead of the
 #: strict `needs.D.result == 'success'`. The invariant the test enforces (A4):

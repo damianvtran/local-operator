@@ -46,6 +46,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
 
     assert [guide.name for guide in guides] == [
         "agents",
+        "app-files",
         "browser",
         "classification",
         "code-requests",
@@ -55,6 +56,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "delivery",
         "extensions",
         "failover",
+        "google-vertex",
         "guardrails",
         "harness-import",
         "highlights",
@@ -78,6 +80,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "sound-generation",
         "system-tools",
         "team-bridge",
+        "team-bridge-integrations",
         "teams",
         "tunnel",
         "video-generation",
@@ -145,6 +148,7 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("what are the highlights under my answer and how do I turn them off", "highlights"),
         ("create a Radient personal tunnel with OpenCode routes and billing", "tunnel"),
         ("why is my usage blank", "qwencloud"),
+        ("my google vertex sign-in keeps expiring", "google-vertex"),
         (
             "turn on the smart agent hints and check which vendor served the call",
             "classification",
@@ -181,6 +185,16 @@ def test_guide_listing_never_contains_guide_body() -> None:
         # negative control, because a guide that matches everything routes nothing.
         ("never let me force-push main", "guardrails"),
         ("warn me before deleting data", "guardrails"),
+        # The app-files rows are phrased unlike the description (a row that
+        # repeats it proves only string overlap) and use the shapes this router
+        # can see: an app's own object vocabulary ("clips", "layers", "office
+        # XML"). The system prompt also points at the guide by name, so routing
+        # is the second route in, not the only one.
+        # `test_ordinary_file_and_project_turns_do_not_route_to_app_files` is
+        # their negative control.
+        ("add three clips to my video editor timeline", "app-files"),
+        ("build an image-editor document with two layers", "app-files"),
+        ("hand-write the slide deck's office XML", "app-files"),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
@@ -213,6 +227,37 @@ async def test_an_unrelated_task_does_not_route_to_guardrails(tmp_path: Path) ->
     selected = await index.select("summarise this spreadsheet into a table")
 
     assert "guardrails" not in {g.name for g in selected}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        "update the project status to active",
+        "create a new project for the website redesign",
+        "show my projects and their milestones",
+        "write a json file with these settings",
+    ],
+)
+async def test_ordinary_file_and_project_turns_do_not_route_to_app_files(
+    tmp_path: Path, query: str
+) -> None:
+    """The negative control for the app-files routing rows.
+
+    Lop *project* turns (status, milestones) are among the most frequent in
+    team sessions, and writing a plain data file is routine. An earlier
+    description naming "project" and "file format" routed all four of these
+    (PR #3857 review round 1), spending a listing line and inviting a needless
+    guide read on ordinary turns. The guide is for an application's native
+    format only, so none of these may surface it.
+    """
+    guides = discover_guides()
+    index = SkillIndex(cast(Any, guides), LocalEmbedder(), cache_dir=tmp_path / "cache")
+    await index.build()
+
+    selected = await index.select(query)
+
+    assert "app-files" not in {g.name for g in selected}
 
 
 def test_guardrails_guide_rule_example_is_loadable(tmp_path: Path) -> None:
@@ -516,6 +561,55 @@ def test_documented_cli_shapes_parse(argv: list[str]) -> None:
     build_cli_parser().parse_args(argv)
 
 
+def test_every_mcp_add_example_in_the_mcp_guide_parses_as_written() -> None:
+    """Agents run guide://mcp's ``mcp add`` examples verbatim, so each must parse.
+
+    ``--arg -y`` exited 2 (``argument --arg: expected one argument``): argparse
+    reads a value that starts with ``-`` as an option, so nothing was saved.
+    ``--arg=-y`` is the spelling that works (PR #4349 agent review round 1, M1).
+    Read from the shipped GUIDE rather than restated here, so a new example
+    with the same trap fails this test instead of an agent's run.
+    """
+    import shlex
+
+    import local_operator.guides as guides_package
+    from local_operator.cli import build_cli_parser
+
+    text = (Path(guides_package.__file__).parent / "mcp" / "GUIDE.md").read_text(encoding="utf-8")
+    commands: list[list[str]] = []
+    for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+        for line in block.replace("\\\n", " ").splitlines():
+            if line.strip().startswith("local-operator mcp add"):
+                commands.append(shlex.split(line, comments=True)[1:])
+    assert len(commands) >= 4, commands  # filesystem, example, linear, tavily
+    for argv in commands:
+        try:
+            build_cli_parser().parse_args(argv)
+        except SystemExit as exc:  # argparse's refusal, which hides the argv
+            raise AssertionError(f"guide://mcp example does not parse: {argv}") from exc
+
+
+def test_the_mcp_guide_names_every_variable_a_stdio_child_receives() -> None:
+    """guide://mcp's allowlist sentence is what a user reads to learn why a key
+    exported in their shell never reaches a server, so it must match the code
+    that builds the child env: ``get_default_environment() | CHILD_QUIET_ENV |
+    cfg.env`` (``mcp/manager.py``). It used to omit the quiet-output defaults,
+    so ``TERM`` read as inherited when the child gets ``dumb`` (PR #4349 agent
+    review round 1, N1). The SDK's list is per-platform; this pins the one the
+    test runs on, and the quiet set everywhere.
+    """
+    from mcp.client.stdio import DEFAULT_INHERITED_ENV_VARS
+
+    import local_operator.guides as guides_package
+    from local_operator.mcp.manager import CHILD_QUIET_ENV
+
+    text = (Path(guides_package.__file__).parent / "mcp" / "GUIDE.md").read_text(encoding="utf-8")
+    missing = [name for name in DEFAULT_INHERITED_ENV_VARS if f"`{name}`" not in text]
+    missing += [f"{k}={v}" for k, v in CHILD_QUIET_ENV.items() if f"`{k}={v}`" not in text]
+    assert missing == [], missing
+    assert "CHILD_QUIET_ENV" in text
+
+
 @pytest.mark.asyncio
 async def test_custom_instructions_task_routes_to_the_configuration_guide(
     tmp_path: Path,
@@ -691,6 +785,15 @@ def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() ->
     # tool half of that sentence).
     assert "`stop` ends an IDLE local session" in flat
     assert "There is no force option" in flat
+    # Mesh-node managers, refused a pinned tier, ran review as parallel
+    # sessions; the remote section must say review lanes are `task` subagents
+    # and name the tier fix (2026-11-14).
+    assert "with `task` subagents" in flat
+    assert "ONE host session per lane, never one per round or per reviewer" in flat
+    # The command as printed must run: a bare `definitions push` is refused
+    # (`peer_required`), review round 1 m1.
+    assert "run `lop network definitions push --peer <node>` (or `--all-peers`)" in flat
+    assert "unless the operator asks" in flat
 
     messaging = resolver("guide://peer-messaging")
     assert messaging is not None
@@ -1200,6 +1303,9 @@ def test_org_hub_guide_is_gated_on_the_radient_team_predicate(tmp_path) -> None:
         # rides the same predicate: a solo or signed-out session must have no
         # trace of it (operator constraint, Team Bridge discoverability).
         "team-bridge": "radient-team",
+        # Team Integrations provisioning is an organization admin feature on the
+        # Team plan (RFC §8.3, S-90): same predicate as the bridge guide.
+        "team-bridge-integrations": "radient-team",
     }
     for name in gated:
         assert name not in {g.name for g in guides_available(guides, tmp_path)}
@@ -1304,3 +1410,39 @@ def test_radient_vault_guide_is_gated_concise_and_keeps_local_first(monkeypatch,
     assert "session credential" in prose and "never shown to you" in prose
     assert "cannot create or upload" in prose
     assert len(body.splitlines()) <= 40
+
+
+def test_app_files_guide_states_the_native_shape_rules() -> None:
+    """A hand-written application file must be what the app's own operation
+    makes. Measured on a 20-task DeepSeek V4.1 Flash sample (2026-11-12): a
+    project file named a generic backend filter where the app has its own
+    (scored as no crop), layers loaded with file names were renamed against a
+    "don't rename" instruction, and source media was transcoded instead of
+    referenced. Each rule below is the general form of one of those misses."""
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://app-files")
+    assert body is not None
+    prose = " ".join(body.replace("**", "").split())
+
+    assert "Drive the app" in prose and "scripting, batch or CLI mode" in prose
+    assert "Use the app's identifiers and defaults." in prose
+    assert "make a tiny sample with the app's own action" in prose
+    assert "One app operation, one object." in prose
+    assert "A placeholder stays a placeholder" in prose
+    assert "Reference the original sources" in prose
+    assert "The user's negative constraints bind what you create." in prose
+    assert "Edit the named file in place" in prose
+    assert "Round-trip it through the app" in prose
+    assert "Check mechanical properties with a command" in prose
+    # The system prompt states these at their minimum to stay inside the
+    # start-context budget; the guide carries the elaboration the prompt
+    # dropped (irreversible-edit examples, every-element and "match B" checks,
+    # the two-safe-routes rule and its "unmet" consequence).
+    assert "back it up elsewhere first" in prose
+    assert "write a new file only when asked for a copy" in prose
+    assert "needs a check over all of them that counts the failures" in prose
+    assert "property diff against B (links, metadata, types)" in prose
+    assert "try two safe routes (never the irreversible action itself)" in prose
+    assert "still untested means unmet" in prose
+    # The guide is general harness guidance, not benchmark advice.
+    assert "grader" not in prose

@@ -14,13 +14,18 @@ import dataclasses
 import json
 import re
 from collections.abc import Iterator, Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.monitors import diff as monitor_diff
 from local_operator.monitors import state as monitor_state
-from local_operator.monitors.scheduler import CheckOutcome, MonitorScheduler
+from local_operator.monitors.scheduler import (
+    CheckOutcome,
+    MonitorScheduler,
+    fresh_counters,
+)
 from local_operator.monitors.settings import MonitorSettings
 from local_operator.monitors.spec import MonitorSpec
 from tests.unit.monitors.support import DRAIN_BACKSTOP_S, drain_checks, wait_set
@@ -171,6 +176,46 @@ def test_first_check_lands_in_the_first_check_window(harness: Harness) -> None:
     high.scheduler.dispose()
 
 
+@pytest.mark.parametrize("write_fails", [False, True])
+def test_load_writes_only_a_rearmed_readable_counter(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, write_fails: bool
+) -> None:
+    rows = {"m1": NOW - 1, "m2": NOW + 10_000, "m3": None, "m4": NOW - 1}
+    for monitor_id, due in rows.items():
+        counters = fresh_counters(monitor_id, due)
+        if monitor_id == "m3":
+            counters["disabled"] = True
+        monitor_state.write_counters(harness.config_dir, "sess", monitor_id, counters)
+    write_counters = monitor_state.write_counters
+    writes: list[str] = []
+
+    def record_write(
+        config_dir: Path, session_id: str, monitor_id: str, counters: Mapping[str, Any]
+    ) -> Path:
+        writes.append(monitor_id)
+        if write_fails:
+            raise OSError("counter store is unwritable")
+        return write_counters(config_dir, session_id, monitor_id, counters)
+
+    monkeypatch.setattr(monitor_state, "write_counters", record_write)
+    harness.scheduler.load(
+        [spec("m1"), spec("m2"), spec("m3"), spec("m4", until_at=NOW), spec("m5")]
+    )
+
+    assert writes == ["m1"]
+    assert [row["next_due_at"] for row in harness.scheduler.index_rows()] == [
+        NOW + 1_000,
+        rows["m2"],
+        None,
+        rows["m4"],
+        NOW + 1_000,
+    ]
+    assert harness.scheduler.next_monitor_due_at() == NOW + 1_000
+    assert harness.counters()["next_due_at"] == (rows["m1"] if write_fails else NOW + 1_000)
+    assert monitor_state.read_counters(harness.config_dir, "sess", "m5") is None
+    assert not harness.calls
+
+
 @pytest.mark.asyncio
 async def test_the_create_outcome_carries_the_first_check_instant(harness: Harness) -> None:
     """§4.5: the id and the instant ride the create receipt (F4)."""
@@ -226,6 +271,33 @@ async def test_a_quiet_tick_delivers_nothing_and_stays_off_the_index(harness: Ha
     assert harness.deliveries == []
     assert harness.counters()["checks"] == 2
     assert harness.changes == changes_before  # no index rewrite on a quiet tick
+
+
+@pytest.mark.asyncio
+async def test_status_advances_after_a_real_quiet_tick(harness: Harness, monkeypatch) -> None:
+    from local_operator.cli import _monitor_rows
+    from local_operator.monitors.store import write_entry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(harness.config_dir))
+    harness.scheduler.load([spec()])
+    harness.results.extend([{"text": "A", "error": None}, {"text": "A", "error": None}])
+    await harness.pump_ripen()
+    index = write_entry(
+        harness.config_dir, "sess", cwd="/w", monitors=harness.scheduler.index_rows()
+    )
+    assert index is not None
+    original = index.read_bytes()
+    changes_before = harness.changes
+
+    await harness.pump_ripen()
+
+    counters = harness.counters()
+    assert not harness.deliveries and harness.changes == changes_before
+    assert index.read_bytes() == original
+    (row,) = _monitor_rows()
+    assert row["checks"] == counters["checks"] == 2
+    assert row["last_check_at"] == counters["last_check_at"] == harness.now_ms
+    assert row["next_due_at"] == counters["next_due_at"] > harness.now_ms
 
 
 @pytest.mark.asyncio

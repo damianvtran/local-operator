@@ -2664,6 +2664,10 @@ def test_summarize_args_sessions_rows_are_the_shared_decision() -> None:
     )
     assert _summarize_args("sessions", {"op": "list"}) == "list"
     assert _summarize_args("sessions", {"op": "stop"}) == "stop · ?"
+    # R1-6 (session park): park names its target; no address is the self-park.
+    assert _summarize_args("sessions", {"op": "park", "pid": 48213}) == "park · pid 48213"
+    assert _summarize_args("sessions", {"op": "park", "target": "crew"}) == "park · crew"
+    assert _summarize_args("sessions", {"op": "park"}) == "park · self"
     assert _summarize_args("sessions", {"op": "frobnicate"}) == "frobnicate"
     # R2 (round 1): a degenerate call stands on the tool name, exactly as the
     # TUI's row does — `sessions_row_summary` returns "" when even the op is
@@ -4804,6 +4808,83 @@ def test_a_supplement_beat_folds_keep_newest_per_anchor() -> None:
     assert held["a1"]["version"] == 2
     assert held["a1"]["state"] == "running" and held["a1"]["stage"] == "generating"
     assert held["a2"]["state"] == "decided"
+
+
+def _journal_row(anchor: str, version: int, **extra: Any) -> dict[str, Any]:
+    return {
+        "anchor": anchor,
+        "job": f"job-{anchor}",
+        "version": version,
+        "state": "done",
+        "files": [{"path": "out/shot.png", "name": "shot.png", "kind": "image"}],
+        **extra,
+    }
+
+
+def _fold_with_tail(*ids: str) -> ProjectionFold:
+    from local_operator.mobile.types import TranscriptEntry
+
+    fold = make_fold()
+    fold.projection.transcript = [TranscriptEntry(id=i, kind="assistant", text="a") for i in ids]
+    return fold
+
+
+def test_seeded_supplement_rows_fill_the_map_for_anchors_in_the_tail() -> None:
+    """A resumed owner never saw the turn's beats; the journal's rows stand in for them.
+
+    Only anchors that are rows of the tail are taken: a row for an old turn has no
+    answer row on the phone and would ride every frame for nothing.
+    """
+    fold = _fold_with_tail("a1", "a2")
+    version = fold.projection.version
+    fold.fold_supplement_rows(
+        [_journal_row("a1", 2), _journal_row("a2", 1), _journal_row("gone", 4)]
+    )
+    held = fold.projection.supplements
+    assert set(held) == {"a1", "a2"}, "the anchor outside the tail is skipped"
+    assert held["a1"]["version"] == 2 and held["a1"]["files"][0]["name"] == "shot.png"
+    assert fold.projection.version > version
+    assert fold.projection.to_json()["supplements"]["a1"]["job"] == "job-a1"
+
+
+def test_a_seeded_row_never_replaces_a_live_beat_at_an_equal_or_higher_version() -> None:
+    """Live beat wins ties; a strictly newer journal row is the only thing that replaces it."""
+    from local_operator.harness.types import SupplementProgressEvent
+
+    fold = _fold_with_tail("a1", "a2")
+    fold.fold_event(
+        SupplementProgressEvent(
+            anchor="a1", job="live", version=3, state="running", stage="generating"
+        )
+    )
+    fold.fold_event(SupplementProgressEvent(anchor="a2", job="live", version=1, state="queued"))
+    fold.fold_supplement_rows(
+        [
+            _journal_row("a1", 3),  # tie: the live beat stays
+            _journal_row("a2", 2),  # strictly newer: the journal row replaces the beat
+        ]
+    )
+    held = fold.projection.supplements
+    assert held["a1"]["job"] == "live" and held["a1"]["stage"] == "generating"
+    assert held["a2"]["job"] == "job-a2" and held["a2"]["version"] == 2
+
+    older = _fold_with_tail("a1")
+    older.fold_event(SupplementProgressEvent(anchor="a1", job="live", version=5, state="queued"))
+    before = older.projection.version
+    older.fold_supplement_rows([_journal_row("a1", 4)])
+    assert older.projection.supplements["a1"]["job"] == "live"
+    assert older.projection.version == before, "a seed that changes nothing must not bump"
+
+
+def test_seeding_no_rows_keeps_the_projection_wire_byte_identical() -> None:
+    fold = _fold_with_tail("a1")
+    before = json.dumps(fold.projection.to_json(), sort_keys=True)
+    version = fold.projection.version
+    fold.fold_supplement_rows([])
+    fold.fold_supplement_rows([_journal_row("not-in-tail", 1)])
+    assert json.dumps(fold.projection.to_json(), sort_keys=True) == before
+    assert fold.projection.version == version
+    assert "supplements" not in fold.projection.to_json()
 
 
 def test_the_projection_wire_carries_the_supplement_map_loosely() -> None:

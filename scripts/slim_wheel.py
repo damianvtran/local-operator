@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Strip ``#`` comments from every module of a built pure wheel, in place, verified.
+"""Strip ``#`` comments from every module of a built pure wheel, in place, verified,
+and drop the phone UI's web build inputs when the wheel already carries the built bundle.
 
-WHY THIS EXISTS. PyPI caps a project at 10 GB, and local-operator ships several
+WHY THIS EXISTS. PyPI caps a project's storage (10 GB then; 30 GiB since 2026-11-04,
+pypi/support#12882), and local-operator ships several
 releases a day. Measured on the published 0.90.17, one release cost ~59 MB: the pure
 wheel 19.98 MB, the ``macosx_11_0_universal2`` wheel 20.14 MB and the sdist 18.85 MB.
 The cap was reached and v0.90.18/v0.90.19 failed with ``400 Project size too large``.
@@ -43,7 +45,30 @@ contents and RECORD's own row stays empty. The new wheel is written to a tempora
 in the same directory and moved over the original, so an interrupted run leaves the
 original wheel, never a truncated one.
 
-IDEMPOTENT: a second run finds only kept comments and rewrites identical bytes.
+THE PHONE UI'S BUILD INPUTS ARE DROPPED WHEN THE BUILT BUNDLE IS PRESENT. A release
+wheel carries ``local_operator/mobile/web/dist/`` (``publish.yml`` builds it before
+``python -m build`` and fails a wheel without ``dist/index.html``), and that ``dist/`` is
+the only part of ``mobile/web/`` the daemon serves (``mobile/daemon.py``). The rest of
+``mobile/web/`` — ``src/**``, the generated i18n ``.gen.ts``, ``pnpm-lock.yaml``,
+``scripts/``, ``public/``, the vite/tsconfig/package manifests — is ~1.0 MB compressed
+(measured on 0.106.2, 2026-11-16) of inputs only ``mobile/install.py`` reads, and only
+to REBUILD a missing or rejected ``dist/``. Against the per-release budget that PyPI's
+project cap forces (``scripts/check_dist_size.py``) that is dead weight, so it goes:
+
+* only when ``dist/index.html`` AND at least one ``dist/assets/`` file are in the wheel.
+  An index with no assets is a broken build; stripping the sources then would leave an
+  install with a UI it cannot serve and nothing to rebuild it from, so the run refuses
+  (:class:`SlimError`) instead.
+* a wheel WITHOUT ``dist/`` (a source-built wheel, a CI shape that skipped the bundle)
+  keeps its sources untouched, so ``lop mobile install`` can still build the bundle on
+  a host with Node — that repair path is unchanged.
+* ``local_operator/mobile/static/`` is not under ``web/`` and is never touched.
+* an installed wheel without sources reads as "built" in ``install._bundle_state``, and
+  ``install._verify_bundle`` skips when ``scripts/check-bundle.mjs`` is absent, so a
+  shipped ``dist/`` is never discarded with nothing to rebuild it from.
+
+IDEMPOTENT: a second run finds only kept comments and rewrites identical bytes, and
+finds no web inputs left to drop.
 
 Usage::
 
@@ -67,12 +92,22 @@ import tokenize
 import zipfile
 from pathlib import Path
 
+# Spend build CPU, not the fixed PyPI storage budget: level 9 changes only ZIP
+# framing, never runtime bytes/docstrings. Pass it on each ZipInfo write as well;
+# those entries do not inherit ZipFile's default compression level.
+_COMPRESSION_LEVEL = 9
+
 #: Comments a tool other than the compiler reads from installed code. Matched against
 #: the comment token's text, so ``#noqa`` and ``#  type: ignore`` both count.
 _PRAGMA = re.compile(r"#\s*(type:|noqa|pragma|pyright:|fmt:)")
 
 #: PEP 263's own regular expression, applied only on lines 1-2 as the PEP specifies.
 _CODING = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*[-\w.]+")
+
+
+#: The phone UI's web tree inside the wheel, and the built bundle the daemon serves.
+_WEB_PREFIX = "local_operator/mobile/web/"
+_DIST_PREFIX = _WEB_PREFIX + "dist/"
 
 
 class SlimError(Exception):
@@ -135,6 +170,30 @@ def slim_module(name: str, data: bytes) -> bytes:
     return out
 
 
+def web_inputs_to_drop(infos: list[zipfile.ZipInfo]) -> list[zipfile.ZipInfo]:
+    """The ``mobile/web/`` build inputs a wheel can shed, or ``[]``; raises if unsafe.
+
+    Empty when the wheel has no built bundle: those sources are then the only way an
+    install can produce one (see the module docstring).
+    """
+    files = [i for i in infos if not i.is_dir()]
+    names = {i.filename for i in files}
+    if _DIST_PREFIX + "index.html" not in names:
+        return []
+    if not any(name.startswith(_DIST_PREFIX + "assets/") for name in names):
+        # Fail closed: an index.html without its JS/CSS renders nothing, and with the
+        # sources gone the install could not rebuild it.
+        raise SlimError(
+            f"{_DIST_PREFIX}index.html is present but {_DIST_PREFIX}assets/ is empty; "
+            "refusing to drop the web sources a broken bundle would need to rebuild"
+        )
+    return [
+        i
+        for i in files
+        if i.filename.startswith(_WEB_PREFIX) and not i.filename.startswith(_DIST_PREFIX)
+    ]
+
+
 def _record_row(path: str, data: bytes) -> tuple[str, str, str]:
     # Same row shape as packaging/macos/make_macos_wheel.py: urlsafe base64 sha256
     # without padding, then the byte size.
@@ -158,15 +217,22 @@ def slim_wheel(wheel: Path) -> tuple[int, int]:
         )
         if record_name is None:
             raise SlimError(f"{wheel.name} has no .dist-info/RECORD")
+        dropped = {i.filename for i in web_inputs_to_drop(infos)}
+        dropped_bytes = sum(i.compress_size for i in infos if i.filename in dropped)
         written: list[tuple[zipfile.ZipInfo, bytes]] = []
         for info in infos:
-            if info.filename == record_name or info.is_dir():
+            if info.filename == record_name or info.is_dir() or info.filename in dropped:
                 continue
             data = src.read(info)
             if info.filename.endswith(".py"):
                 data = slim_module(info.filename, data)
             written.append((info, data))
 
+    if dropped:
+        print(
+            f"{wheel.name}: dropped {len(dropped)} phone web build input(s) "
+            f"({dropped_bytes:,} compressed bytes); the built mobile/web/dist/ is kept"
+        )
     record = "".join(",".join(_record_row(info.filename, data)) + "\n" for info, data in written)
     record += f"{record_name},,\n"
 
@@ -179,13 +245,13 @@ def slim_wheel(wheel: Path) -> tuple[int, int]:
                 out = zipfile.ZipInfo(info.filename, date_time=info.date_time)
                 out.external_attr = info.external_attr
                 out.compress_type = zipfile.ZIP_DEFLATED
-                dst.writestr(out, data)
+                dst.writestr(out, data, compresslevel=_COMPRESSION_LEVEL)
             # RECORD last, as wheel builders write it, with the source entry's metadata.
             source_record = next(i for i in infos if i.filename == record_name)
             out = zipfile.ZipInfo(record_name, date_time=source_record.date_time)
             out.external_attr = source_record.external_attr
             out.compress_type = zipfile.ZIP_DEFLATED
-            dst.writestr(out, record)
+            dst.writestr(out, record, compresslevel=_COMPRESSION_LEVEL)
         # mkstemp creates 0600 and os.replace keeps the temp file's mode, so without
         # this a slimmed wheel would be owner-only (measured: -rw------- after vs
         # -rw-r--r-- before). Keep the source wheel's permission bits.
@@ -198,7 +264,10 @@ def slim_wheel(wheel: Path) -> tuple[int, int]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Strip comments from a built py3-none-any wheel, in place, verified"
+        description=(
+            "Strip comments from a built py3-none-any wheel and drop the phone UI's web "
+            "build inputs when its built bundle is present, in place, verified"
+        )
     )
     parser.add_argument("wheels", nargs="+", type=Path, help="py3-none-any wheel(s)")
     args = parser.parse_args(argv)

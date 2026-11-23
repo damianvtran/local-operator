@@ -43,6 +43,12 @@ this project deliberately does not ship. If the extension truly cannot be set
 up and no cmux panel exists, say a rendered screenshot is unavailable and why —
 do not build a second browser stack.
 
+**One narrow exception: a headless mesh node** (no desktop, no user browser, no
+screen) may carry the *node-managed* browser that `lop browser setup --node`
+installs, with the operator's authorisation — see "Headless nodes: the
+node-managed browser" below. It is the only sanctioned browser on a node; the
+"never" above still applies to everything else there.
+
 ## Focus safety — never steal the user's focus
 
 The agent often browses in the background while the user works in another
@@ -355,6 +361,131 @@ Re-run `lop browser status`; you want `extension connected: yes` and
 `paired: yes`. The `browser` tool now appears — use it. From here on the user
 does nothing: pairing persists across restarts, so future sessions just work.
 
+## Headless nodes: the node-managed browser
+
+**Why a node differs.** The rule above protects a USER's machine: their
+browser, their logins, their screen. A headless mesh node has none of those —
+no desktop, no user browser, no screen, no logins to protect — so sessions
+offloaded there simply had no `browser` tool, and visual, end-to-end or
+screenshot work could not run there. The node-managed browser fills that gap
+without weakening the rule: it is ONE supervised, pinned browser, installed by
+a reviewed command, never a per-task download.
+
+**The command** (on the node; it needs the operator's authorisation, recorded
+verbatim in the install record):
+
+```sh
+lop browser setup --node --dry-run                     # every step, nothing changed
+lop browser setup --node --authorised-by '<who, when>' # install (idempotent)
+lop browser setup --node --repair --authorised-by '<who, when>'  # re-apply what drifted
+lop browser setup --node --upgrade --authorised-by '<who, when>' # the only path that moves the pin
+lop browser uninstall --node --authorised-by '<who, when>'
+```
+
+**Getting the authorisation.** It is the operator's to give, never yours to
+write. Either of these counts:
+
+- an explicit instruction naming THIS node; or
+- a standing operator instruction that agents on the mesh's nodes may install
+  the node-managed browser when visual or end-to-end testing needs one — and
+  your task genuinely needs a browser for that.
+
+Quote the instruction and its date in `--authorised-by`, e.g.
+`--authorised-by '<operator>, 2026-11-13, via ask: "yes, set up the browser on
+<node>"'` or `--authorised-by '<operator>, standing instruction of <date>:
+"<their words>"'`. Without either, ask them (`ask`, or `hub` to your delegator
+when no interface is attached), naming the node and what changes: sudo,
+Google's Chrome rpm and repository, fonts, a user unit and a Chrome policy
+file. A standing instruction never applies on a user's own machine (setup
+refuses there anyway), and it covers the install only: per-site approvals stay
+the operator's.
+
+**How long it takes.** A fresh install runs for several minutes (a ~110 MB
+download, then bounded waits of up to 120 s each for the extension to load
+and pair). Run it with a timeout of at least 900 s (`bash` with
+`timeout: 900`) or in the background (`background: true`); each step's row
+prints as it completes (`--json`: one final document on stdout, progress lines
+on stderr), so a cut-off run still shows what landed. The install record is
+updated after every step that lands, so after a cut-off run either re-run
+setup to finish or `uninstall --node` to back out. A re-run on a provisioned
+node takes seconds.
+
+**Why the timeout matters.** Ctrl-C, a hangup or SIGTERM unwind cleanly: setup
+takes the pairing code back out of Chrome's policy on the way out. lop's own
+`bash` tool does not send those — when a command times out, is aborted or a
+background job is cancelled, it kills the whole process group outright
+(SIGKILL), which no cleanup survives. A run killed that way mid-pairing leaves
+the pairing code in the policy until the next setup run or until the code
+expires. The 900 s timeout (or `background: true`) is what prevents that.
+
+Re-running on a provisioned node reports every step "already in place" and
+changes nothing. Privileged steps run through `sudo -n` (rows tagged `(root)`);
+when sudo would prompt, setup refuses before changing anything and names the
+steps that need root, and `--dry-run` already reports them as `would fail`. It
+also refuses on a user's machine (the desktop app's discovery record or a
+graphical session), off Linux x86_64, on a non-dnf/rpm distribution, and on a
+device that is not in a mesh network. `uninstall --node` runs the same host
+checks and removes only what the install record says setup installed; it keeps
+the extension signing key, Google's key, the fonts, the bridge daemon and the
+record.
+
+**What it installs.** Google Chrome from Google's signed rpm repository (key
+fingerprint checked before import, `rpm -K` on the downloaded package, sha256
+recorded), pinned with `dnf versionlock`; fonts for ordinary pages; the bridge
+daemon (`lop browser install`); the Local Operator extension, packed to a CRX
+with the node's own persistent key (so its id never changes) and
+force-installed by Chrome policy; and a user unit running Chrome
+`--headless=new` under `MemoryMax=2G`, sandbox on, **no remote-debugging port**,
+talking only to the daemon on 127.0.0.1. The extension comes from the newest
+GitHub Release that carries it (checked against the release asset's sha256
+digest), or from `--extension-dir` for a built tree. Everything lands in
+`<config_dir>/browser/node-host.json`.
+
+**Pairing without a popup.** Nobody can type a code into a headless Chrome, so
+setup mints one through the daemon's own route (the one `lop browser pair`
+uses) and delivers it through Chrome managed policy, readable only by this
+extension; the extension submits it exactly as the popup would, and setup
+removes it from the policy the moment the daemon reports `paired: yes`. The
+daemon still checks the code — no extension id is trusted automatically.
+
+**What it does not change.**
+
+- **Per-site approvals stay default-deny** and are the operator's decision,
+  once per site, with no pre-approved loopback. Nobody can click a headless
+  Chrome's popup, so on a node the operator decides on **their own device**
+  and signs the answer with their operator key; the node's extension checks
+  that signature itself before it allows anything — see "Per-site
+  permissions", "On a headless node". Setup copies the operator's public key
+  from the node's root-owned operator anchor
+  (`/etc/local-operator/operators/<uid>.json`) into the extension's managed
+  policy; re-run `lop browser setup --node --repair --authorised-by '<who,
+  when>'` after that anchor changes — or after the operator key file was
+  copied onto (or removed from) the node: setup reads that state only when it
+  runs, and `lop network ready` warns while the node holds the key. Never work
+  around a refusal.
+- **Node-side boundaries are advisory where sudo is passwordless.** On a node
+  whose account has NOPASSWD sudo, the policy file's root ownership and the
+  unit's limits are audited, not enforced against that account: anything
+  running as it could rewrite them. They guard against mistakes, not against
+  the account itself.
+- **Nobody signs in by hand there.** The node's Chrome has no user cookies and
+  no one at its screen; for a login, type credentials with `secret_ref` only.
+- **Fidelity is a server's, not a designer's laptop**: fonts are Linux fonts,
+  there is no GPU, and the window is headless. Fine for E2E flows and
+  regressions; say so when a pixel-exact comparison matters.
+- **Memory is capped.** Chrome's unit is capped at 2 GB and carries a raised
+  OOM score, so under pressure Chrome is reclaimed before the rest of the node;
+  a tab that dies that way reports `tab_closed` — re-open it rather than
+  retrying the action.
+- **A session started before setup never gets the tool**: the tool list is
+  fixed when a session starts. Start a new session after setup.
+
+**Checking from anywhere:** `lop network ready` carries a `browser` row per
+peer — `ok` (Chrome, extension, paired), `warn` with the setup remedy when it
+is not installed, `warn` with the `--repair` remedy when it is installed but
+unusable, `n/a` where a user's own browser host serves the device. The row
+never holds the onboarding verdict.
+
 ## What to ask the user for
 
 Only the things the browser genuinely requires a human for. Ask concisely, and
@@ -432,15 +563,131 @@ independently (Settings → Allowed sites). A separate **Dangerously allow all
 websites** switch in Settings skips the site prompt entirely; it requires an
 explicit confirmation dialog and is off by default.
 
+**Desktop app: approving opens the page.** When the app's responses carry
+`opens_on_approval` / `opened_tab`, Allow opens the requested URL in a tab of
+the app's Browser for the operator. If the site needs a sign-in, ask ONCE:
+approve, sign in on the page that opens in the app's Browser, then reply. Do
+not `open` before they reply when the page may need their sign-in or input:
+`open` hands that tab to you. After their reply, a plain `open url=<url>`
+normally continues in that tab; if the site ended on another origin you get a
+new tab, and if you hold a tab `open` navigates yours (`close` it first) — both
+still signed in via the shared session. `opened_tab` on a pending answer or an
+`origin_not_allowed` means the earlier page is still open: they approve again,
+no new sign-in.
+
+### On a headless node: the operator decides on their device
+
+A node's Chrome has no screen, so the popup steps above do not apply there.
+The flow keeps the same three calls; only who answers, and where, changes:
+
+1. `open` fails with `origin_not_allowed`, as above.
+2. `request_access` raises a **card for the operator** — a queued ask whose
+   text the harness writes from the origin ("Allow <origin> on <node>?",
+   Deny / Approve). The card IS the notification: do not write your own ask
+   or message for it, and do not ask again for the same site — a second
+   `request_access` for a pending origin says it is already asked. The card
+   reaches the operator's own device when this session was started from that
+   device. A session started directly on the node reaches it too when the
+   node has verified which linked device is the operator's: the operator's
+   Mac presents an approval they signed that names THIS node — the SSH
+   onboarding card that admitted it, or a credential share/inheritance card
+   whose recipient is this node — and the node checks it against its installed
+   operator anchor. Without one (a node joined by invite that no credential
+   card names, an older Mac, a node re-anchored to a new key), the card shows
+   only on the node, where nobody can sign — the `notify` result says "Shown
+   on <node> only" in that case; tell the operator. What restores forwarding
+   for such a node: the operator signs a credential share or inheritance card
+   for it, or removes it (`lop network member rm <network> <device>`) and
+   onboards it afresh through a signed card (`lop network approvals request
+   --host <host> …`). Re-filing an onboarding for a node that is still a
+   member does not bind it. A session another agent spawned on the node sends
+   the operator ONLY its site cards (never its other asks or `notify` items),
+   and only over that same verified binding, since its parent agent cannot
+   sign one. On a node whose user has passwordless sudo this
+   binding is advisory, as site approvals are: root there could replace the
+   anchor.
+3. `await_access` (each call ≤240 s; the request lives ~10 minutes). There is
+   no popup on a node: the card is on the operator's device. Do other work
+   between calls rather than sitting on it. `allowed` means the operator
+   approved **this exact origin** (scheme, host, port) — the only scope a node
+   grants. `denied` is final, and it sticks: the node remembers a signed Deny,
+   and a later `request_access` for that origin answers "the operator denied
+   this site" without raising a card. Do not ask again unless they tell you to.
+4. If `await_access` reports no live request (the card expired unanswered),
+   you may re-raise it with `request_access` one time. If that card also
+   expires, tell the operator in chat which site you need, and stop using it.
+   The tool counts this from the session's own cards: once two cards for an
+   origin have expired unanswered, `request_access` raises no third and says
+   the operator hasn't answered twice. If the operator replies in chat asking
+   for it, you may raise one new card (plus one re-raise): only cards that
+   lapsed after their last chat message count. `cancel_access` withdraws the
+   request and its card together (a withdrawn card does not count as
+   unanswered).
+
+Removing a decision: an approval lasts until someone runs `lop browser sites
+--revoke <origin>` **on the node** (`lop browser sites` lists what that
+browser allows and which sites the operator denied). Revoking a denial lets an
+agent ask about the site again. Both only ever reduce what is allowed, so they
+need no signature. **Lifting a denial is the operator's decision, never
+yours:** run `lop browser sites --revoke <origin>` only when the operator tells
+you to (quote them), then `request_access`; never on your own initiative.
+`--revoke` removes one exact origin; broad grants and the extension's
+all-sites switch are changed only in the extension's Settings page, which a
+node has no screen for.
+
+What can go wrong, and what to say:
+
+- `no_approver` from `request_access` — the node's browser has no operator key
+  to verify against (setup ran without a usable anchor), or this machine
+  holds the operator key's private half (then a signature here would not show
+  a person decided). Do not retry; tell the operator, and carry on without the
+  site. The fix is theirs: `lop browser setup --node --repair --authorised-by
+  '<who, when>'` on the node re-derives the browser's anchor from the installed
+  operator anchor (`/etc/local-operator/operators/<uid>.json`); if the node
+  holds the operator key file, remove it from the node first.
+- An answer from the node's own terminal, or from a paired phone, is refused
+  (`unsigned_decision`): only an answer signed with the operator key itself
+  decides. Approving from Local Operator (the app or `lop`) on their own
+  computer is the path, and the card says so.
+- An operator computer on a build from before signed site approvals cannot
+  answer at all: the node gives a `decide` challenge for a site card only to a
+  client that says it checked the card first (`site_card_verified`), and an
+  old build — or a phone — is told to answer from an up-to-date Local Operator
+  on the operator's computer. That marker is unsigned: it keeps honest old
+  clients from signing a card they never checked; it is not a defence against
+  someone who controls the operator's signing client.
+- The operator's computer refuses to sign a card it cannot rebuild
+  (`site_card_mismatch`): its words or buttons do not match the site its id
+  binds — tampering, or the two machines run different releases. Nothing was
+  approved; if they say both are up to date, raise it as a security problem.
+- The request expired before the answer reached the browser: you learn it from
+  `await_access` reporting no live request — follow step 4.
+
+What is enforced where: the node's browser approves a site only for a
+signature from the operator key over that one request (its entry, origin and
+node), so a signature cannot be forged here or moved to another site. The
+operator's computer, before it signs, rebuilds the card from the site it
+binds — every word, button, description and default — and refuses one that
+differs, or that names the machine differently from how its own mesh knows
+it, so what the operator reads is what the signature approves. Older operator
+builds that lack that check are refused a challenge (above), so they cannot
+sign a node's card. And on a
+node whose user can run `sudo` without a password the whole boundary is
+advisory: whoever holds the node can rewrite the root-owned policy (sudo logs
+it). Never do that, never write to a session's ask log, and never try to
+answer your own card.
+
 Other rules:
 
 - `denied` is final for the task at hand: **do not retry or re-request the
-  same origin** unless the user says they've changed their mind.
+  same origin** unless the user says they've changed their mind (on a node,
+  that is also when you run `--revoke`, above).
 - A redirect INTO a new origin mid-navigation still prompts synchronously at
   that hop (a running command cannot fail early); if a navigation returns
   `origin_denied` after a redirect, explain which hop needed approval.
 - If you know you will visit several sites, `request_access` them and tell
-  the user up front in ONE message so they can approve in a batch.
+  the user up front in ONE message so they can approve in a batch. On a node
+  the cards are the batch: skip the message.
 - Subresources are not gated (this is a navigation gate, not a network filter).
 - `http`/`https` only; the extension refuses `chrome://`, `file://`, etc.
 

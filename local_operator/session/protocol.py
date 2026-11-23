@@ -41,7 +41,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # The annotation is all that is needed — ``from __future__ import
     # annotations`` above makes every annotation in this file a string, and a
     # Protocol member's type is never evaluated at runtime.
-    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+        FrontendUpdate,
+    )
 
     # Same shape, same reason: ``mark_goal_done`` returns the settled entry, and
     # naming the real type keeps the caller's ``entry`` from degrading to ``Any``
@@ -758,7 +762,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 154 public members and a POSITIVE
+    than stylistic. This protocol carries 158 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -848,7 +852,19 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     through it, so a facade without them could not revert a save at all, 154
     once the Team Bridge approval card needed ``bridge_latched`` and
     ``bridge_taint_latch`` declared rather than duck-probed — a rename would
-    otherwise have silently defaulted the latch read), so
+    otherwise have silently defaulted the latch read, 156 once the desktop
+    bridge needed ``frontend_state_reference`` and ``subscribe_frontend_updates``
+    — ``serve`` builds a large session's cold snapshot from the canonical
+    reference on a worker and relays updates without the joining clone; serve
+    still reads them through ``getattr``, so a rename there degrades silently to
+    the slow on-loop path, and what catches it is the census test in
+    ``test_viewer_protocol.py``, which reads those ``getattr`` literals and fails
+    on a probe of an undeclared name — not the declaration alone), 157 once
+    the desktop answer route needed ``ask_consent_bearing`` — it reads, through
+    the same ``bridge.remote`` binding as ``ask_respond``, whether the answer
+    just sent carried operator proof, and only the facade sends it), 158 once
+    the same route needed ``bridge_decide_signature_free`` — whether a Team
+    Bridge card's decision would be signed, i.e. a Touch ID sheet), so
     recompute it
     rather
     than adjusting it by the size of your own change.
@@ -1426,8 +1442,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
-    async def bind_runtime(self) -> None:
+    async def bind_runtime(self, *, deadline: float | None = None) -> None:
         """Bind this viewer before an explicitly requested runtime operation.
+
+        ``deadline`` is the caller's absolute monotonic bound. Omission keeps
+        the short foreground envelope; the pilot supplies its existing budget.
 
         Declared because the desktop ROUTES call it as a HARD access on every
         path that mutates runtime state (``desktop_lifecycle.py`` /mcp,
@@ -1535,6 +1554,25 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Declared here because ``server/routes/desktop_sessions.py`` reaches it
         through a duck-typed ``bridge.remote`` binding, where a rename would be
         a 500 on the phone portal rather than a pyright error.
+        """
+        ...
+
+    def ask_consent_bearing(self) -> bool:
+        """Whether the last ask answer this facade sent carried operator proof.
+
+        Declared because the desktop answer route reads it through the same
+        duck-typed ``bridge.remote`` binding as :meth:`ask_respond`; viewer-only
+        since only the facade sends the answer frame it reports on.
+        """
+        ...
+
+    async def bridge_decide_signature_free(self) -> bool:
+        """Whether this facade's ``bridge_decide`` would reach the runtime unsigned.
+
+        Declared because the desktop answer route probes it through the same
+        duck-typed ``bridge.remote`` binding (decision a-856f, PR #4208 S-1: a
+        Team Bridge card that would be signed, i.e. Touch ID, is decided through
+        the bearer path instead). Viewer-only: an in-process owner never signs.
         """
         ...
 
@@ -2084,6 +2122,33 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Only the argument every session can honour is declared. The owner
         version also accepts ``display_window`` (it can capture a signed page
         of its own transcript); a host that needs that holds the owner type.
+        """
+        ...
+
+    # The desktop bridge's clone-free pair (PR #4012). ``serve`` probes both by
+    # ``getattr`` on the remote it bridges (``utils/desktop_sessions.py``) so
+    # the cold snapshot is built from the canonical REFERENCE on a worker thread
+    # and the bridge relays updates without the joining sync's whole-state
+    # clone on the serving loop. Viewer-only by construction: only a facade
+    # mirrors an owner's store across the socket and is bridged to a desktop
+    # client this way; an owner ``Session`` is served by its runtime instead.
+
+    def frontend_state_reference(self) -> tuple[FrontendStateStore, FrontendSessionState]:
+        """The store and its canonical state object, WITHOUT the clone.
+
+        The reference is shared, not copied: read it only where the store's
+        ``state_reference`` contract allows (a worker that never mutates it).
+        Raises like ``frontend_state`` when the store has not synchronized.
+        """
+        ...
+
+    def subscribe_frontend_updates(
+        self, handler: Callable[[FrontendUpdate], None]
+    ) -> Callable[[], None]:
+        """``subscribe_frontend`` without the joining snapshot; returns the unsubscribe.
+
+        For a subscriber that paints from its own snapshot and only relays
+        updates, so no whole-state clone is built on the serving loop for it.
         """
         ...
 

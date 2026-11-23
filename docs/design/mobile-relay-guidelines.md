@@ -29,6 +29,29 @@ static replay, an old screenshot or an intended interaction as current live proo
   quieter meta role; monospace is for code and compact numeric/technical facts.
   Keep contrast at the existing checker floors (normally 4.5:1 text, 3:1 meaningful
   UI graphics). Do not solve density by shrinking primary text or touch controls.
+- **The person's own messages carry an edge.** The user bubble, the steer row and the
+  parent bubble take `border border-control`, the desktop's own choice
+  (`UserRow` in `local-operator-ui`). The agent side has no bubble, and the `surface`
+  ground is only **1.07:1** off `canvas` in both Local Operator themes, so the edge is
+  the whole difference between the speakers. `border-hairline` is 1.25:1 light /
+  1.41:1 dark and does not do this job; `border-control` is 3.51:1 / 4.47:1 against
+  `canvas`. This is the structural-boundary case, not a redundant panel outline: tool
+  rows, notices and peer cards stay unbordered so the edge keeps meaning "the human
+  said this".
+- **A condensed turn folds a VERY long message of the person's, with a control.**
+  Inside a condensed turn a message of 8 or more wrapped lines (`MESSAGE_FOLD_MIN_LINES`,
+  measured at the reader's width) keeps its whole text in the DOM and shows three
+  lines; a shorter message shows in full with no control, so the fold does not
+  appear all the time. The control is icon-only: a chevron (down to open, up to
+  close; never mirrored in RTL) on a faint rounded `sunken` chip about 40 x 24 with
+  no outline, in flow below the preview at the bubble's inline end, with no word on
+  screen. Its target is at least 44 px tall and wide (`lo-hit-chip`), and its
+  accessible name stays "Show more of your message" / "Show less of your message"
+  (`aria-label`, with `aria-expanded` and `aria-controls`). It is separate from the
+  turn bar and keeps its state through opening and re-condensing the turn. The
+  preview carries no fade of its own (the transcript scroller already fades its
+  edges). Long assistant replies are not folded: they are the primary content, and
+  the desktop does not fold them either.
 - A long title truncates in its own `min-w-0` flex slot, not by pushing actions
   outside the viewport. Reserve stable slots for changing status and counts.
 
@@ -130,6 +153,26 @@ static replay, an old screenshot or an intended interaction as current live proo
   Keep scrollbars/edge cues discoverable; never fade or mask actionable error text,
   focus rings or the only indication of selection. Avoid double fades at nested
   scroll boundaries.
+
+## Diagrams
+
+- A CLOSED ```mermaid fence in assistant text is drawn by Pele (`pele`, loaded on
+  demand from its own chunk, never the entry chunk; `scripts/check-bundle.mjs`
+  fails the build if it lands there). An open fence is a reply still streaming and
+  stays the plain code block. A diagram that cannot be drawn keeps its code block
+  under an error card that shows the engine's own message.
+- Colours and fonts are `--pele-*` variables set from the relay's `--lo-*` theme
+  variables (`src/lib/diagram-theme.ts`), so a theme change recolours a drawn
+  diagram without redrawing it. Sections of a `journey` stay one neutral colour,
+  `click` callbacks and links are ignored, and the first four series colours are
+  distinct in all 31 palettes (a fifth may repeat one).
+- The inline drawing is laid out for the column width (Pele reflows a wide chart
+  top to bottom) and clamped in height behind a fade. It reacts to a tap only:
+  one-finger drags always scroll the transcript. Full size is a viewer on the
+  modal layer that scrolls both ways at the author's own pixel size.
+- Pele's SVG is never parsed as HTML. `src/lib/diagram-svg.ts` copies an
+  allow-listed set of elements, attributes and style properties into fresh DOM
+  nodes; the markdown renderer's no-HTML-sink rule still holds for everything else.
 
 ## Drawers, sheets and disclosure
 

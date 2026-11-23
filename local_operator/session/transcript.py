@@ -39,6 +39,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
 from collections.abc import Iterator, Mapping
@@ -1623,8 +1624,44 @@ def find_row_for_custom_type(
     return None
 
 
+#: The fixed head every row this module writes starts with: ``to_json`` emits
+#: ``{"id":<string>,"ts":<number>,...`` with compact separators, in that key
+#: order. :func:`read_custom_entries` reads ONLY this head (no JSON decode) to
+#: learn how old a chunk is, so a ``min_ts`` walk can stop at the first chunk that
+#: is entirely older than the caller's window. A row that does not match (a
+#: hand-written or foreign-serialized line) simply gives no age, and the walk
+#: carries on — the bound is an optimization, never a filter on its own.
+_ROW_TS_HEAD = re.compile(rb'\{"id":"(?:[^"\\]|\\.)*","ts":(-?[0-9][0-9.eE+-]*)[,}]')
+
+
+def _chunk_head_ts(buf: bytes, chunk_offset: int, chunk_start: int) -> float | None:
+    """The ``ts`` of the first row that STARTS inside ``buf`` at or after
+    ``chunk_start`` (an absolute offset; ``chunk_offset`` is ``buf``'s own), or
+    ``None`` when no such row's head is readable without a decode."""
+    relative = max(0, chunk_start - chunk_offset)
+    if chunk_start == 0:
+        row = 0
+    else:
+        newline = buf.find(b"\n", max(0, relative - 1))
+        if newline == -1:
+            return None
+        row = newline + 1
+    match = _ROW_TS_HEAD.match(buf, row)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
 def read_custom_entries(
-    directory: str | Path, custom_type: str, *, max_rows: int | None = None
+    directory: str | Path,
+    custom_type: str,
+    *,
+    max_rows: int | None = None,
+    custom_messages: bool = False,
+    min_ts: float | None = None,
 ) -> list[TranscriptEntry]:
     """Every custom row of ``custom_type``, NEWEST first, without parsing the journal.
 
@@ -1643,6 +1680,28 @@ def read_custom_entries(
     very many rows of this type; ``None`` reads all of them. The walk cost is
     the distance from EOF to the OLDEST returned row — never worse than the
     one-row reader's worst case, which reaches the file start itself.
+
+    ``custom_messages`` selects the OTHER row shape that carries a
+    ``custom_type``: a delivered ``CustomMessage`` is persisted as
+    ``{"type":"message","payload":{"kind":"custom","custom_type":...}}``,
+    not as a ``custom`` entry. The default keeps the ``custom``-entry filter
+    exactly as every existing caller (video, music) relies on; a caller that
+    wants message rows has to say so. WHY IT IS AN OPTION AND NOT A LOOSER
+    FILTER: the Team Bridge repair asked this reader for ``team_bridge_message``
+    rows, which only ever exist as message rows — so every needle hit decoded
+    and was rejected, ``max_rows`` was never reached, and the walk went to byte
+    zero on every call (1.07 s warm / ~3.6 s cold, measured on a 688 MB journal,
+    synchronously on the event loop at every turn start and ask tick) while
+    returning nothing.
+
+    ``min_ts`` bounds the walk by AGE: rows older than it are not returned, and
+    the walk stops at the first chunk whose leading row is older (read from
+    the row head, see :data:`_ROW_TS_HEAD`). The journal is append-only and
+    ``ts`` is the append clock, so everything before that chunk is older too —
+    which makes the cost proportional to the window the caller cares about,
+    not to the journal's lifetime. A clock step backwards could hide a row
+    written in that gap; callers pass a window, not an exact cut, so that is
+    the accepted trade.
     """
     encoded = json.dumps(custom_type)
     if encoded != f'"{custom_type}"':
@@ -1659,6 +1718,17 @@ def read_custom_entries(
         return []
     entries: list[TranscriptEntry] = []
     seen_offsets: set[int] = set()
+
+    def _matches(entry: TranscriptEntry) -> bool:
+        if custom_messages:
+            if entry.type != ENTRY_MESSAGE or entry.payload.get("kind") != "custom":
+                return False
+        elif entry.type != ENTRY_CUSTOM:
+            return False
+        if str(entry.payload.get("custom_type", "")) != custom_type:
+            return False
+        return min_ts is None or entry.ts >= min_ts
+
     with handle:
         handle.seek(0, os.SEEK_END)
         end_of_file = handle.tell()
@@ -1675,16 +1745,19 @@ def read_custom_entries(
                 located = _row_at_offset(handle, offset)
                 if located is not None:
                     row_offset, entry = located
-                    if (
-                        entry.type == ENTRY_CUSTOM
-                        and str(entry.payload.get("custom_type", "")) == custom_type
-                        and row_offset not in seen_offsets
-                    ):
+                    if row_offset not in seen_offsets and _matches(entry):
                         seen_offsets.add(row_offset)
                         entries.append(entry)
                         if max_rows is not None and len(entries) >= max_rows:
                             return entries
                 index = buf.rfind(needle, 0, index)
+            if min_ts is not None:
+                # Every row from this chunk's first row onward has been
+                # considered; if that first row is already outside the window,
+                # so is everything above it.
+                head_ts = _chunk_head_ts(buf, read_start, start)
+                if head_ts is not None and head_ts < min_ts:
+                    return entries
             position = start
     return entries
 
@@ -1953,8 +2026,16 @@ class ReplaySuffix:
     #: because eager would keep looking further back for a parseable one.
     usage_proven_absent: bool = False
     #: :func:`read_cold_tail` only: bytes the absence proof scanned below the
-    #: tail, for the caller's evidence; not a contract.
+    #: tail, for the caller's evidence; not a contract. With a prior proof
+    #: (``known_absent``) this is only the span the prior proof did not cover.
     absence_scan_bytes: int = 0
+    #: :func:`read_cold_tail` only: ``absence_needles`` are now proven absent from
+    #: ``[0, absence_covered_end)``, a row boundary (the start of the oldest row
+    #: the tail consumed). Both are ``0``/``()`` when no absence was proven. A
+    #: caller may persist them so the NEXT read of a grown journal scans only
+    #: the bytes above this boundary (``replay_cache.build_cold_tail_metadata``).
+    absence_covered_end: int = 0
+    absence_needles: tuple[bytes, ...] = ()
 
 
 #: Ceiling on the bytes BELOW the bounded tail that :func:`read_cold_tail` will
@@ -2086,6 +2167,7 @@ def read_cold_tail(
     max_bytes: int = 4 * 1024 * 1024,
     max_rows: int = 256,
     max_scan_bytes: int = ABSENCE_SCAN_MAX_BYTES,
+    known_absent: tuple[int, frozenset[bytes]] | None = None,
 ) -> ReplaySuffix | None:
     """Prove first-frame facts from a bounded plain-journal suffix, or decline.
 
@@ -2158,6 +2240,23 @@ def read_cold_tail(
     since the byte before ``low`` is a newline that no spelling contains, but
     it keeps the bound conservative. Above ``max_scan_bytes``
     (:data:`ABSENCE_SCAN_MAX_BYTES`) the tail declines.
+
+    ``known_absent`` (``(boundary, needles)``) is a PRIOR proof that every
+    needle in ``needles`` is absent from ``[0, boundary)`` of THIS file. The
+    caller owns validating it against the journal (same inode, unchanged row
+    ending at ``boundary``: ``replay_cache._prior_absence``); this function only
+    uses it, and only when it covers every needle this read needs. Then the
+    scan starts at ``boundary - (longest needle - 1)`` instead of ``0``: a
+    spelling wholly inside ``[0, boundary)`` is excluded by the prior proof, and
+    any other occurrence ends past ``boundary`` so starts at or above that
+    start. The overlap is DEFENSIVE: ``boundary`` is always a row start and no
+    needle contains a newline, so today no real journal places a spelling
+    across it; it keeps the answer exact if either ever stops holding.
+    WHY: an ACTIVE session's journal grows between opens, so the cold
+    metadata record misses on every open, and without this each open re-scanned
+    the whole journal below the tail (measured on a 55 MB fixture with no spend
+    row: 55,112,712 bytes per grown open). The answer is unchanged either way;
+    only the bytes read differ.
 
     When the walk stops: once every fact is met (as before), at the
     4 MiB / 256-row bound, or at a shrink row met AFTER a parseable usage
@@ -2292,10 +2391,16 @@ def read_cold_tail(
                 needles.extend(spelling)
             if not have_usage:
                 needles.extend(_USAGE_SPELLINGS)
-            scan_end = min(end, low + max(len(n) for n in needles) - 1)
+            longest = max(len(n) for n in needles)
+            scan_end = min(end, low + longest - 1)
+            # The cap stays on the RANGE the proof covers, not on the bytes this
+            # call reads, so a prior proof never changes which journals decline.
             if scan_end > max_scan_bytes:
                 return None
-            if not _spellings_absent(handle, 0, scan_end, tuple(needles)):
+            scan_start = 0
+            if known_absent is not None and set(needles) <= known_absent[1]:
+                scan_start = max(0, min(known_absent[0], scan_end) - (longest - 1))
+            if not _spellings_absent(handle, scan_start, scan_end, tuple(needles)):
                 return None
             return ReplaySuffix(
                 entries=tuple(reversed(parsed)),
@@ -2306,7 +2411,9 @@ def read_cold_tail(
                 bytes_read=bytes_read,
                 rows_read=len(parsed),
                 usage_proven_absent=not have_usage,
-                absence_scan_bytes=scan_end,
+                absence_scan_bytes=scan_end - scan_start,
+                absence_covered_end=low,
+                absence_needles=tuple(needles),
             )
     except (OSError, UnicodeError, TypeError, ValueError):
         return None
@@ -2777,6 +2884,7 @@ class Transcript:
         producer_command_id: str | None = None,
         preserve_mtime: bool = False,
         checkpoint: dict[str, Any] | None = None,
+        _file_captures: Mapping[str, Any] | None = None,
     ) -> list[TranscriptEntry]:
         """Durably commit an ordered message batch with one fsync.
 
@@ -2801,6 +2909,8 @@ class Transcript:
         if not messages and checkpoint is None:
             return []
 
+        provenance_pending: list[dict[str, Any]] = []
+
         def build() -> list[TranscriptEntry]:
             rows = []
             for message in messages:
@@ -2809,6 +2919,30 @@ class Transcript:
                 if producer_command_id is not None:
                     payload["producer_command_id"] = producer_command_id
                 rows.append(TranscriptEntry(message.id, time.time(), ENTRY_MESSAGE, payload))
+            if _file_captures is not None:
+                from local_operator.session.file_provenance import NATIVE_TYPES
+
+                # Native provenance facts are BOOKKEEPING, never conversation
+                # messages. Existing replay/audit/display decoders already skip
+                # ENTRY_CUSTOM; no old client must understand a new hidden flag.
+                # Classify even empty/failed captures, before proof publication,
+                # so metadata failures cannot create phantom transcript cards.
+                rows = [
+                    (
+                        TranscriptEntry(
+                            row.id,
+                            row.ts,
+                            ENTRY_CUSTOM,
+                            {
+                                "custom_type": row.payload["custom_type"],
+                                "details": row.payload.get("details", {}),
+                            },
+                        )
+                        if row.payload.get("custom_type") in NATIVE_TYPES
+                        else row
+                    )
+                    for row in rows
+                ]
             if checkpoint is not None:
                 rows.append(
                     TranscriptEntry(
@@ -2818,9 +2952,24 @@ class Transcript:
                         {"custom_type": CHECKPOINT_CUSTOM_TYPE, "details": checkpoint},
                     )
                 )
+            if _file_captures:
+                # Only sealed native tickets can add receipts. Generic/imported
+                # commits keep their exact old row builder and cannot issue.
+                from local_operator.session.file_provenance import prepare_batch
+
+                rows, pending = prepare_batch(self, rows, _file_captures)
+                provenance_pending.extend(pending)
             return rows
 
-        return await self._commit(build, preserve_mtime=preserve_mtime)
+        def finish(rows: list[TranscriptEntry], source: tuple[int, int, float]) -> None:
+            if provenance_pending:
+                from local_operator.session.file_provenance import finish_batch
+
+                finish_batch(self, rows, provenance_pending, end=source[1])
+
+        return await self._commit(
+            build, preserve_mtime=preserve_mtime, _file_finish=finish if _file_captures else None
+        )
 
     async def append_imported(
         self,
@@ -3081,6 +3230,7 @@ class Transcript:
         build: Callable[[], list[TranscriptEntry]],
         *,
         preserve_mtime: bool = False,
+        _file_finish: Callable[[list[TranscriptEntry], tuple[int, int, float]], None] | None = None,
     ) -> list[TranscriptEntry]:
         """Serialize writes and acknowledge only after durable publication.
 
@@ -3097,6 +3247,10 @@ class Transcript:
             def write() -> tuple[list[TranscriptEntry], tuple[int, int, float]]:
                 rows = build()
                 source = self._write_entries(rows, preserve_mtime=preserve_mtime)
+                if _file_finish is not None:
+                    # Same worker/shield/order lock: cancellation cannot expose
+                    # an unlogged proof or abandon finalization halfway through.
+                    _file_finish(rows, source)
                 return rows, source
 
             worker = asyncio.create_task(asyncio.to_thread(write))
@@ -3557,6 +3711,17 @@ class Transcript:
     def entries(self) -> list[TranscriptEntry]:
         """All entries in append order (in-memory snapshot)."""
         return list(self._entries)
+
+    def recent_entries(self, limit: int) -> list[TranscriptEntry]:
+        """The newest ``limit`` entries in append order, without copying the rest.
+
+        For per-turn-end readers (the economic compaction gate) on journals
+        that are hundreds of thousands of rows long, where ``entries()``'s
+        full copy would be paid at every wake.
+        """
+        if limit <= 0:
+            return []
+        return list(self._entries[-limit:])
 
     def latest_custom(self, custom_type: str) -> dict[str, Any] | None:
         """Details of the newest custom entry of ``custom_type`` (backward

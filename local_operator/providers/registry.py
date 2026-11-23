@@ -28,12 +28,23 @@ from local_operator.providers.local import LOCAL_PRESETS
 if TYPE_CHECKING:
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
-WireFormat = Literal["openai-compat", "anthropic", "google", "mock"]
+#: ``bedrock`` is Anthropic Messages carried over Amazon Bedrock's
+#: ``InvokeModelWithResponseStream`` (``providers/bedrock/``): same request body
+#: and events as ``anthropic``, different transport, auth and framing. Code that
+#: asks "is this the Anthropic Messages shape?" uses
+#: :func:`is_anthropic_messages_wire`, not ``wire == "anthropic"``.
+WireFormat = Literal["openai-compat", "anthropic", "google", "mock", "bedrock"]
 
 # A login yields either the OAuth credentials mapping or, for paste-a-key
 # providers, the bare key string.
 LoginFn = Callable[..., Awaitable[str | dict[str, Any]]]
 RefreshFn = Callable[..., Awaitable[dict[str, Any]]]
+#: Revoke a stored OAuth login AT THE PROVIDER (RFC 7009 or the provider's own
+#: documented endpoint), given the stored payload; ``True`` when the provider
+#: confirmed it. Used by ``lop logout`` of a login lent for renewal to a node
+#: (mesh-credential-renewal §D D3): deleting the row here cannot end the copy a
+#: node holds, revoking the family at the provider can.
+RevokeFn = Callable[[dict[str, Any]], Awaitable[bool]]
 GetApiKeyFn = Callable[[dict[str, Any]], str]
 #: How a provider names its API key's environment variable(s).
 #:
@@ -129,6 +140,12 @@ class ProviderDefinition:
     local_setup: bool = False
     login: LoginFn | None = None
     refresh_token: RefreshFn | None = None
+    #: Optional provider-side revoke (see :data:`RevokeFn`). Implemented ONLY
+    #: against a documented endpoint and verified on a throwaway account or a
+    #: fake IdP, never an operator's real login. ``None`` (every provider today,
+    #: Anthropic and Radient included) means logout says plainly that it could
+    #: not revoke there.
+    revoke_token: RevokeFn | None = None
     get_api_key: GetApiKeyFn | None = None
     store_credentials_as: str | None = None
     callback_port: int | None = None
@@ -295,6 +312,12 @@ class ProviderDefinition:
             return None
         if getattr(self.login, "__lo_api_key_login__", False):
             return "api_key"
+        # A login that is neither a paste nor a browser/device flow names its
+        # own kind (Amazon Bedrock's structured AWS chooser is "aws"); hosts
+        # branch on the kind, so the TUI, CLI and desktop census agree.
+        declared = getattr(self.login, "__lo_login_kind__", None)
+        if isinstance(declared, str) and declared:
+            return declared
         return "browser" if self.callback_port is not None else "device"
 
     @property
@@ -389,6 +412,18 @@ def _token_plan_wire_key(creds: dict[str, Any]) -> str:
     return creds.get("api_key") or creds["access"]
 
 
+def _bedrock_login() -> LoginFn:
+    """Amazon Bedrock's structured AWS login, imported lazily like OAuth flows.
+
+    The kind marker is set on the THUNK (the registry never imports the login
+    module at build time), mirroring how ``_lazy_login`` carries the paste
+    flags: ``login_kind`` reads it off this callable to answer "aws".
+    """
+    login = _lazy_login("local_operator.providers.bedrock.login", "login_bedrock")
+    setattr(login, "__lo_login_kind__", "aws")
+    return login
+
+
 def create_api_key_login(provider_label: str, auth_url: str, instructions: str = "") -> LoginFn:
     """Paste-an-API-key "login" for providers without real OAuth.
 
@@ -443,6 +478,24 @@ def create_api_key_login(provider_label: str, auth_url: str, instructions: str =
     setattr(login, PASTE_IS_API_KEY_ATTR, True)
     setattr(login, "__lo_api_key_login__", True)
     return login
+
+
+def _bedrock_env_key() -> str | None:
+    # Lazy + pure (no botocore): runs on every provider census. The D6 rules —
+    # a plain AWS_PROFILE/AWS_ACCESS_KEY_ID never enables Bedrock — live there.
+    from local_operator.providers.bedrock.connection import bedrock_env_key
+
+    return bedrock_env_key()
+
+
+def is_anthropic_messages_wire(wire: str | None) -> bool:
+    """Whether ``wire`` speaks the Anthropic Messages body (first party or Bedrock).
+
+    One predicate for every consumer that cares about the MESSAGE SHAPE (audio
+    refusal, cache-input accounting, document form), so a new transport of the
+    same body is one edit here rather than a hunt for ``== "anthropic"``.
+    """
+    return wire in ("anthropic", "bedrock")
 
 
 def _anthropic_env_key() -> str | None:
@@ -551,6 +604,25 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         store_credentials_as="anthropic",
         base_url="https://api.anthropic.com",
         wire="anthropic",
+    ),
+    # Claude on Amazon Bedrock (``providers/bedrock/``). The stored key is a
+    # non-secret CONNECTION DESCRIPTOR (``bedrock://profile?name=dev&region=...``)
+    # or a raw Bedrock API key; secrets are sealed in the encrypted store by the
+    # AuthStore seal hook. ``base_url=None`` because the endpoint is per Region
+    # and derived from the credential. The paste-a-key login covers method 1
+    # (Bedrock API key, provider-level Region) for older desktop renderers via
+    # ``PUT /key``; the interactive login is the structured AWS chooser
+    # (``providers/bedrock/login.py``, login_kind "aws"). Never lent over the mesh (device-bound: a
+    # descriptor names a local profile or a local sealed ref).
+    ProviderDefinition(
+        id="bedrock",
+        name="Amazon Bedrock",
+        brand="Amazon Bedrock",
+        search_aliases=("aws", "claude-bedrock", "bedrock-claude"),
+        env_keys=_bedrock_env_key,
+        login=_bedrock_login(),
+        base_url=None,
+        wire="bedrock",
     ),
     ProviderDefinition(
         id="kimi",
@@ -693,7 +765,6 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         id="google",
         search_aliases=(
             "gemini",
-            "vertex",
             "aistudio",
         ),
         name="Google (Gemini)",
@@ -704,6 +775,67 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
             "The console calls it an AI Studio API key.",
         ),
         base_url="https://generativelanguage.googleapis.com",
+        wire="google",
+    ),
+    ProviderDefinition(
+        id="google-vertex",
+        search_aliases=(
+            "vertex",
+            "vertexai",
+            "vertex-ai",
+            "gcp",
+            "gcloud",
+        ),
+        name="Google Vertex AI (Cloud sign-in)",
+        env_keys=("GOOGLE_VERTEX_API_KEY", "VERTEX_API_KEY"),
+        login=_lazy_login("local_operator.providers.oauth.vertex", "login_vertex_oauth"),
+        refresh_token=_lazy_refresh(
+            "local_operator.providers.oauth.vertex", "refresh_vertex_token"
+        ),
+        get_api_key=_oauth_api_key,
+        callback_port=8085,
+        paste_code_flow=True,
+        base_url="https://aiplatform.googleapis.com",
+        wire="google",
+    ),
+    ProviderDefinition(
+        id="google-vertex-key",
+        search_aliases=(
+            "vertex",
+            "vertex-key",
+            "vertex-api-key",
+        ),
+        name="Google Vertex AI (API key)",
+        env_keys=("GOOGLE_VERTEX_API_KEY", "VERTEX_API_KEY"),
+        login=create_api_key_login(
+            "Google Vertex AI",
+            "https://console.cloud.google.com/vertex-ai/studio/settings/api-keys",
+            "Paste a Vertex AI API key (express mode or service-account-bound).",
+        ),
+        store_credentials_as="google-vertex",
+        base_url="https://aiplatform.googleapis.com",
+        wire="google",
+    ),
+    ProviderDefinition(
+        id="google-vertex-sa",
+        search_aliases=(
+            "vertex",
+            "vertex-sa",
+            "service-account",
+            "gcp-sa",
+        ),
+        name="Google Vertex AI (Service account JSON)",
+        login=_lazy_login(
+            "local_operator.providers.oauth.vertex",
+            "login_vertex_service_account",
+            requires_paste_prompt=True,
+        ),
+        refresh_token=_lazy_refresh(
+            "local_operator.providers.oauth.vertex", "refresh_vertex_token"
+        ),
+        get_api_key=_oauth_api_key,
+        store_credentials_as="google-vertex",
+        base_url="https://aiplatform.googleapis.com",
         wire="google",
     ),
     ProviderDefinition(

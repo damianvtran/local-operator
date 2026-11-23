@@ -948,7 +948,11 @@ async def test_stop_runs_the_graceful_ladder_only(
             "t", {"op": "stop", "session": record.session_id}, None, None, _context(root)
         )
         assert not result.is_error, result.text
-        assert result.text == _Outcome.line
+        # The receipt leads; the second line names the cost and offers park
+        # (2026-11-12 field gap: stops silently made wakes dormant).
+        head, hint = result.text.split("\n", 1)
+        assert head == _Outcome.line
+        assert "DORMANT" in hint and "op='park'" in hint
         assert captured["target"] == record
         # v1 is the graceful ladder only: no SIGKILL from the tool, and the
         # marker records which front end asked.
@@ -1133,7 +1137,7 @@ def test_resume_receipt_spaces_the_id_once() -> None:
             "origin": ORIGIN_AGENT_WORKSTREAM,
         },
     )
-    assert 'opened "w" as a listed workstream (session s1)' in spawn_text
+    assert 'opened "w" as a listed workstream (session s1, team: none)' in spawn_text
     unnamed = _sessions_open_body(
         SessionsParams(op="spawn", prompt="go"),
         {"op": "spawn", "session_id": "s1", "sidebar_visibility": "listed"},
@@ -1246,7 +1250,11 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     # trimmed to the start-context budget — pinned at 1314, the same one-token
     # headroom as every pin above rather than the cushion the untrimmed field
     # would have left.
-    assert count_text_tokens(params) <= 1314
+    # RE-MEASURED for `park` (2026-11-12): one enum word plus the one clause
+    # that tells it apart from `stop` ("keeps wakes/monitors armed") — 1326
+    # measured with this test's own ruler, pinned at 1327 (one-token headroom).
+    # The rest of park's contract lives in op='help', not the schema.
+    assert count_text_tokens(params) <= 1327
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 
@@ -1969,6 +1977,76 @@ def test_the_description_advertises_every_ops_accepted_set() -> None:
         assert listed == expected or (not expected and listed == {"none"})
 
 
+def _spawn_section(body: str) -> str:
+    """The guide's ``### Spawn inputs`` section, or ``""`` when it is gone."""
+    section = re.search(r"^### Spawn inputs$", body, re.M)
+    if section is None:
+        return ""
+    rest = body[section.end() :]
+    end = re.search(r"^#{2,3} ", rest, re.M)
+    return rest[: end.start()] if end else rest
+
+
+def _undocumented_spawn_fields(body: str) -> list[str]:
+    """Spawn fields with no ``| `field` |`` ROW in the guide's spawn table.
+
+    ROW-anchored, not a substring of the section: the ``profile`` row's prose
+    names ``team`` (they share the one agent slot), so a substring test stayed
+    green while the ``team`` row itself was deleted — the one field this change
+    exists to document (agent review round 1, R1).
+    """
+    section = _spawn_section(body)
+    return [
+        field
+        for field in sorted(_SESSIONS_OP_FIELDS["spawn"] - {"op"})
+        if not re.search(rf"^\| `{field}` \|", section, re.M)
+    ]
+
+
+def test_the_sessions_guide_spawn_section_documents_every_accepted_field() -> None:
+    """The guide is hand-written; the accepted set is derived — so pin them together.
+
+    `sessions` `op='spawn'` accepts a field the description advertises, and the
+    guide's `### Spawn inputs` section is what a model reads before passing one.
+    A field added to `SessionsParams` (and therefore to
+    ``_SESSIONS_OP_FIELDS['spawn']``) that nobody wrote into the guide is a
+    silent documentation drop — the same class of drift the description test
+    above pins for the advertisement, one surface further out.
+    """
+    from local_operator.guides.discovery import discover_guides
+
+    guide = next(item for item in discover_guides() if item.name == "sessions")
+    body = guide.file_path.read_text(encoding="utf-8", errors="replace")
+    assert _spawn_section(body), "the sessions guide has no '### Spawn inputs' section"
+    missing = _undocumented_spawn_fields(body)
+    assert (
+        not missing
+    ), f"spawn accepts these fields but the guide's spawn table has no row for them: {missing}"
+
+
+def test_the_spawn_field_guard_fails_for_every_deleted_row() -> None:
+    """The MUTATION CONTROL for the guard above (agent review round 1, R1).
+
+    Deleting one field's row must be DETECTED — for EVERY field. A scratch copy
+    of the guide's text is mutated per field and the guard re-run, which is the
+    promise the substring version could not keep. The real guide is never
+    touched, and ``== [field]`` also proves one deletion names exactly the one
+    field (a guard that reported everything would be useless in a failure).
+    """
+    from local_operator.guides.discovery import discover_guides
+
+    guide = next(item for item in discover_guides() if item.name == "sessions")
+    body = guide.file_path.read_text(encoding="utf-8", errors="replace")
+    section = _spawn_section(body)
+    assert section and not _undocumented_spawn_fields(body)
+    start = body.index(section)
+    for field in sorted(_SESSIONS_OP_FIELDS["spawn"] - {"op"}):
+        mutated_section = re.sub(rf"^\| `{field}` \|.*\n", "", section, count=1, flags=re.M)
+        assert mutated_section != section, f"the row pattern missed {field!r}"
+        mutated = body[:start] + mutated_section + body[start + len(section) :]
+        assert _undocumented_spawn_fields(mutated) == [field], field
+
+
 def test_the_reference_is_deterministic_bounded_and_never_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2014,11 +2092,9 @@ async def test_help_returns_the_reference_and_refuses_an_address() -> None:
     result = await execute_sessions("t", {"op": "help"}, None, None, None)
     assert not result.is_error, result.text
     assert result.text == render_sessions_reference()
-    # Round 1 (NIT): the reference's refusal line must match behavior —
-    # `include_stored` widens only the LOCAL half (refused beside
-    # `scope='remote'` alone), while `query` is refused beside `peer` too.
+    # Local-only fields must not be silently ignored by an addressed peer.
     assert (
-        "`include_stored` widens only the local half and is refused beside `scope='remote'`."
+        "`include_stored` widens only the local half and is refused beside `peer`/`scope='remote'`."
         in result.text
     )
 
@@ -2056,7 +2132,7 @@ async def test_a_stray_parameter_refusal_names_the_ops_accepted_set() -> None:
     mixed = await execute_sessions("t", {"op": "bogus", "timeout_ms": 1}, None, None, None)
     assert mixed.is_error
     assert mixed.text.startswith("invalid arguments:")
-    assert "The ops are list, info, spawn, resume, stop, peek, move, help." in mixed.text
+    assert "The ops are list, info, spawn, resume, stop, park, peek, move, help." in mixed.text
 
 
 @pytest.mark.asyncio
@@ -2635,6 +2711,96 @@ async def test_list_scope_remote_and_peer_narrow_the_fetch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [None, "all", "remote"])
+async def test_list_explicit_peer_never_reads_local_rows(
+    root: Path, monkeypatch: pytest.MonkeyPatch, scope: str | None
+) -> None:
+    """An address selects its device before the shared result limit is applied."""
+
+    def forbidden_local(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("an explicitly addressed peer must not read the local catalogue")
+
+    monkeypatch.setattr("local_operator.info.collect.session_rows", forbidden_local)
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, _fed_doc(), calls=calls)
+    params: dict[str, Any] = {"op": "list", "peer": PEER, "limit": 1}
+    if scope is not None:
+        params["scope"] = scope
+    context = _context(root)
+    tool = build_sessions_tool(context)
+    assert tool is not None
+    result = await tool.execute("t", params, None, None, context)
+    assert not result.is_error, result.text
+    assert (result.details or {})["scope"] == "remote"
+    assert [row["session_id"] for row in (result.details or {})["rows"]] == ["aaaa11112222"]
+    assert (result.details or {})["total"] == 2
+    assert "shared-one" in result.text and "second" not in result.text
+    assert calls == [(["network", "sessions", "--json", "--peer", PEER], 30.0)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["relay_unavailable", "peer_not_found", "no_json", "timeout", "unreachable"]
+)
+async def test_list_explicit_peer_failure_never_falls_back_local(
+    root: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    def forbidden_local(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("a peer failure must never fall back to local sessions")
+
+    monkeypatch.setattr("local_operator.info.collect.session_rows", forbidden_local)
+    calls: list[list[str]] = []
+
+    async def fake(argv: list[str], timeout: float, context: object | None = None):
+        calls.append(argv)
+        if failure == "timeout":
+            raise TimeoutError
+        if failure == "no_json":
+            return 1, None, "synthetic peer transport failed"
+        if failure == "unreachable":
+            return (
+                0,
+                _fed_doc(
+                    sessions=[],
+                    peers={
+                        "d_b": {
+                            "name": PEER,
+                            "reachable": False,
+                            "reason": "connect_failed:ConnectionRefusedError",
+                        }
+                    },
+                ),
+                "",
+            )
+        return 1, {"ok": False, "code": failure, "message": f"synthetic {failure}"}, ""
+
+    monkeypatch.setattr(builtin, "_mesh_cli_json", fake)
+    context = _context(root)
+    tool = build_sessions_tool(context)
+    assert tool is not None
+    result = await tool.execute("t", {"op": "list", "peer": PEER, "limit": 1}, None, None, context)
+    assert calls == [["network", "sessions", "--json", "--peer", PEER]]
+    assert not (result.details or {}).get("rows")
+    if failure == "unreachable":
+        assert not result.is_error
+        assert f"{PEER}: unreachable" in result.text
+        assert (result.details or {})["scope"] == "remote"
+    else:
+        assert result.is_error, result.text
+        assert "synthetic" in result.text or "did not finish" in result.text
+
+
+def test_list_peer_conflicts_refuse_instead_of_ignoring_local_fields() -> None:
+    for scope in ("all", "remote"):
+        refusal = _sessions_validation_error(
+            SessionsParams(op="list", peer=PEER, scope=scope, include_stored=True)
+        )
+        assert refusal is not None and "include_stored" in refusal and "drop" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="list", peer=PEER, scope="local"))
+    assert refusal is not None and "drop one" in refusal
+
+
+@pytest.mark.asyncio
 async def test_list_with_no_mesh_degrades_to_local_rows_and_one_note(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2874,6 +3040,8 @@ async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
                 "--peer",
                 PEER,
                 "--create",
+                "--origin",
+                "agent",
                 "--prompt",
                 "go",
                 "--hosting",
@@ -3266,10 +3434,13 @@ async def test_omitting_tags_leaves_spawn_receipt_unchanged(root: Path, monkeypa
     assert "tags" not in (result.details or {}) and "tags_applied" not in (result.details or {})
     assert not (root / "tags").exists()
     assert result.text == _sessions_open_body(params, result.details or {})
+    # The receipt carries the applied binding on EVERY spawn (this slice's
+    # `team: none`), so "unchanged" here means unchanged by TAGS -- no `tags`
+    # segment, no tag write, and the one binding field still present.
     assert (
         result.text
-        == 'opened "untagged" as a listed workstream (session abcdef123456, job cafebabe0001)'
-        " — visible in the operator's sidebar, /resume and the phone list."
+        == 'opened "untagged" as a listed workstream (session abcdef123456, job cafebabe0001'
+        ", team: none) — visible in the operator's sidebar, /resume and the phone list."
         " origin: agent-workstream."
     )
 
@@ -3555,6 +3726,220 @@ async def test_stop_puts_the_outcome_above_the_wait_lines(
     lines = result.text.splitlines()
     assert lines[0] == 'stopped "stoppable"'
     assert "waiting up to" in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# park — free a session's memory, keep its wakes and monitors armed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_without_dormant_schedules_has_no_park_hint(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hint is about what the stop COST; a stop that parked nothing says nothing."""
+    worker = _live_pid()
+    record = _publish_record(root, "abcdabcdab01", "plain", pid=worker.pid)
+
+    async def _fake_stop(target: Any, **kwargs: Any) -> Any:
+        return control.StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name="plain",
+            method="socket",
+            line='stopped "plain"',
+        )
+
+    monkeypatch.setattr(control, "stop_session", _fake_stop)
+    try:
+        result = await execute_sessions(
+            "t", {"op": "stop", "session": record.session_id}, None, None, _context(root)
+        )
+        assert result.text == 'stopped "plain"'
+    finally:
+        registry.unpublish(record.pid, root)
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_park_another_session_uses_the_park_ladder_and_says_what_stays_armed(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = _live_pid()
+    record = _publish_record(root, "abcdabcdab02", "parkable", pid=worker.pid)
+    captured: dict[str, Any] = {}
+
+    async def _fake_park(target: Any, **kwargs: Any) -> Any:
+        captured["target"] = target
+        captured.update(kwargs)
+        return control.StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name="parkable",
+            method="socket",
+            line="parked",
+            parked=True,
+            wakes_armed=2,
+            monitors_armed=1,
+        )
+
+    async def _no_stop(*_a: Any, **_k: Any) -> Any:  # pragma: no cover — must not run
+        raise AssertionError("park must not take the stop path")
+
+    monkeypatch.setattr(control, "park_session", _fake_park)
+    monkeypatch.setattr(control, "stop_session", _no_stop)
+    try:
+        result = await execute_sessions(
+            "t", {"op": "park", "session": record.session_id}, None, None, _context(root)
+        )
+        assert not result.is_error, result.text
+        assert result.text == (
+            'parked "parkable" — 2 wakes and 1 monitor stay armed; the supervisor '
+            "reopens it when one fires"
+        )
+        assert captured["target"] == record
+        details = result.details or {}
+        assert details["op"] == "park" and details["parked"] is True
+        assert (details["wakes_armed"], details["monitors_armed"]) == (2, 1)
+    finally:
+        registry.unpublish(record.pid, root)
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_park_refusal_is_the_stops_refusal(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = _live_pid()
+    record = _publish_record(root, "abcdabcdab03", "busy-one", pid=worker.pid)
+
+    async def _fake_park(target: Any, **kwargs: Any) -> Any:
+        return control.StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name="busy-one",
+            method="refused",
+            reason=control.REASON_BUSY,
+            line="refused",
+        )
+
+    monkeypatch.setattr(control, "park_session", _fake_park)
+    try:
+        result = await execute_sessions(
+            "t", {"op": "park", "session": record.session_id}, None, None, _context(root)
+        )
+        assert result.is_error
+        assert "is working right now" in result.text
+    finally:
+        registry.unpublish(record.pid, root)
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_park_with_peer_is_refused_without_contacting_anything(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        control, "park_session", AsyncMock(side_effect=AssertionError("must not park"))
+    )
+    result = await execute_sessions(
+        "t", {"op": "park", "session": "abcdabcdab04", "peer": "laptop"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert "another device" in result.text
+
+
+class _Jobs:
+    """A ``JobManagerProtocol`` with fixed rows (only ``status`` is read)."""
+
+    def __init__(self, statuses: list[str]) -> None:
+        self._rows = [type("Job", (), {"status": status})() for status in statuses]
+
+    def get(self, job_id: str, *, registrant_id: str | None = None) -> Any:
+        return None
+
+    def list(self, *, registrant_id: str | None = None) -> list[Any]:
+        return list(self._rows)
+
+    async def cancel(self, job_id: str, *, registrant_id: str | None = None) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_self_park_is_deferred_to_a_detached_helper_when_idle(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No address = THIS session, after this turn: the tool spawns the helper and
+    returns; it never runs the ladder itself (that would cut its own turn)."""
+    from local_operator.session.runtime import park_after_turn
+
+    spawned: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        park_after_turn, "spawn", lambda pid, sid: spawned.append((pid, sid)) or 4242
+    )
+    monkeypatch.setattr(
+        control, "park_session", AsyncMock(side_effect=AssertionError("not synchronously"))
+    )
+    result = await execute_sessions(
+        "t", {"op": "park"}, None, None, _context(root, jobs=_Jobs(["completed"]))
+    )
+    assert not result.is_error, result.text
+    assert spawned == [(os.getpid(), REQUESTER_ID)]
+    assert "parks as soon as this turn ends" in result.text
+    assert (result.details or {})["helper_pid"] == 4242
+
+
+@pytest.mark.asyncio
+async def test_self_park_is_refused_while_a_job_or_subagent_runs(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session.runtime import park_after_turn
+
+    monkeypatch.setattr(
+        park_after_turn, "spawn", lambda *_a: (_ for _ in ()).throw(AssertionError("no spawn"))
+    )
+    result = await execute_sessions(
+        "t", {"op": "park"}, None, None, _context(root, jobs=_Jobs(["running"]))
+    )
+    assert result.is_error
+    assert "cannot park itself" in result.text
+
+
+@pytest.mark.asyncio
+async def test_self_park_is_refused_while_an_ask_is_open(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session.runtime import park_after_turn
+
+    monkeypatch.setattr(builtin, "_self_park_busy", lambda _ctx: True)
+    monkeypatch.setattr(
+        park_after_turn, "spawn", lambda *_a: (_ for _ in ()).throw(AssertionError("no spawn"))
+    )
+    result = await execute_sessions("t", {"op": "park"}, None, None, _context(root))
+    assert result.is_error
+
+
+def test_self_park_busy_reads_open_asks_from_the_store(root: Path) -> None:
+    """The ask half of the predicate, against the real ask log."""
+    from local_operator.asks import store as ask_store
+
+    ctx = _context(root, jobs=_Jobs([]))
+    assert builtin._self_park_busy(ctx) is False
+    directory = ask_store.session_dir(root, REQUESTER_ID)
+    directory.mkdir(parents=True, exist_ok=True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ask_store, "fold", lambda *_a, **_k: [{"status": ask_store.STATUS_OPEN}])
+        assert builtin._self_park_busy(ctx) is True
+
+
+def test_park_approval_copy_names_what_stays_armed() -> None:
+    assert "wakes and monitors armed" in _describe_sessions_approval(
+        {"op": "park", "session": "abc"}, "."
+    )
+    assert "after this turn" in _describe_sessions_approval({"op": "park"}, ".")
 
 
 # --- remote peek parity: the owner's journal read renders like a local peek --
@@ -3865,3 +4250,468 @@ async def test_a_remote_resume_parked_behind_a_busy_owner_is_an_error(
     assert resumed.is_error
     assert "NOT delivered yet" in resumed.text
     assert "--mailbox" not in seen[0]
+
+
+# --- the team binding: reported, echoed, and hinted at ----------------------
+
+
+class _TeamRow:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _TeamRegistryStub:
+    """Only what the spawn hint reads: the roster's names.
+
+    Duck-typed on purpose — the tool's contract with a registry is
+    ``list_teams``/``get_team_by_name`` (``team_tool._registry``), not a class.
+    """
+
+    def __init__(self, names: list[str]) -> None:
+        self._teams = [_TeamRow(name) for name in names]
+
+    def list_teams(self) -> list[_TeamRow]:
+        return self._teams
+
+    def get_team_by_name(self, name: str) -> _TeamRow | None:
+        return next((row for row in self._teams if row.name.lower() == name.lower()), None)
+
+
+def _spawn_doubles(
+    monkeypatch: pytest.MonkeyPatch, root: Path, session_id: str = "fffaaaaabbbb"
+) -> str:
+    """The two PROCESS boundaries a spawn crosses, doubled; nothing else.
+
+    ``_sessions_launch`` (the nested CLI) and the exec ledger are the boundaries
+    the product cannot provide in a unit test — every line between them
+    (validation, argv, the readiness gate, the receipt) runs for real.
+    """
+
+    async def launch(argv: list[str], env: dict[str, str], cwd: str | None) -> tuple[int, str]:
+        _session(root, session_id, "spawned")
+        return 0, "Background job cafebabe0001: running (execution receipt)\n"
+
+    def status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
+        return {"status": "running", "session_id": session_id}
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", launch)
+    monkeypatch.setattr("local_operator.exec_mode.job_status", status)
+    return session_id
+
+
+@pytest.mark.asyncio
+async def test_spawn_receipt_echoes_the_team_it_applied(root: Path, monkeypatch) -> None:
+    """A spawn applies exactly `team=` and nothing by inheritance — say which."""
+    sid = _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go", "team": "lopdev"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    details = result.details or {}
+    assert details["team"] == "lopdev"
+    assert details["session_id"] == sid
+    assert "team: lopdev" in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_receipt_echoes_the_profile_it_applied(root: Path, monkeypatch) -> None:
+    _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go", "profile": "coder"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert (result.details or {})["profile"] == "coder"
+    assert "profile: coder" in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_receipt_says_team_none_when_nothing_is_attached(
+    root: Path, monkeypatch
+) -> None:
+    """The absence is the point: a session asked to apply a team's standards
+    without one cannot, so `team: none` is a fact rather than an omission."""
+    _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert (result.details or {})["team"] is None
+    assert "team: none" in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_warns_when_the_name_names_a_team_and_none_is_attached(
+    root: Path, monkeypatch
+) -> None:
+    """The incident: a spawn for "the lopdev work" came up with no team."""
+    sid = _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_TeamRegistryStub(["lopdev", "platform"]))
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "go", "name": "lopdev review pass"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert "the name names the team lopdev" in result.text, result.text
+    assert (result.details or {})["team_hint"]
+    # ADVISORY: the spawn still launched and published.
+    assert (result.details or {})["session_id"] == sid
+
+
+@pytest.mark.asyncio
+async def test_spawn_warns_when_the_prompt_names_a_team_and_none_is_attached(
+    root: Path, monkeypatch
+) -> None:
+    _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_TeamRegistryStub(["lopdev"]))
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "apply the lopdev standards to this diff", "name": "audit"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert "the prompt names the team lopdev" in result.text, result.text
+    assert "`team=lopdev`" in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_is_silent_about_a_team_it_was_given(root: Path, monkeypatch) -> None:
+    _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_TeamRegistryStub(["lopdev"]))
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "go", "name": "lopdev review", "team": "lopdev"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert "team_hint" not in (result.details or {})
+    assert "names the team" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_is_silent_when_no_team_name_appears(root: Path, monkeypatch) -> None:
+    _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_TeamRegistryStub(["lopdev"]))
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "check the shard ledger", "name": "audit"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert "team_hint" not in (result.details or {})
+    assert "names the team" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_ignores_a_team_name_too_short_to_be_specific(root: Path, monkeypatch) -> None:
+    """Whole words alone are not enough: "ops"/"dev"/"ai" live in ordinary prose."""
+    _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_TeamRegistryStub(["ops"]))
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "start the ops run"}, None, None, context
+    )
+    assert not result.is_error, result.text
+    assert "team_hint" not in (result.details or {})
+
+
+@pytest.mark.asyncio
+async def test_spawn_is_silent_without_a_registry_to_ask(root: Path, monkeypatch) -> None:
+    _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "do the lopdev work", "name": "lopdev audit"},
+        None,
+        None,
+        _context(root),
+    )
+    assert not result.is_error, result.text
+    assert "team_hint" not in (result.details or {})
+    assert "team: none" in result.text
+
+
+@pytest.mark.asyncio
+async def test_info_reports_the_team_binding_and_says_none_when_absent(root: Path) -> None:
+    from local_operator.resume import write_session_attachment
+
+    bound = _session(root, "aaaa11112222", "bound")
+    write_session_attachment(bound, team="lopdev", agent="", goal="")
+    _session(root, "bbbb33334444", "unbound")
+
+    attached = await execute_sessions(
+        "t", {"op": "info", "target": "bound"}, None, None, _context(root)
+    )
+    assert not attached.is_error, attached.text
+    assert (attached.details or {})["team"] == "lopdev"
+    assert "team: lopdev" in attached.text
+
+    plain = await execute_sessions(
+        "t", {"op": "info", "target": "unbound"}, None, None, _context(root)
+    )
+    assert not plain.is_error, plain.text
+    assert (plain.details or {})["team"] == ""
+    assert "team: none" in plain.text
+
+
+@pytest.mark.asyncio
+async def test_list_reports_each_rows_team_and_says_none_when_absent(root: Path) -> None:
+    from local_operator.resume import write_session_attachment
+
+    bound = _session(root, "aaaa11112222", "bound")
+    write_session_attachment(bound, team="lopdev", agent="", goal="")
+    _session(root, "bbbb33334444", "unbound")
+
+    result = await execute_sessions(
+        "t", {"op": "list", "include_stored": True}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    rows = {row["conversation_name"]: row for row in (result.details or {}).get("rows") or []}
+    lines = result.text.splitlines()
+    # By ID, not by name: "bound" is a substring of "unbound".
+    bound_line = next(line for line in lines if "aaaa11112222" in line)
+    unbound_line = next(line for line in lines if "bbbb33334444" in line)
+    assert "team: lopdev" in bound_line, result.text
+    assert "team: none" in unbound_line, result.text
+    # The published rows are the collector's shape, untouched by the text addend.
+    assert "team" not in rows["bound"]
+
+
+@pytest.mark.asyncio
+async def test_list_query_reports_the_rows_team(root: Path) -> None:
+    from local_operator.resume import write_session_attachment
+
+    bound = _session(root, "aaaa11112222", "shard bound")
+    write_session_attachment(bound, team="lopdev", agent="", goal="")
+
+    result = await execute_sessions(
+        "t", {"op": "list", "query": "shard"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "team: lopdev" in result.text, result.text
+
+
+class _RaisingRegistry:
+    """A registry whose reads fail: the advisory paths must stay silent."""
+
+    def list_teams(self) -> list[Any]:
+        raise RuntimeError("registry locked")
+
+    def get_team_by_name(self, name: str) -> Any:
+        raise RuntimeError("registry locked")
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        # A peer whose build predates the ``binding`` key has made NO claim.
+        ({"locality": "remote", "session_id": "x"}, None),
+        # A peer carrying it with a null team SAYS there is no team.
+        ({"locality": "remote", "session_id": "x", "binding": {"team": None}}, ""),
+        # A bound peer names its team.
+        (
+            {"locality": "remote", "session_id": "x", "binding": {"team": "lopdev", "agent": "m"}},
+            "lopdev",
+        ),
+        # A non-string value is no claim rather than a printed repr.
+        ({"locality": "remote", "session_id": "x", "binding": {"team": 7}}, ""),
+        # A remote row whose binding block is not a mapping at all.
+        ({"locality": "remote", "session_id": "x", "binding": ["lopdev"]}, None),
+    ],
+)
+def test_a_remote_rows_binding_answers_are_three_not_two(
+    row: dict[str, Any], expected: str | None
+) -> None:
+    """``None`` (no claim), ``""`` (none), a name — the distinction is the design."""
+    assert builtin._sessions_row_team(row) == expected
+
+
+def test_a_local_row_whose_session_dir_is_gone_makes_no_claim(root: Path) -> None:
+    """R2: a row we could not read must not print ``team: none``."""
+    assert builtin._sessions_row_team({"session_id": "missingdir01"}) is None
+
+
+@pytest.mark.parametrize(
+    ("binding", "expected_fragment"),
+    [
+        ({"team": "lopdev", "agent": "manager"}, "team: lopdev"),
+        ({"team": None, "agent": None}, "team: none"),
+        (None, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mesh_info_prints_the_peers_binding_claim(
+    root: Path, monkeypatch, binding: Any, expected_fragment: str | None
+) -> None:
+    """The ``info`` mesh body reports the peer's own claim, on the same rule."""
+    row: dict[str, Any] = {
+        "session_id": "cccc11112222",
+        "conversation_name": "remote one",
+        "state": "running",
+        "locality": "remote",
+    }
+    if binding is not None:
+        row["binding"] = binding
+
+    async def fake_mesh_op(*_args: Any, **_kwargs: Any) -> tuple[None, dict[str, Any]]:
+        return None, {"sessions": [row], "peers": {}}
+
+    monkeypatch.setattr(builtin, "_mesh_op", fake_mesh_op)
+    result = await execute_sessions(
+        "t",
+        {"op": "info", "peer": "node-2", "session": "cccc11112222"},
+        None,
+        None,
+        _context(root),
+    )
+    assert not result.is_error, result.text
+    if expected_fragment is None:
+        assert "team:" not in result.text, result.text
+    else:
+        assert expected_fragment in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_sidecar_makes_no_team_claim_in_info_or_list(root: Path) -> None:
+    """Q-2: a read that failed must not be printed as ``team: none``.
+
+    ``read_session_attachment`` deliberately collapses OSError and absence (a
+    resume must always open), so the display decides on a stat first: an
+    unreadable sidecar is "no claim" in BOTH surfaces, while an absent one is a
+    successful read of an unbound session and still prints ``team: none``.
+    """
+    from local_operator.resume import write_session_attachment
+
+    directory = _session(root, "aaaa11112222", "locked")
+    write_session_attachment(directory, team="lopdev", agent="", goal="")
+    sidecar = directory / "attachment.json"
+    sidecar.chmod(0)
+    try:
+        info = await execute_sessions(
+            "t", {"op": "info", "target": "locked"}, None, None, _context(root)
+        )
+        assert not info.is_error, info.text
+        assert "team:" not in info.text, info.text
+        assert (info.details or {})["team"] is None
+
+        listed = await execute_sessions(
+            "t", {"op": "list", "include_stored": True}, None, None, _context(root)
+        )
+        assert not listed.is_error, listed.text
+        line = next(line for line in listed.text.splitlines() if "aaaa11112222" in line)
+        assert "team:" not in line, listed.text
+    finally:
+        sidecar.chmod(0o644)
+
+
+@pytest.mark.asyncio
+async def test_spawn_proceeds_when_the_team_registry_cannot_be_read(
+    root: Path, monkeypatch
+) -> None:
+    """R4: the advisory path's ``except`` arm — silent, and the spawn still runs."""
+    sid = _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_RaisingRegistry())
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "do the lopdev work", "name": "lopdev audit"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert "team_hint" not in (result.details or {})
+    assert "names the team" not in result.text
+    assert (result.details or {})["session_id"] == sid
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_falls_back_to_the_typed_team_when_the_registry_raises(
+    root: Path, monkeypatch
+) -> None:
+    _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "go", "team": "LOPDEV"},
+        None,
+        None,
+        _context(root, team_registry=_RaisingRegistry()),
+    )
+    assert not result.is_error, result.text
+    assert (result.details or {})["team"] == "LOPDEV"
+    assert "team: LOPDEV" in result.text
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_echoes_the_registrys_spelling_of_the_team(
+    root: Path, monkeypatch
+) -> None:
+    """Q-3: ``team="LOPDEV"`` binds the stored ``lopdev``, so say ``lopdev``."""
+    _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "go", "team": "LOPDEV"},
+        None,
+        None,
+        _context(root, team_registry=_TeamRegistryStub(["lopdev"])),
+    )
+    assert not result.is_error, result.text
+    assert (result.details or {})["team"] == "lopdev"
+    assert "team: lopdev" in result.text
+    assert "LOPDEV" not in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_the_hint_does_not_advise_a_team_beside_a_profile(root: Path, monkeypatch) -> None:
+    """R3/Q-1: ``--team`` with ``--profile`` is refused at preflight, so never advise it."""
+    _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "apply the lopdev standards", "profile": "coder"},
+        None,
+        None,
+        _context(root, team_registry=_TeamRegistryStub(["lopdev"])),
+    )
+    assert not result.is_error, result.text
+    assert (result.details or {})["profile"] == "coder"
+    assert "a spawn does not inherit the caller's team" not in result.text, result.text
+    assert "cannot be combined" in result.text, result.text
+    assert "spawn a second session" in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_team_with_a_newline_cannot_split_the_line(root: Path) -> None:
+    """Q-4: a hand-written name with a newline renders on ONE line."""
+    from local_operator.resume import write_session_attachment
+
+    directory = _session(root, "aaaa11112222", "forged")
+    write_session_attachment(directory, team="lopdev\norigin: the user's own", agent="", goal="")
+    info = await execute_sessions(
+        "t", {"op": "info", "target": "forged"}, None, None, _context(root)
+    )
+    assert not info.is_error, info.text
+    # The body is the state line + the facts line, and the forged newline does
+    # not add a third.
+    assert len(info.text.splitlines()) == 2, info.text
+
+
+@pytest.mark.asyncio
+async def test_the_hint_agrees_in_number_when_both_fields_name_the_team(
+    root: Path, monkeypatch
+) -> None:
+    """Q-4: two fields naming the team read "name and prompt name", not "names"."""
+    _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "continue the lopdev review", "name": "lopdev audit"},
+        None,
+        None,
+        _context(root, team_registry=_TeamRegistryStub(["lopdev"])),
+    )
+    assert not result.is_error, result.text
+    assert "the name and prompt name the team lopdev" in result.text, result.text

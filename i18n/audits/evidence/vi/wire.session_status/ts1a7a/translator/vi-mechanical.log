@@ -1,0 +1,11 @@
+PASS: frozen en/context SHA-256; exact 17-key order, 16 new translations + 1 preserved label
+PASS: retired_label preserves exact frozen existing value
+PASS: all Vietnamese values NFC, one logical line, no manual bidi controls
+PASS: repo scripts/i18n/check.py::check_catalogues() on isolated en/vi namespace: 0 problems
+PASS: ICU argument names/kinds, 6 select argument/arm sequences, code/URL/printf tokens; vi plural other only
+PASS: isolated ICU formatting: 12 exact command-token cases + 4 sentinel none cases
+PASS: isolated ICU count formatting for 0,1,2,5,21,100; no scheduling/cancellation assertion inferred
+PASS: isolated ICU formats all 26 cause branches; unseen error outputs include chưa đọc
+PASS: missing-key negative control detected; restored candidate returns 0 catalogue problems
+LIMIT: mechanical checks only; NOT an independent audit, integrated runtime, pseudo, visual or native proof
+GAP: unknown external diagnostics retain legacy English outside namespace; unresolved programme gap, not an accepted exception

@@ -86,7 +86,7 @@ _ALWAYS_INFRA = (
 # request fails -- which is why 7 of 8 runs died in a 424-466s window on a clock
 # rather than on workload, and why changing the instance type fixed nothing.
 # Infra rather than a task field for the same content-hash reason.
-# See provisioning._resolve_root_volume_gb.
+# See provisioning._resolve_root_volume (a task's own volume_size wins).
 _OPTIONAL_INFRA = (
     "AWS_INSTANCE_TYPE",
     "AWS_ROOT_VOLUME_SIZE",
@@ -96,6 +96,11 @@ _OPTIONAL_INFRA = (
     # The runner always pins the effective policy; optional preserves older
     # invocation compatibility while making adapters reject silent omissions.
     "OSWORLD_ACTION_SETTLE_POLICY",
+    # Host directories appended to the worker's tool search path for
+    # evaluators that shell out. Optional and off by default: declaring it is
+    # what lets the runner's disclosed-infra gate tell this build from one
+    # that would ignore the value. See provisioning.resolve_evaluator_tool_path.
+    "EVALUATOR_TOOL_PATH",
 )
 
 # The LLM judge. OSWorld's ``model_client`` resolves the key from the

@@ -49,6 +49,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
 
+from local_operator.asks.surfaces import UNVERIFIED as UNVERIFIED_SURFACE
 from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
@@ -1190,6 +1191,20 @@ class TuiSessionHandle(SessionHandle):
         self._refresh_state()
         return f"ran {line}"
 
+    def _already_auto_session_form(self, args: str) -> bool:
+        """Whether a refused frame is the session ``auto`` form while auto is on.
+
+        Only the session form: ``default auto`` while this conversation is auto
+        can still loosen the MACHINE default other sessions follow, so it keeps
+        the refusal. Called only after :meth:`_bridge_ack_refusal` refused.
+        """
+        from local_operator.harness.approval import APPROVALS_LOOSENING_WORDS
+
+        words = (args or "").strip().lower().split()
+        if len(words) != 1 or words[0] not in APPROVALS_LOOSENING_WORDS:
+            return False
+        return bool(getattr(self._app, "_approve_all", False))
+
     def _bridge_ack_refusal(self, command: str, args: str, bridge_ack: bool) -> Any:
         """The receipt for an unacknowledged routed loosening, or ``None``."""
         from local_operator.slash_commands import primary_slash_name
@@ -1307,8 +1322,17 @@ class TuiSessionHandle(SessionHandle):
         the gate reads as withheld.
         """
         refusal = self._bridge_ack_refusal(command, args, bridge_ack)
+        already_auto = False
         if refusal is not None:
-            return refusal
+            if not self._already_auto_session_form(args):
+                return refusal
+            # ALREADY AUTO IS NOT A LOOSENING (design r1 D2 on #4080), the twin
+            # of the runtime's rule: the refusal said "auto is still off" while
+            # every tool ran without asking. Run the bare report instead, which
+            # writes nothing (a session switch would pin a machine-default auto
+            # onto this conversation) and names the mode's real provenance.
+            args = ""
+            already_auto = True
         owner_loop = await self._on_app(asyncio.get_running_loop)
         done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
 
@@ -1358,6 +1382,12 @@ class TuiSessionHandle(SessionHandle):
         except (asyncio.TimeoutError, TimeoutError):
             raise TimeoutError(_app_hop_timeout_note()) from None
         result = await done
+        if already_auto and isinstance(result, dict):
+            # The card keys on ``ok``/``approval_mode``, never the sentence; the
+            # bare report carries neither, so add the ones every receipt sends.
+            data = result.get("data")
+            prior: dict[str, Any] = data if isinstance(data, dict) else {}
+            result = {**result, "data": {**prior, "approval_mode": "auto", "ok": True}}
         return result if isinstance(result, dict) else {"kind": "notice", "text": f"ran /{command}"}
 
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> AckDetail:
@@ -1473,7 +1503,11 @@ class TuiSessionHandle(SessionHandle):
         return "approved" if approved else "denied"
 
     async def ask_answer(
-        self, request_id: str, value: str, question_index: int | None = None
+        self,
+        request_id: str,
+        value: str,
+        question_index: int | None = None,
+        by: str = UNVERIFIED_SURFACE,
     ) -> str:
         """Answer the CURRENT question of a live TUI ask picker from the phone.
 
@@ -1521,7 +1555,10 @@ class TuiSessionHandle(SessionHandle):
             # the queue rather than onto the (empty) ``_ask_pending`` map.
             # ``None`` is "not a mirrored id" and everything below runs
             # unchanged.
-            mirrored = self._mirror_ask_answer(request_id, value)
+            # ``by`` is the runtime-stamped label (``mirror`` only for a
+            # connection that proved the operator capability); see
+            # ``asks/surfaces``.
+            mirrored = self._mirror_ask_answer(request_id, value, by=by)
             if mirrored is not None:
                 return mirrored
             card = self._ask_pending.get(request_id)
@@ -1559,7 +1596,9 @@ class TuiSessionHandle(SessionHandle):
 
         return await self._on_app(resolve)
 
-    def _mirror_ask_answer(self, request_id: str, value: str) -> str | None:
+    def _mirror_ask_answer(
+        self, request_id: str, value: str, *, by: str = UNVERIFIED_SURFACE
+    ) -> str | None:
         """Answer a queued ask through the legacy mirrored card id, or ``None``.
 
         ``None`` is "not a mirrored id" — the ordinary case, where the caller
@@ -1589,7 +1628,7 @@ class TuiSessionHandle(SessionHandle):
         if not value:
             # An EMPTY value is today's Esc and settles the WHOLE ask: a decline
             # is not a step of the multi-step flow.
-            outcome = session.decline_ask(ask_id, by="mirror")
+            outcome = session.decline_ask(ask_id, by=by)
             if not outcome.get("ok"):
                 raise ValueError(str(outcome.get("error") or "the decline was refused"))
             return "declined"
@@ -1601,7 +1640,7 @@ class TuiSessionHandle(SessionHandle):
         # same bridge the runtime uses so a mirror answered through the terminal's
         # registrant settles exactly as one answered through the runtime: one
         # question per tap into the queue's draft, one atomic write on the last.
-        outcome = session.answer_ask_question(ask_id, key, [value], by="mirror")
+        outcome = session.answer_ask_question(ask_id, key, [value], by=by)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         if not outcome.get("settled"):

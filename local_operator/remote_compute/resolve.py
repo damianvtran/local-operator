@@ -153,7 +153,7 @@ def resolve_network(network: str | None, root: Path | None = None) -> NetworkBin
         # removed or untrusted record cannot be a tenant a run is sent through,
         # and counting it would report "ambiguous" — naming a network this
         # device is not in — where the usable set is unambiguous.
-        candidates = [row for row in records if _is_active_member(row)]
+        candidates = [row for row in records if is_active_member(row)]
         if len(candidates) == 1:
             record = candidates[0]
         elif not candidates:
@@ -194,11 +194,14 @@ def resolve_network(network: str | None, root: Path | None = None) -> NetworkBin
     return _issue(record.network_id, record.name)
 
 
-def _is_active_member(record: "NetworkRecord") -> bool:
+def is_active_member(record: "NetworkRecord") -> bool:
     """Whether :func:`_require_active_membership` would ADMIT ``record``.
 
     The no-argument resolution picks its candidates with this, so the set it
-    counts and names is exactly the set a run could be sent through.
+    counts and names is exactly the set a run could be sent through — and a
+    surface that LISTS the networks a run may be bound to (the desktop's
+    remote-compute read) asks the same question here rather than restating the
+    rule: a fourth copy of "is this device a member" is the one nobody reviews.
     """
     if record.self_member() is None:
         return False
@@ -245,3 +248,10 @@ def _require_active_membership(record: "NetworkRecord") -> None:
         f"{state['sentence']}; remote compute only sends work to a network this "
         "device is an active member of",
     )
+
+
+__all__ = [
+    "NetworkBinding",
+    "is_active_member",
+    "resolve_network",
+]

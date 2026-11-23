@@ -1,0 +1,26 @@
+{
+  "locale": "ur",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10",
+  "status": "passed",
+  "auditor": {
+    "agent": "i18n-auditor / Audit daemon Urdu",
+    "session": "c736f176af6f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "independent_from_translation_job": "170903662c6e",
+    "actual_model_source": "Session runtime declaration openai/gpt-6.1-sol; no fallback reported.",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "job": "170903662c6e",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Manager identifies remediation job as same original translator; original delegation disclosed actual openai/gpt-6.1-sol. No separate provider fallback was disclosed for this job."
+  },
+  "audit_date": "2026-11-16",
+  "note": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/record.json; first audit of 7 updated + 4 new keys; 4 unchanged byte-proven, 15-key checks; passed, 0 unresolved blocker/major.",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": []
+}

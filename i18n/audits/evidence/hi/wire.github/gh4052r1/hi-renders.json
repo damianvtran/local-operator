@@ -1,0 +1,5042 @@
+[
+  {
+    "key": "wire.github.progress",
+    "count": 0,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 2,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 3,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 4,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 5,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 11,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 21,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 22,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 25,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1.5,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1000000,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 0,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 2,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 3,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 4,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 5,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 11,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 21,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 22,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 25,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1.5,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1000000,
+    "form": "other",
+    "text": "बाहर रखी गईं: कोई नहीं"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 0,
+    "form": "other",
+    "text": "बाहर रखी गईं (0): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1,
+    "form": "other",
+    "text": "बाहर रखी गईं (1): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 2,
+    "form": "other",
+    "text": "बाहर रखी गईं (2): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 3,
+    "form": "other",
+    "text": "बाहर रखी गईं (3): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 4,
+    "form": "other",
+    "text": "बाहर रखी गईं (4): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 5,
+    "form": "other",
+    "text": "बाहर रखी गईं (5): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 11,
+    "form": "other",
+    "text": "बाहर रखी गईं (11): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 21,
+    "form": "other",
+    "text": "बाहर रखी गईं (21): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 22,
+    "form": "other",
+    "text": "बाहर रखी गईं (22): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 25,
+    "form": "other",
+    "text": "बाहर रखी गईं (25): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1.5,
+    "form": "other",
+    "text": "बाहर रखी गईं (1.5): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1000000,
+    "form": "other",
+    "text": "बाहर रखी गईं (10,00,000): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 0,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 0 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 1 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 2,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 2 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 3,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 3 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 4,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 4 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 5,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 5 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 11,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 11 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 21,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 21 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 22,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 22 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 25,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 25 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1.5,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 1.5 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1000000,
+    "form": "other",
+    "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 10,00,000 — SOURCE"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 0,
+    "form": "other",
+    "text": ", बाहर रखी गई 0 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1,
+    "form": "other",
+    "text": ", बाहर रखी गई 1 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 2,
+    "form": "other",
+    "text": ", बाहर रखी गई 2 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 3,
+    "form": "other",
+    "text": ", बाहर रखी गई 3 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 4,
+    "form": "other",
+    "text": ", बाहर रखी गई 4 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 5,
+    "form": "other",
+    "text": ", बाहर रखी गई 5 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 11,
+    "form": "other",
+    "text": ", बाहर रखी गई 11 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 21,
+    "form": "other",
+    "text": ", बाहर रखी गई 21 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 22,
+    "form": "other",
+    "text": ", बाहर रखी गई 22 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 25,
+    "form": "other",
+    "text": ", बाहर रखी गई 25 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1.5,
+    "form": "other",
+    "text": ", बाहर रखी गई 1.5 को छोड़कर"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1000000,
+    "form": "other",
+    "text": ", बाहर रखी गई 10,00,000 को छोड़कर"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 0,
+    "form": "other",
+    "text": "  … और 0 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1,
+    "form": "other",
+    "text": "  … और 1 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 2,
+    "form": "other",
+    "text": "  … और 2 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 3,
+    "form": "other",
+    "text": "  … और 3 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 4,
+    "form": "other",
+    "text": "  … और 4 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 5,
+    "form": "other",
+    "text": "  … और 5 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 11,
+    "form": "other",
+    "text": "  … और 11 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 21,
+    "form": "other",
+    "text": "  … और 21 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 22,
+    "form": "other",
+    "text": "  … और 22 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 25,
+    "form": "other",
+    "text": "  … और 25 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1.5,
+    "form": "other",
+    "text": "  … और 1.5 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1000000,
+    "form": "other",
+    "text": "  … और 10,00,000 अन्य — सभी देखें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 0,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 0 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 1 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 2,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 2 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 3,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 3 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 4,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 4 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 5,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 5 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 11,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 11 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 21,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 21 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 22,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 22 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 25,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 25 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1.5,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 1.5 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1000000,
+    "form": "other",
+    "text": "यह संख्या एक साझाकरण में आने वाली 10,00,000 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 0,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 2,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 3,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 4,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 5,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 11,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 21,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 22,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 25,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1.5,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1000000,
+    "form": "other",
+    "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos --use-default — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 0,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 2,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 3,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 4,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 5,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 11,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 21,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 22,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 25,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1.5,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1000000,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "आपकी हाथ से चुनी सूची"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website पहले से बाहर थी"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website बाहर नहीं थी"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 0,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 2,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 3,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 4,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 5,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 11,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 21,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 22,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 25,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 0,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 2,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 3,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 4,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 5,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 11,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 21,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 22,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 25,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 0,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (0), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (1), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 2,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (2), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 3,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (3), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 4,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (4), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 5,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (5), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 11,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (11), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 21,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (21), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 22,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (22), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 25,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (25), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (1.5), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (10,00,000), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 0,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (0), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (1), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 2,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (2), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 3,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (3), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 4,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (4), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 5,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (5), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 11,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (11), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 21,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (21), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 22,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (22), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 25,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (25), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (1.5), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (10,00,000), वे बाहर रखी गई हैं"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 0,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 2,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 3,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 4,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 5,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 11,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 21,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 22,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 25,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 0,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 2,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 3,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 4,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 5,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 11,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 21,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 22,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 25,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 0,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 2,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 3,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 4,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 5,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 11,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 21,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 22,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 25,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1.5,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1000000,
+    "form": "other",
+    "text": "lop network credential github repos --use-default से किसी एक को वापस शामिल करें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 0,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 2,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 3,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 4,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 5,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 11,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 21,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 22,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 25,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1.5,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1000000,
+    "form": "other",
+    "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 0,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 2,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 3,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 4,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 5,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 11,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 21,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 22,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 25,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1.5,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1000000,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 0,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 2,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 3,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 4,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 5,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 11,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 21,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 22,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 25,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1.5,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1000000,
+    "form": "other",
+    "text": "अज्ञात समय पर"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 0,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 2,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 3,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 4,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 5,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 11,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 21,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 22,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 25,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1.5,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1000000,
+    "form": "other",
+    "text": "अभी-अभी"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 0,
+    "form": "other",
+    "text": "0 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1,
+    "form": "other",
+    "text": "1 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 2,
+    "form": "other",
+    "text": "2 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 3,
+    "form": "other",
+    "text": "3 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 4,
+    "form": "other",
+    "text": "4 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 5,
+    "form": "other",
+    "text": "5 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 11,
+    "form": "other",
+    "text": "11 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 21,
+    "form": "other",
+    "text": "21 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 22,
+    "form": "other",
+    "text": "22 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 25,
+    "form": "other",
+    "text": "25 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1000000,
+    "form": "other",
+    "text": "10,00,000 मिनट पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 0,
+    "form": "other",
+    "text": "0 घंटा पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1,
+    "form": "other",
+    "text": "1 घंटा पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 2,
+    "form": "other",
+    "text": "2 घंटे पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 3,
+    "form": "other",
+    "text": "3 घंटे पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 4,
+    "form": "other",
+    "text": "4 घंटे पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 5,
+    "form": "other",
+    "text": "5 घंटे पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 11,
+    "form": "other",
+    "text": "11 घंटे पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 21,
+    "form": "other",
+    "text": "21 घंटे पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 22,
+    "form": "other",
+    "text": "22 घंटे पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 25,
+    "form": "other",
+    "text": "25 घंटे पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5 घंटे पहले"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1000000,
+    "form": "other",
+    "text": "10,00,000 घंटे पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 0,
+    "form": "other",
+    "text": "0 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1,
+    "form": "other",
+    "text": "1 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 2,
+    "form": "other",
+    "text": "2 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 3,
+    "form": "other",
+    "text": "3 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 4,
+    "form": "other",
+    "text": "4 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 5,
+    "form": "other",
+    "text": "5 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 11,
+    "form": "other",
+    "text": "11 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 21,
+    "form": "other",
+    "text": "21 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 22,
+    "form": "other",
+    "text": "22 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 25,
+    "form": "other",
+    "text": "25 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5 दिन पहले"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1000000,
+    "form": "other",
+    "text": "10,00,000 दिन पहले"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 0,
+    "form": "other",
+    "text": "0 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1,
+    "form": "other",
+    "text": "1 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 2,
+    "form": "other",
+    "text": "2 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 3,
+    "form": "other",
+    "text": "3 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 4,
+    "form": "other",
+    "text": "4 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 5,
+    "form": "other",
+    "text": "5 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 11,
+    "form": "other",
+    "text": "11 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 21,
+    "form": "other",
+    "text": "21 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 22,
+    "form": "other",
+    "text": "22 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 25,
+    "form": "other",
+    "text": "25 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1000000,
+    "form": "other",
+    "text": "10,00,000 मिनट के भीतर"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub ने उस खाते को अस्वीकार किया"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub से संपर्क नहीं हो सका"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub ने त्रुटि लौटाई"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 0,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 2,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 3,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 4,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 5,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 11,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 21,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 22,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 25,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1.5,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1000000,
+    "form": "other",
+    "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 0,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 2,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 3,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 4,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 5,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 11,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 21,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 22,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 25,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1.5,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1000000,
+    "form": "other",
+    "text": "सहेजी गई सूची पिछले GitHub खाते की है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 0,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 2,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 3,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 4,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 5,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 11,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 21,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 22,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 25,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1.5,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1000000,
+    "form": "other",
+    "text": "सहेजी गई GitHub सूची का खाता अज्ञात है"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 0,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 2,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 3,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 4,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 5,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 11,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 21,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 22,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 25,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1.5,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1000000,
+    "form": "other",
+    "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 0,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 2,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 3,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 4,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 5,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 11,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 21,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 22,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 25,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 0,
+    "form": "other",
+    "text": ", 0 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1,
+    "form": "other",
+    "text": ", 1 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 2,
+    "form": "other",
+    "text": ", 2 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 3,
+    "form": "other",
+    "text": ", 3 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 4,
+    "form": "other",
+    "text": ", 4 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 5,
+    "form": "other",
+    "text": ", 5 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 11,
+    "form": "other",
+    "text": ", 11 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 21,
+    "form": "other",
+    "text": ", 21 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 22,
+    "form": "other",
+    "text": ", 22 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 25,
+    "form": "other",
+    "text": ", 25 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1.5,
+    "form": "other",
+    "text": ", 1.5 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1000000,
+    "form": "other",
+    "text": ", 10,00,000 बाहर रखी गईं"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 0,
+    "form": "other",
+    "text": "0 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1,
+    "form": "other",
+    "text": "1 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 2,
+    "form": "other",
+    "text": "2 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 3,
+    "form": "other",
+    "text": "3 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 4,
+    "form": "other",
+    "text": "4 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 5,
+    "form": "other",
+    "text": "5 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 11,
+    "form": "other",
+    "text": "11 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 21,
+    "form": "other",
+    "text": "21 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 22,
+    "form": "other",
+    "text": "22 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 25,
+    "form": "other",
+    "text": "25 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1000000,
+    "form": "other",
+    "text": "10,00,000 अन्य"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "वहाँ हाथ से चुनी गई सूची"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 0,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 2,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 3,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 4,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 5,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 11,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 21,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 22,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 25,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1.5,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1000000,
+    "form": "other",
+    "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 0,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 2,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 3,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 4,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 5,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 11,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 21,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 22,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 25,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1.5,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1000000,
+    "form": "other",
+    "text": " — पूरी सूची: lop network credential github repos --use-default (lender-qa पर चलाएँ)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 0,
+    "form": "one",
+    "text": "octo-org/api (0 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (0 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1,
+    "form": "one",
+    "text": "octo-org/api (1 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (1 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 2,
+    "form": "one",
+    "text": "octo-org/api (2 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (2 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 3,
+    "form": "one",
+    "text": "octo-org/api (3 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (3 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 4,
+    "form": "one",
+    "text": "octo-org/api (4 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (4 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 5,
+    "form": "one",
+    "text": "octo-org/api (5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 11,
+    "form": "one",
+    "text": "octo-org/api (11 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (11 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 21,
+    "form": "one",
+    "text": "octo-org/api (21 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (21 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 22,
+    "form": "one",
+    "text": "octo-org/api (22 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (22 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 25,
+    "form": "one",
+    "text": "octo-org/api (25 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (25 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1.5,
+    "form": "one",
+    "text": "octo-org/api (1.5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (1.5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1000000,
+    "form": "one",
+    "text": "octo-org/api (10,00,000 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website और octo-org/api (10,00,000 — SOURCE)"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 0,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 2,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 3,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 4,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 5,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 11,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 21,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 22,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 25,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1.5,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1000000,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे lender-qa पर ठीक करें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 0,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 2,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 3,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 4,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 5,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 11,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 21,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 22,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 25,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1.5,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1000000,
+    "form": "other",
+    "text": "lender-qa के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। lender-qa पर lop network credential github repos --use-default जाँचें; कोई पहुँच उधार नहीं दी गई।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 0,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 2,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 3,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 4,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 5,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 11,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 21,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 22,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 25,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1.5,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1000000,
+    "form": "other",
+    "text": "lender-qa के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। lender-qa पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos --use-default जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 0,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 2,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 3,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 4,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 5,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 11,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 21,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 22,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 25,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1.5,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1000000,
+    "form": "other",
+    "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 0,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 2,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 3,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 4,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 5,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 11,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 21,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 22,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 25,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1.5,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1000000,
+    "form": "other",
+    "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 0,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 2,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 3,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 4,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 5,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 11,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 21,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 22,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 25,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1.5,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1000000,
+    "form": "other",
+    "text": "--use-default केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 0,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 2,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 3,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 4,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 5,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 11,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 21,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 22,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 25,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1.5,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1000000,
+    "form": "other",
+    "text": "--refresh केवल repos पर लागू होता है"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 0,
+    "form": "other",
+    "text": "0 रिपॉज़िटरी; एक साझाकरण में अधिकतम 0 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1,
+    "form": "other",
+    "text": "1 रिपॉज़िटरी; एक साझाकरण में अधिकतम 1 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 2,
+    "form": "other",
+    "text": "2 रिपॉज़िटरी; एक साझाकरण में अधिकतम 2 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 3,
+    "form": "other",
+    "text": "3 रिपॉज़िटरी; एक साझाकरण में अधिकतम 3 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 4,
+    "form": "other",
+    "text": "4 रिपॉज़िटरी; एक साझाकरण में अधिकतम 4 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 5,
+    "form": "other",
+    "text": "5 रिपॉज़िटरी; एक साझाकरण में अधिकतम 5 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 11,
+    "form": "other",
+    "text": "11 रिपॉज़िटरी; एक साझाकरण में अधिकतम 11 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 21,
+    "form": "other",
+    "text": "21 रिपॉज़िटरी; एक साझाकरण में अधिकतम 21 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 22,
+    "form": "other",
+    "text": "22 रिपॉज़िटरी; एक साझाकरण में अधिकतम 22 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 25,
+    "form": "other",
+    "text": "25 रिपॉज़िटरी; एक साझाकरण में अधिकतम 25 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5 रिपॉज़िटरी; एक साझाकरण में अधिकतम 1.5 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1000000,
+    "form": "other",
+    "text": "10,00,000 रिपॉज़िटरी; एक साझाकरण में अधिकतम 10,00,000 आ सकती हैं"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 0,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 2,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 3,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 4,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 5,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 11,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 21,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 22,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 25,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1.5,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1000000,
+    "form": "other",
+    "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos --use-default दोबारा आज़माएँ"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+  }
+]

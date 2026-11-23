@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "cli.daemon_build",
+  "history_sha256": "8c0ff5a95147938c8dc8b8a1d9100afb223321887c49726fb400efe76fe4af62",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "cli.daemon_build",
+      "source_sha256": "d2eca6d6879fb63e6433032158af8ba12186fdc2be7d371a40a17ecfdbcc1c93",
+      "context_sha256": "a35175034f8cee80d9e80aef3deaf4d27809bf48e0ccea0b5d30246aed436c14",
+      "translator": {
+        "agent": "local-operator implementer (coder role), PR #4215 coder subagent",
+        "session": null,
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev)",
+        "session": "623609b4ac65",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "R1 r1-6236, 5/5 keys, parity+check.py ok; 0 BLOCKER/0 MAJOR, 1 MINOR/1 NIT. Record: i18n/audits/evidence/ru/cli.daemon_build/r1-6236/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ru/cli.daemon_build/r1-6236/record.json",
+          "sha256": "25482623e5529f1092f2304709117cb381f38c9845b4eb1cdfffee445e4d8b0a"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.daemon_build/r1-6236/report.md",
+          "sha256": "6555edfc2d7e13c420658f843ff27cf331133a89e4107819c16d0d3b2b0de91d"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.daemon_build/r1-6236/audit.log",
+          "sha256": "3a1b18e85721e660957b008f54e6d2708b74764a037aea74d349b463efd0cc08"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.daemon_build/r1-6236/audit_checks.py.txt",
+          "sha256": "9fe25e772249eb0047db43d8c9d028cc23e7fe5680dfbc7dfc62732ea6a18aff"
+        }
+      ]
+    }
+  ]
+}

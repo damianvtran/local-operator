@@ -1,0 +1,63 @@
+MODULE /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/__init__.py
+OFFICIAL_SCOPED_CATALOGUE []
+KEY_PASS tui.model_persistence.persist arguments () cells 46
+KEY_PASS tui.model_persistence.settings arguments () cells 33
+KEY_PASS tui.model_persistence.saved arguments () cells 42
+KEY_PASS tui.model_persistence.with_model arguments (('label', 'simple'), ('routes', 'simple')) cells 24
+PLAIN_RICH_WRAP ordinary label 3 width 80 rows 2 cells [68, 71]
+  模型：p/m — /model default将当前模型保存为新会话的默认模型 · /model 
+  saved将本会话切换至已保存的默认模型 · /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP ordinary label 3 width 100 rows 2 cells [68, 71]
+  模型：p/m — /model default将当前模型保存为新会话的默认模型 · /model 
+  saved将本会话切换至已保存的默认模型 · /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP ordinary label 3 width 120 rows 2 cells [106, 33]
+  模型：p/m — /model default将当前模型保存为新会话的默认模型 · /model saved将本会话切换至已保存的默认模型 · 
+  /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP missing-model label 3 width 80 rows 2 cells [61, 33]
+  模型：p/m — /model default将当前模型保存为新会话的默认模型 · 
+  /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP missing-model label 3 width 100 rows 1 cells [94]
+  模型：p/m — /model default将当前模型保存为新会话的默认模型 · /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP missing-model label 3 width 120 rows 1 cells [94]
+  模型：p/m — /model default将当前模型保存为新会话的默认模型 · /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP settings-only label 3 width 80 rows 1 cells [45]
+  模型：p/m — /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP settings-only label 3 width 100 rows 1 cells [45]
+  模型：p/m — /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP settings-only label 3 width 120 rows 1 cells [45]
+  模型：p/m — /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP ordinary label 80 width 80 rows 3 cells [80, 65, 71]
+  模型：provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrst
+  uvwxyz — /model default将当前模型保存为新会话的默认模型 · /model 
+  saved将本会话切换至已保存的默认模型 · /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP ordinary label 80 width 100 rows 3 cells [96, 87, 33]
+  模型：provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz — /model 
+  default将当前模型保存为新会话的默认模型 · /model saved将本会话切换至已保存的默认模型 · 
+  /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP ordinary label 80 width 120 rows 2 cells [96, 120]
+  模型：provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz — /model 
+  default将当前模型保存为新会话的默认模型 · /model saved将本会话切换至已保存的默认模型 · /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP missing-model label 80 width 80 rows 3 cells [80, 58, 33]
+  模型：provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrst
+  uvwxyz — /model default将当前模型保存为新会话的默认模型 · 
+  /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP missing-model label 80 width 100 rows 2 cells [96, 75]
+  模型：provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz — /model 
+  default将当前模型保存为新会话的默认模型 · /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP missing-model label 80 width 120 rows 2 cells [96, 75]
+  模型：provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz — /model 
+  default将当前模型保存为新会话的默认模型 · /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP settings-only label 80 width 80 rows 2 cells [80, 42]
+  模型：provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrst
+  uvwxyz — /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP settings-only label 80 width 100 rows 2 cells [89, 33]
+  模型：provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz — 
+  /settings也可修改新会话的默认模型
+PLAIN_RICH_WRAP settings-only label 80 width 120 rows 2 cells [89, 33]
+  模型：provider-name/opaque-model-2026-11-22-long-identifier-abcdefghijklmnopqrstuvwxyz — 
+  /settings也可修改新会话的默认模型
+PSEUDO_CONTROL tui.model_persistence.persist 72
+PSEUDO_CONTROL tui.model_persistence.settings 65
+PSEUDO_CONTROL tui.model_persistence.saved 78
+PSEUDO_CONTROL tui.model_persistence.with_model 39
+PASS: four keys; scoped official catalogue/ICU; exact command bytes; short/long opaque labels; 80/100/120 plain Rich wrapping; human-only pseudo control. NOT native NoticeBlock/transcript-family integration proof.

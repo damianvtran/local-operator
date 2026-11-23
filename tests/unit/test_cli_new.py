@@ -721,10 +721,16 @@ def test_serve_command_preserves_the_address_it_was_given() -> None:
     try:
         resolved_port = sockets[0].getsockname()[1]
         assert resolved_port > 0, "the socket handed over is bound, not a placeholder"
+        # ``http`` is the peer-UID check wiring (``server/peer_check.py``): the
+        # gated protocol class must reach uvicorn, so the pin includes it.
+        from local_operator.server import peer_check
+
         assert kwargs == {
             "host": "localhost",
             "port": resolved_port,
-        }, "uvicorn is told the bound port"
+            "log_config": None,
+            "http": peer_check.gated_protocol_class(),
+        }, "uvicorn keeps the serve-only logging config and the peer-checked protocol"
         # And the same number is what the app publishes its record with — read
         # off the app OBJECT, which is the channel this path announces on (no
         # environment: nothing this daemon spawns may inherit its address).
@@ -756,6 +762,10 @@ def test_serve_command_still_routes_reload_through_uvicorn_run() -> None:
         port=8000,
         reload=True,
         reload_excludes=[".venv"],
+        log_config=None,
+        # The peer-UID check wiring: the reloader re-imports the app in a child,
+        # so the gated protocol travels as an import string, not a class.
+        http="local_operator.server.peer_check:PeerCheckedHTTPProtocol",
     )
 
 

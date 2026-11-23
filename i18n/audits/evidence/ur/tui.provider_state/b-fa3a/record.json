@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "date_source": "host current date",
+  "key_count": 5,
+  "source_audit_revision": "2b924d84f0e663302fd93a7b36411ee6035576fe",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "provider-state-ur-audit-B",
+    "session": "fa3a49851fe9",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Host-delivered model-switch notice: openai/gpt-6.1-sol from anthropic/claude-opus-5-5, provider failure: quota",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "independent_per_response_telemetry": "unavailable; unknown beyond host notice",
+    "provider_request_id": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "provider-state-ur-author",
+    "session": "ab6b56b73e1e",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Fresh host-delivered model-switch notice in this session transcript: now running openai/gpt-6.1-sol (was anthropic/claude-opus-5-5), reason provider failure: quota.",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "provider_request_id": null,
+    "additional_served_telemetry": "not available; no configured-header inference",
+    "method": "native LLM reasoning; no translation API/SDK/MT service"
+  },
+  "translator_record": "i18n/audits/evidence/ur/tui.provider_state/ur-author/record.json",
+  "translator_record_sha256": "5017935369679ad2a45d1fbc49e3edaa1f0cfe6dca397fd3d9740ca2c889d7ef",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/tui.provider_state.json",
+      "sha256": "fe5cfd731a80eedd50d066bce968adf6ddec24311af418fdad46db7644aef437"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/ur.md",
+      "sha256": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/b-fa3a/report.md",
+      "sha256": "0d5180966a75b22afbe68924b79d87b2f3372f40a62003f1d91f186264c8fb56"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/b-fa3a/script.py.txt",
+      "sha256": "a3fd7afcdaa56e595680f1cd2adb9ea547001a65be8b6b6ee0626794ec638028"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/b-fa3a/audit.log",
+      "sha256": "425fb489f1cab2da506d71fe0cf7456cdaa709ddcad46ffee516c08a48131dfd"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/b-fa3a/directledger-receipt.json",
+      "sha256": "df7f84609dfcbe583995928b2bb24dd2c40064a9e7b74c1bccaff7dc976e9975"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.provider_state/b-fa3a/ledger-dry-run.log",
+      "sha256": "96693baeef210c31158bec69992d91632feb2b828e3af6d75aa1a234553d8662"
+    }
+  ],
+  "validation": {
+    "actual_exit_code": 0,
+    "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/ur-b-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/ur-b-home/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=\"$PWD\" /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/ur/tui.provider_state/b-fa3a/script.py.txt > i18n/audits/evidence/ur/tui.provider_state/b-fa3a/audit.log 2>&1",
+    "scope": "official check_catalogues narrowed discovery en/ur tui.provider_state; all five actual ICU/plain Rich/English/pseudo/logical RTL checks; missing-key and added-argument negative controls",
+    "native_glyph_certificate": false,
+    "failed_execution_runs": []
+  },
+  "report_classification": "audit_notes_not_execution_log",
+  "execution_log": "audit.log",
+  "limits": [
+    "No native-font or integration proof",
+    "No shipping/admission/release clearance",
+    "Producer remains English pending future resolver",
+    "No independent per-response model telemetry",
+    "Uncommitted new bundle, not on main"
+  ],
+  "ledger_dry_run": {
+    "actual_exit_code": 0,
+    "expected_history_sha": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "command": "/Users/damian/local-operator/.venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/ur/tui.provider_state/b-fa3a/directledger-receipt.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --dry-run",
+    "applied": false
+  }
+}

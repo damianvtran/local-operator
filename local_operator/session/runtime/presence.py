@@ -98,6 +98,157 @@ PRESENCE_BEAT_S = 15.0
 #: one banner, and the durable unseen mark means nothing is lost by it.
 PRESENCE_CACHE_TTL_S = 2.0
 
+#: ADR 0008 (desk presence) §3.5: the operator's "send to phone when I'm away
+#: from my computer for N" choices, in seconds. An ALLOW-LIST rather than a
+#: range because every surface that edits it (desktop Settings, the phone's
+#: per-computer row, ``/settings``) renders it as four fixed options, and a
+#: receiver must never compute a deadline from a value no surface can show.
+#: "Immediately, even at the computer" (0) is left out on purpose: the operator
+#: did not ask for it, and adding it later is one more entry here.
+AWAY_AFTER_CHOICES_S: tuple[int, ...] = (60, 120, 300, 600)
+
+#: The default threshold ("2 min", ADR 0008 §3.5). Also the value a desk
+#: report that omits ``away_after_s`` is evaluated with, so a partial report
+#: never invents a longer hold than the operator could have chosen by default.
+DEFAULT_AWAY_AFTER_S = 120
+
+#: How long after a LOCK the desk still counts as active (ADR 0008 §3.2).
+#:
+#: Zero on purpose: locking is a deliberate "I'm leaving", and the operator's
+#: own example is walking away with the phone. The cost is a possible duplicate
+#: on a quick lock/unlock (risk R5); moving to Slack's 60 s is this one line.
+LOCK_GRACE_S = 0.0
+
+
+@dataclass(frozen=True)
+class DeskReport:
+    """One desktop app's "is a person at this computer" report, materialised.
+
+    ADR 0008 §3.2. The app sends RAW, RELATIVE facts (``idle_s``, ``locked``,
+    ``idle_trusted``, ``away_after_s``) and the RECEIVER turns them into absolute
+    deadlines on its own clock at receipt. That is what removes clock skew: the
+    sender's wall clock never crosses the wire, so a Mac whose clock is ten
+    minutes off produces exactly the same ``away_at`` as one that is right
+    (risk R6).
+
+    WALL CLOCK, NOT MONOTONIC. Every field here is ``time.time()`` epoch
+    seconds. The HTTP server stamps it and the push DAEMON — another process —
+    compares it with its own ``time.time``. ``time.monotonic`` means nothing in
+    another process, and on macOS it stops during sleep, which is exactly when
+    ``away_at`` must keep running. ``PresenceClaim.seen_at`` is monotonic because
+    it never leaves the server process; copying that pattern here would be a bug.
+
+    PRIVACY. These values are a person's minute-by-minute activity, so nothing
+    in core writes them to a log line at any level (ADR 0008 §3.1). A decision
+    may log ``desk_active=<bool>``, never the reading behind it.
+    """
+
+    received_at: float
+    last_input_at: float
+    away_at: float
+    #: False when the app could not vouch for its idle reading (Wayland, R2).
+    #: An untrusted report is "unknown", which leans towards notifying, and it
+    #: never contributes to the any-aggregation: a Wayland ``idle_s = 0`` must
+    #: not keep the desk "active" beside a trusted report that has gone idle.
+    idle_trusted: bool = False
+    locked: bool = False
+
+    def fresh(self, now: float) -> bool:
+        """Received within one presence TTL of ``now`` (three missed beats)."""
+        return now - self.received_at <= PRESENCE_TTL_S
+
+    def known(self, now: float) -> bool:
+        """Fresh AND trusted: the only reports a decision may read."""
+        return self.fresh(now) and self.idle_trusted
+
+    def active(self, now: float) -> bool:
+        """ADR 0008 §3.2's predicate for ONE report. Strict ``<`` on ``away_at``."""
+        return self.known(now) and not self.locked and now < self.away_at
+
+    def as_record(self) -> dict[str, Any]:
+        """The JSON shape the publisher writes and :meth:`from_record` reads."""
+        return {
+            "received_at": self.received_at,
+            "last_input_at": self.last_input_at,
+            "away_at": self.away_at,
+            "idle_trusted": self.idle_trusted,
+            "locked": self.locked,
+        }
+
+    @classmethod
+    def from_record(cls, raw: Any) -> "DeskReport | None":
+        """Parse one published entry, or ``None`` when it is not one.
+
+        Strict about types for the reason the reader is strict everywhere: a
+        torn or foreign value must read as "no report" (which notifies), never
+        as a deadline that holds a push.
+        """
+        if not isinstance(raw, dict):
+            return None
+        try:
+            received_at = float(raw["received_at"])
+            last_input_at = float(raw["last_input_at"])
+            away_at = float(raw["away_at"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return cls(
+            received_at=received_at,
+            last_input_at=last_input_at,
+            away_at=away_at,
+            idle_trusted=raw.get("idle_trusted") is True,
+            locked=raw.get("locked") is True,
+        )
+
+
+def configured_away_after_s(values: Any) -> int:
+    """``notifications.phone_away_after_s`` from a config mapping, validated.
+
+    The consumer behind the ``/settings`` row. Anything that is not one of
+    :data:`AWAY_AFTER_CHOICES_S` (absent, a hand-edited 90, a string, a bool)
+    answers :data:`DEFAULT_AWAY_AFTER_S`: a deadline must only ever come from a
+    value a settings surface can show.
+    """
+    notifications = values.get("notifications") if isinstance(values, dict) else None
+    raw = notifications.get("phone_away_after_s") if isinstance(notifications, dict) else None
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw in AWAY_AFTER_CHOICES_S:
+        return raw
+    return DEFAULT_AWAY_AFTER_S
+
+
+def materialise_desk_report(
+    *,
+    received_at: float,
+    idle_s: int | None,
+    locked: bool | None,
+    idle_trusted: bool | None,
+    away_after_s: int | None,
+) -> DeskReport:
+    """Turn one beat's relative desk fields into receiver-clock deadlines.
+
+    ADR 0008 §3.2, verbatim::
+
+        last_input_at = t_r - idle_s
+        away_at       = t_r if locked else last_input_at + away_after_s
+
+    MISSING FIELDS LEAN TOWARDS NOTIFYING. A beat that carries some desk fields
+    but not ``idle_s`` or ``idle_trusted`` is untrusted (unknown → push now);
+    a missing ``away_after_s`` is the default rather than the longest choice; a
+    missing ``locked`` is unlocked, which is safe because the deadline still
+    runs from the (trusted) idle reading.
+    """
+    trusted = bool(idle_trusted) and idle_s is not None
+    idle = max(0, int(idle_s or 0))
+    threshold = away_after_s if away_after_s in AWAY_AFTER_CHOICES_S else DEFAULT_AWAY_AFTER_S
+    last_input_at = received_at - idle
+    away_at = received_at + LOCK_GRACE_S if locked else last_input_at + threshold
+    return DeskReport(
+        received_at=received_at,
+        last_input_at=last_input_at,
+        away_at=away_at,
+        idle_trusted=trusted,
+        locked=bool(locked),
+    )
+
 
 @dataclass(frozen=True)
 class DesktopPresence:
@@ -150,6 +301,11 @@ class DesktopPresence:
     has_window: bool = False
     pid: int = 0
     heartbeat_at: float = 0.0
+    #: ADR 0008: every live app's desk report, one per subscription that sent
+    #: the desk fields. EMPTY means no reporter speaks the desk protocol (an
+    #: app older than ``features.desk_presence``), which is what selects the
+    #: one-release legacy focus fallback in the push worker.
+    desk: tuple[DeskReport, ...] = ()
     #: Kept for diagnostics and for the tests that assert a reaped record is
     #: reported absent rather than reported empty. Never read by a decision.
     detail: str = field(default="")
@@ -167,6 +323,54 @@ class DesktopPresence:
         if not self.deliverable:
             return False
         return bool(self.kinds) if kind is None else kind in self.kinds
+
+    def attending(self, session_id: str) -> bool:
+        """Whether an attended window is showing ``session_id`` (rung 1).
+
+        THE ONE PREDICATE for "the desktop is displaying this conversation to
+        someone looking at it". Two consumers must answer it identically, or
+        the phone can push what the desktop deliberately kept quiet: the
+        desktop feed's banner gate (``desktop_feed._focus_policy_for``, which
+        raises nothing for exactly this case) and the mobile push worker's
+        presence gate (``push_worker._settle_deferred``). Operator, 2026-11-15:
+        "I feel like I'm still seeing more notifications on mobile than I see
+        pop up on desktop" — phone <= desktop is only provable if both read
+        this one method rather than two copies of its expression.
+        """
+        return self.attended and bool(session_id) and self.session_id == session_id
+
+    @property
+    def desk_reported(self) -> bool:
+        """Whether any live app sent desk fields at all (new protocol in use).
+
+        False selects the legacy focus rule for ONE release (ADR 0008 §3.3,
+        version skew row "old app, new core"). After that release a report with
+        no desk fields is to be read as unknown, i.e. notify.
+        """
+        return bool(self.desk)
+
+    def desk_active(self, now: float) -> bool:
+        """ADR 0008 §3.2: is a person at ANY desk this backend serves?
+
+        ANY-aggregation, each report judged on its own: an untrusted or stale
+        report never contributes, so it cannot win a max and keep the desk
+        "active" beside a trusted report that has gone idle (review m3).
+        """
+        return any(report.active(now) for report in self.desk)
+
+    def desk_known(self, now: float) -> bool:
+        """Whether at least one fresh, trusted report exists (else: unknown)."""
+        return any(report.known(now) for report in self.desk)
+
+    def last_input_at(self, now: float) -> float | None:
+        """Newest input time over fresh TRUSTED reports only, or ``None``.
+
+        Rule 4's "input after the banner" reads this. Untrusted reports are
+        excluded for the same reason as in :meth:`desk_active`: a Wayland
+        ``idle_s = 0`` is not evidence anybody touched anything.
+        """
+        known = [report.last_input_at for report in self.desk if report.known(now)]
+        return max(known) if known else None
 
 
 #: The absent answer, shared so callers can compare against one object.
@@ -346,6 +550,16 @@ def read_delivery(root: Path | None = None) -> DesktopPresence:
     # precisely the clobbering this change removes.
     kinds: set[str] = set()
     deliverable = False
+    # DESK REPORTS ARE UNIONED TOO, and evaluated per report by the predicate
+    # (ADR 0008 §3.2 "any"): a person at any desk this backend serves is at a
+    # desk. A malformed entry is skipped, i.e. it contributes nothing.
+    desk: list[DeskReport] = []
+    for record in live:
+        raw_desk = record.get("desk")
+        if isinstance(raw_desk, list):
+            desk.extend(
+                report for report in map(DeskReport.from_record, raw_desk) if report is not None
+            )
     for record in live:
         if not bool(record.get("can_notify")):
             continue
@@ -375,6 +589,7 @@ def read_delivery(root: Path | None = None) -> DesktopPresence:
         has_window=has_window,
         pid=int(newest.get("pid") or 0),
         heartbeat_at=max(heartbeat_of(record) for record in live),
+        desk=tuple(desk),
     )
 
 
@@ -435,7 +650,9 @@ def desktop_viewing_session(root: Path | None = None) -> str:
     return presence.session_id if presence.attended else ""
 
 
-def desktop_attending_session(session_id: str, root: Path | None = None) -> bool:
+def desktop_attending_session(
+    session_id: str, root: Path | None = None, *, cached: bool = True
+) -> bool:
     """Whether a desktop window is attended AND showing ``session_id``.
 
     Rung 1's desktop contribution. A desktop lease is a *machine-wide*
@@ -446,9 +663,12 @@ def desktop_attending_session(session_id: str, root: Path | None = None) -> bool
     Kinds are deliberately NOT consulted: a card already painted in-band on the
     session's own stream is a card somebody is looking at, whatever the app
     would be able to do with a banner.
+
+    ``cached`` follows :func:`desktop_presence`: a caller whose decision is
+    terminal (the push worker DROPS a completion on a True here) passes
+    ``cached=False`` so it never acts on focus the user has already left.
     """
-    presence = desktop_presence(root)
-    return presence.attended and bool(session_id) and presence.session_id == session_id
+    return desktop_presence(root, cached=cached).attending(session_id)
 
 
 def reset_cache() -> None:

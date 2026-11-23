@@ -1,0 +1,91 @@
+"""Author mechanical checks only; NOT an independent locale audit.
+Uses the official catalogue checker on a two-locale, one-namespace fixture.
+Negative mutations touch scratch copies only, never product catalogues.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+import unicodedata
+from unittest.mock import patch
+from rich.cells import cell_len
+from rich.console import Console
+from rich.text import Text
+from local_operator.i18n import catalogues, runtime
+from scripts.i18n import check
+
+ROOT = Path.cwd()
+NS = 'tui.provider_state'
+LOCALE = 'vi'
+SOURCE = ROOT / 'local_operator/i18n/catalogues'
+FIXTURE = Path(os.environ['HOME']) / 'scoped-catalogues'
+print('AUTHOR MECHANICAL VALIDATION; not independent audit or app/native proof')
+print('executable:', sys.executable)
+print('HOME:', os.environ['HOME'])
+print('CONFIG:', os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+print('CMUX variables:', sorted(k for k in os.environ if k.startswith('CMUX_')))
+for module in (catalogues, runtime, check):
+    print('MODULE:', module.__file__)
+    assert Path(module.__file__).resolve().is_relative_to(ROOT)
+for locale in ('en', LOCALE):
+    (FIXTURE / locale).mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(SOURCE / locale / (NS + '.json'), FIXTURE / locale / (NS + '.json'))
+shutil.copyfile(SOURCE / 'en' / (NS + '.context.json'), FIXTURE / 'en' / (NS + '.context.json'))
+en = json.loads((FIXTURE / 'en' / (NS + '.json')).read_text())
+target_path = FIXTURE / LOCALE / (NS + '.json')
+target = json.loads(target_path.read_text())
+assert len(en) == len(target) == 5
+assert list(en) == list(target)
+assert hashlib.sha256((SOURCE / 'en' / (NS + '.json')).read_bytes()).hexdigest() == '113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912'
+assert hashlib.sha256((SOURCE / 'en' / (NS + '.context.json')).read_bytes()).hexdigest() == '67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be'
+print('PASS exact pinned English/context hashes; 5 keys in exact order')
+with patch.object(catalogues, '_CATALOGUES', FIXTURE):
+    result = check.check_catalogues()
+    print('OFFICIAL scripts.i18n.check.check_catalogues scoped en/vi namespace:', result)
+    assert result == []
+    missing = dict(target)
+    missing.pop(next(iter(missing)))
+    target_path.write_text(json.dumps(missing, ensure_ascii=False))
+    result = check.check_catalogues()
+    print('NEGATIVE missing key:', result)
+    assert any('missing key' in item for item in result)
+    added = dict(target)
+    first = next(iter(added))
+    added[first] += ' {unexpected}'
+    target_path.write_text(json.dumps(added, ensure_ascii=False))
+    result = check.check_catalogues()
+    print('NEGATIVE added argument:', result)
+    assert any('arguments' in item for item in result)
+    target_path.write_text(json.dumps(target, ensure_ascii=False))
+    result = check.check_catalogues()
+    assert result == []
+    print('RESTORED CONTROL:', result)
+
+# Source has no protected tokens. Compare explicitly rather than inventing any.
+tokens = re.compile(r'`[^`]*`|</?[^>]+>|%[sd]|https?://\S+|--[\w-]+')
+console = Console(width=120, color_system=None, force_terminal=False)
+for key, source in en.items():
+    value = target[key]
+    assert runtime.message_arguments(source) == runtime.message_arguments(value) == ()
+    assert runtime.plural_selectors(source) == runtime.plural_selectors(value) == ()
+    assert unicodedata.normalize('NFC', value) == value
+    assert not any(unicodedata.category(char) == 'Cf' for char in value)
+    assert tokens.findall(source) == tokens.findall(value) == []
+    assert runtime.render_message(source, {}, 'en') == source
+    assert runtime.render_message(value, {}, LOCALE) == value
+    assert Text.from_markup(value).plain == value
+    # Synthetic expansion control only; no locale eligibility/production mutation.
+    pseudo = '[!! ' + source + ' ~~~~~ !!]'
+    assert runtime.render_message(pseudo, {}, 'en') == pseudo
+    diagnostic = {
+        'key': key, 'en_cells': cell_len(source), 'vi_cells': cell_len(value),
+        'pseudo_cells': cell_len(pseudo), 'illustrative_openrouter_allowance': 17,
+        'vi_exceeds_illustrative_allowance': cell_len(value) > 17,
+    }
+    print('WIDTH DIAGNOSTIC (not a max cap):', json.dumps(diagnostic, ensure_ascii=False))
+    console.print(Text('en: ' + source + ' | vi: ' + value + ' | pseudo: ' + pseudo))
+print('PASS: 5/5 zero args, no plural/select, NFC, no bidi controls, protected-token parity, ICU renders, plain Rich labels')
+print('LIMIT: no real settings/app render, native geometry/fonts, server-health probe, ledger, eligibility, or global/full checker executed')

@@ -1,0 +1,23 @@
+{
+  "tui.settings_view.editor.contract": "{save_key} enregistrer · {cancel_key} annuler",
+  "tui.settings_view.editor.contract_unset": "{save_key} enreg. · {cancel_key} annuler · vider = aucun",
+  "tui.settings_view.editor.suggest_long": "{browse_keys} suggestions · {complete_key} compléter · {save_key} enregistrer · {cancel_key}",
+  "tui.settings_view.editor.suggest_medium": "{browse_keys} parcourir · {complete_key} compléter · {save_key} enregistrer",
+  "tui.settings_view.editor.suggest_short": "{browse_keys} · {complete_key} · {save_key} enreg.",
+  "tui.settings_view.pane.agents_empty": "aucun agent configuré",
+  "tui.settings_view.pane.empty_hint": "{command} les liste et attache",
+  "tui.settings_view.pane.more": "{count, plural, one {… {shown} de plus} many {… {shown} de plus} other {… {shown} de plus}}",
+  "tui.settings_view.pane.providers_empty": "aucun connecté — {command}",
+  "tui.settings_view.pane.providers_header": "fournisseurs",
+  "tui.settings_view.pane.tab_agents": "agents",
+  "tui.settings_view.pane.tab_teams": "équipes",
+  "tui.settings_view.pane.teams_empty": "aucune équipe configurée",
+  "tui.settings_view.row.add_chain": "+ ajouter une chaîne",
+  "tui.settings_view.row.add_hop": "+ ajouter une étape",
+  "tui.settings_view.scope.live": "immédiat",
+  "tui.settings_view.scope.never": "jamais",
+  "tui.settings_view.scope.new_launch": "relancement",
+  "tui.settings_view.scope.new_sessions": "nouv. sessions",
+  "tui.settings_view.section.takes_effect": "prise d’effet : {scope}",
+  "tui.settings_view.too_short": "terminal trop bas pour les paramètres — augmentez sa hauteur"
+}

@@ -48,8 +48,9 @@ them actually moved, plus one bounded authoritative read every
 read. That is what makes detection p50 ~60 ms where the per-session poll's floor
 was 1 s.
 
-COST, CONTINUED — the FIVE 1 s invalidation probes are NOT in that eight-stat figure:
-the approvals one (two directory stats; record reads only on movement/expiry,
+COST, CONTINUED — the SIX 1 s invalidation probes are NOT in that eight-stat figure:
+the voice slot's (one ``os.stat`` of ``voice/active.json``, a read only when it
+moved), the approvals one (two directory stats; record reads only on movement/expiry,
 with failures backing off on the same clock), the catalogue's, the authoring one
 (O(profiles)), the code-request one (one ``readdir`` of the derived code-request
 index plus one ``os.stat`` per session WITH rows — usually
@@ -132,6 +133,7 @@ import sqlite3
 import time
 import zlib
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, cast
@@ -162,6 +164,7 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import DesktopPresence, desktop_presence
 from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
 from local_operator.tui.sidebar_pins import PINS_FILE
+from local_operator.voice import slot as voice_slot
 from local_operator.wakes.store import read_index
 
 logger = logging.getLogger(__name__)
@@ -730,6 +733,16 @@ class DesktopFeed:
         self._approvals_token: tuple[Any, ...] | None = None
         self._approvals_pending: bool | None = None
         self._approvals_expiry = 0.0
+        # The live ``pair_phone`` approval id the ticker last PUBLISHED, and the one the
+        # last snapshot read (subscriber snapshots must not commit the published edge).
+        self._approvals_pair_request: str | None = None
+        self._approvals_pair_request_seen: str | None = None
+        #: The oldest open MESH PAIRING card's id (``<side>:<invite_id>``), read in the
+        #: same probe as the approvals store and kept BESIDE it rather than folded into
+        #: ``_approvals_pending``: that field is also the cache ``approval_snapshot``
+        #: compares, and it must keep meaning "the approvals store has rows".
+        self._approvals_pairing_seen: str | None = None
+        self._approvals_pairing: str | None = None
         self._approvals_probed_at = float("-inf")
         #: When the inbox read last warned, so a corrupt store reports once a
         #: minute instead of once per 100 ms tick.
@@ -762,6 +775,13 @@ class DesktopFeed:
         #: keeps a failing producer to one attempt per ITEM_RETRY_BACKOFF_S
         #: instead of one per tick.
         self._item_retry_after: dict[str, float] = {}
+        # -- the voice channel (machine-wide, docs/design/qwen-voice.md) --------
+        #: The voice slot file's stat token. One ``os.stat`` per probe, on the
+        #: list-invalidation cadence: the slot is written by whichever server
+        #: process handled the toggle, so a frame from THIS feed is the only way
+        #: another window learns that voice moved.
+        self._voice_token: tuple[int, int, int] | None = None
+        self._voice_probed_at = 0.0
 
         # -- the per-session status channel ------------------------------------
         #: The discovery-record directory (``run/mobile``). Resolved HERE as a
@@ -1268,10 +1288,16 @@ class DesktopFeed:
                 self._approvals_pending,
                 self._approvals_expiry,
             ) = self._approval_snapshot()
+            self._approvals_pair_request = self._approvals_pair_request_seen
+            self._approvals_pairing = self._approvals_pairing_seen
         except Exception:  # noqa: BLE001 — an optional store remains unknown
             self._approvals_token = None
             self._approvals_pending = None
             self._approvals_expiry = 0.0
+            self._approvals_pair_request = None
+        # The VOICE baseline, same no-replay rule: the slot as it stood at
+        # connect is what the client's own `GET /v1/desktop/voice` returns.
+        self._voice_token = voice_slot.slot_token(self.root)
         candidates = [*records, *self._wake_index, *self._monitor_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -1488,6 +1514,10 @@ class DesktopFeed:
         # only while a live desktop lease advertises the `update` kind, and only
         # for revisions nothing has claimed yet.
         await self._emit_item_notifications()
+        # 10. THE VOICE SLOT. Outside the doorbell branch for the authoring
+        # channel's reason: the slot lives under the config root, which the
+        # five-stat doorbell never looks at.
+        await self._maybe_emit_voice()
 
     # -- the item banner leg (contract §3.5, rung 2) -------------------------
 
@@ -1723,6 +1753,25 @@ class DesktopFeed:
             "dedupe_key": "item:digest:" + ";".join(str(row.get("id") or "") for row in rows),
         }
 
+    async def _maybe_emit_voice(self) -> None:
+        """Publish ``type: "voice"`` with ``{active}`` when the slot moved.
+
+        A LEVEL, not an edge: the payload is the slot as it now is, so a burst of
+        switches that lands inside one probe is one frame carrying the latest
+        holder. That is all a renderer needs, since it shows only who holds the
+        slot now. ``CATALOGUE_PROBE_INTERVAL_S``, the module's one list cadence.
+        """
+        now = time.monotonic()
+        if now - self._voice_probed_at < CATALOGUE_PROBE_INTERVAL_S:
+            return
+        self._voice_probed_at = now
+        token = await asyncio.to_thread(voice_slot.slot_token, self.root)
+        if token == self._voice_token:
+            return
+        self._voice_token = token
+        slot = await asyncio.to_thread(voice_slot.read_slot, self.root)
+        self._publish("voice", {"active": slot.public() if slot is not None else None})
+
     async def _maybe_probe_unattributed(self) -> None:
         """The doorbell's unattributed-move fallback, RATE-LIMITED (NIT 1).
 
@@ -1903,7 +1952,24 @@ class DesktopFeed:
             # exists for — pay N of them inside one tick against 1 before.
             if presence is None:
                 presence = self._tick_presence()
-            policy = self._focus_policy_for(self._session_id(identity), presence)
+            # ADR 0009: the ROW's routing facts (this row's own kind/origin,
+            # F1's rule), over the conversation's unseen state.
+            route = {
+                **state,
+                **{
+                    key: row[key]
+                    for key in ("kind", "origin", "needs_user", "notify")
+                    if key in row
+                },
+            }
+            if route.get("origin") == "mobile":
+                # Only a mobile-origin row reads the device registry; off the
+                # loop like the test-hosting read below.
+                policy = await asyncio.to_thread(
+                    self._focus_policy_for, self._session_id(identity), presence, route
+                )
+            else:
+                policy = self._focus_policy_for(self._session_id(identity), presence, route)
             if policy is None:
                 continue
             if await asyncio.to_thread(
@@ -2030,7 +2096,12 @@ class DesktopFeed:
             ],
         }
 
-    def _focus_policy_for(self, session_id: str, presence: DesktopPresence) -> str | None:
+    def _focus_policy_for(
+        self,
+        session_id: str,
+        presence: DesktopPresence,
+        route: Mapping[str, Any] | None = None,
+    ) -> str | None:
         """``focus_policy`` for this completion, or ``None`` for "raise nothing".
 
         WHY THIS IS DERIVED AND NOT COPIED. ``focus_policy`` is a ROUTING field,
@@ -2064,8 +2135,22 @@ class DesktopFeed:
         argument is untouched by the move: the caller still reads on the tick
         that decides, so the answer is never the cache's.
         """
-        if presence.attended and presence.session_id == session_id:
+        # ``DesktopPresence.attending`` is shared with the mobile push worker's
+        # presence gate, so the phone suppresses exactly what this suppresses.
+        if presence.attending(session_id):
             return None
+        # ADR 0009 §2 footnote 1: a MOBILE-origin completion or error raises no
+        # desktop banner while the phone would be told (``phone_would_emit``,
+        # the predicate the push worker asks, never a re-derivation). The row
+        # still lands unread in the sidebar, inbox and badge. When the phone
+        # would not emit, the desktop banners as before, so the item is never
+        # silent on every surface. A registry read, so the caller runs this off
+        # the event loop.
+        if route is not None:
+            from local_operator.notifications.routing import desktop_defers_to_phone
+
+            if desktop_defers_to_phone(route, self.root):
+                return None
         return "always"
 
     # -- catalogue ---------------------------------------------------------
@@ -2283,6 +2368,29 @@ class DesktopFeed:
             session_id=session_id,
         )
 
+    def publish_team_bridge_authorize(self, payload: dict[str, Any]) -> None:
+        """Announce a batch approvals confirmation (``team_bridge_authorize``).
+
+        WHY (PR #4099 security round 2, S-6): any bearer holder can call
+        ``…/requests/decide/authorize``, so the daemon publishes, on the
+        MACHINE-WIDE feed every desktop window holds, what each confirmation is
+        for — ``{authorize_id, client_ref, state, items}`` with the senders and
+        excerpts it resolved from the local asks — whoever started it. The
+        desktop renders it and labels a ``client_ref`` it did not generate as
+        "not started by you".
+
+        NO CALLER PUBLISHES IT SINCE decision a-856f. That route is now a
+        non-prompting compatibility shim, and a lone ``signed`` frame renders
+        nothing in the shipped desktop (its model only closes a notice that a
+        ``prompting`` frame opened), so publishing one would claim a detection
+        signal that does not exist (PR #4208 security round 1, S-2). The method
+        and frame type stay so an older desktop's subscription keeps its shape;
+        a decide-side frame would be a new, rendered contract. LIVE-ONLY, like ``settings_intent``:
+        a missed frame has nothing to replay into. The payload never carries a
+        message body, a screening rationale or a body hash.
+        """
+        self._publish("team_bridge_authorize", dict(payload))
+
     def _avatar_probe(self) -> dict[str, str | None]:
         """``{agent_id: avatar sha256 | None}`` from the shared, stat-memoised index.
 
@@ -2441,35 +2549,44 @@ class DesktopFeed:
         )
 
     def _approval_snapshot(self) -> tuple[tuple[Any, ...], bool, float]:
-        """The existing store's requested predicate, without presentation data."""
-        from local_operator.network.approvals import approvals_dir, list_records
+        """The existing store's requested predicate, without presentation data.
 
-        directories = [approvals_dir(self.root), approvals_dir(self.root, enrollment_only=True)]
-        token: list[Any] = []
-        for directory in directories:
-            try:
-                stat = directory.stat()
-                token.append((stat.st_ino, stat.st_mtime_ns))
-            except FileNotFoundError:
-                token.append(None)
-        fingerprint = tuple(token)
-        now = time.time()
-        if (
-            fingerprint == self._approvals_token
-            and self._approvals_pending is not None
-            and (self._approvals_expiry == 0 or now < self._approvals_expiry)
-        ):
-            return fingerprint, self._approvals_pending, self._approvals_expiry
-        # list_records folds expiry and reads no secret/peer; use its own state,
-        # never infer a pending request from a rail row or notification delivery.
-        records = list_records(root=self.root, now=now)
-        requested = [record for record in records if record.get("state") == "requested"]
-        expirations = [
-            float(record["expires_at"])
-            for record in requested
-            if isinstance(record.get("expires_at"), (int, float)) and record["expires_at"] > now
-        ]
-        return fingerprint, bool(requested), min(expirations, default=0.0)
+        The body lives in ``network.approvals.approval_snapshot`` (pairing design v2
+        §2.3) so the TUI's dock shares ONE fingerprint and ONE "which pairing is live"
+        answer with this feed. The live ``pair_phone`` id rides the same read and is
+        kept beside the 3-tuple this method has always returned.
+        """
+        from local_operator.network.approvals import approval_snapshot
+
+        cached = None
+        if self._approvals_pending is not None:
+            cached = (
+                self._approvals_token,
+                self._approvals_pending,
+                self._approvals_expiry,
+                self._approvals_pair_request,
+            )
+        token, pending, expiry, pair_request = approval_snapshot(self.root, cached=cached)
+        self._approvals_pair_request_seen = pair_request
+        self._approvals_pairing_seen = self._open_pairing_id()
+        return token, pending, expiry
+
+    def _open_pairing_id(self) -> str | None:
+        """The oldest open mesh pairing card (files only, no relay call), or ``None``.
+
+        WHY IN THE FEED. A pairing parked for the inviter's person used to be visible
+        only on the Mesh approvals tray's 15 s poll, so the badge could stay dark for
+        most of a short window. Read on the existing 1 s approvals probe, it lights
+        the badge at feed latency. A read failure is "no card", never a feed failure.
+        """
+        try:
+            from local_operator.server.utils.desktop_mesh_pairings import (
+                first_open_pairing_id,
+            )
+
+            return first_open_pairing_id(self.root)
+        except Exception:  # noqa: BLE001 — optional: a card read never kills the feed
+            return None
 
     async def _maybe_emit_approvals(self) -> None:
         # Optional authority reads and failures share the existing 1 s probe
@@ -2482,11 +2599,31 @@ class DesktopFeed:
             token, pending, expiry = await asyncio.to_thread(self._approval_snapshot)
         except Exception:  # noqa: BLE001 — optional authority failure is unknown, not empty
             return
-        if pending != self._approvals_pending:
-            self._publish("approvals", {"pending": pending})
+        pair_request = self._approvals_pair_request_seen
+        pairing = self._approvals_pairing_seen
+        # ``pair_request`` (design v2 §2.3): the one live phone pairing's approval id, so a
+        # renderer can raise the pairing card on ANY route within one probe tick. Same
+        # frame, same 1 s probe, no new poller; an old UI ignores the extra key.
+        # ``pairing_id``: the same idea for a MESH pairing card; ``pending`` is OR'd with
+        # it so the badge lights for an open pairing as for any other approval.
+        if (
+            pending != self._approvals_pending
+            or pair_request != self._approvals_pair_request
+            or pairing != self._approvals_pairing
+        ):
+            self._publish(
+                "approvals",
+                {
+                    "pending": bool(pending) or pairing is not None,
+                    "pair_request": pair_request,
+                    "pairing_id": pairing,
+                },
+            )
         self._approvals_token = token
         self._approvals_pending = pending
         self._approvals_expiry = expiry
+        self._approvals_pair_request = pair_request
+        self._approvals_pairing = pairing
 
     def _notifications_state_or_none(self) -> tuple[int, int, int, int] | None:
         """The inbox counts, or ``None`` when the store cannot be read (CD1).
@@ -3192,12 +3329,27 @@ class DesktopFeed:
         attention, catalogue_revision, authoring_revision, attention_status, notifications = (
             snapshot
         )
+
+        def read_approvals() -> tuple[bool, str | None, str | None]:
+            pending = self._approval_snapshot()[1]
+            # The live pairing id the SAME read just produced (round-1 Q5): a window
+            # opened or reconnected mid-request must raise the pairing card from the
+            # open frame, because no change frame follows for a level it never saw.
+            # Read in the same thread call as the snapshot; a ticker read racing it
+            # writes the same attribute from an equally fresh store read.
+            pairing = self._approvals_pairing_seen
+            return bool(pending) or pairing is not None, self._approvals_pair_request_seen, pairing
+
+        approvals_pairing: str | None = None
         try:
-            approvals_pending = (await asyncio.to_thread(self._approval_snapshot))[1]
+            approvals_pending, approvals_pair_request, approvals_pairing = await asyncio.to_thread(
+                read_approvals
+            )
             # A subscriber snapshot is local; only the ticker commits the
             # shared edge baseline, or subscriber B can consume A's next edge.
         except Exception:  # noqa: BLE001 — retain explicit unknown on an optional read
             approvals_pending = None
+            approvals_pair_request = None
         frame["payload"] = {
             "subscription_id": subscription.id,
             "heartbeat_seconds": HEARTBEAT_INTERVAL_S,
@@ -3209,6 +3361,8 @@ class DesktopFeed:
             "attention_status": attention_status,
             "notifications": notifications,
             "approvals_pending": approvals_pending,
+            "approvals_pair_request": approvals_pair_request,
+            "approvals_pairing_id": approvals_pairing,
         }
         return frame
 

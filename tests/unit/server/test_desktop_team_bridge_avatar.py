@@ -73,6 +73,10 @@ def test_avatar_desktop_auth(proxy):
         ("image/png", b""),
         ("image/png", b"x" * (1024 * 1024 + 1)),
     ],
+    # Explicit ids: the auto id of the 1 MiB + 1 body is 1,048,610 characters
+    # under CI's pytest 8.4.2, which bloats every stall header and junit row
+    # that names it and makes the shard logs unreadable.
+    ids=["svg-markup", "html-body", "empty-png", "png-over-1MiB"],
 )
 def test_avatar_bad_bytes(proxy, mime, body):
     client, _, state = proxy

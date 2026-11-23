@@ -8,6 +8,7 @@ not persisted: after restart the next request must verify the owner again.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 import time
@@ -118,6 +119,12 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
         if result.token_expires_at_ms:
             expiry = min(expiry, result.token_expires_at_ms)
         held = bool(getattr(result, "held_offline", False))
+        held_until = int(getattr(result, "held_until_ms", 0) or 0)
+        if held and held_until:
+            # THE OFFLINE HOLD's end, not the grant's: the client serves this grant
+            # until then (``Grant.hold_end_ms``), so ``owner_unavailable`` must not
+            # be published while it is still being served.
+            expiry = held_until
         receipt = EffectiveAccess(
             "held_offline" if held else "effective_borrow",
             owner=result.credential_ref.owner_device,
@@ -132,7 +139,13 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
         state = (
             "owner_unavailable"
             if result.code
-            in {"owner_offline", "owner_unreachable", "refresh_failed", "consent_unverifiable"}
+            in {
+                "owner_offline",
+                "owner_unreachable",
+                "owner_busy",
+                "refresh_failed",
+                "consent_unverifiable",
+            }
             else (
                 "withdrawn"
                 if result.code
@@ -159,6 +172,43 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
                 previous.last_grant_expires_at if same_owner and previous else None
             ),
         )
+    with _lock:
+        _receipts[key] = receipt
+    _notify(key)
+
+
+def note_held_dropped(root: Path | None, provider: str) -> None:
+    """A held grant was just dropped (the provider refused it): its hold is over NOW.
+
+    Without this the next refusal's receipt copies ``last_grant_expires_at`` from
+    the held receipt (the hold end, up to a day away), so a reader keyed on "the
+    lease has not ended yet" (#3722's owner-away wait) would believe access is
+    still coming and fail fast instead of waiting for the owner (design review m2).
+    Only a ``held_offline`` receipt moves; a live borrow keeps its own evidence.
+    """
+    key = (_root(root), provider)
+    with _lock:
+        previous = _receipts.get(key)
+        if previous is None or previous.state != "held_offline":
+            return
+        _receipts[key] = dataclasses.replace(previous, last_grant_expires_at=time.time())
+    _notify(key)
+
+
+def note_awaiting_handback(root: Path | None, provider: str, *, node: str, node_label: str) -> None:
+    """The OWNER is waiting for ``node`` to hand back a lent login (design
+    mesh-credential-renewal §B.3 R4, made visible per §D D2).
+
+    Published as its own state, ``awaiting_handback``, beside ``held_offline``: the
+    login is this device's own, it is NOT broken, and it is not usable for renewal
+    until the node answers or the 7-day return cap passes. ``owner``/``owner_label``
+    carry the NODE here — the device a reader must name ("Waiting for node2 to hand
+    back your Anthropic login"). Not in :data:`USABLE_STATES`.
+    """
+    key = (_root(root), provider)
+    receipt = EffectiveAccess(
+        "awaiting_handback", owner=node, owner_label=node_label or node, observed_at=time.time()
+    )
     with _lock:
         _receipts[key] = receipt
     _notify(key)

@@ -453,6 +453,8 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
 
                 text = model_card_text(message, messages)
             rendered = _injected_user_message(text, message.id)
+            if getattr(message, "_ephemeral", False):
+                rendered._ephemeral = True
             if message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE:
                 from local_operator.team_bridge.card_projection import (
                     carry_presented_body,

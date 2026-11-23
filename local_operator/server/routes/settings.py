@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from local_operator import keymap as _keymap
 from local_operator import settings_io
 from local_operator.config import ConfigManager
 from local_operator.i18n.boot import follow_language
@@ -190,7 +192,27 @@ def _private_endpoint(value: Any) -> bool:
         return True
 
 
-def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
+def _live_keymap(manager: ConfigManager) -> dict[str, str]:
+    """The LIVE app-scope keymap, resolved from config ONCE per request (R9).
+
+    `_live_help` used to re-read the config for EVERY row — 200-odd rows, each
+    one a config snapshot — to substitute a chord that only the `display.dock`
+    line names. One snapshot per response is both cheaper and the honest shape:
+    every row describes the same keymap.
+    """
+    values = manager.get_config().values
+    return {
+        action.id: _keymap.effective_key(action, values)
+        for action in _keymap.KEY_ACTIONS
+        if action.scope == "app"
+    }
+
+
+def _view(
+    manager: ConfigManager,
+    setting: settings_io.Setting,
+    live: Mapping[str, str] | None = None,
+) -> SettingView:
     value = (
         settings_io.read_chains(manager)
         if setting.kind is settings_io.Kind.CASCADE
@@ -213,7 +235,7 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         section=setting.section,
         label=setting.label,
         kind=setting.kind.value,
-        help=setting.help,
+        help=_live_help(setting, live),
         value=None if _private_endpoint(value) else value,
         default=setting.default,
         redacted=_private_endpoint(value),
@@ -265,6 +287,21 @@ def _setting(key: str) -> settings_io.Setting:
     return setting
 
 
+def _live_help(setting: settings_io.Setting, live: Mapping[str, str] | None) -> str:
+    """``setting.help``, with any shipped app chord replaced by its live remap.
+
+    The dock's help line names the subagent-panel chord, and a row that kept
+    saying ``ctrl+g`` after a remap would send a desktop user after a key the
+    terminal no longer answers to. Same token-substitution rule the TUI paints
+    with (``keymap.substitute_keys``) — the copy is translated and audited, so
+    the chord is rewritten, not templated. A no-op while every row is default,
+    and `live` is resolved once by the caller.
+    """
+    if live is None:
+        return setting.help
+    return _keymap.substitute_keys(setting.help, live)
+
+
 @router.get("/v1/settings", response_model=CRUDResponse[SettingsView])
 async def list_settings(manager: ConfigManager = Depends(get_config_manager)):
     async with _write_lock:
@@ -274,6 +311,7 @@ async def list_settings(manager: ConfigManager = Depends(get_config_manager)):
         except settings_io.ConfigUnreadableError:
             raise HTTPException(409, _we.config_unreadable().envelope())
         root = manager.config_dir
+        live = _live_keymap(manager)
         return CRUDResponse(
             status=200,
             message="Settings retrieved.",
@@ -295,7 +333,7 @@ async def list_settings(manager: ConfigManager = Depends(get_config_manager)):
                     if bridge_availability.section_visible(section.name, root)
                 ],
                 settings=[
-                    _view(manager, setting)
+                    _view(manager, setting, live)
                     for setting in settings_io.SETTINGS
                     if bridge_availability.section_visible(setting.section, root)
                 ],
@@ -361,7 +399,7 @@ async def edit_setting(
             ) from None
         changed_identity = before != _bridge_identity(manager, key)
         _follow_language_write(manager, key)
-        result = _view(manager, setting)
+        result = _view(manager, setting, _live_keymap(manager))
     if changed_identity:
         await _reconcile_bridge_identity(manager)
     if key == "team_bridge.enabled":
@@ -402,7 +440,7 @@ async def reset_setting(key: str, manager: ConfigManager = Depends(get_config_ma
             ) from None
         changed_identity = before != _bridge_identity(manager, key)
         _follow_language_write(manager, key)
-        result = _view(manager, setting)
+        result = _view(manager, setting, _live_keymap(manager))
     if changed_identity:
         await _reconcile_bridge_identity(manager)
     return CRUDResponse(status=200, message="Setting reset.", result=result)

@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "cli.failures",
+  "history_sha256": "e294b2da59b7e02a95b4fbac3057af46e3f93edced87a9c2d95743919b8838aa",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "cli.failures",
+      "source_sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea",
+      "translator": {
+        "agent": "i18n-translator (timeout-ru)",
+        "model": "openai/gpt-6.1-sol (fallback anthropic/claude-opus-5-5)",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (audit2-ru, session 2753becb3d9e; independent)",
+        "model": "anthropic/claude-opus-5-5 (fallback from openai/gpt-6.1-sol)",
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "ru cli.failures gbt2 independent audit PASS: 5 keys, 0 blocker/major, 1 minor (R1). Auditor opus-5-5 (fallback from gpt-6.1-sol, 429); translator gpt-6.1-sol+opus fallback. Evidence: i18n/audits/evidence/ru/cli.failures/gbt2/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ru/cli.failures/gbt2/record.json",
+          "sha256": "09011d5faebe66c938948c0673a8df1be25fdc0411905e4fba04bd60a4e78f31"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.failures/gbt2/report.md",
+          "sha256": "047ad7743313c00f8e66a7956e016079b2d4a4a1c971ea5979c84db3454cfc0d"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.failures/gbt2/audit.log",
+          "sha256": "1aa4fdc1faff12f984f11c3a3f7f883ad2a3348aacdceaa19014787ecdc4f832"
+        }
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.failures",
+      "source_sha256": "10452313f2d9c33a17496fabefb90870ef27631c1ac446972d7457b8000ce54c",
+      "translator": {
+        "agent": "coder (PR #4364 implementer)",
+        "model": null,
+        "date": "2026-11-21",
+        "model_source": "not reported in the PR, commit or brief; left null rather than invented"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev 4364-i18n-audit)",
+        "model": "anthropic/claude-opus-5-5",
+        "session": "f3778867a369",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "ru cli.failures goo1: independent audit of new key github_owner_offline (PR #4364); FAIL→corrected (у этого сеанса → у этой сессии); prior 5 keys byte-identical to base. Auditor claude-opus-5-5, no fallback. Report: i18n/audits/evidence/ru/cli.failures/goo1/report.md",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ru/cli.failures/goo1/report.md",
+          "sha256": "c64fba1717d73d1cc4db2802f196635acb4ea9838c193bc4e744ab33a161a924"
+        }
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.failures",
+      "source_sha256": "da8725bbc324ad5124716489a31616dc4e7d999ae1ae07f9060d206f0137bc95",
+      "translator": {
+        "agent": "manager (lopdev lane 79, PR #4364 commit 6d1afe8c3)",
+        "model": null,
+        "date": "2026-11-21",
+        "model_source": "not reported in the PR, commit or brief; left null rather than invented"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev 4364-i18n-audit-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "session": "683ecf30b5dc",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "ru cli.failures goo2: independent re-audit of github_owner_offline after en reworded to \"isn't answering right now\" (PR #4364, 6d1afe8c3); PASS; round-1 corrections persist; other 5 keys byte-identical. Auditor claude-opus-5-5, no fallback. Report: i18n/audits/evidence/ru/cli.failures/goo2/report.md",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ru/cli.failures/goo2/report.md",
+          "sha256": "5baab49b2150652db5e262feb048919b8959a88e2469b864b3d80eb203bd48bf"
+        }
+      ]
+    }
+  ]
+}

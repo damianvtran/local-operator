@@ -1,0 +1,259 @@
+{
+  "locale": "es",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "8370e777a20ecea9cbf5665c1d37687fa5725506f7d9410ab865d5aef78040c5",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor/settings-reaudit-es",
+    "session": "1ef61c3f0d64",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "Round 2 delta-only independent audit; 2 changed keys plus 9 compositional neighbours read, not a new whole-namespace approval. Both fixes clean. Spanish terminal is acceptable feminine here; the notice unambiguously requests more height. borra para quitar accurately describes clear-to-unset. No plural/RTL structures in changed keys. Nominal 23-cell cap is not a defect: source also exceeds it and code falls back to editor.contract. Existing short-contract overflow at 23 cells is unchanged and out of scope. No provider/model fallback used. Translator identity supplied by task; all text/hash/check evidence derived locally.",
+  "round": 2,
+  "head": "56781d884f27cb85551746e9bccf7a3c81a17ab6",
+  "changed_keys": [
+    "tui.settings_view.editor.contract_unset",
+    "tui.settings_view.too_short"
+  ],
+  "keys_read": 11,
+  "findings": [],
+  "checks": [
+    {
+      "key": "tui.settings_view.editor.contract",
+      "arguments": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "rendered": {
+        "en": "enter saves · esc cancels",
+        "es": "enter guarda · esc cancela"
+      },
+      "cell_len": {
+        "en": 25,
+        "es": 26
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.contract_unset",
+      "arguments": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "rendered": {
+        "en": "enter saves · esc cancels · clear to unset",
+        "es": "enter guarda · esc cancela · borra para quitar"
+      },
+      "cell_len": {
+        "en": 42,
+        "es": 46
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_long",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "rendered": {
+        "en": "↑↓ suggestions · tab completes · enter saves · esc",
+        "es": "↑↓ sugerencias · tab completa · enter guarda · esc"
+      },
+      "cell_len": {
+        "en": 50,
+        "es": 50
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_medium",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ],
+      "rendered": {
+        "en": "↑↓ browse · tab complete · enter saves",
+        "es": "↑↓ navega · tab completa · enter guarda"
+      },
+      "cell_len": {
+        "en": 38,
+        "es": 39
+      }
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_short",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ],
+      "rendered": {
+        "en": "↑↓ · tab · enter saves",
+        "es": "↑↓ · tab · enter guarda"
+      },
+      "cell_len": {
+        "en": 22,
+        "es": 23
+      }
+    },
+    {
+      "key": "tui.settings_view.scope.live",
+      "arguments": [],
+      "rendered": {
+        "en": "live",
+        "es": "al instante"
+      },
+      "cell_len": {
+        "en": 4,
+        "es": 11
+      }
+    },
+    {
+      "key": "tui.settings_view.scope.never",
+      "arguments": [],
+      "rendered": {
+        "en": "never",
+        "es": "nunca"
+      },
+      "cell_len": {
+        "en": 5,
+        "es": 5
+      }
+    },
+    {
+      "key": "tui.settings_view.scope.new_launch",
+      "arguments": [],
+      "rendered": {
+        "en": "new launch",
+        "es": "al reiniciar"
+      },
+      "cell_len": {
+        "en": 10,
+        "es": 12
+      }
+    },
+    {
+      "key": "tui.settings_view.scope.new_sessions",
+      "arguments": [],
+      "rendered": {
+        "en": "new sessions",
+        "es": "sesión nueva"
+      },
+      "cell_len": {
+        "en": 12,
+        "es": 12
+      }
+    },
+    {
+      "key": "tui.settings_view.section.takes_effect",
+      "arguments": [
+        [
+          "scope",
+          "simple"
+        ]
+      ],
+      "rendered": {
+        "en": "takes effect: sesión",
+        "es": "se aplica: sesión"
+      },
+      "cell_len": {
+        "en": 20,
+        "es": 17
+      }
+    },
+    {
+      "key": "tui.settings_view.too_short",
+      "arguments": [],
+      "rendered": {
+        "en": "terminal too short for settings — make it taller",
+        "es": "terminal muy baja — aumenta la altura"
+      },
+      "cell_len": {
+        "en": 48,
+        "es": 37
+      }
+    }
+  ],
+  "scope_compositions": {
+    "tui.settings_view.scope.live": "se aplica: al instante",
+    "tui.settings_view.scope.never": "se aplica: nunca",
+    "tui.settings_view.scope.new_launch": "se aplica: al reiniciar",
+    "tui.settings_view.scope.new_sessions": "se aplica: sesión nueva"
+  },
+  "fallback_checks": {
+    "23": {
+      "text": "  enter guarda · esc cancela",
+      "choice": "contract"
+    },
+    "28": {
+      "text": "  enter guarda · esc cancela",
+      "choice": "contract"
+    },
+    "47": {
+      "text": "  enter guarda · esc cancela",
+      "choice": "contract"
+    },
+    "48": {
+      "text": "  enter guarda · esc cancela · borra para quitar",
+      "choice": "unset"
+    },
+    "60": {
+      "text": "  enter guarda · esc cancela · borra para quitar",
+      "choice": "unset"
+    }
+  }
+}

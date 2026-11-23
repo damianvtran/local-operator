@@ -103,7 +103,12 @@ async def test_resume_of_a_peers_session_names_the_device_and_mints_nothing(
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
     host_b, port_b = _listen(server_b)
     _seed(server_b.root, REMOTE_ID)
-    link, reason = server_a.dial(record.network_id, host=f"{host_b}:{port_b}", epoch=record.epoch)
+    link, reason = server_a.dial(
+        record.network_id,
+        host=f"{host_b}:{port_b}",
+        epoch=record.epoch,
+        expected_device=server_b.identity.device_id,
+    )
     assert link is not None, reason
     # The app resolves its root from the AMBIENT config dir — the same way a user
     # runs it — so the test points it at the viewer's own root.
@@ -191,7 +196,12 @@ async def test_the_guard_speaks_without_the_sidebar_ever_having_polled(
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
     host_b, port_b = _listen(server_b)
     _seed(server_b.root, REMOTE_ID)
-    link, reason = server_a.dial(record.network_id, host=f"{host_b}:{port_b}", epoch=record.epoch)
+    link, reason = server_a.dial(
+        record.network_id,
+        host=f"{host_b}:{port_b}",
+        epoch=record.epoch,
+        expected_device=server_b.identity.device_id,
+    )
     assert link is not None, reason
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     try:
@@ -270,7 +280,12 @@ async def test_picking_a_peer_row_from_the_sidebar_names_the_device_not_the_loca
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
     host_b, port_b = _listen(server_b)
     _seed(server_b.root, REMOTE_ID)
-    link, reason = server_a.dial(record.network_id, host=f"{host_b}:{port_b}", epoch=record.epoch)
+    link, reason = server_a.dial(
+        record.network_id,
+        host=f"{host_b}:{port_b}",
+        epoch=record.epoch,
+        expected_device=server_b.identity.device_id,
+    )
     assert link is not None, reason
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     try:

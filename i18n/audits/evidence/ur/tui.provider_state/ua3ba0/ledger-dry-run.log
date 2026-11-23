@@ -1,0 +1,5 @@
+COMMAND: /Users/damian/local-operator/.venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/ur/tui.provider_state/ua3ba0/directledger-receipt.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --dry-run
+HISTORY SHA: 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+i18n/audit-history/ur/tui.provider_state.json
+
+ACTUAL EXIT CODE: 0

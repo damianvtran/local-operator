@@ -40,6 +40,8 @@ import zlib
 from collections.abc import Mapping
 from typing import Any, Literal
 
+from local_operator.providers.account_selection_trace import SelectionExplanation
+
 # ---------------------------------------------------------------------------
 # Op names and the two legs
 # ---------------------------------------------------------------------------
@@ -68,6 +70,11 @@ LOCAL_CREDENTIAL_OPS: tuple[str, ...] = (
     # The share push (``share_push``): ``credential share`` asks THIS device's relay
     # to hand the row it just wrote to the new holder over the relay's own link.
     "credential_share_push",
+    # The renewal claim (mesh-credential-renewal §B.3 R3): an owner PROCESS about to
+    # present a lent login's refresh token asks THIS device's relay to ask the
+    # renewing node first; and, after it renewed, to push the new pair to that node.
+    "credential_claim",
+    "credential_lend_push",
 )
 
 #: Leg 2 (relay → owner relay). ONE peer op with a ``kind`` discriminator, as the
@@ -98,9 +105,28 @@ REFRESH_CAP_STRING = "credential-refresh-v1"
 #: ``refresh_take`` (node → owner) asks for the material under a signed
 #: delegation; ``refresh_return`` (node → owner, three frames) is the handback.
 #: Two kinds, no new op and no new capability row (§7.10's rule, unchanged).
-BrokerKind = Literal["grant", "report", "placement", "refresh_take", "refresh_return"]
+BrokerKind = Literal[
+    "grant",
+    "report",
+    "placement",
+    "refresh_take",
+    "refresh_return",
+    "renewal_claim",
+    "renewal_push",
+]
+#: ``renewal_claim`` / ``renewal_push`` (owner -> renewing node, design
+#: mesh-credential-renewal §B.3 R3): "are you renewing?" and "here is the pair I just
+#: renewed". Gated on ``renewal.RENEWAL_CAP_STRING`` by the sender.
 BROKER_KINDS: frozenset[str] = frozenset(
-    {"grant", "report", "placement", "refresh_take", "refresh_return"}
+    {
+        "grant",
+        "report",
+        "placement",
+        "refresh_take",
+        "refresh_return",
+        "renewal_claim",
+        "renewal_push",
+    }
 )
 
 #: The three ``sub`` messages of the ordered handback (design §3.3 Rule A).
@@ -190,7 +216,15 @@ def secret_name_from_key(key: str) -> str:
 #: device's token being used by this one — the case the design itself calls
 #: never. Refused by NAME rather than by a heuristic, because a heuristic that
 #: missed would broker it silently.
-DEVICE_BOUND_PROVIDERS: frozenset[str] = frozenset({"kimi"})
+#:
+#: Bedrock is refused for a different reason with the same consequence: its
+#: stored "key" is a connection DESCRIPTOR (``bedrock://profile?name=dev``,
+#: ``bedrock://access-key?ref=BEDROCK_SECRET_...``) that only means something
+#: on this device — it names a local ~/.aws profile, a local encrypted-store
+#: ref or this host's ambient AWS role. Lending it would hand a borrower a
+#: string that resolves to nothing (or, worse, to the BORROWER's own AWS
+#: identity under the owner's label).
+DEVICE_BOUND_PROVIDERS: frozenset[str] = frozenset({"kimi", "bedrock"})
 
 
 def is_device_bound_provider(provider: str) -> bool:
@@ -368,18 +402,12 @@ def peer_affinity(value: Any) -> tuple[int, int] | None:
     return (account_id, created_at)
 
 
-#: The longest narrowing LIST a peer may carry. 500 is GitHub's own ceiling on
-#: ``repositories`` in ``POST /app/installations/{id}/access_tokens`` (the App
-#: mint maximum), so no designation the owner can actually lend is longer. It was
-#: 64, which silently truncated a longer list here while the owner had digested the
-#: whole one — every delivery then failed its digest and the borrower kept its
-#: standing list forever (PR #3841 mesh-lane m2). The settings validator refuses a
-#: designation over this same number where a person types it
-#: (``settings_io._validate_github_repositories``), so the two cannot drift; a
-#: hand-edited longer list still truncates here and is REFUSED, receipted, on the
-#: borrower (``too_many_entries``), never applied as a partial list. Size: 500 x
-#: 200 chars is ~100 KB, far inside the 8 MiB session frame.
-MAX_NARROWING_LIST_ENTRIES = 500
+#: The largest list one ``Grant.narrowing`` entry may carry across the peer
+#: boundary. Equal to ``github.MAX_DESIGNATED_REPOSITORIES`` (a unit test pins
+#: them equal): the owner refuses a longer designation, so an honest owner never
+#: reaches this bound. 2000 entries of at most 200 characters stay far inside the
+#: 8 MiB record ceiling.
+MAX_NARROWING_LIST_ENTRIES = 2000
 
 
 def _bounded_narrowing(value: Any) -> dict[str, Any]:
@@ -401,8 +429,15 @@ def _bounded_narrowing(value: Any) -> dict[str, Any]:
         if isinstance(item, str):
             out[name] = item[:200]
         elif isinstance(item, (list, tuple)):
+            # NEVER CUT A LIST: a truncated allow-list is a DIFFERENT designation
+            # (it silently drops repos, and a digest delivered beside it cannot
+            # verify). Over the bound the entry is dropped whole, which reads as
+            # "nothing delivered": the borrower keeps its standing list, the
+            # fail-closed direction. This replaced a silent ``[:64]``.
+            if len(item) > MAX_NARROWING_LIST_ENTRIES:
+                continue
             entries = [entry[:200] for entry in item if isinstance(entry, str) and entry]
-            out[name] = entries[:MAX_NARROWING_LIST_ENTRIES]
+            out[name] = entries
     return out
 
 
@@ -527,6 +562,7 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "quota_blocked": 0,
     "interactive_required": 300_000,
     "rate_limited": 0,
+    "owner_busy": 0,
     "unsupported": NO_RETRY,
     "device_bound": 300_000,
     "not_authorised": 60_000,
@@ -540,6 +576,10 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "device_scope_required": 60_000,
     "github_app_unusable": 300_000,
     "github_repositories_unset": 300_000,
+    # A designation larger than one grant can carry (the App mint's 500, the
+    # wire's MAX_NARROWING_LIST_ENTRIES): refused rather than cut, and repaired
+    # by the operator on the owner (an opt-out or an explicit list).
+    "github_repositories_overflow": 300_000,
     "github_repo_refused": 0,
     # The forge ladder's token arms (mesh-consent-provisioning §3.2): a source
     # that RESOLVED but could not be read refuses by arm rather than falling
@@ -616,7 +656,8 @@ CAUSES: frozenset[str] = frozenset(
 #: loop that asks a rate-limited owner on every provider call.
 DEFAULT_RETRY_AFTER_MS = 60_000
 
-#: ``BrokerError.reason`` values, a closed set (anything else reads as absent).
+#: Semantic ``BrokerError.reason`` values (anything else reads as absent,
+#: apart from the code-bound GitHub presentation provenance defined below).
 #:
 #: WHY A MARKER (review round 1 on #3108, m1): ``quota_blocked`` with no
 #: remainder used to have ONE producer, the owner's holder-exclusion arm, so a
@@ -627,8 +668,17 @@ DEFAULT_RETRY_AFTER_MS = 60_000
 QUOTA_REASON_HOLDER_EXCLUDED = "holder_excluded"
 QUOTA_REASON_POOL_DEPLETED = "pool_depleted"
 BROKER_ERROR_REASONS: frozenset[str] = frozenset(
-    {QUOTA_REASON_HOLDER_EXCLUDED, QUOTA_REASON_POOL_DEPLETED}
+    {QUOTA_REASON_HOLDER_EXCLUDED, QUOTA_REASON_POOL_DEPLETED, "owner_busy"}
 )
+
+
+# Presentation provenance on the existing optional reason field, bound to CODE.
+# Never accept these tags on quota/policy errors: that would change the legacy
+# holder-exclusion interpretation. They carry no credential or authority.
+GITHUB_RENDERED_REASONS: dict[str, str] = {
+    "github_repositories_unset": "github_repositories_unset_rendered",
+    "github_repositories_overflow": "github_repositories_overflow_rendered",
+}
 
 
 @dataclasses.dataclass
@@ -648,8 +698,12 @@ class BrokerError:
     owner_device: str = ""
     owner_device_name: str = ""
     retry_after_ms: int = 0
-    #: Which arm produced this refusal, from :data:`BROKER_ERROR_REASONS`; "" when
-    #: the producer did not say (every code but ``quota_blocked``, and older owners).
+    #: Producer semantic reason from :data:`BROKER_ERROR_REASONS`, or code-bound
+    #: GitHub presentation provenance (:data:`GITHUB_RENDERED_REASONS`); "" when
+    #: the producer did not say. A renderer must preserve a populated semantic
+    #: reason. Presentation tags are accepted only for GitHub unset/overflow, never
+    #: as quota/policy arms. ``owner_busy`` distinguishes a GitHub owner lookup
+    #: timeout from rate limiting without breaking older borrowers' transient-code fence.
     reason: str = ""
     #: ``retry_after_ms`` is a FLOOR, not the owner's reset (#3108 review r2 m1): the
     #: owner stated a longer wait than ``MAX_PEER_RETRY_AFTER_MS``, which the boundary
@@ -657,6 +711,17 @@ class BrokerError:
     #: promise about the owner's account — a proven 3 h reopening would otherwise be
     #: rendered "for another 5 min", and repeated every 5 min. Never on the wire.
     retry_after_is_floor: bool = False
+
+    def as_borrower_error(self) -> BrokerError:
+        """Normalize the additive busy reason ONLY at upgraded consumer edges.
+
+        Keep from_detail literal: an older client must still see rate_limited
+        and keep its held grant. Re-serialization restores that compatible wire
+        code even when an upgraded relay has normalized the in-memory error.
+        """
+        if self.code == "rate_limited" and self.reason == "owner_busy":
+            return dataclasses.replace(self, code="owner_busy")
+        return self
 
     @property
     def is_holder_exclusion(self) -> bool:
@@ -683,7 +748,11 @@ class BrokerError:
 
     def to_detail(self) -> dict[str, Any]:
         """The wire shape (design §3.2's failure reply, inside ``detail``)."""
-        detail: dict[str, Any] = {"kind": "error", "code": self.code, "message": self.message}
+        detail: dict[str, Any] = {
+            "kind": "error",
+            "code": "rate_limited" if self.code == "owner_busy" else self.code,
+            "message": self.message,
+        }
         if self.key:
             detail["key"] = self.key
         if self.owner_device:
@@ -692,7 +761,9 @@ class BrokerError:
             detail["owner_device_name"] = self.owner_device_name
         if self.retry_after_ms:
             detail["retry_after_ms"] = self.retry_after_ms
-        if self.reason:
+        if self.code == "owner_busy":
+            detail["reason"] = "owner_busy"
+        elif self.reason:
             detail["reason"] = self.reason
         return detail
 
@@ -709,10 +780,25 @@ class BrokerError:
             retry_after_is_floor=stated >= MAX_PEER_RETRY_AFTER_MS,
             reason=(
                 str(detail.get("reason"))
-                if str(detail.get("reason") or "") in BROKER_ERROR_REASONS
+                if (
+                    str(detail.get("reason") or "") in BROKER_ERROR_REASONS
+                    or str(detail.get("reason") or "")
+                    == GITHUB_RENDERED_REASONS.get(str(detail.get("code") or ""))
+                )
                 else ""
             ),
         )
+
+
+@dataclasses.dataclass
+class BorrowTimeout(BrokerError):
+    """Local-only diagnostic: no token, wire field, grant or extra authority.
+
+    The normal refusal code still drives every existing held/policy decision.
+    Only a timeout that remains refused may explain the missing tool env.
+    """
+
+    timeout_s: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -777,6 +863,12 @@ class Grant:
     identity: dict[str, str] = dataclasses.field(default_factory=dict)
     latency_ms: int = 0
     grant_id: str = ""
+    #: Owner-local audit evidence, deliberately absent from to_detail/from_detail.
+    #: Coalesced outcomes carry their own immutable observation; neither grant
+    #: equality nor credential/cache identity may depend on diagnostic metadata.
+    selection: SelectionExplanation | None = dataclasses.field(
+        default=None, compare=False, repr=False, kw_only=True
+    )
     #: Per-grant narrowing metadata the OWNER enforced at serve time, for the
     #: borrower to materialise locally where a provider needs it at use time —
     #: github's ``{"repositories": [owner/repo, ...]}`` is the git helper's
@@ -791,6 +883,43 @@ class Grant:
     #: ``effective.note_resolution`` say ``held_offline`` instead of claiming a fresh
     #: owner resolve.
     held_offline: bool = dataclasses.field(default=False, compare=False)
+    #: ON THE WIRE, set by the OWNER: the latest moment (epoch ms) the owner allows
+    #: this grant to be served from the borrower's memory while the owner cannot be
+    #: reached — ``min(token expiry, owner_now + offline_hold_s)``, never below
+    #: ``grant_expires_at_ms``. ``0`` = an older owner that states no hold, which
+    #: gets NO extension (the hold ends at ``grant_expires_at_ms``, today's bound).
+    #: Approved 2026-11-13 (C5); see ``credentials.OFFLINE_HOLD_S``.
+    hold_until_ms: int = 0
+    #: PROCESS-LOCAL receipt stamps, never on the wire (``GrantCache.put`` sets
+    #: them once): THIS device's wall clock and sleep-inclusive clock when the grant
+    #: arrived. The borrower's own cap on the hold is measured from these, so an
+    #: owner clock far ahead, a hostile ``hold_until_ms``, a wall clock stepped back
+    #: or a laptop sleeping through the window cannot stretch it (R4-m1, R1-B1).
+    received_wall: float = dataclasses.field(default=0.0, compare=False)
+    received_boot: float = dataclasses.field(default=0.0, compare=False)
+    #: PROCESS-LOCAL: the hold end this serve was licensed under, set only on the
+    #: copy ``_held_or`` returns, so ``effective.note_resolution`` publishes the
+    #: lapse at the hold end rather than at the (earlier) grant end.
+    held_until_ms: int = dataclasses.field(default=0, compare=False)
+
+    def hold_end_ms(self, local_cap_s: float, now_boot: float) -> int:
+        """Until when (epoch ms) this grant may be served while the owner is away.
+
+        ``min(owner-stated hold or grant end, token expiry, received_wall + cap)``,
+        and ``0`` once ``cap`` has passed on the sleep-inclusive clock. A grant this
+        process never stamped on receipt gets no extension: without a borrower-side
+        receipt there is nothing to cap the owner's number against.
+        """
+        end = self.grant_expires_at_ms
+        if not (self.received_wall and self.received_boot):
+            return end
+        if now_boot - self.received_boot >= local_cap_s:
+            return 0
+        if self.hold_until_ms > end:
+            end = self.hold_until_ms
+        if self.token_expires_at_ms:
+            end = min(end, self.token_expires_at_ms)
+        return min(end, int(self.received_wall * 1000 + local_cap_s * 1000))
 
     def usable_at(self, now_ms: float | None = None) -> bool:
         """Whether this grant may still be handed to a request right now."""
@@ -822,6 +951,9 @@ class Grant:
             detail["identity"] = dict(self.identity)
         if self.narrowing:
             detail["narrowing"] = dict(self.narrowing)
+        if self.hold_until_ms:
+            # Only when stated, so the frame to/from an older peer is unchanged.
+            detail["hold_until_ms"] = self.hold_until_ms
         return detail
 
     @classmethod
@@ -847,6 +979,8 @@ class Grant:
             # holds the grant: the failure is a re-ask, not a bearer kept forever.
             token_expires_at_ms=peer_int(detail.get("token_expires_at_ms")),
             grant_expires_at_ms=peer_int(detail.get("grant_expires_at_ms")),
+            # Garbled or absent reads as 0 = no hold stated = no extension.
+            hold_until_ms=peer_int(detail.get("hold_until_ms")),
             credential_ref=CredentialRef(
                 owner_device=str(ref_row.get("owner_device") or ""),
                 owner_device_name=str(ref_row.get("owner_device_name") or ""),

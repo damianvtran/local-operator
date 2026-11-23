@@ -249,9 +249,11 @@ def enqueue(
     request_id: str,
     requested_by: str,
     engage_on_arrival: bool = False,
+    no_engage_on_arrival: bool = False,
     drop_session_roles: bool = False,
     session_roles: int = 0,
     session_roles_notice: str = "",
+    working_set: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Create (or return the existing) queue record for ``session_id``.
 
@@ -275,6 +277,7 @@ def enqueue(
             "requested_by": requested_by,
             "mode": "move",
             "engage_on_arrival": bool(engage_on_arrival),
+            "no_engage_on_arrival": bool(no_engage_on_arrival),
             # THE ROLE-GATE'S OPT-OUT RIDES THE INTENT (agent review round 1, M3):
             # the resume prepare runs on the SOURCE, long after this frame is
             # gone, and without the stored flag the gate would refuse the move it
@@ -286,6 +289,11 @@ def enqueue(
             # the record, not be recomputed where the definitions do not exist.
             "session_roles": int(session_roles),
             "session_roles_notice": str(session_roles_notice),
+            # THE USER'S WORKING-SET CONSENT RIDES THE INTENT for the same reason as
+            # ``drop_session_roles``: the resume prepare re-runs the owner's gate on
+            # the then-current tree, and without the stored digest it would refuse the
+            # very move the user confirmed (docs/design/move-working-set.md §4).
+            "working_set": dict(working_set) if isinstance(working_set, dict) else None,
             "phase": QUEUE_PHASE_QUEUED,
             "phases": [{"phase": QUEUE_PHASE_QUEUED, "at": time.time()}],
             "detail": "",
@@ -636,6 +644,23 @@ def drive(server: "RelayServer", session_id: str) -> str:
                     # The intent is installed: from here the record's own word
                     # for the state is "waiting for the safe point".
                     transition(root, session_id, QUEUE_PHASE_FINISHING, writer="relay")
+                elif _retire_if_idle(root, session_id):
+                    # THE IDLE RUNTIME'S SAFE POINT (2026-11-13 incident: a
+                    # ``--queue`` move of ce6fcb93c28a sat at ``queued`` for six
+                    # minutes after its session had finished the turn and gone
+                    # idle, and only a manual cancel + plain move shipped it — the
+                    # plain move retired the same idle runtime in ~9 s). Every
+                    # delivery attempt had come back ``unreachable``, so no
+                    # runtime ever owned the boundary watch, and the loop's only
+                    # other exit needs the runtime to DISAPPEAR, which an idle
+                    # runtime with a window attached never does. The ordinary
+                    # move's own retire is the right fallback: the runtime
+                    # re-asks its idle predicate and refuses (``busy``/
+                    # ``viewed``) without touching a turn in flight, so trying it
+                    # cannot cut a turn — the design's "refused, not drained"
+                    # holds — and when it retires, the boundary has been reached.
+                    transition(root, session_id, QUEUE_PHASE_COPYING, writer="relay")
+                    return _drive_copy(server, session_id)
             time.sleep(DRIVER_POLL_S)
             continue
 
@@ -709,6 +734,37 @@ def _deliver_intent(server: "RelayServer", session_id: str) -> str:
         return "cancelled"
     logger.info("move queue: %s installed the queued move (stage %s)", session_id, word or "queued")
     return "delivered"
+
+
+def _retire_if_idle(root: Path, session_id: str) -> bool:
+    """Retire the session's runtime through the PLAIN move's retire, if idle.
+
+    Used only when :func:`_deliver_intent` could not install the intent, so no
+    runtime-side watcher can race this (the runtime never claimed ``paused``).
+    ``True`` only for ``retired``/``cold``: every refusal (a turn in flight, a
+    viewer the fence will not override, a too-old owner) leaves the record
+    ``queued`` and the driver tries again on its next delivery attempt. The
+    record is re-read first so a cancel that won meanwhile is never overridden.
+    """
+    from local_operator.network import mobility
+
+    record = read_record(root, session_id)
+    if record is None or str(record.get("phase") or "") not in (
+        QUEUE_PHASE_QUEUED,
+        QUEUE_PHASE_FINISHING,
+    ):
+        return False
+    try:
+        outcome = mobility._retire_local_runtime(Path(root), session_id)  # noqa: SLF001
+    except Exception:  # noqa: BLE001 — a failed probe is "not yet", never a fold
+        logger.warning("move queue: idle-retire probe failed for %s", session_id, exc_info=True)
+        return False
+    result = str((outcome or {}).get("result") or "")
+    if result in ("retired", "cold"):
+        logger.info("move queue: %s was idle; retired it for the queued move", session_id)
+        return True
+    logger.info("move queue: %s not at a safe point yet (%s)", session_id, result or "unknown")
+    return False
 
 
 def _supports_queue(record: Any) -> bool:
@@ -819,6 +875,18 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
             writer="relay",
         )
         return QUEUE_PHASE_FAILED
+    # THE TEAM/AGENT BRIEF GOES FIRST, as on the immediate move
+    # (``mobility._push_move_definitions``): the queued path sent the invite with no
+    # definitions reconcile at all, so a session attached to a team the destination
+    # had never been sent restored unattached there (2026-11-13: the lopdev brief was
+    # missing from the moved session's prompt). Non-fatal by the same contract; the
+    # destination's promote names a team it still cannot resolve (``carry.team``).
+    try:
+        mobility._push_move_definitions(  # noqa: SLF001
+            server, session_id, target_device, target_name or target_device
+        )
+    except Exception:  # noqa: BLE001 — a brief that could not be refreshed never blocks
+        logger.warning("move queue: definitions push before %s failed", session_id, exc_info=True)
     try:
         accepted = mobility.LinkTransport(server, link, session_id).ask(
             {
@@ -829,6 +897,7 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
                 "wait_s": 0.0,
                 "mode": "move",
                 "engage_on_arrival": bool(record.get("engage_on_arrival") or False),
+                "no_engage_on_arrival": bool(record.get("no_engage_on_arrival") or False),
                 "to_device": target_device,
                 # THE COMMIT'S OWN CREDENTIALS: the record's request id (its
                 # transfer key) plus the resume flag, so the source's queue
@@ -840,6 +909,13 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
                 # Stored when the move was queued; the prepare this invite starts
                 # is on the SOURCE, which cannot see the original request.
                 "drop_session_roles": bool(record.get("drop_session_roles") or False),
+                # Stored for the same reason: the destination folds it into the
+                # resume prepare, where the owner's working-set gate reads it.
+                "working_set": (
+                    record.get("working_set")
+                    if isinstance(record.get("working_set"), dict)
+                    else None
+                ),
             }
         )
     except Exception as refusal:  # noqa: BLE001 — a Moved carries the sentence

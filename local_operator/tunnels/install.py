@@ -15,6 +15,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -900,7 +901,13 @@ def _revive_allowed() -> bool:
         return False
 
 
-def install() -> None:
+def install() -> str:
+    """Install (or re-assert) the connector service; return a note for the CLI.
+
+    The note is ``""`` unless the already-installed connector's RUNNING build
+    had to be restarted or could not be confirmed (see the skip branch below);
+    the caller prints it beside its own success sentence.
+    """
     kind = supervisors.supervisor()
     if kind is None:
         raise ValueError(NO_SUPERVISOR_ERROR)
@@ -938,12 +945,30 @@ def install() -> None:
         # label), and the shared reload for anything else — including a label
         # launchd has forgotten, which is what registers it.
         reload_needed = True
-        if (
-            current
-            and launchd.job_running(label=LABEL, path=path, run=_launchctl)
-            and gateway_answers()
-        ):
-            reload_needed = False
+        pid = launchd.job_pid(label=LABEL, path=path, run=_launchctl) if current else None
+        if current and pid is not None and gateway_answers():
+            # ANSWERING IS NOT "ON THIS BUILD" (field finding, 2026-11-18): an
+            # upgraded machine kept a connector started days earlier on the old
+            # code while this install reported success; only `lop tunnel
+            # restart` moved it. A PROVEN stale build is restarted here.
+            #
+            # AN UNPROVEN BUILD IS NOT BOUNCED, unlike mobile: restarting the
+            # connector drops remote access for seconds and can land in states
+            # that do not recover by themselves (LOGIN_REQUIRED, a suspended
+            # lease — see `launchd.PlistRefresh`), so a restart reasoned from a
+            # probe that could not read the build is the operator's call. The
+            # note says so instead of the old silent "current".
+            build = launchd.check_running_build_on_install(
+                label=LABEL,
+                path=path,
+                pid=pid,
+                recovery="lop tunnel restart",
+                run=_launchctl,
+                restart_when_unproven=False,
+            )
+            if build.kind == "failed":
+                raise ValueError(build.step())
+            return build.step()
         elif current and launchd.kickstart(label=LABEL, path=path, run=_launchctl):
             reload_needed = False
         if reload_needed:
@@ -968,6 +993,19 @@ def install() -> None:
         path.chmod(0o600)
         _run(["systemctl", "--user", "daemon-reload"])
         _run(["systemctl", "--user", "enable", "--now", path.name])
+        from local_operator import update
+
+        # Unproven build → named, not bounced, as on macOS (see the launchd
+        # skip branch above for why the connector is not restarted on a guess).
+        build = update.systemd_install_build_line(
+            name="tunnel",
+            unit=path.name,
+            recovery="lop tunnel restart",
+            restart_when_unproven=False,
+        )
+        if build.kind == "failed":
+            raise ValueError(build.step())
+        return build.step()
     else:  # schtasks
         xml = render_task_xml()
         # The record first: it is what `uninstall` and a future diff read, and it
@@ -983,6 +1021,7 @@ def install() -> None:
                 "the tunnel task was registered but could not be started: "
                 f"{((started.stderr or started.stdout) or '').strip()[:200]}"
             )
+    return ""
 
 
 def action(name: str) -> None:
@@ -1095,3 +1134,162 @@ def _uninstall_task() -> None:
     supervisors.schtasks(*supervisors.task_end_args(TASK_NAME))
     supervisors.delete_task(TASK_NAME)
     task_record_path().unlink(missing_ok=True)
+
+
+#: `tunnel.auto_setup_after_login` in config.yml: whether a verified Radient
+#: sign-in may start the unattended no-spend setup run below. Default ON — the
+#: run only reconnects/reinstalls a tunnel this machine already wanted and can
+#: never spend — and a key rather than a constant so an operator can turn it
+#: off without a release if it ever misbehaves (registered in `settings_io`).
+AUTO_SETUP_KEY = "tunnel.auto_setup_after_login"
+AUTO_SETUP_DEFAULT = True
+
+
+def auto_setup_enabled() -> bool:
+    """Read the switch WITHOUT a `ConfigManager` (which would write config.yml).
+
+    Both spellings are honoured, like `config.transport_override`: the flat
+    dotted key the settings writer stores and a nested ``tunnel:`` mapping a
+    hand edit produces. Only an explicit false-y value turns it off.
+    """
+    from local_operator.config import read_config_values
+
+    values = read_config_values(config_dir()) or {}
+    chosen = values.get(AUTO_SETUP_KEY)
+    nested = values.get("tunnel")
+    if chosen is None and isinstance(nested, dict):
+        chosen = nested.get("auto_setup_after_login")
+    if chosen is None:
+        return AUTO_SETUP_DEFAULT
+    if isinstance(chosen, str):
+        return chosen.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(chosen)
+
+
+def phone_access_wanted() -> bool:
+    """Whether this machine already chose phone access: a tunnel or a create intent.
+
+    The post-sign-in run must never be the thing that CREATES remote access — a
+    first sign-in on a machine that never asked for it gets an offer in the TUI
+    and a card on the desktop, nothing more. `config.json` (an enrolled tunnel)
+    or `create.json` (an interrupted setup's intent, `setup._pending_intent`) are
+    the two records that say a person already asked.
+    """
+    root = config.directory()
+    return (root / "config.json").exists() or (root / "create.json").exists()
+
+
+def _person_owns_tunnel() -> bool:
+    """Whether a deliberate stop or a park leaves this tunnel to a person (U9).
+
+    A ``stopped`` configuration is the operator turning remote access off
+    (`lop tunnel stop`/`revoke`/`uninstall`), and an automatic run that
+    reconnected it would undo their decision. A PARK is the connector waiting
+    on a person for a reason it named: a login park is `rearm_if_parked`'s to
+    end (it ran just before this), and a prerequisite or re-enrolment park needs
+    a different act than a sign-in. Unreadable configuration answers True, the
+    same conservative direction `_revive_allowed` takes.
+    """
+    if state.parked() is not None:
+        return True
+    if not (config.directory() / "config.json").exists():
+        # Only an interrupted create's intent: there is no configuration to have
+        # been stopped, and resuming that create is exactly what was asked for.
+        return False
+    try:
+        return bool(config.load().get("stopped"))
+    except (OSError, ValueError):
+        return True
+
+
+def _bound_auto_setup_log(log: Path) -> None:
+    """Keep `auto-setup.log` bounded the way `request_log` bounds its file.
+
+    The child writes its stdout/stderr straight into the file, so a logging
+    handler cannot rotate it; this rotates BEFORE each spawn instead, with the
+    request log's own cap and backup count (`request_log.FILE_MAX_BYTES`, one
+    backup), so the worst case stays ~1 MiB whatever the number of sign-ins
+    (#3945 round 1, N2). Best-effort: a rotation that fails must not stop the run.
+    """
+    from local_operator.tunnels.request_log import FILE_BACKUPS, FILE_MAX_BYTES
+
+    try:
+        if log.stat().st_size < FILE_MAX_BYTES:
+            return
+        for index in range(FILE_BACKUPS, 0, -1):
+            source = log if index == 1 else log.with_name(f"{log.name}.{index - 1}")
+            if source.exists():
+                os.replace(source, log.with_name(f"{log.name}.{index}"))
+    except OSError:
+        return
+
+
+def auto_setup_after_login(*, provider: str, credential_id: int) -> str:
+    """Start the no-spend setup run after a verified Radient sign-in, when wanted.
+
+    WHY: a teammate signed in and his phone still said the tunnel "isn't
+    active" — the heal and re-arm only cover a dead pin and a login park, and
+    nothing ran setup, so a suspended tunnel or a half-finished install stayed
+    that way until someone found a terminal command. This closes that gap with
+    the setup path that already exists, never a parallel one.
+
+    WHAT RUNS: a DETACHED `lop tunnel setup apply --credential-id N --no-spend`
+    (its own session, so a TUI or server exiting does not kill it mid-install).
+    `--no-spend` pins ``accepted=None``, so every billing write stays behind
+    `_same_price(accepted, quote)`, which None never satisfies: the run may
+    re-point and reconnect/reinstall, and stops at a quote, a balance, a login,
+    an owner choice or a missing prerequisite, recording where (`setup`'s
+    auto-run journal) for the desktop and TUI to show. `setup.lock` serializes
+    it against the desktop route.
+
+    GUARDS, in order: the provider is Radient; the config switch is on; the
+    `LOP_TUNNEL_NO_REARM` opt-out is not set (tests, review worktrees); phone
+    access was already wanted; no person owns the tunnel (a stop or a park);
+    and the store lives in the real home — a sandboxed config must never spawn
+    an install that addresses the operator's real launchd/systemd session.
+
+    Never raises; returns a log sentence, or "" when it did nothing.
+    """
+    if provider != "radient":
+        return ""
+    try:
+        if not (auto_setup_enabled() and _rearm_allowed() and phone_access_wanted()):
+            return ""
+        if _person_owns_tunnel():
+            return ""
+        if not supervisors.config_lives_in_real_home(config_dir()):
+            return ""
+        from local_operator.interpreter import python_argv
+
+        # This build's own interpreter with `-P` (`python_argv`): the run is part
+        # of the sign-in that started it, never a checkout that happens to be cwd.
+        argv = [
+            *python_argv("-m", "local_operator.cli"),
+            "tunnel",
+            "setup",
+            "apply",
+            "--credential-id",
+            str(int(credential_id)),
+            "--no-spend",
+            "--json",
+        ]
+        log = config.directory() / "auto-setup.log"
+        _bound_auto_setup_log(log)
+        with open(log, "ab") as sink:
+            child = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=sink,
+                stderr=sink,
+                start_new_session=True,
+                close_fds=True,
+            )
+        # Reap it (#3945 round 1, N2): in a long-lived server the dropped handle
+        # left the exited child a zombie until some later `subprocess` call
+        # happened to collect it. A daemon thread only waits; it never blocks the
+        # sign-in or keeps the process alive at exit.
+        threading.Thread(target=child.wait, name="auto-setup-reaper", daemon=True).start()
+    except Exception:  # noqa: BLE001 — a login must not fail over a background run
+        logger.warning("could not start the post-sign-in tunnel setup run")
+        return ""
+    return f"started the no-spend tunnel setup run for credential {int(credential_id)}"

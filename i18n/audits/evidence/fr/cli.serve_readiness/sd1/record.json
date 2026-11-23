@@ -1,0 +1,150 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "Audit daemon French (i18n-auditor)",
+    "session": "19f657b90086",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "acf0a84cd992",
+    "actual_model_source": "Session runtime Model declaration: openai/gpt-6.1-sol",
+    "fallback": {
+      "observed": false,
+      "reported": false,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "provenance_source": "Requesting task brief; identity not independently queried"
+  },
+  "source_audit_revision": {
+    "base": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca",
+    "includes_uncommitted_catalogues": true
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/cli.serve_readiness.json",
+      "sha256": "fa709445a56aaae44736e248854e28b4c87721a3d079be8710d7b1a92958ed44"
+    }
+  },
+  "policy_inputs": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    {
+      "path": "i18n/audits/evidence/README.md",
+      "sha256": "f98005f6797ad42d3e0c8d8f72516bf684519ad9e6b7ad7ac83812bbdb4a4d3b"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    },
+    {
+      "path": "docs/design/i18n.md",
+      "sha256": "21ed2c1d2118681b85738985415ece46625e8b2f2bc01d545a78e1c02344bec1"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/report.md",
+      "sha256": "4276e6a88cc10b0a42e5232763d4a0cfba28a516d4ee9d0ed392a362b84ab238"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/audit.log",
+      "sha256": "f0eabe55491f2487c526c66010e46194294733d9e4511d8b5ec0137127b44b1c"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/verify.py.txt",
+      "sha256": "44ce583dd974c25a7f4bb6f5fbbad88cc6c72d7b3739451c7aea8cb246b54a73"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/receipt.json",
+      "sha256": "aa028ae984c71fb2c951f363035941e9cfd3687b6eaab0112e6f2dfb9a116c66"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/ledger-dry-run.log",
+      "sha256": "2473e045974f146ddc1d2f2920006ff2f7acc5922dd014a3e844817e3de29271"
+    }
+  ],
+  "audit_notes_not_execution_log": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/report.md",
+  "execution_logs": [
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd1/audit.log",
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd1/ledger-dry-run.log"
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "FR-SD1-01"
+    ],
+    "findings_report": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/report.md"
+  },
+  "findings": [
+    {
+      "id": "FR-SD1-01",
+      "severity": "MINOR",
+      "key": "cli.serve_readiness.not_reporting",
+      "report_reference": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/report.md#fr-sd1-01--minor--cliserve_readinessnot_reporting"
+    }
+  ],
+  "mechanical_result": {
+    "validator_exit_code": 0,
+    "keys_checked": 11,
+    "plural_messages_checked": 3,
+    "french_categories": [
+      "one",
+      "many",
+      "other"
+    ],
+    "runtime_sample_counts": [
+      0,
+      1,
+      2,
+      1000000
+    ]
+  },
+  "ledger": {
+    "candidate_receipt": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/receipt.json",
+    "dry_run_exit_code": 0,
+    "expected_history_sha256_at_dry_run": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "appended": false,
+    "parent_owns_append": true
+  },
+  "coverage_limits": {
+    "pass": "one independent full-namespace sd1 pass",
+    "second_independent_pass_claimed": false,
+    "live_terminal_or_visual_evidence": false,
+    "translation_or_mt_service_used": false,
+    "translation_files_modified": false,
+    "committed_by_auditor": false,
+    "on_main_claimed": false
+  },
+  "artifact_provenance": {
+    "report.md": "Audit reasoning, not execution log; identity in this record",
+    "audit.log": "Actual captured validator and pure-parser command output; identity in this record",
+    "verify.py.txt": "Exact pure-parser -c verification source; identity in this record",
+    "receipt.json": "Candidate ledger row and hashes; provenance and record reference embedded",
+    "ledger-dry-run.log": "Actual captured CLI help/history-sha/append dry-run output; provenance and record reference embedded"
+  },
+  "hash_graph_note": "Record hashes all companions. Receipt hashes report/audit.log/verify.py.txt and references record by path, without a circular record hash."
+}

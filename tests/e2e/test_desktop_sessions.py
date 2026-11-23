@@ -766,6 +766,20 @@ async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
                 await new_session(),
                 await new_session(),
             )
+            # The production catalogue discovers the directory name as-is.
+            # Model a persisted full-hex name without assuming any old CLI minted it.
+            full_hex = "abcdef0123456789abcdef0123456789"
+            source = await new_session()
+            (root / "sessions" / source).rename(root / "sessions" / full_hex)
+            publish(full_hex, "anchor-full-hex")
+            catalogue = await client.get(path)
+            assert catalogue.status_code == 200, catalogue.text
+            rendered = next(
+                row for row in catalogue.json()["result"]["sessions"] if row["id"] == full_hex
+            )
+            assert rendered["attention"]["unseen"] is True
+            full_hex_token = rendered["attention"]["completion_token"]
+
             observed = {
                 settled: publish(settled, "anchor-settled"),
                 # Two completions for this conversation: the token the client was
@@ -783,6 +797,24 @@ async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
                 completions_before = conn.execute("SELECT * FROM completions ORDER BY 1").fetchall()
 
             absent = "0123456789ab"
+            refused = await client.post(
+                "/v1/desktop/attention/seen",
+                json={
+                    "items": [
+                        {"session_id": settled, "completion_token": observed[settled]},
+                        {"session_id": "../foreign", "completion_token": full_hex_token},
+                    ]
+                },
+            )
+            assert refused.status_code == 422, refused.text
+            assert refused.json()["detail"] == [
+                {
+                    "loc": ["body", "items", 1, "session_id"],
+                    "msg": "String should match pattern '^(?:[a-f0-9]{12}|[a-f0-9]{32})$'",
+                }
+            ]
+            assert store.state(f"session/{settled}")["unseen"] is True
+
             response = await client.post(
                 "/v1/desktop/attention/seen",
                 json={
@@ -791,6 +823,7 @@ async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
                         {"session_id": racing, "completion_token": observed[racing]},
                         {"session_id": delivered, "completion_token": observed[delivered]},
                         {"session_id": absent, "completion_token": str(uuid.uuid4())},
+                        {"session_id": full_hex, "completion_token": full_hex_token},
                     ]
                 },
             )
@@ -800,7 +833,7 @@ async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
             assert body["result"]["superseded"] == [racing]
             assert body["result"]["unknown"] == [absent]
             assert sorted(entry["conversation_id"] for entry in body["result"]["read"]) == sorted(
-                [f"session/{settled}", f"session/{delivered}"]
+                [f"session/{settled}", f"session/{delivered}", f"session/{full_hex}"]
             )
             for entry in body["result"]["read"]:
                 assert entry["unseen"] is False
@@ -811,6 +844,7 @@ async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
             # The store, read back through the same object every surface uses.
             assert store.state(f"session/{settled}")["unseen"] is False
             assert store.state(f"session/{delivered}")["unseen"] is False
+            assert store.state(f"session/{full_hex}")["unseen"] is False
             superseded_state = store.state(f"session/{racing}")
             assert superseded_state["unseen"] is True, "a superseded item was cleared"
             assert superseded_state["anchor_id"] == "anchor-racing-2"
@@ -1076,8 +1110,9 @@ async def test_a_real_turn_emits_exactly_one_notification_after_many_turn_ends(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("settlement", ["complete", "error"])
 async def test_a_delegating_turn_stays_silent_until_its_child_settles(
-    headless_tui_env: Path, notifications_on: None, workspace: Path, monkeypatch
+    headless_tui_env: Path, notifications_on: None, workspace: Path, monkeypatch, settlement: str
 ):
     """The other half of the defect: `agent_end` while children still work.
 
@@ -1086,11 +1121,14 @@ async def test_a_delegating_turn_stays_silent_until_its_child_settles(
     toasted there, telling the user their task was done while it was not.
 
     This drives a real registered `task` job over the real bridge and asserts
-    ZERO notification frames while the child runs — then releases the child and
-    asserts the banner appears only for the re-entry turn its result opens.
+    ZERO notification frames while the child runs — then releases the child.
+    Routine result re-entry must remain quiet too: the operator requested no
+    routine completion interruptions on any surface. A provider failure on the
+    same re-entry path is the positive control: it MUST still produce a banner.
     Nothing about this is reconstructed in the bridge: the session's own
     `_publish_attention_outcome` refuses to publish while a `task` job is
-    running, so there is no completion row for the bridge to observe.
+    running, and later records routine completion with notify=False in the
+    shared store. Quiet is delivery eligibility, not deletion of the outcome.
     """
     root = headless_tui_env
     token = secrets.token_hex(32)
@@ -1117,7 +1155,24 @@ async def test_a_delegating_turn_stays_silent_until_its_child_settles(
             sid = created.json()["result"]["session_id"]
             target = path + "/" + sid
 
-            stream = ScriptedStream(
+            class SettlementStream(ScriptedStream):
+                def __call__(self, request, signal=None):
+                    if settlement == "error" and len(self.requests) == 1:
+                        from local_operator.providers.failover import ProviderError
+
+                        self.requests.append(request)
+
+                        async def fail():
+                            # Non-retryable provider failure, not an exhausted
+                            # script or a forged attention row: the real session
+                            # must classify and publish this re-entry's error.
+                            raise ProviderError(400, "audit settlement provider failed")
+                            yield  # pragma: no cover — async generator shape
+
+                        return fail()
+                    return super().__call__(request, signal)
+
+            stream = SettlementStream(
                 [
                     text_turn("Delegated the audit to a subagent."),
                     text_turn("The subagent finished; the audit is clean."),
@@ -1187,24 +1242,59 @@ async def test_a_delegating_turn_stays_silent_until_its_child_settles(
                 store = AttentionStore(root / "attention.db")
                 assert store.state(f"session/{sid}")["completion_token"] is None
 
-                # Release the child. Its result re-enters as a fresh turn, and
-                # THAT turn's completion is the notifiable one.
+                # Settlement still opens and finishes a real result turn. Wait
+                # for that end, not for a routine banner that policy forbids.
                 child_release.set()
                 after = await collect_frames(
-                    lines, lambda f: f["type"] == "notification", timeout=60
+                    lines,
+                    lambda f: f["type"] == "event" and f["payload"].get("type") == "agent_end",
+                )
+                end = after[-1]["payload"]
+                assert end["notify"] is (settlement == "error")
+                # Observe beyond the bridge's attention polling boundary. The
+                # SSE heartbeat is its existing idle fence, not a new timeout or
+                # a cancelled read that would make this iterator unusable.
+                after += await collect_frames(
+                    lines,
+                    lambda f: f["type"]
+                    == ("notification" if settlement == "error" else "heartbeat"),
                 )
 
-            notifications = [f for f in after if f["type"] == "notification"]
-            assert len(notifications) == 1
-            payload = notifications[0]["payload"]
-            assert payload["kind"] == "complete"
-            assert payload["body"] == "The subagent finished; the audit is clean."
+            assert len(stream.requests) == 2
+            assert stream.exhausted_at is None
+            assert session._run_input_types == {"job_result"}
             assert job_status() == "completed"
+            # Idle delivery is a fresh prompt, not the safe-boundary injector
+            # that sets AsyncJob.consumed. Prove actual delivery by its provider
+            # request and exactly one durable result row instead.
+            assert "audit clean" in json.dumps(stream.requests[1].model_dump(mode="json"))
+            result_rows = [
+                entry
+                for entry in session._transcript.entries()
+                if entry.type == "message" and entry.payload.get("custom_type") == "job_result"
+            ]
+            assert len(result_rows) == 1
+            assert "audit clean" in json.dumps(result_rows[0].payload)
+            state = store.state(f"session/{sid}")
+            assert state["completion_token"] is not None
+            assert state["notify"] is (settlement == "error")
+            notifications = [f for f in after if f["type"] == "notification"]
+            if settlement == "error":
+                assert len(notifications) == 1
+                payload = notifications[0]["payload"]
+                assert payload["kind"] == "error"
+                assert "audit settlement provider failed" in payload["body"]
+                assert state["kind"] == "error"
+            else:
+                assert notifications == []
+                assert state["kind"] == "complete"
+                assert state["unseen"] is True
+                assert "The subagent finished; the audit is clean." in json.dumps(end)
 
             print(
-                "Delegating turn: agent_end with a live task child produced 0 notifications "
-                "and no completion row; after the child settled, the re-entry turn produced "
-                f"exactly 1, body={payload['body']!r}"
+                "Delegating turn: live child produced 0 notifications and no completion row; "
+                f"settlement={settlement}, re-entry completed, result delivered exactly once, "
+                f"notifications={len(notifications)}"
             )
     finally:
         child_release.set()

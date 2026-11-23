@@ -395,7 +395,12 @@ def _stamp_matches(info: os.stat_result, frame: dict[str, Any]) -> bool:
 
 
 def serve_file(
-    root: Path, session_id: str, frame: dict[str, Any], owner: str = "this device"
+    root: Path,
+    session_id: str,
+    frame: dict[str, Any],
+    owner: str = "this device",
+    *,
+    admit: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, Any]:
     """The owner's answer to one ``net_file_get`` phase. Raises :class:`MeshRefusal`.
 
@@ -405,10 +410,32 @@ def serve_file(
     phase = str(frame.get("phase") or "")
     source = _resolve_source(Path(root), session_id, frame, owner)
     fd, info = _open_source(source, session_id, owner)
+
+    def admit_span(offset: int, length: int) -> None:
+        # Hashing consumes protected owner bytes just as fetch does. Normalize
+        # only the canonical reference, never target content, before admission.
+        if admit is None:
+            raise _refuse("audit_unavailable", "the owner cannot commit the file read audit")
+        reference = (
+            f"attachment:{source.attachment}"
+            if source.attachment
+            else "scratchpad://" + source.scope.relative_in(source.path).as_posix()
+        )
+        from local_operator.network.audit import file_read_reference
+
+        try:
+            reference = file_read_reference(reference, offset, length, phase=phase)
+        except ValueError:
+            raise _refuse(
+                "audit_unavailable", "the owner cannot commit the file read audit"
+            ) from None
+        admit(reference, offset, length)
+
     try:
         if phase == "stat":
             if info.st_size == 0:
                 raise _refuse("empty_file", f"{source.label} is empty; there is nothing to pull")
+            admit_span(0, info.st_size)
             digest = _hash_fd(fd, info.st_size)
             if source.attachment and digest[len("sha256:") :][:32] != source.attachment:
                 # The store's own name is a digest of its content; a file that no longer
@@ -443,7 +470,13 @@ def serve_file(
                 limit = min(FILE_CHUNK_BYTES, max(0, int(frame.get("limit") or FILE_CHUNK_BYTES)))
             except (TypeError, ValueError):
                 raise _refuse("bad_request", "a fetch needs an integer offset and limit") from None
-            span = _read_span(fd, offset, limit)
+            # Admit the owner-observed maximum span BEFORE reading/encoding any
+            # content for egress. A concurrent truncation or lost link may mean
+            # fewer bytes arrive: this is planned admission, never completion.
+            # Bound the read itself to that span even if the source later grows.
+            admitted = min(limit, max(0, info.st_size - offset))
+            admit_span(offset, admitted)
+            span = _read_span(fd, offset, admitted)
             return {
                 "offset": offset,
                 "bytes": len(span),
@@ -459,6 +492,7 @@ def serve_file(
                 raise _refuse("bad_request", "a verify needs an integer prefix_bytes") from None
             if prefix <= 0 or prefix > info.st_size:
                 return {"match": False}
+            admit_span(0, prefix)
             return {"match": _hash_fd(fd, prefix) == str(frame.get("prefix_digest") or "")}
         raise _refuse("bad_request", f"unknown file phase {phase!r}")
     finally:
@@ -483,8 +517,46 @@ def make_handler(server: "RelayServer") -> Callable[["PeerLink", dict[str, Any]]
         # must not reach a path built from an empty id.
         if not session_id:
             raise _refuse("bad_request", "a file pull names the session it reads from")
+
+        # Capture the actual serving operation, not an audit-detail override
+        # supplied by a peer. The same frame selects serve_file's closed branch.
+        phase = str(frame.get("phase") or "")
+
+        def admit(reference: str, offset: int, admitted: int) -> None:
+            from local_operator.network.audit import AuditEvent
+
+            detail: dict[str, Any] = {
+                "reference": reference,
+                "admitted_bytes": admitted,
+                "offset": offset,
+                "decision": "allow",
+            }
+            # Historical AND future fetch rows remain exactly four fields.
+            # Hash reads are distinguishable, never counted as transferred bytes.
+            if phase in {"stat", "verify"}:
+                detail["phase"] = phase
+
+            # Only the peer link authenticates WHO requested these bytes. The
+            # protocol has no trusted requesting-session identity; session_id
+            # is the OWNER session, never a claim about the requesting process.
+            if not server.audit.record_required(
+                AuditEvent(
+                    event="session_file_read_admitted",
+                    actor=_link.device_id,
+                    actor_kind="device",
+                    network_id=_link.network_id,
+                    epoch=_link.epoch,
+                    session_id=session_id,
+                    detail=detail,
+                ),
+                expected_file_phase=phase,
+            ):
+                raise _refuse("audit_unavailable", "the owner cannot commit the file read audit")
+
         try:
-            return serve_file(server.root, session_id, frame, server._own_label())  # noqa: SLF001
+            return serve_file(
+                server.root, session_id, frame, server._own_label(), admit=admit  # noqa: SLF001
+            )
         except sync.SyncRefused:
             # Belt: a containment refusal this module did not translate must still
             # leave as a named read refusal, never the relay's generic error with
@@ -771,8 +843,14 @@ def pull_file(
     session_id: str,
     path: str = "",
     attachment: str = "",
+    land: str = "store",
 ) -> dict[str, Any]:
     """Pull one file from ``peer``'s session into THIS device's attachment store.
+
+    ``land="cache"`` files it in the viewer's bounded remote-files cache instead
+    (``remote_files.cache``, docs/design/remote-files-parity.md §4): the desktop's
+    fetch-on-miss lands there so eviction can never delete a local session's only
+    copy from the authoritative store. ``"store"`` keeps S1's CLI receipt.
 
     Returns the receipt ``{ok, peer, device_id, session_id, name, path, bytes,
     sha256, attachment, mime, verified, resumed_bytes}``; raises :class:`MeshRefusal`
@@ -783,6 +861,8 @@ def pull_file(
 
     if not session_id:
         raise _refuse("bad_request", "a file pull names the session it reads from")
+    if land not in ("store", "cache"):
+        raise _refuse("bad_request", f"a file pull lands in 'store' or 'cache', not {land!r}")
     if bool(path) == bool(attachment):
         raise _refuse(
             "bad_request",
@@ -809,6 +889,30 @@ def pull_file(
     asker = _Asker(server, link, label, session_id, source)
     meta = _validated_stat(asker.ask(phase="stat"), label)
     root = Path(server.root)
+    if land == "cache":
+        from local_operator.remote_files.cache import cache_root, touch
+
+        # A PATH source is keyed by the owner's stat sha256 only after this phase, so
+        # the viewer cannot look the cache up first; the bytes may already be here
+        # (content-addressed, verified when they landed). Skip the transfer then.
+        digest = meta["sha256"][len("sha256:") :][:32]
+        cached = cache_root(root) / f"{digest}.bin"
+        if cached.is_file():
+            touch(cached)
+            return {
+                "ok": True,
+                "peer": label,
+                "device_id": device_id,
+                "session_id": session_id,
+                "name": meta["name"],
+                "path": str(cached),
+                "bytes": meta["bytes"],
+                "sha256": meta["sha256"],
+                "attachment": digest,
+                "mime": meta["mime"],
+                "verified": True,
+                "resumed_bytes": 0,
+            }
     try:
         scope = sync.write_scope(root, staging_root(root))
     except sync.SyncRefused:
@@ -864,7 +968,12 @@ def pull_file(
                 raise
             os.close(fd)
             break
-        store = AttachmentStore(root / ATTACHMENTS_DIRNAME)
+        if land == "cache":
+            from local_operator.remote_files.cache import cache_root
+
+            store = AttachmentStore(cache_root(root))
+        else:
+            store = AttachmentStore(root / ATTACHMENTS_DIRNAME)
         # The store re-hashes while adopting: its own gate is what makes a file
         # visible under a content name, and it must not rest on a caller's check.
         ref = store.adopt_file(part, meta["mime"], expected_sha256=meta["sha256"])
@@ -875,6 +984,13 @@ def pull_file(
                 "the pulled file verified but could not be filed in this device's attachment "
                 "store; nothing was saved",
             )
+        if land == "cache":
+            # An existing blob is not re-written by ``adopt_file``, so its mtime is
+            # whenever it first landed: bump it, or the eviction pass that follows
+            # this landing would treat the file just asked for as the oldest.
+            from local_operator.remote_files.cache import touch
+
+            touch(store.root / f"{ref.digest}.bin")
     return {
         "ok": True,
         "peer": label,
@@ -901,6 +1017,7 @@ def local_pull_handler(server: "RelayServer") -> Callable[[dict[str, Any]], dict
             session_id=str(frame.get("session_id") or ""),
             path=str(frame.get("path") or ""),
             attachment=str(frame.get("attachment") or ""),
+            land=str(frame.get("land") or "store"),
         )
 
     return _handle
@@ -908,8 +1025,21 @@ def local_pull_handler(server: "RelayServer") -> Callable[[dict[str, Any]], dict
 
 def install(server: "RelayServer") -> None:
     """Register ``net_file_get`` (slow: a stat hashes up to 256 MiB) and the local verb."""
+    from local_operator.network import file_index
+
     server.register_ops(
-        {"net_file_get": make_handler(server)},
-        local_handlers={"session_file_pull": local_pull_handler(server)},
-        slow={"net_file_get": FILE_OP_DEADLINE_S},
+        {
+            "net_file_get": make_handler(server),
+            # The Files index rides this module's install so SLICE_MODULES is untouched
+            # (remote-files-parity.md §2): same family, same view capability.
+            "net_session_files": file_index.make_handler(server),
+        },
+        local_handlers={
+            "session_file_pull": local_pull_handler(server),
+            "peer_session_files": file_index.local_handler(server),
+        },
+        slow={
+            "net_file_get": FILE_OP_DEADLINE_S,
+            "net_session_files": file_index.INDEX_OP_DEADLINE_S,
+        },
     )

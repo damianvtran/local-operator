@@ -10,8 +10,8 @@ their edges into inbox rows.
 
 Each acceptance line of the brief is one test below:
 
-* no TUI, one node turn end → exactly one ``remote-done:`` row within one poll
-  (``test_serve_host_raises_one_done_row_within_one_poll``);
+* no remote turn end is ever an inbox row (operator rule 2026-11-13; the
+  ``remote-done:`` producer is gone and only its read-marking settle remains);
 * ``notify priority=high`` → one banner-eligible row
   (``test_a_high_notice_is_one_banner_eligible_row``);
 * a restarted watcher does not duplicate
@@ -26,12 +26,14 @@ Each acceptance line of the brief is one test below:
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.network.projection import PeerRow
+from local_operator.network.types import TrustState
 from local_operator.notifications import remote_attention as ra
 from local_operator.notifications import store as store_mod
 from local_operator.notifications.delivery import (
@@ -68,24 +70,30 @@ def _no_banner_threads(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     return calls
 
 
-#: The real banner leg, kept before the autouse fixture below replaces it, so
-#: the claim tests can drive it synchronously with a fake notifier.
-_REAL_DONE_BANNER = ra._deliver_done_banner
-
-
 @pytest.fixture(autouse=True)
-def done_banners(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Capture done-banner hand-offs: no daemon thread, no real notifier."""
-    calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(ra, "_deliver_done_banner", lambda root, **kw: calls.append(kw))
-    return calls
+def _fresh_origin_memo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test an empty ``record_forwarding_origin`` memo.
+
+    The product remembers ``(str(root), device)`` process-wide so the origins
+    file is written once per origin, not on every catalogue read. In the suite
+    that memo outlives the ``tmp_path`` it names: this repo deletes a PASSING
+    test's ``tmp_path`` (``tmp_path_retention_policy = "failed"``), and the
+    pytest CI runs (8.x) numbers the next directory from the suffixes that still
+    EXIST, so a later parameter gets the earlier one's path back — with no
+    ``remote-attention-origins.json`` in it, yet a memo saying it was written.
+    CI run 43661997364, shards (3.12, 4) and (3.13, 4): ``[origin1-False]``
+    of ``test_default_deny_the_node_reply_matches_the_owner_forward_filter``
+    failed ``assert 'd_head' in {}`` that way. ``monkeypatch`` swaps in a fresh
+    set and restores the module's own afterwards, so no test sees another's.
+    """
+    monkeypatch.setattr(ra, "_recorded_origins", set())
 
 
 def _row(
     *,
     attention: tuple[str, str] | None = None,
-    notice: tuple[str, int, str, str] | None = None,
-    notices: tuple[tuple[str, int, str, str], ...] | None = None,
+    notice: tuple[Any, ...] | None = None,
+    notices: tuple[tuple[Any, ...], ...] | None = None,
     device: str = NODE,
     session_id: str = SID,
     name: str = "Port the parser",
@@ -99,8 +107,30 @@ def _row(
         owner_device=device,
         owner_device_name="lop-remote-node-2",
         remote_attention=attention,
-        remote_notices=(notice,) if notice else notices,
+        remote_notices=_timed((notice,) if notice else notices),
     )
+
+
+def _timed(notices: tuple[tuple[Any, ...], ...] | None) -> tuple[tuple[Any, ...], ...] | None:
+    """Give a 4-tuple notice an owner time AFTER any baseline this test records.
+
+    The no-backfill rule (2026-11-13) raises only a notice newer than the
+    origin's first-seen baseline; a test about some OTHER property of a notice
+    states a fresh one, and a test about the baseline passes a 5-tuple.
+    """
+    if not notices:
+        return notices
+    fresh = _fresh_ms()
+    return tuple(n if len(n) > 4 else (*n, fresh) for n in notices)
+
+
+def _seed_done(root: Path, token: str = TOK1) -> dict[str, Any]:
+    """A ``remote-done:`` row as an OLDER build wrote it (this one never does)."""
+    NotificationStore(root).notify(
+        SID, title="Port the parser", key=ra.done_key(NODE, SID), anchor_id=token, episode=token
+    )
+    [item] = [i for i in _items(root) if i["key"] == ra.done_key(NODE, SID)]
+    return item
 
 
 def _later() -> int:
@@ -118,84 +148,33 @@ def _items(root: Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def test_serve_host_raises_one_done_row_within_one_poll(
+def test_serve_host_raises_no_done_row_for_a_remote_turn_end(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The ``lop serve`` host, no TUI: one poll, one ``remote-done:`` row."""
+    """Operator rule 2026-11-13: a remote turn-end is never an inbox row or banner."""
     listing = ((_row(attention=(TOK1, "complete")),), ())
     monkeypatch.setattr(peer_rows, "read_listing", lambda *_a, **_k: listing)
 
-    async def one_poll() -> None:
-        task = asyncio.create_task(ra.run_forever(root, interval_s=3600))
-        for _ in range(200):
-            await asyncio.sleep(0.01)
-            if _items(root):
-                break
+    async def two_polls() -> None:
+        task = asyncio.create_task(ra.run_forever(root, interval_s=0.01))
+        await asyncio.sleep(0.2)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    asyncio.run(one_poll())
-    rows = _items(root)
-    assert [row["key"] for row in rows] == [ra.done_key(NODE, SID)]
-    row = rows[0]
-    assert row["session_id"] == SID
-    assert row["priority"] == "normal"
-    assert row["title"] == "Port the parser"
-    assert "lop-remote-node-2" in row["body_md"], "the row must say where the turn ran"
-    assert row["read"] is False
+    asyncio.run(two_polls())
+    assert _items(root) == []
+    assert not hasattr(ra, "raise_done_item") and not hasattr(ra, "_deliver_done_banner")
 
 
-def test_a_restarted_watcher_neither_duplicates_nor_reopens(root: Path) -> None:
-    rows = [_row(attention=(TOK1, "complete"))]
-    first = ra.RemoteAttentionWatcher(root)
-    first.observe(rows)
-    first.observe(rows)
-    [item] = _items(root)
-    NotificationStore(root).apply("read", ids=[(item["id"], item["revision"])])
-
-    # A fresh process (restart) and a second host (TUI beside serve) both start
-    # with an empty episode map and see the same completion as an edge.
-    ra.RemoteAttentionWatcher(root).observe(rows)
-    ra.RemoteAttentionWatcher(root).observe([_row(attention=(TOK1, "complete"), name="Renamed")])
-    [after] = _items(root)
-    assert after["id"] == item["id"]
-    assert after["read"] is True, "a repeat of a read completion must not flip it unread"
-    assert after["revision"] == item["revision"]
-
-
-def test_a_new_completion_reopens_the_one_row(root: Path) -> None:
+def test_an_acknowledged_completion_marks_an_older_builds_row_read(root: Path) -> None:
+    """The settle survives: an older build's done row reads once the owner acks it."""
+    _seed_done(root)
     watcher = ra.RemoteAttentionWatcher(root)
-    watcher.observe([_row(attention=(TOK1, "complete"))])
-    [item] = _items(root)
-    store = NotificationStore(root)
-    store.apply("dismiss", ids=[(item["id"], item["revision"])])
-
-    watcher.observe([_row(attention=(TOK2, "error"))])
-    [after] = _items(root)
-    assert after["id"] == item["id"], "one row per (device, session), never a stack"
-    assert after["dismissed"] is False and after["read"] is False
-    assert after["anchor_id"] == TOK2
-
-
-def test_an_acknowledged_completion_marks_the_row_read(root: Path) -> None:
-    """The owner stops stamping once the receipt landed: the origin row reads."""
-    watcher = ra.RemoteAttentionWatcher(root)
-    watcher.observe([_row(attention=(TOK1, "complete"))])
+    watcher.observe([_row(attention=(TOK1, "complete"))], listed_at_ms=_later())
+    assert _items(root)[0]["read"] is False, "still claimed: not acknowledged"
     watcher.observe([_row()], listed_at_ms=_later())
     [item] = _items(root)
     assert item["read"] is True and item["dismissed"] is False
-
-
-def test_a_silent_device_keeps_its_episode(root: Path) -> None:
-    watcher = ra.RemoteAttentionWatcher(root)
-    watcher.observe([_row(attention=(TOK1, "complete"))])
-    watcher.observe([], unanswered=[NODE])
-    [item] = _items(root)
-    assert item["read"] is False, "a timed-out read is not the operator reading it"
-    edges, state = peer_rows.completion_edges(
-        {(NODE, SID): TOK1}, [_row(attention=(TOK1, "complete"))]
-    )
-    assert edges == () and state == {(NODE, SID): TOK1}
 
 
 def test_a_high_notice_is_one_banner_eligible_row(
@@ -273,7 +252,14 @@ def _owner(tmp_path: Path, *, origin: str = HEAD) -> Path:
             placement=SessionPlacement(
                 mode="peer", network_id="n_test", home_device=NODE, stamp_revision=1
             ),
-            origin={"kind": "user", "source_device": origin, "source_session_id": ""},
+            origin={
+                "kind": "user",
+                "source_device": origin,
+                "source_session_id": "",
+                # An ATTESTED operator create (``relay._ctl_peer_create``): only
+                # this forwards ``notify`` items under the default-deny rule.
+                ra.STARTED_BY_FIELD: ra.OPERATOR_STARTED,
+            },
         ),
     )
     AttentionStore(owner / "attention.db").publish(f"session/{SID}", TOK1, "a1", "complete")
@@ -285,7 +271,12 @@ def _catalog_row(origin: str = HEAD) -> dict[str, Any]:
     return {
         "session_id": SID,
         "state": "stored",
-        "origin": {"kind": "user", "source_device": origin, "source_session_id": ""},
+        "origin": {
+            "kind": "user",
+            "source_device": origin,
+            "source_session_id": "",
+            ra.STARTED_BY_FIELD: ra.OPERATOR_STARTED,
+        },
     }
 
 
@@ -294,9 +285,16 @@ def test_the_origin_viewer_gets_attention_and_notice(tmp_path: Path) -> None:
     rows = [_catalog_row()]
     ra.stamp_rows_for_viewer(owner, rows, HEAD)
     assert rows[0]["attention"] == {"token": TOK1, "outcome": "complete"}
-    assert rows[0]["notices"] == [
-        {"key": "deploy", "revision": 1, "priority": "high", "title": "Deploy finished"}
-    ]
+    [notice] = rows[0]["notices"]
+    assert {k: v for k, v in notice.items() if k != "at"} == {
+        "key": "deploy",
+        "revision": 1,
+        "priority": "high",
+        "title": "Deploy finished",
+    }
+    # The owner item's own time rides along (2026-11-13, no-backfill rule).
+    [owned] = NotificationStore(owner).list_items(state="all", limit=5)[0]
+    assert notice["at"] == owned["updated_at"] > 0
 
 
 def test_a_non_origin_viewer_gets_no_fields(tmp_path: Path) -> None:
@@ -359,7 +357,7 @@ def test_an_old_parse_and_malformed_blocks_are_no_claim() -> None:
         device_id=NODE,
     )
     assert good.attention == (TOK1, "complete")
-    assert good.notices == (("k", 3, "high", "T"),)
+    assert good.notices == (("k", 3, "high", "T", 0),), "no ``at``: an older owner"
     # A row from an owner that predates the capability carries neither key.
     old = PeerRow.from_json({"session_id": SID, "state": "live"}, device_id=NODE)
     assert old.attention is None and old.notices is None
@@ -426,22 +424,276 @@ def test_the_node_notify_sentence_promises_only_what_the_origin_collects(
 ) -> None:
     """Review round 1 m2 + QA Q2: "forwarded" only to an origin known to collect."""
     owner = _owner(tmp_path)
+    _join_mesh(owner)
     # Not yet recorded (an older origin, or one that has not read this device
     # since updating): the item stays here, and the model is told so.
     before = ra.forwarded_notice_sentence(owner, SID)
     assert "will be forwarded" not in before
-    assert "stays on this device" in before
-    # Q2: a non-member origin is named in words, never by its raw device id.
-    assert HEAD not in before and "its origin device" in before
+    assert "stays on node-box" in before and "d_head-box" in before
     # The owner's catalogue op records an origin that advertised the capability.
     ra.stamp_rows_for_viewer(owner, [_catalog_row()], HEAD)
     assert HEAD in ra.forwarding_origins(owner)
     after = ra.forwarded_notice_sentence(owner, SID)
-    assert "will be forwarded to its origin device" in after
+    assert "will be forwarded to d_head-box" in after
     # A key this module never forwards gets no clause at all.
     assert ra.forwarded_notice_sentence(owner, SID, "gate:approval:w1") == ""
     local = tmp_path / "local"
     assert ra.forwarded_notice_sentence(local, SID) == ""
+
+
+def test_r2_1_an_origin_that_is_no_active_member_is_never_promised(tmp_path: Path) -> None:
+    """PR #4029 R2-1: a collector marker alone never makes "will be forwarded".
+
+    The origin left (removed / burned), or the network is no longer trusted: no
+    link will carry the item, so a mesh node says node-only and a device in no
+    mesh keeps its bare result. The raw device id is never printed (Q2).
+    """
+    from local_operator.network import store as net_store
+
+    owner = _owner(tmp_path)
+    ra.record_forwarding_origin(owner, HEAD)
+    # No network at all here: nothing to forward over, nothing to say.
+    assert ra.notice_forwarding(owner, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(owner, SID) == ""
+    # A mesh node whose OTHER member is not the origin: node-only, honestly.
+    _join_mesh(owner, peers=("d_other",))
+    assert ra.notice_forwarding(owner, SID) == (ra.LOCAL_ONLY, "")
+    sentence = ra.forwarded_notice_sentence(owner, SID)
+    assert sentence == " Shown on node-box only; it was not forwarded to your other devices."
+    assert HEAD not in sentence
+    # The origin removed (burned) from a network it was in.
+    _join_mesh(owner, peers=(HEAD, "d_other"))
+    record = net_store.load("n_test", owner)
+    record.removed_ids.append(HEAD)
+    net_store.save(record, owner)
+    assert ra.notice_forwarding(owner, SID) == (ra.LOCAL_ONLY, "")
+    # A disconnected (untrusted) network: no mesh node either.
+    _join_mesh(owner, trust="untrusted")
+    assert ra.notice_forwarding(owner, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(owner, SID) == ""
+
+
+def _join_mesh(
+    root: Path, *, peers: tuple[str, ...] = (HEAD,), trust: TrustState = "active"
+) -> None:
+    """Save a network record making ``root`` (device NODE) a member beside ``peers``."""
+    from local_operator.network import store as net_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    record = NetworkRecord(network_id="n_test", name="mesh", self_device_id=NODE, trust=trust)
+    record.members = [MemberRecord(device_id=NODE, name="node-box")] + [
+        MemberRecord(device_id=peer, name=f"{peer}-box") for peer in peers
+    ]
+    net_store.save(record, root)
+
+
+def test_a_session_started_on_a_mesh_node_says_its_notice_stayed_here(tmp_path: Path) -> None:
+    """2026-11-15: no stamp on a mesh node was "" — read as if the operator were told."""
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    _join_mesh(node)
+    assert ra.notice_forwarding(node, SID) == (ra.LOCAL_ONLY, "")
+    sentence = ra.forwarded_notice_sentence(node, SID)
+    assert sentence == " Shown on node-box only; it was not forwarded to your other devices."
+    # A key this module never forwards keeps its empty clause.
+    assert ra.forwarded_notice_sentence(node, SID, "gate:approval:w1") == ""
+
+
+def test_a_device_in_no_mesh_keeps_the_bare_notify_result(tmp_path: Path) -> None:
+    """Single-device operators: no network, or a network nobody else has joined."""
+    alone = tmp_path / "alone"
+    (alone / "sessions" / SID).mkdir(parents=True)
+    assert ra.notice_forwarding(alone, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(alone, SID) == ""
+    _join_mesh(alone, peers=())
+    assert ra.forwarded_notice_sentence(alone, SID) == ""
+    untrusted = tmp_path / "untrusted"
+    _join_mesh(untrusted, trust="untrusted")
+    assert ra.forwarded_notice_sentence(untrusted, SID) == ""
+
+
+def test_a_forwarded_notice_keeps_its_sentence_on_a_mesh_node(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    _join_mesh(owner)
+    ra.stamp_rows_for_viewer(owner, [_catalog_row()], HEAD)
+    assert ra.notice_forwarding(owner, SID) == (ra.FORWARDED, HEAD)
+    assert ra.forwarded_notice_sentence(owner, SID) == (
+        " Posted on node-box; it will be forwarded to d_head-box, where this session started."
+    )
+
+
+def test_an_agent_child_on_a_node_is_told_its_notice_stays_here(tmp_path: Path) -> None:
+    """Mirrors stamp_rows_for_viewer: an agent-origin row is never put on the wire."""
+    owner = tmp_path / "node"
+    (owner / "sessions" / SID).mkdir(parents=True)
+    write_stamp(
+        owner,
+        MeshStamp(
+            session_id=SID,
+            network_id="n_test",
+            home_device=NODE,
+            placement=SessionPlacement(
+                mode="peer", network_id="n_test", home_device=NODE, stamp_revision=1
+            ),
+            origin={"kind": ra.AGENT_ORIGIN_KIND, "source_device": HEAD, "source_session_id": ""},
+        ),
+    )
+    _join_mesh(owner)
+    ra.record_forwarding_origin(owner, HEAD)
+    assert ra.notice_forwarding(owner, SID) == (ra.LOCAL_ONLY, HEAD)
+    assert "will be forwarded" not in ra.forwarded_notice_sentence(owner, SID)
+
+
+def _stamped_node(tmp_path: Path, mode: str | None, origin: dict[str, Any]) -> Path:
+    """A mesh node holding SID with one forwardable notice, stamped ``mode``/``origin``.
+
+    ``mode=None`` writes no stamp at all (a session started here).
+    """
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    if mode is not None:
+        write_stamp(
+            node,
+            MeshStamp(
+                session_id=SID,
+                network_id="" if mode == "local" else "n_test",
+                home_device=NODE,
+                placement=SessionPlacement(
+                    mode=mode,  # type: ignore[arg-type]
+                    network_id="" if mode == "local" else "n_test",
+                    home_device=NODE,
+                    stamp_revision=1,
+                ),
+                origin=origin,
+            ),
+        )
+    NotificationStore(node).notify(SID, title="Deploy finished", priority="high", key="deploy")
+    _join_mesh(node)
+    return node
+
+
+#: The stamp ``sync.promote_replica`` writes: placement LOCAL, the origin the
+#: old owner (``REPLICA_ORIGIN_KIND`` = "fork") and NO ``started_by`` — a copy
+#: does not attest who started the original.
+_REPLICA_ORIGIN = {"kind": "fork", "source_device": HEAD, "source_session_id": "s_old"}
+
+#: ``started_by`` variants for the parity table (#4001's default-deny): the
+#: attested operator create, an attested agent create, and a legacy stamp.
+_ATTESTED = {ra.STARTED_BY_FIELD: ra.OPERATOR_STARTED}
+_AGENT_ATTESTED = {ra.STARTED_BY_FIELD: ra.AGENT_ORIGIN_KIND}
+_UNATTESTED: dict[str, str] = {}
+
+_STAY_UNATTESTED = (
+    " Posted on node-box; it stays on node-box, because only notices from sessions the"
+    " operator started on d_head-box are forwarded there, and this one was moved, forked"
+    " or placed here otherwise."
+)
+
+
+def test_a_recovered_replica_is_told_its_notice_stays_here(tmp_path: Path) -> None:
+    """R1-1 rebased onto #4001: a replica stamp carries no ``started_by``.
+
+    The catalogue now withholds its notify items (default-deny), so the verdict
+    must not promise forwarding even once HEAD collects. Mode-independence (the
+    original R1-1 point) is held by the parity table's attested ``local`` rows.
+    """
+    node = _stamped_node(tmp_path, "local", _REPLICA_ORIGIN)
+    assert ra.notice_forwarding(node, SID) == (ra.ORIGIN_NOT_COLLECTING, HEAD)
+    assert "will be forwarded" not in ra.forwarded_notice_sentence(node, SID)
+    ra.record_forwarding_origin(node, HEAD)
+    assert ra.notice_forwarding(node, SID) == (ra.NOT_OPERATOR_STARTED, HEAD)
+    assert ra.forwarded_notice_sentence(node, SID) == _STAY_UNATTESTED
+
+
+def test_an_attested_replica_is_still_forwarded_whatever_its_mode(tmp_path: Path) -> None:
+    """R1-1 kept: an attested origin is read the same under placement ``local``."""
+    node = _stamped_node(tmp_path, "local", {**_REPLICA_ORIGIN, **_ATTESTED})
+    assert ra.notice_forwarding(node, SID) == (ra.ORIGIN_NOT_COLLECTING, HEAD)
+    ra.record_forwarding_origin(node, HEAD)
+    assert ra.notice_forwarding(node, SID) == (ra.FORWARDED, HEAD)
+    assert "will be forwarded" in ra.forwarded_notice_sentence(node, SID)
+
+
+@pytest.mark.parametrize("attestation", [_AGENT_ATTESTED, _UNATTESTED], ids=["agent", "missing"])
+def test_an_unattested_user_stamp_says_it_stays_here(
+    tmp_path: Path, attestation: dict[str, str]
+) -> None:
+    """#4001 x #4029: no operator attestation -> never forwarded.
+
+    Main's precedence is kept: before the origin collects, the not-collecting
+    sentence (already "stays"); once it collects, #4001's attestation sentence.
+    """
+    origin = {"kind": "user", "source_device": HEAD, "source_session_id": "", **attestation}
+    node = _stamped_node(tmp_path, "peer", origin)
+    assert ra.notice_forwarding(node, SID) == (ra.ORIGIN_NOT_COLLECTING, HEAD)
+    assert ra.forwarded_notice_sentence(node, SID) == (
+        " Posted on node-box; it stays on node-box, because d_head-box, where this session"
+        " started, is not known to collect forwarded notices."
+    )
+    ra.record_forwarding_origin(node, HEAD)
+    assert ra.notice_forwarding(node, SID) == (ra.NOT_OPERATOR_STARTED, HEAD)
+    assert ra.forwarded_notice_sentence(node, SID) == _STAY_UNATTESTED
+
+
+def _origin(kind: str, source: str, attestation: dict[str, str]) -> dict[str, Any]:
+    return {"kind": kind, "source_device": source, "source_session_id": "", **attestation}
+
+
+_PARITY_MODES: tuple[str | None, ...] = ("peer", "local")
+_PARITY_ORIGINS: list[tuple[str | None, dict[str, Any]]] = [
+    (mode, _origin(kind, source, attestation))
+    for mode in _PARITY_MODES
+    for kind in ("user", ra.AGENT_ORIGIN_KIND, "fork", "moved")
+    for source in (HEAD, "d_other", "")
+    for attestation in (_ATTESTED, _AGENT_ATTESTED, _UNATTESTED)
+]
+_PARITY_ORIGINS += [("local", {}), (None, {})]
+
+
+@pytest.mark.parametrize(("mode", "origin"), _PARITY_ORIGINS)
+def test_the_notify_verdict_agrees_with_the_catalogue_leg(
+    tmp_path: Path, mode: str | None, origin: dict[str, Any]
+) -> None:
+    """Parity (R1-1, #4001): "forwarded to HEAD" iff the REAL catalogue leg puts it on HEAD's wire.
+
+    Modes x origin kinds x sources x ``started_by`` (operator / agent / missing):
+    the catalogue row is built from the same stamp origin, so any drift between
+    :func:`ra.notice_forwarding` and :func:`ra.stamp_rows_for_viewer` fails here.
+    """
+    node = _stamped_node(tmp_path, mode, origin)
+    # The row exactly as RelayServer._op_catalog builds it from the stamp.
+    row: dict[str, Any] = {"session_id": SID, "state": "stored", "origin": dict(origin) or None}
+    ra.stamp_rows_for_viewer(node, [row], HEAD)  # also records HEAD as collecting
+    on_wire = bool(row.get("notices"))
+    assert (ra.notice_forwarding(node, SID) == (ra.FORWARDED, HEAD)) is on_wire
+    # And the positive cell exists: an attested user/fork/moved origin of HEAD.
+    if origin.get("source_device") == HEAD and origin.get(ra.STARTED_BY_FIELD) == "operator":
+        assert on_wire is (origin["kind"] != ra.AGENT_ORIGIN_KIND)
+
+
+def test_a_network_whose_only_peer_was_removed_is_no_mesh(tmp_path: Path) -> None:
+    """R1-2: a removed member is a tombstone, not "another device" to mention."""
+    from local_operator.network import store as net_store
+
+    alone = tmp_path / "alone"
+    (alone / "sessions" / SID).mkdir(parents=True)
+    _join_mesh(alone)
+    record = net_store.list_networks(alone)[0]
+    for member in record.members:
+        if member.device_id == HEAD:
+            member.removed_at = time.time()
+    net_store.save(record, alone)
+    assert ra.notice_forwarding(alone, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(alone, SID) == ""
+
+
+def test_a_disconnected_network_is_no_mesh(tmp_path: Path) -> None:
+    """R1-2: a network this device left carries nothing to other devices."""
+    alone = tmp_path / "alone"
+    (alone / "sessions" / SID).mkdir(parents=True)
+    _join_mesh(alone, trust="disconnected")
+    assert ra.notice_forwarding(alone, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(alone, SID) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +706,10 @@ def test_m2_a_high_notice_followed_by_a_normal_one_both_arrive(
 ) -> None:
     """Review round 1 M2's repro: only the newest notice used to cross the wire."""
     owner = tmp_path / "node"
+    head = tmp_path / "head"
+    # The head first watched the node BEFORE these notices were posted.
+    ra.origin_baseline_ms(head, NODE)
+    time.sleep(0.002)
     _owner(tmp_path)  # stamp + attention; its own "deploy" notice is read below
     store = NotificationStore(owner)
     [seed] = [item for item in _items(owner)]
@@ -467,7 +723,6 @@ def test_m2_a_high_notice_followed_by_a_normal_one_both_arrive(
         ("a", "high"),
     ], "newest first, and the earlier high notice is still on the wire"
 
-    head = tmp_path / "head"
     parsed = PeerRow.from_json({**rows[0], "state": "stored"}, device_id=NODE)
     session_row = _row(notices=parsed.notices)
     ra.RemoteAttentionWatcher(head).observe([session_row])
@@ -529,7 +784,7 @@ def test_m1_minor_a_read_notice_never_flips_back_to_unread(root: Path) -> None:
 
 def test_q1_a_receipt_between_two_watchers_still_settles_the_row(root: Path) -> None:
     """QA round 1 Q1: settle from the current listing, not from process memory."""
-    ra.RemoteAttentionWatcher(root).observe([_row(attention=(TOK1, "complete"))])
+    _seed_done(root)
     [item] = _items(root)
     assert item["read"] is False
     # serve stopped; the receipt landed on the owner; a FRESH watcher starts.
@@ -548,97 +803,6 @@ def test_q1_a_receipt_between_two_watchers_still_settles_the_row(root: Path) -> 
     assert after["read"] is True and after["dismissed"] is False
 
 
-def test_m1_a_new_completion_hands_one_banner_per_token(
-    root: Path, done_banners: list[dict[str, Any]]
-) -> None:
-    watcher = ra.RemoteAttentionWatcher(root)
-    watcher.observe([_row(attention=(TOK1, "error"))])
-    watcher.observe([_row(attention=(TOK1, "error"))])
-    ra.RemoteAttentionWatcher(root).observe([_row(attention=(TOK1, "error"))])
-    [item] = _items(root)
-    assert len(done_banners) == 1, done_banners
-    call = done_banners[0]
-    assert call["item_id"] == item["id"] and call["revision"] == item["revision"]
-    assert call["session_id"] == SID and call["title"] == "Port the parser"
-    from local_operator.tui import notify as notify_copy
-
-    assert call["body"] == notify_copy.BODIES["error"]
-    assert call["subtitle"] == notify_copy.CONTEXTS.get("error", "")
-    watcher.observe([_row(attention=(TOK2, "complete"))])
-    assert len(done_banners) == 2, "a NEW completion banners again"
-
-
-def _banner_row(root: Path) -> dict[str, Any]:
-    ra.raise_done_item(root, session_id=SID, device_id=NODE, token=TOK1, name="N", deliver=False)
-    [item] = _items(root)
-    return item
-
-
-def test_m1_the_done_banner_is_claimed_once_across_hosts(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from local_operator.notifications import delivery
-
-    monkeypatch.setattr(delivery, "gates_refuse", lambda: "")
-    item = _banner_row(root)
-    sent: list[tuple[str, str, dict[str, Any]]] = []
-
-    def notifier(title: str, body: str, **kw: Any) -> bool:
-        sent.append((title, body, kw))
-        return True
-
-    kwargs = dict(
-        item_id=item["id"],
-        revision=item["revision"],
-        session_id=SID,
-        title="N",
-        body="Done",
-    )
-    # The TUI's watcher and serve's both reach the same revision.
-    _REAL_DONE_BANNER(root, **kwargs, notify=notifier, background=False)
-    _REAL_DONE_BANNER(root, **kwargs, notify=notifier, background=False)
-    assert len(sent) == 1
-    assert sent[0][2]["session_id"] == SID, "clickable: the click opens the peer session"
-    row = NotificationStore(root).get(item["id"])
-    assert row is not None and row["delivered_by"] == ra.DONE_BANNER_CLAIMANT
-
-
-def test_m1_a_notifier_that_started_nothing_gives_the_claim_back(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from local_operator.notifications import delivery
-
-    item = _banner_row(root)
-    kwargs = dict(
-        item_id=item["id"],
-        revision=item["revision"],
-        session_id=SID,
-        title="N",
-        body="Done",
-    )
-    # Gated (rig guard / switch off): refused BEFORE the claim.
-    monkeypatch.setattr(delivery, "gates_refuse", lambda: "notifications disabled")
-    _REAL_DONE_BANNER(root, **kwargs, notify=lambda *a, **k: True, background=False)
-    stored = NotificationStore(root).get(item["id"])
-    assert stored is not None
-    assert stored["delivered_rev"] == 0
-    monkeypatch.setattr(delivery, "gates_refuse", lambda: "")
-    _REAL_DONE_BANNER(root, **kwargs, notify=lambda *a, **k: False, background=False)
-    stored = NotificationStore(root).get(item["id"])
-    assert stored is not None
-    assert stored["delivered_rev"] == 0
-    # A read row is never bannered (the store's claim refuses it).
-    NotificationStore(root).apply("read", ids=[(item["id"], item["revision"])])
-    sent: list[str] = []
-    _REAL_DONE_BANNER(
-        root,
-        **kwargs,
-        notify=lambda t, b, **k: bool(sent.append(t)) or True,
-        background=False,
-    )
-    assert sent == []
-
-
 def test_q1_the_prefix_query_matches_literally(tmp_path: Path) -> None:
     """``unread_with_key_prefix`` escapes LIKE wildcards: ``_`` is not "any char"."""
     store = NotificationStore(tmp_path)
@@ -653,6 +817,31 @@ def test_q1_the_prefix_query_matches_literally(tmp_path: Path) -> None:
     ]
 
 
+def test_r1_1_the_undismissed_prefix_query_keeps_read_rows_and_matches_literally(
+    tmp_path: Path,
+) -> None:
+    """``undismissed_with_key_prefix`` (PR #4082 R1-1) returns READ rows too, never
+    dismissed ones, and matches ``prefix``/``containing`` literally."""
+    store = NotificationStore(tmp_path)
+    for key in (
+        "remote-notice:d_x:s1:remote-ask:a1",
+        "remote-notice:d_x:s1:remote-askXa2",
+        "remote-notice:d_x:s1:deploy",
+        "remote-notice:d_x:s1:remote-ask:a3",
+    ):
+        store.notify("s1", title=key, key=key)
+    rows = {r["key"]: r for r in store.undismissed_with_key_prefix("remote-notice:")}
+    read, gone = (
+        rows["remote-notice:d_x:s1:remote-ask:a1"],
+        rows["remote-notice:d_x:s1:remote-ask:a3"],
+    )
+    store.apply("read", ids=[(read["id"], read["revision"])])
+    store.apply("dismiss", ids=[(gone["id"], gone["revision"])])
+    asks = store.undismissed_with_key_prefix("remote-notice:", containing=":remote-ask:")
+    assert [(r["key"], r["read"]) for r in asks] == [("remote-notice:d_x:s1:remote-ask:a1", True)]
+    assert store.undismissed_with_key_prefix("remote_notice:") == []
+
+
 # ---------------------------------------------------------------------------
 # Round 2 remediation
 # ---------------------------------------------------------------------------
@@ -664,42 +853,6 @@ class _Clock:
     def __init__(self, monkeypatch: pytest.MonkeyPatch, start: int = 1_800_000_000_000) -> None:
         self.ms = start
         monkeypatch.setattr(store_mod, "now_ms", lambda: self.ms)
-
-
-def test_r2_m1_two_completions_five_minutes_apart_banner_twice(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """R2-M1 / Q4: per completion token, no cooldown — the local leg's rule.
-
-    The REAL banner leg and the real store claim run (synchronously); only the
-    OS notifier is a recorder, because a test may not raise a real banner.
-    """
-    from local_operator.notifications import delivery
-
-    monkeypatch.setattr(delivery, "gates_refuse", lambda: "")
-    sent: list[dict[str, Any]] = []
-
-    def notifier(title: str, body: str, **kw: Any) -> bool:
-        sent.append({"title": title, **kw})
-        return True
-
-    monkeypatch.setattr(
-        ra,
-        "_deliver_done_banner",
-        lambda root, **kw: _REAL_DONE_BANNER(root, **kw, notify=notifier, background=False),
-    )
-    clock = _Clock(monkeypatch)
-    tui, serve = ra.RemoteAttentionWatcher(root), ra.RemoteAttentionWatcher(root)
-    tui.observe([_row(attention=(TOK1, "complete"))])
-    serve.observe([_row(attention=(TOK1, "complete"))])
-    assert len(sent) == 1, "one banner per token across both hosts"
-    clock.ms += 5 * 60 * 1000
-    tui.observe([_row(attention=(TOK2, "complete"))])
-    serve.observe([_row(attention=(TOK2, "complete"))])
-    assert len(sent) == 2, "a second completion 5 min later banners again"
-    [row] = _items(root)
-    assert row["delivered_rev"] == row["revision"] == 2
-    assert row["delivered_by"] == ra.DONE_BANNER_CLAIMANT
 
 
 def test_r2_m1_every_other_claimant_keeps_the_cooldown(
@@ -753,7 +906,7 @@ def test_q3_a_stale_cached_listing_never_settles_a_newer_row(
         y = ra.RemoteAttentionWatcher(root)
         y.observe(stale)
         clock.ms += 200
-        ra.RemoteAttentionWatcher(root).observe([_row(attention=(TOK1, "complete"))])
+        _seed_done(root)
         clock.ms += 5_000
         again, _ = peer_rows.read_listing(root, catalog=catalog)
         assert again is stale, "the 20 s cache hands Y the pre-completion listing"
@@ -803,7 +956,7 @@ def test_r2_m2_a_failed_attention_read_is_unknown_not_acknowledged(
         assert old.attention_unknown is False
 
     watcher = ra.RemoteAttentionWatcher(root)
-    watcher.observe([_row(attention=(TOK1, "complete"))])
+    _seed_done(root)
     unknown = SessionRow(
         SID,
         0.0,
@@ -818,9 +971,30 @@ def test_r2_m2_a_failed_attention_read_is_unknown_not_acknowledged(
     assert _items(root)[0]["read"] is True
 
 
+def _fresh_ms() -> int:
+    """An owner time after any baseline a test records (wall clock + 1 h).
+
+    Evaluated at USE, never at import: the baseline is recorded from the wall
+    clock when ``observe`` runs, and under a loaded xdist shard a test can run
+    minutes after this module was imported, so an import-time constant fell
+    before the baseline and every notice read as backfill (CI shard 3.13/3 on
+    PR #3902). The hour margin keeps the notice fresh however long the gap
+    between this call and ``observe`` stretches.
+    """
+    return int(time.time() * 1000) + 3_600_000
+
+
+# ``import_lag_s`` simulates the loaded-shard case directly: the clock the
+# watcher reads for its baseline is pushed well past module import, which
+# failed against the old import-time constant.
+@pytest.mark.parametrize("import_lag_s", [0, 120])
 def test_r2_m1_minor_a_batch_of_notices_lands_oldest_first(
-    root: Path, monkeypatch: pytest.MonkeyPatch
+    root: Path, monkeypatch: pytest.MonkeyPatch, import_lag_s: int
 ) -> None:
+    if import_lag_s:
+        real_time = time.time
+        monkeypatch.setattr(time, "time", lambda: real_time() + import_lag_s)
+    fresh = _fresh_ms()
     # Every store write a distinct millisecond, so ``updated_at`` order is the
     # write order rather than a tie broken by id.
     ticks = iter(range(1_800_000_000_000, 1_800_000_001_000))
@@ -830,8 +1004,8 @@ def test_r2_m1_minor_a_batch_of_notices_lands_oldest_first(
         [
             _row(
                 notices=(
-                    ("k-new", 1, "normal", "Deploy done (newer)"),
-                    ("k-old", 1, "normal", "Tests failed (older)"),
+                    ("k-new", 1, "normal", "Deploy done (newer)", fresh + 2),
+                    ("k-old", 1, "normal", "Tests failed (older)", fresh + 1),
                 )
             )
         ]
@@ -848,3 +1022,1185 @@ def test_r2_m3_the_origins_file_is_owner_only(tmp_path: Path) -> None:
     mode = stat.S_IMODE((tmp_path / ra.ORIGINS_FILE).stat().st_mode)
     assert mode == 0o600, oct(mode)
     assert HEAD in ra.forwarding_origins(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# The v0.102.2 flood (operator rule 2026-11-13): turn-ends never notify, no
+# backfill, agent children never forward, original timestamps.
+# ---------------------------------------------------------------------------
+
+_DAY_MS = 24 * 60 * 60 * 1000
+
+
+def _historic_listing(count: int) -> list[SessionRow]:
+    """``count`` node sessions, each with an unacknowledged completion and a notice
+    the agent posted a day ago — the shape the head read at first contact."""
+    old = int(time.time() * 1000) - _DAY_MS
+    rows = []
+    for i in range(count):
+        sid = f"{i:012x}"
+        rows.append(
+            _row(
+                session_id=sid,
+                attention=(f"6f1c2a3e-0b4d-4e5f-8a9b-{i:012x}", "complete"),
+                notices=(("k", 1, "normal", f"Old notice {i}", old),),
+            )
+        )
+    return rows
+
+
+def test_flood_first_contact_with_historic_items_raises_nothing(root: Path) -> None:
+    """THE REPRODUCTION: before the fix this wrote 2 x N unread rows at sync time."""
+    listing = _historic_listing(25)
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=_later())
+    assert _items(root) == [], [i["key"] for i in _items(root)]
+    # Reconnect / restart / a second host: still nothing.
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=_later())
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=_later())
+    assert _items(root) == []
+
+
+def test_a_notice_posted_after_first_contact_is_raised_once_at_its_own_time(root: Path) -> None:
+    baseline = ra.origin_baseline_ms(root, NODE)
+    assert ra.origin_baseline_ms(root, NODE) == baseline, "persisted, never moved"
+    posted = baseline + 5_000
+    listing = [_row(notice=("deploy", 1, "high", "Deploy needs sign-off", posted))]
+    ra.RemoteAttentionWatcher(root).observe(listing)
+    [item] = _items(root)
+    assert item["created_at"] == item["updated_at"] == posted, "the owner's time, not now"
+    # Restart (fresh watcher, baseline read back from disk) and reconnect.
+    ra.RemoteAttentionWatcher(root).observe(listing)
+    ra.RemoteAttentionWatcher(root).observe(listing)
+    assert [i["id"] for i in _items(root)] == [item["id"]]
+    assert (root / ra.BASELINES_FILE).is_file()
+
+
+def test_a_notice_from_before_the_baseline_or_without_a_time_is_never_raised(
+    root: Path,
+) -> None:
+    baseline = ra.origin_baseline_ms(root, NODE)
+    ra.RemoteAttentionWatcher(root).observe(
+        [
+            _row(notice=("old", 1, "high", "Backfill", baseline - 1)),
+            _row(session_id="b" * 12, notice=("legacy", 1, "high", "Older owner", 0)),
+        ]
+    )
+    assert _items(root) == []
+
+
+def test_an_agent_spawned_sessions_notices_never_cross_the_wire(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    stamp_file = owner / "sessions" / SID / "mesh.json"
+    import json
+
+    data = json.loads(stamp_file.read_text(encoding="utf-8"))
+    data["origin"]["kind"] = ra.AGENT_ORIGIN_KIND
+    stamp_file.write_text(json.dumps(data), encoding="utf-8")
+    rows = [{**_catalog_row(), "origin": data["origin"]}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert "notices" not in rows[0], "a reviewer/QA child reports to its parent agent"
+    # The user's own session on the same owner still forwards.
+    user_rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, user_rows, HEAD)
+    assert [n["key"] for n in user_rows[0]["notices"]] == ["deploy"]
+
+
+def test_first_contact_is_the_listing_not_the_first_notice(root: Path) -> None:
+    """Review round 1, R1-1: the first deliberate notice from a new device is raised.
+
+    The baseline used to be recorded when the first NOTICE was observed, at the
+    observation instant — always after that notice was posted, so it was
+    dropped for good. Contact is now the first listing that names the device,
+    notices or not.
+    """
+    assert not (root / ra.BASELINES_FILE).exists()
+    before = int(time.time() * 1000)
+    ra.RemoteAttentionWatcher(root).observe([_row()])  # first contact: no notices
+    # Read the file, not ``origin_baseline_ms`` (which would record it itself).
+    import json
+
+    baseline = json.loads((root / ra.BASELINES_FILE).read_text(encoding="utf-8"))[NODE]
+    assert before <= baseline <= int(time.time() * 1000), "recorded at the empty poll"
+    posted = baseline + 2_000
+    listing = [_row(notice=("first", 1, "normal", "First real notice", posted))]
+    ra.RemoteAttentionWatcher(root).observe(listing)
+    [item] = _items(root)
+    assert item["created_at"] == posted
+
+
+def test_a_notice_older_than_first_contact_is_still_backfill(root: Path) -> None:
+    """The other side of R1-1: a notice already there at first contact is skipped,
+    even when that first listing is also where the baseline is recorded."""
+    posted = int(time.time() * 1000) - 2_000
+    listing = [_row(notice=("historic", 1, "high", "Posted before contact", posted))]
+    ra.RemoteAttentionWatcher(root).observe(listing)
+    assert _items(root) == []
+    assert ra.origin_baseline_ms(root, NODE) > posted
+    # A restart does not turn it into news either.
+    ra.RemoteAttentionWatcher(root).observe(listing)
+    assert _items(root) == []
+
+
+def test_baselines_merge_across_writers_and_keep_the_earliest(tmp_path: Path) -> None:
+    """Review round 1, R1-4: a second process's write never drops or moves a device.
+
+    Simulates the TUI and ``lop serve`` racing: another writer recorded device B
+    between this process's reads; recording A must keep B, and an already
+    recorded value is never replaced by a later one.
+    """
+    import json
+
+    first = ra.origin_baselines_ms(tmp_path, ["d_a"])["d_a"]
+    path = tmp_path / ra.BASELINES_FILE
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["d_b"] = 1_000  # another process's earlier record
+    path.write_text(json.dumps(data), encoding="utf-8")
+    got = ra.origin_baselines_ms(tmp_path, ["d_a", "d_b", "d_c"])
+    assert got["d_a"] == first and got["d_b"] == 1_000
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["d_a"] == first and on_disk["d_b"] == 1_000 and on_disk["d_c"] >= first
+    assert (tmp_path / f".{ra.BASELINES_FILE}.lock").is_file(), "the cross-process lock"
+
+
+def test_baselines_hold_under_concurrent_processes(tmp_path: Path) -> None:
+    """R1-4 for real: several processes recording different devices lose none."""
+    import json
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")
+    procs = [
+        ctx.Process(
+            target=_record_baselines, args=(str(tmp_path), [f"d_{n}_{i}" for i in range(5)])
+        )
+        for n in range(4)
+    ]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(60)
+        assert proc.exitcode == 0
+    on_disk = json.loads((tmp_path / ra.BASELINES_FILE).read_text(encoding="utf-8"))
+    assert sorted(on_disk) == sorted(f"d_{n}_{i}" for n in range(4) for i in range(5))
+
+
+def _record_baselines(root: str, devices: list[str]) -> None:
+    for device in devices:
+        ra.origin_baselines_ms(Path(root), [device])
+
+
+def test_the_baselines_file_is_owner_only_and_heals_when_corrupt(tmp_path: Path) -> None:
+    import stat
+
+    (tmp_path / ra.BASELINES_FILE).write_text("{not json", encoding="utf-8")
+    first = ra.origin_baseline_ms(tmp_path, NODE)
+    assert ra.origin_baseline_ms(tmp_path, NODE) == first
+    mode = stat.S_IMODE((tmp_path / ra.BASELINES_FILE).stat().st_mode)
+    assert mode == 0o600, oct(mode)
+
+
+def test_the_cleanup_prefixes_match_this_modules_namespaces() -> None:
+    assert store_mod.CLEANUP_KEY_PREFIXES == (f"{ra.DONE_PREFIX}:", f"{ra.NOTICE_PREFIX}:")
+
+
+# ---------------------------------------------------------------------------
+# Open queued asks ride the notices block (node-ask-forward, 2026-11-13)
+# ---------------------------------------------------------------------------
+#
+# A queued ask is not a NotificationStore row on the node (the local inbox
+# merges open asks from the ask index), so before this an ask asked by a node
+# session never reached the origin at all. The owner now lists each OPEN ask as
+# a ``remote-ask:<id>`` notice; the origin raises one high row per ask and
+# retires it once a newer listing no longer carries it.
+
+
+def _queue_ask(owner: Path, ask_id: str, question: str, *, at: int | None = None) -> None:
+    from local_operator.asks import store as ask_store
+
+    now = ask_store.now_ms() if at is None else at
+    ask_store.append_event(
+        ask_store.session_dir(owner, SID),
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "at": now,
+            "ask_id": ask_id,
+            "expires_at": now + 3_600_000,
+            "questions": [{"id": "q0", "question": question, "options": [{"label": "yes"}]}],
+        },
+    )
+
+
+def _settle_ask(owner: Path, ask_id: str) -> None:
+    from local_operator.asks import store as ask_store
+
+    ask_store.append_event(
+        ask_store.session_dir(owner, SID),
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_DISMISSED,
+            "at": ask_store.now_ms(),
+            "ask_id": ask_id,
+            "reason": "answered_in_chat",
+        },
+    )
+
+
+def test_ask_an_open_queued_ask_is_stamped_first_for_the_origin(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    from local_operator.asks import store as ask_store
+
+    asked_at = ask_store.now_ms()
+    _queue_ask(owner, "k7", "Install Chromium on the node?", at=asked_at)
+    rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    blocks = rows[0]["notices"]
+    assert [{k: v for k, v in block.items() if k != "at"} for block in blocks] == [
+        {
+            "key": "remote-ask:k7",
+            "revision": 1,
+            "priority": "high",
+            "title": "Install Chromium on the node?",
+        },
+        {"key": "deploy", "revision": 1, "priority": "high", "title": "Deploy finished"},
+    ]
+    # The ask carries its OWN queue time: the origin drops a timeless notice
+    # (the no-backfill rule), so without it the ask would never be raised.
+    assert blocks[0]["at"] == asked_at
+    # Another member of the mesh still sees nothing (the origin-only rule).
+    other = [_catalog_row(origin="d_other")]
+    ra.stamp_rows_for_viewer(owner, other, HEAD)
+    assert "notices" not in other[0]
+
+
+def test_ask_a_settled_or_lapsed_ask_is_no_longer_stamped(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    _queue_ask(owner, "k7", "Install Chromium on the node?")
+    _settle_ask(owner, "k7")
+    # Queued two hours ago with a one-hour deadline: folds to timed_out.
+    from local_operator.asks import store as ask_store
+
+    _queue_ask(owner, "k8", "Old question?", at=ask_store.now_ms() - 7_200_000)
+    assert ra.open_ask_notices(owner, SID) == []
+
+
+def test_ask_the_wire_list_stays_bounded_with_asks_first(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    for index in range(ra.NOTICES_ON_WIRE + 2):
+        _queue_ask(owner, f"k{index}", f"Question {index}?")
+    rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    keys = [block["key"] for block in rows[0]["notices"]]
+    assert len(keys) == ra.NOTICES_ON_WIRE
+    assert all(key.startswith(ra.ASK_NOTICE_PREFIX) for key in keys)
+
+
+def _ask_claim(
+    ask_id: str = "k7", title: str = "Install Chromium on the node?", *, at: int | None = None
+) -> Any:
+    claim = (f"{ra.ASK_NOTICE_PREFIX}{ask_id}", 1, "high", title)
+    return claim if at is None else (*claim, at)
+
+
+def _asked_at_first_contact(root: Path) -> int:
+    """An ask time the origin both raises and can later settle by absence.
+
+    The no-backfill rule raises only a claim at or after the origin's baseline,
+    and the row keeps that owner time as ``updated_at``, which the absence
+    settle (Q3) requires to be OLDER than the settling listing. ``_timed``'s
+    hour-ahead default would pass the first and never the second, so an ask
+    test states the realistic case: asked at the moment of first contact.
+    """
+    return ra.origin_baseline_ms(root, NODE)
+
+
+def test_ask_the_origin_raises_one_high_row_and_retires_it_on_settle(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    watcher = ra.RemoteAttentionWatcher(root)
+    claim = _ask_claim(at=_asked_at_first_contact(root))
+    watcher.observe([_row(notices=(claim,))], listed_at_ms=now_ms())
+    # A second host / restarted watcher: no second row, no second banner.
+    ra.RemoteAttentionWatcher(root).observe([_row(notices=(claim,))], listed_at_ms=now_ms())
+    [row] = _items(root)
+    assert row["key"] == ra.notice_key(NODE, SID, "remote-ask:k7")
+    assert row["session_id"] == SID, "the row deep-links to the remote session"
+    assert row["priority"] == "high" and row["title"] == "Install Chromium on the node?"
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+
+    # The ask was answered on the node: the next (newer) listing carries no claim.
+    watcher.observe([_row(notices=None)], listed_at_ms=_later())
+    assert _items(root) == [], "a settled ask must leave the origin's inbox"
+    row = NotificationStore(root).get_by_key(SID, ra.notice_key(NODE, SID, "remote-ask:k7"))
+    assert row is not None and row["dismissed_at"]
+
+
+def test_ask_absence_settles_nothing_it_cannot_vouch_for(root: Path) -> None:
+    watcher = ra.RemoteAttentionWatcher(root)
+    claim = _ask_claim(at=_asked_at_first_contact(root))
+    watcher.observe([_row(notices=(claim,))], listed_at_ms=now_ms())
+    # A listing that started BEFORE the row was written (a stale cache) — Q3.
+    watcher.observe([_row(notices=None)], listed_at_ms=0)
+    # The device did not answer: no row for the session at all.
+    watcher.observe([], [NODE], listed_at_ms=_later())
+    # A list full of OTHER asks may have cut this one off its tail (asks are
+    # stamped first, so only an all-ask full list can hide one; R1-1).
+    full = tuple(
+        (f"remote-ask:o{i}", 1, "high", "Other %d?" % i) for i in range(ra.NOTICES_ON_WIRE)
+    )
+    watcher.observe([_row(notices=full)], listed_at_ms=_later())
+    # The owner could not read its ask log: absence says nothing (R1-2).
+    unknown = _row(notices=None)._replace(remote_asks_unknown=True)
+    watcher.observe([unknown], listed_at_ms=_later())
+    # Unknown listing age.
+    ra.settle_unlisted_ask_items(root, [_row(notices=None)], listed_at_ms=None)
+    ask_rows = [r for r in _items(root) if r["key"].endswith(":remote-ask:k7")]
+    assert len(ask_rows) == 1 and not ask_rows[0]["dismissed_at"]
+
+
+_ASK_K7 = f"{ra.ASK_NOTICE_PREFIX}k7"  # ``_ask_claim``'s default owner key
+
+
+def test_q3_1_an_ask_open_before_first_contact_is_raised_once(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """QA round 3, Q3-1 (row 9b): the ask was queued 1048 ms before the origin
+    first listed the node. No-backfill dropped it for good — the baseline only
+    moves earlier — though it was still waiting on the operator."""
+    assert not (root / ra.BASELINES_FILE).exists(), "this listing IS first contact"
+    asked = now_ms() - 1_048
+    listing = [_row(notices=(_ask_claim(at=asked),))]
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=now_ms())
+    [row] = _items(root)
+    assert row["key"] == ra.notice_key(NODE, SID, _ASK_K7)
+    assert row["priority"] == "high" and row["created_at"] == asked, "the ask's own time"
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+    # Restart / a second host / reconnect: the same ask is one row, one banner.
+    for _ in range(2):
+        ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=_later())
+    assert [i["id"] for i in _items(root)] == [row["id"]]
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+    # Still retired by the existing settle once a fresh listing drops it.
+    ra.RemoteAttentionWatcher(root).observe([_row(notices=None)], listed_at_ms=_later())
+    assert _items(root) == []
+
+
+def test_q3_1_an_ask_from_an_owner_whose_clock_runs_behind_is_raised(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """Q3-1, skew: contact was made long ago, the ask is new, but the node's
+    clock is a minute behind this device's — its ``created_at`` reads older
+    than the baseline. An open ask is judged by being listed, not by a time
+    taken on another machine's clock."""
+    baseline = ra.origin_baseline_ms(root, NODE)
+    behind = baseline - 60_000
+    ra.RemoteAttentionWatcher(root).observe(
+        [_row(notices=(_ask_claim(at=behind),))], listed_at_ms=_later()
+    )
+    [row] = _items(root)
+    assert row["key"] == ra.notice_key(NODE, SID, _ASK_K7)
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+
+
+def test_q3_1_a_plain_notice_from_before_first_contact_is_still_dropped(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """The exemption is the ask namespace's alone: in the SAME first listing a
+    finished ``notify`` older than contact stays backfill (#3902), and so does
+    one with no owner time."""
+    old = now_ms() - 1_048
+    listing = [
+        _row(
+            notices=(
+                _ask_claim(at=old),
+                ("deploy", 1, "high", "Deploy needs sign-off", old),
+                ("legacy", 1, "high", "Older owner", 0),
+            )
+        )
+    ]
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=now_ms())
+    assert [i["key"] for i in _items(root)] == [ra.notice_key(NODE, SID, _ASK_K7)]
+    assert len(_no_banner_threads) == 1
+
+
+def test_q3_1_a_restart_never_revives_or_duplicates_a_read_ask_row(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """Exempt from the time filter is not exempt from dedupe: an ask the
+    operator already read stays one read row across restarts, with no second
+    banner, while the node keeps listing it as open."""
+    listing = [_row(notices=(_ask_claim(at=now_ms() - 1_048),))]
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=now_ms())
+    [row] = _items(root)
+    store = NotificationStore(root)
+    store.apply("read", ids=[(str(row["id"]), int(row["revision"]))], via="test")
+    for _ in range(3):
+        ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=_later())
+    [after] = _items(root)
+    assert after["id"] == row["id"] and after["read"], "not flipped back to unread"
+    assert after["revision"] == row["revision"]
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+
+
+def test_ask_a_plain_notice_is_never_retired_by_absence(root: Path) -> None:
+    watcher = ra.RemoteAttentionWatcher(root)
+    watcher.observe([_row(notice=("deploy", 1, "normal", "Deploy done"))], listed_at_ms=now_ms())
+    watcher.observe([_row(notices=None)], listed_at_ms=_later())
+    [row] = _items(root)
+    assert not row["dismissed_at"] and not row["read_at"]
+
+
+def test_ask_an_agent_notify_cannot_squat_the_ask_namespace(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    NotificationStore(owner).notify(SID, title="spoof", priority="normal", key="remote-ask:zz")
+    rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert [block["key"] for block in rows[0]["notices"]] == ["deploy"]
+
+
+def test_r1_1_an_answered_ask_retires_under_a_full_list_of_plain_notices(root: Path) -> None:
+    """R1-1: 8 unread notifies on the node must not pin the answered ask forever.
+
+    The owner's notify items are never read on the node, so a busy session's
+    listing is full on every read. Asks are stamped FIRST, so a full list that
+    still carries a non-ask claim proves every open ask fit: the missing one was
+    answered.
+    """
+    watcher = ra.RemoteAttentionWatcher(root)
+    plain = tuple((f"m{i}", 1, "normal", "FYI %d" % i) for i in range(ra.NOTICES_ON_WIRE))
+    ask = _ask_claim(at=_asked_at_first_contact(root))
+    watcher.observe([_row(notices=(ask,) + plain[: ra.NOTICES_ON_WIRE - 1])], listed_at_ms=now_ms())
+    watcher.observe([_row(notices=plain)], listed_at_ms=_later())
+    row = NotificationStore(root).get_by_key(SID, ra.notice_key(NODE, SID, "remote-ask:k7"))
+    assert row is not None and row["dismissed_at"], "the answered ask still asks on the origin"
+
+
+def test_r1_2_a_failed_ask_read_is_unknown_and_settles_nothing(tmp_path: Path) -> None:
+    """R1-2: an unreadable ask log is NOT "no open asks" (the attention_unknown rule)."""
+    from local_operator.asks import store as ask_store
+
+    owner = _owner(tmp_path)
+    # A directory where the log should be: ``read_bytes`` raises an OSError.
+    ask_store.asks_log_path(ask_store.session_dir(owner, SID)).mkdir(parents=True)
+    rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert rows[0].get("asks_unknown") is True
+    assert [block["key"] for block in rows[0]["notices"]] == ["deploy"]
+    # The origin's parse carries the flag onto the row the settle reads.
+    parsed = PeerRow.from_json({**rows[0], "state": "live"}, device_id=NODE)
+    assert parsed.asks_unknown is True
+
+    head = tmp_path / "head"
+    watcher = ra.RemoteAttentionWatcher(head)
+    claim = _ask_claim(at=_asked_at_first_contact(head))
+    watcher.observe([_row(notices=(claim,))], listed_at_ms=now_ms())
+    unknown = _row(notice=("deploy", 1, "high", "Deploy finished"))._replace(
+        remote_asks_unknown=True
+    )
+    watcher.observe([unknown], listed_at_ms=_later())
+    row = NotificationStore(head).get_by_key(SID, ra.notice_key(NODE, SID, "remote-ask:k7"))
+    assert row is not None and not row["dismissed_at"], "a still-open ask was retired"
+
+
+def test_r1_4_the_forwarded_title_is_capped_like_the_local_inbox(tmp_path: Path) -> None:
+    """R1-4/R1-5: the wire title is the inbox's own excerpt, the priority its own."""
+    from local_operator.notifications import items
+
+    owner = _owner(tmp_path)
+    _queue_ask(owner, "k7", "Why? " * 200)
+    blocks = ra.open_ask_notices(owner, SID)
+    # ``None`` means the ask log was unreadable — a distinct failure from an
+    # empty list, so narrow it explicitly rather than let the unpack hide it.
+    assert blocks is not None, "the ask log read as unknown"
+    [block] = blocks
+    assert len(block["title"]) <= 120
+    assert block["title"] == items.excerpt(
+        items.first_question({"questions": [{"question": "Why? " * 200}]}), 120
+    )
+    assert block["priority"] == items.ASK_PRIORITY
+
+
+def _parked(**fields: Any) -> SessionRow:
+    return SessionRow(
+        SID, 0.0, "n", live_state="idle", locality="remote", owner_device=NODE, **fields
+    )
+
+
+def test_q1_a_queued_ask_is_never_a_park_row() -> None:
+    """Q1: a queued ask's ``pending`` is a listing fact, not a park, on EVERY member.
+
+    Before the queue claimed ``pending`` only blocking gates reached
+    ``park_edges``; a queued ask on a session this device did not start (a third
+    device's, or one the node started itself) must not page this device. The
+    origin is told through the forwarded ``remote-ask:`` rows instead.
+    """
+    third_device = _parked(pending="ask", pending_queued=True)
+    forwarded = third_device._replace(remote_notices=(_ask_claim(),))
+    edges, state = peer_rows.park_edges({}, [third_device, forwarded._replace(id="other")])
+    assert edges == () and state == {}
+
+
+def test_r1_3_a_blocking_gate_still_parks_beside_a_queued_ask() -> None:
+    """R1-3: a parked gate keeps its park row even while a queued ask is forwarded."""
+    gate = _parked(pending="ask", remote_notices=(_ask_claim(),))
+    edges, _ = peer_rows.park_edges({}, [gate])
+    assert [edge.kind for edge in edges] == ["ask"]
+    approval = _parked(pending="approval", remote_notices=(_ask_claim(),))
+    edges, _ = peer_rows.park_edges({}, [approval])
+    assert [edge.kind for edge in edges] == ["approval"]
+
+
+def test_q2_the_notify_tool_refuses_a_remote_ask_key() -> None:
+    """Q2: the ask namespace is refused at the tool, not merely kept off the wire."""
+    import json
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    async def door(**_kwargs: Any) -> str:
+        raise AssertionError("a reserved key reached the inbox")
+
+    # ``@_guard`` types the executor as the positional ``ToolExecutor``
+    # callable, so call it positionally with a real ``ToolContext`` — the same
+    # shape the loop uses (and test_notify_title_guard.py's ``_notify``).
+    # ``ToolExecutor`` returns an ``Awaitable``, which ``asyncio.run`` will not
+    # take, so await it inside a coroutine.
+    context = ToolContext(cwd=".", notify_inbox=door)
+
+    async def notify() -> Any:
+        return await builtin.execute_notify(
+            "call-1",
+            {"title": "Answer me?", "key": f"{ra.ASK_NOTICE_PREFIX}zz"},
+            None,
+            None,
+            context,
+        )
+
+    result = asyncio.run(notify())
+    text = json.dumps(getattr(result, "content", str(result)), default=str)
+    assert "reserved" in text and ra.ASK_NOTICE_PREFIX in text
+
+
+def test_r1_3_the_notify_tool_refuses_a_remote_notice_key() -> None:
+    """PR #4082 review round 1, R1-3: ``remote-notice:`` is the watcher's own
+    namespace — the ``ask`` relay re-raises a row under it as an attested node
+    card — so a session may not mint a lookalike there either."""
+    import json
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    async def door(**_kwargs: Any) -> str:
+        raise AssertionError("a reserved key reached the inbox")
+
+    context = ToolContext(cwd=".", notify_inbox=door)
+    key = ra.notice_key("d_member", "s1", f"{ra.ASK_NOTICE_PREFIX}x")
+
+    async def notify() -> Any:
+        return await builtin.execute_notify(
+            "call-1", {"title": "Answer me?", "key": key}, None, None, context
+        )
+
+    result = asyncio.run(notify())
+    text = json.dumps(getattr(result, "content", str(result)), default=str)
+    assert "refused" in text and "reserved" in text and f"{ra.NOTICE_PREFIX}:" in text
+    assert "nothing was posted" in text
+
+
+# ---------------------------------------------------------------------------
+# Default-deny (operator rule 2026-11-14): only an ATTESTED operator session's
+# ``notify`` items travel; open asks travel from any non-agent session.
+# ---------------------------------------------------------------------------
+
+#: The stamp every session placed on a peer before the attestation carries: the
+#: owner's create op defaulted a missing kind to ``user`` since the mesh core, so
+#: agent-lane workers on lop-remote-node-2 read exactly like this.
+LEGACY_ORIGIN = {"kind": "user", "source_device": HEAD, "source_session_id": ""}
+
+
+def _legacy_owner(tmp_path: Path) -> Path:
+    owner = _owner(tmp_path)
+    stamp_file = owner / "sessions" / SID / "mesh.json"
+    import json
+
+    data = json.loads(stamp_file.read_text(encoding="utf-8"))
+    data["origin"] = dict(LEGACY_ORIGIN)
+    stamp_file.write_text(json.dumps(data), encoding="utf-8")
+    return owner
+
+
+@pytest.mark.parametrize(
+    ("origin", "forwarded"),
+    [
+        (LEGACY_ORIGIN, False),
+        ({**LEGACY_ORIGIN, "started_by": "operator"}, True),
+        ({**LEGACY_ORIGIN, "kind": "agent", "started_by": "agent"}, False),
+        # A forged-looking mix still denies: ``agent`` kind wins.
+        ({**LEGACY_ORIGIN, "kind": "agent", "started_by": "operator"}, False),
+        ({**LEGACY_ORIGIN, "kind": "moved"}, False),
+        ({**LEGACY_ORIGIN, "started_by": "someone"}, False),
+    ],
+)
+def test_default_deny_forwards_notify_items_only_for_an_attested_operator_session(
+    tmp_path: Path, origin: dict[str, Any], forwarded: bool
+) -> None:
+    owner = _owner(tmp_path)
+    rows = [{**_catalog_row(), "origin": dict(origin)}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    keys = [n["key"] for n in rows[0].get("notices") or ()]
+    assert keys == (["deploy"] if forwarded else []), (origin, keys)
+
+
+def _restamp(owner: Path, origin: dict[str, Any]) -> None:
+    import json
+
+    stamp_file = owner / "sessions" / SID / "mesh.json"
+    data = json.loads(stamp_file.read_text(encoding="utf-8"))
+    data["origin"] = dict(origin)
+    stamp_file.write_text(json.dumps(data), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("origin", "forwarded"),
+    [
+        # Moved / forked ONTO this node by the operator: no attestation, so the
+        # owner keeps its items, and the reply must say so (QA r2, Q1).
+        ({"kind": "moved", "source_device": HEAD, "source_session_id": ""}, False),
+        ({"kind": "fork", "source_device": HEAD, "source_session_id": ""}, False),
+        # An attested operator create: promised AND put on the wire.
+        ({**LEGACY_ORIGIN, "started_by": "operator"}, True),
+    ],
+)
+def test_default_deny_the_node_reply_matches_the_owner_forward_filter(
+    tmp_path: Path, origin: dict[str, Any], forwarded: bool
+) -> None:
+    """QA r2 Q1: the node's ``notify`` reply applies the owner's own forward
+    predicate, so "will be forwarded" is said exactly when the item travels."""
+    owner = _owner(tmp_path)
+    _join_mesh(owner)
+    _restamp(owner, origin)
+    # The head has read this node, so it IS recorded as collecting forwards:
+    # the old reply said "will be forwarded" here regardless of the stamp.
+    rows = [{**_catalog_row(), "origin": dict(origin)}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert HEAD in ra.forwarding_origins(owner)
+    sentence = ra.forwarded_notice_sentence(owner, SID)
+    keys = [n["key"] for n in rows[0].get("notices") or ()]
+    if forwarded:
+        assert "will be forwarded to d_head-box" in sentence, sentence
+        assert keys == ["deploy"]
+    else:
+        assert "will be forwarded" not in sentence, sentence
+        assert "it stays on node-box" in sentence and "moved, forked" in sentence
+        assert keys == [], "the head inbox gets nothing from an unattested stamp"
+
+
+def test_a_reused_tmp_path_still_records_its_forwarding_origin(tmp_path: Path) -> None:
+    """Regression for the order-dependent CI failure: a root path handed out
+    again after its directory was deleted (pytest 8 renumbering a passing
+    test's removed ``tmp_path``) still gets its origins file, because no
+    test inherits another test's memo (``_fresh_origin_memo``)."""
+    assert ra._recorded_origins == set()
+    owner = _owner(tmp_path)
+    ra.stamp_rows_for_viewer(owner, [_catalog_row()], HEAD)
+    assert HEAD in ra.forwarding_origins(owner)
+
+
+def test_a_session_brought_home_keeps_its_reply_byte_for_byte(tmp_path: Path) -> None:
+    """A session moved HOME (its source device never reads this one, so it is not
+    a recorded forwarding origin): the reply is unchanged from before Q1."""
+    # PR #4030 rebase: the origin must be an ACTIVE member here (#4029 R2-1),
+    # so the device it came home from is one; the wording is #4001's, unchanged.
+    owner = _owner(tmp_path, origin="d_away")
+    _join_mesh(owner, peers=(HEAD, "d_away"))
+    _restamp(owner, {"kind": "moved", "source_device": "d_away", "source_session_id": ""})
+    assert "d_away" not in ra.forwarding_origins(owner)
+    assert ra.forwarded_notice_sentence(owner, SID) == (
+        " Posted on node-box; it stays on node-box, because d_away-box,"
+        " where this session started, is not known to collect forwarded notices."
+    )
+
+
+def test_default_deny_a_legacy_sessions_open_ask_still_reaches_the_origin(
+    tmp_path: Path,
+) -> None:
+    """The operator rule allows asks: a question waiting on the operator travels
+    from an unattested session; only its ``notify`` item is withheld."""
+    owner = _legacy_owner(tmp_path)
+    _queue_ask(owner, "k9", "Rotate the node's MCP token?")
+    rows = [{**_catalog_row(), "origin": dict(LEGACY_ORIGIN)}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    titles = [n["title"] for n in rows[0]["notices"]]
+    assert titles == ["Rotate the node's MCP token?"], titles
+    assert rows[0]["notices"][0]["key"].startswith(ra.ASK_NOTICE_PREFIX)
+
+
+def test_default_deny_the_origin_drops_a_legacy_owners_notify_but_keeps_its_ask(
+    root: Path,
+) -> None:
+    """An OWNER older than this filter still puts every notice on the wire; the
+    origin re-applies the rule to the row's ``origin`` (``peer_rows``), which is
+    what stops the lop-remote-node-2 rows the moment the head updates."""
+    from types import SimpleNamespace
+
+    from local_operator.session.peer_rows import _attested_notices
+
+    ask = (f"{ra.ASK_NOTICE_PREFIX}k1", 1, "high", "Which branch?", 5)
+    note = ("progress", 1, "normal", "#3842 convergence pushed; six PR commits preserved", 5)
+    legacy = SimpleNamespace(notices=(note, ask), origin=dict(LEGACY_ORIGIN))
+    assert _attested_notices(legacy) == (ask,)
+    attested = SimpleNamespace(
+        notices=(note, ask), origin={**LEGACY_ORIGIN, "started_by": "operator"}
+    )
+    assert _attested_notices(attested) == (note, ask)
+    assert _attested_notices(SimpleNamespace(notices=(note,), origin=None)) == ()
+    assert _attested_notices(SimpleNamespace(notices=None, origin=None)) is None
+
+
+def test_default_deny_the_create_attestation_is_never_defaulted() -> None:
+    """The owner copies ``started_by`` only from a frame that carried one; the
+    origin's control op derives it from the attributed ``origin``."""
+    from local_operator.network.relay import _started_by_claim
+
+    assert _started_by_claim({}) == {}, "a pre-attestation origin stamps nothing"
+    assert _started_by_claim({"origin": "user"}) == {}, "kind alone is not attestation"
+    assert _started_by_claim({"started_by": "operator"}) == {"started_by": "operator"}
+    assert _started_by_claim({"started_by": "agent"}) == {"started_by": "agent"}
+    assert _started_by_claim({"started_by": "root"}) == {}
+    assert ra.started_by_for_origin("user") == ra.OPERATOR_STARTED
+    assert ra.started_by_for_origin("agent") == ra.AGENT_ORIGIN_KIND
+
+
+# ---------------------------------------------------------------------------
+# Operator-signed cards from an agent's child (manager rule, 2026-11-15)
+# ---------------------------------------------------------------------------
+# "human-only signed cards (site approvals, any card only the operator's
+# signature can answer) forward to the bound operator device even from
+# agent-origin and stampless sessions. Ordinary agent-child asks keep their
+# current routing, and notifications stay per #4001." Reproduced live: session
+# 1c31cfff075b on a node, spawned by an agent on the operator's Mac (origin
+# kind=agent, source_device=the Mac), raised two site cards the Mac never saw.
+
+CO = "d_co"
+
+
+def _site_question() -> dict[str, Any]:
+    from local_operator.browser_bridge import site_approval
+
+    return site_approval.site_ask_question(
+        origin="https://example.com", node_name="node", node_device_id=NODE, entry_id="e-1"
+    )
+
+
+def _queue_raw(node: Path, ask_id: str, questions: list[dict[str, Any]]) -> None:
+    from local_operator.asks import store as ask_store
+
+    now = ask_store.now_ms()
+    ask_store.append_event(
+        ask_store.session_dir(node, SID),
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "at": now,
+            "ask_id": ask_id,
+            "expires_at": now + 3_600_000,
+            "questions": questions,
+        },
+    )
+
+
+def _agent_child_node(
+    tmp_path: Path, origin: dict[str, Any] | None, *, site_card: bool = True
+) -> Path:
+    """A node holding SID (stamped ``origin``) with an ordinary ask, a notify item
+    and, when ``site_card``, a real site card built by ``site_approval`` itself."""
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    if origin is not None:
+        write_stamp(
+            node,
+            MeshStamp(
+                session_id=SID,
+                network_id="n_test",
+                home_device=NODE,
+                placement=SessionPlacement(
+                    mode="peer", network_id="n_test", home_device=NODE, stamp_revision=1
+                ),
+                origin=origin,
+            ),
+        )
+    _queue_raw(node, "a-plain", [{"id": "q0", "question": "Which branch?", "options": []}])
+    if site_card:
+        _queue_raw(node, "a-site", [_site_question()])
+    NotificationStore(node).notify(SID, title="Build done", priority="high", key="build")
+    return node
+
+
+def _wire(
+    node: Path, origin: dict[str, Any] | None, viewer: str, *, operator_viewer: bool
+) -> dict[str, Any]:
+    row: dict[str, Any] = {"session_id": SID, "state": "stored", "origin": origin}
+    ra.stamp_rows_for_viewer(
+        node, [row], viewer, operator_viewer=operator_viewer, self_device_id=NODE
+    )
+    return row
+
+
+def _keys(row: dict[str, Any]) -> list[str]:
+    return [n["key"] for n in row.get("notices") or ()]
+
+
+def _agent(source: str) -> dict[str, Any]:
+    return {"kind": ra.AGENT_ORIGIN_KIND, "source_device": source, "source_session_id": "s_p"}
+
+
+def test_only_a_site_question_is_an_operator_signed_card() -> None:
+    assert ra.is_operator_signed_card({"questions": [_site_question()]})
+    # human_required alone is answerable by any human at any surface: not one.
+    plain = {"id": "q0", "question": "Ship?", "human_required": True, "question_id": "x:1"}
+    assert not ra.is_operator_signed_card({"questions": [plain]})
+    assert not ra.is_operator_signed_card({"questions": None})
+    assert not ra.is_operator_signed_card(None)
+
+
+def _forged_site_questions() -> list[tuple[str, dict[str, Any]]]:
+    """Site-prefixed questions whose id is NOT the digest of their own block."""
+    real = _site_question()
+    no_block = {k: v for k, v in real.items() if k != "site"}
+    return [
+        ("prefix-only id", {**real, "question_id": "site:v1:not-a-digest"}),
+        ("no site block", no_block),
+        (
+            "block for another origin",
+            {**real, "site": {**real["site"], "origin": "https://evil.test"}},
+        ),
+        ("block for another entry", {**real, "site": {**real["site"], "entry_id": "e-2"}}),
+        ("non-string block field", {**real, "site": {**real["site"], "scope": None}}),
+        ("block not a mapping", {**real, "site": "origin"}),
+    ]
+
+
+@pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
+def test_a_forged_site_id_is_not_an_operator_signed_card(case: str) -> None:
+    """Security review S1-1: the ``site:v1:`` prefix alone is mintable by any writer
+    of the node's ask log; only an id equal to its block's digest counts."""
+    question = dict(_forged_site_questions())[case]
+    assert not ra.is_operator_signed_card({"questions": [question]})
+
+
+@pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
+def test_a_forged_site_card_from_an_operator_placed_agent_child_is_only_an_ordinary_ask(
+    tmp_path: Path, case: str
+) -> None:
+    """S1-1 end to end on the operator-placed leg (2026-11-21): a forged card earns
+    no standing of its own — it travels exactly as any ordinary ask of that child
+    does (to the bound operator, as a plain ``remote-ask:`` block carrying no
+    authority), and to no other viewer."""
+    origin = _agent(HEAD)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    _queue_raw(node, "a-forged", [dict(_forged_site_questions())[case]])
+    keys = _keys(_wire(node, origin, HEAD, operator_viewer=True))
+    assert keys == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-forged"]
+    assert "notices" not in _wire(node, origin, HEAD, operator_viewer=False)
+    assert "notices" not in _wire(node, origin, CO, operator_viewer=False)
+
+
+@pytest.mark.parametrize("source", ["", NODE, CO])
+@pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
+def test_a_forged_site_card_from_a_non_operator_placed_agent_child_never_forwards(
+    tmp_path: Path, case: str, source: str
+) -> None:
+    """S1-1 end to end on the signed-only leg (as on base): a child the operator's
+    own device did not place forwards real site cards only, so a forged one stays
+    on the node even over the binding."""
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    _queue_raw(node, "a-forged", [dict(_forged_site_questions())[case]])
+    assert "notices" not in _wire(node, origin, HEAD, operator_viewer=True)
+
+
+@pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
+def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
+    tmp_path: Path, source: str
+) -> None:
+    """The site card reaches the VERIFIED operator link, wherever the child was
+    placed from: by the operator's Mac (the live repro), started here, or placed
+    by a co-member. Only the operator-placed child lists its older ordinary ask
+    beside it (:func:`ra.agent_child_forwards_ordinary_asks`); every other
+    child's leg carries the site card alone, exactly as on base."""
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin)
+    # A REAL completion (review R1-1): without one, "no badge" holds vacuously.
+    AttentionStore(node / "attention.db").publish(f"session/{SID}", TOK1, "a1", "complete")
+    row = _wire(node, origin, HEAD, operator_viewer=True)
+    if source == HEAD:
+        assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    else:
+        assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    if source == HEAD:
+        # The Mac placed the child: its completion badge reaches the Mac, as before.
+        assert row["attention"] == {"token": TOK1, "outcome": "complete"}
+    else:
+        # A child the operator's device did not place: the site card rides the
+        # cards-only leg, and its completion stays here.
+        assert "attention" not in row and "attention_unknown" not in row
+    # The notify verdict is unchanged: the child's notify items stay on the node.
+    assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY
+    assert "build" not in _keys(row)
+
+
+def test_an_operator_placed_agent_childs_ordinary_ask_reaches_the_bound_operator_only(
+    tmp_path: Path,
+) -> None:
+    """Remote parity (2026-11-21; live repro d83f5525a563's a-e9c5, no Mac banner):
+    a child the operator's OWN device placed sends its ordinary ask to the VERIFIED
+    operator viewer, as a local agent child's ask reaches the local inbox. Its
+    notify item never travels, and no unbound viewer — the origin it names, a
+    co-member — gets anything."""
+    origin = _agent(HEAD)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    row = _wire(node, origin, HEAD, operator_viewer=True)
+    assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-plain"]  # never "build"
+    assert "asks_unknown" not in row
+    for viewer in (HEAD, CO, NODE):
+        assert "notices" not in _wire(node, origin, viewer, operator_viewer=False), viewer
+    # The target is the caller's VERIFIED operator id, or nobody without one.
+    assert ra.signed_card_target(origin, operator_device_id=HEAD) == HEAD
+    assert ra.signed_card_target(origin, operator_device_id="") == ""
+    assert ra.agent_child_forwards_ordinary_asks(origin, operator_device_id=HEAD)
+    assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY
+
+
+@pytest.mark.parametrize("source", ["", NODE, CO])
+def test_a_non_operator_placed_agent_childs_ordinary_ask_reaches_nobody(
+    tmp_path: Path, source: str
+) -> None:
+    """Security review P1 (narrow gate): ``origin.kind`` is the placing device's own
+    claim, so a co-member could stamp any session it places ``agent``. Ordinary
+    asks travel only when the AUTHENTICATED ``source_device`` is the verified
+    operator; a co-member-placed (or locally started, or source-less) agent child
+    sends NO ordinary ask to anyone, the operator included — and its real site
+    card still reaches the operator, unchanged from base."""
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    for viewer, bound in ((HEAD, True), (HEAD, False), (CO, False), (NODE, False)):
+        assert "notices" not in _wire(node, origin, viewer, operator_viewer=bound), viewer
+    assert not ra.agent_child_forwards_ordinary_asks(origin, operator_device_id=HEAD)
+    # The site card leg is untouched: added now, it alone reaches the operator.
+    _queue_raw(node, "a-site", [_site_question()])
+    assert _keys(_wire(node, origin, HEAD, operator_viewer=True)) == [
+        f"{ra.ASK_NOTICE_PREFIX}a-site"
+    ]
+    assert "notices" not in _wire(node, origin, CO, operator_viewer=False)
+
+
+def test_the_ordinary_ask_gate_needs_a_verified_operator_and_an_agent_child() -> None:
+    """The gate's own truth table: no verified operator, a non-agent row, or a
+    source that is not the operator never widens the agent-child leg."""
+    assert not ra.agent_child_forwards_ordinary_asks(_agent(HEAD), operator_device_id="")
+    assert not ra.agent_child_forwards_ordinary_asks(
+        {"kind": "user", "source_device": HEAD}, operator_device_id=HEAD
+    )
+    assert not ra.agent_child_forwards_ordinary_asks(None, operator_device_id=HEAD)
+    assert not ra.agent_child_forwards_ordinary_asks(_agent(CO), operator_device_id=HEAD)
+
+
+def test_an_agent_childs_asks_share_the_wire_cap_oldest_first(tmp_path: Path) -> None:
+    """Same bounded list as the non-agent path: ``NOTICES_ON_WIRE`` asks, oldest first."""
+    origin = _agent(HEAD)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    for index in range(ra.NOTICES_ON_WIRE + 2):
+        _queue_raw(node, f"a-{index:02d}", [{"id": "q0", "question": f"Q{index}?", "options": []}])
+    keys = _keys(_wire(node, origin, HEAD, operator_viewer=True))
+    assert len(keys) == ra.NOTICES_ON_WIRE
+    assert keys[0] == f"{ra.ASK_NOTICE_PREFIX}a-plain"
+
+
+@pytest.mark.parametrize("source", [HEAD, CO])
+def test_a_viewer_the_origin_names_but_not_bound_gets_no_site_card(
+    tmp_path: Path, source: str
+) -> None:
+    """Never "any viewer that matches the origin": the source device itself gets
+    nothing unless its link is the verified operator's."""
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin)
+    assert "notices" not in _wire(node, origin, source, operator_viewer=False)
+    # A non-operator member that is not the source gets nothing either.
+    other = CO if source == HEAD else HEAD
+    assert "notices" not in _wire(node, origin, other, operator_viewer=False)
+
+
+def test_a_stampless_agent_started_session_keeps_forwarding_every_ask(tmp_path: Path) -> None:
+    """Unchanged routing: a node session with no stamp and a subagent marker already
+    sends ALL its open asks over the binding (asks always travel); only notify
+    stays here (:func:`ra.is_non_agent_session`)."""
+    node = _agent_child_node(tmp_path, None)
+    (node / "sessions" / SID / "origin.json").write_text('{"origin": "subagent"}', "utf-8")
+    row = _wire(node, None, HEAD, operator_viewer=True)
+    assert sorted(_keys(row)) == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    assert "notices" not in _wire(node, None, CO, operator_viewer=False)
+
+
+def test_an_unreadable_ask_log_on_an_agent_child_says_unknown(tmp_path: Path) -> None:
+    """The R1-2 rule holds on the new leg: a failed read never retires a card."""
+    from local_operator.asks import store as ask_store
+
+    origin = _agent(HEAD)
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    ask_store.asks_log_path(ask_store.session_dir(node, SID)).mkdir(parents=True)
+    row = _wire(node, origin, HEAD, operator_viewer=True)
+    assert row.get("asks_unknown") is True and "notices" not in row
+    assert "asks_unknown" not in _wire(node, origin, HEAD, operator_viewer=False)
+
+
+# ---------------------------------------------------------------------------
+# Who started an agent child: the forwarded ask's label (PR #4372 "Label")
+# ---------------------------------------------------------------------------
+
+MAC = "d_mac"
+ASK_KEY = f"{ra.ASK_NOTICE_PREFIX}a-e9c5"
+AGENT_BODY = "runs on lop-remote-node-2 · started by an agent on damian-mac"
+
+
+def _labelled_rows(origins: dict[str, Any]) -> dict[str, SessionRow]:
+    """One listing whose rows carry ``origins`` (session id -> stamp origin)."""
+
+    class _Peer:
+        def __init__(self, device_id: str, name: str) -> None:
+            self.device_id, self.name = device_id, name
+            self.network_id, self.reachable, self.reason = "n_test", True, ""
+
+    class _Catalog:
+        def peers(self) -> list[Any]:
+            return [_Peer(NODE, "lop-remote-node-2"), _Peer(MAC, "damian-mac")]
+
+        def rows(self) -> list[Any]:
+            return [
+                PeerRow.from_json(
+                    {"session_id": sid, "state": "live", "origin": origin}, device_id=NODE
+                )
+                for sid, origin in origins.items()
+            ]
+
+    rows = peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+    return {row.id: row for row in rows}
+
+
+def test_label_names_the_device_whose_agent_started_the_row() -> None:
+    by_id = _labelled_rows(
+        {
+            "a" * 12: {"kind": ra.AGENT_ORIGIN_KIND, "source_device": MAC},
+            "b" * 12: {"kind": "user", "source_device": MAC, "started_by": "operator"},
+            "c" * 12: {"kind": ra.AGENT_ORIGIN_KIND, "source_device": "d_unknown"},
+            "d" * 12: {"kind": ra.AGENT_ORIGIN_KIND},
+            "e" * 12: {},
+        }
+    )
+    assert by_id["a" * 12].remote_started_by_agent_on == "damian-mac"
+    # Not an agent child: no label, whatever the source.
+    assert by_id["b" * 12].remote_started_by_agent_on == ""
+    # A source this device cannot name, or none at all: no label (never an id).
+    assert by_id["c" * 12].remote_started_by_agent_on == ""
+    assert by_id["d" * 12].remote_started_by_agent_on == ""
+    assert by_id["e" * 12].remote_started_by_agent_on == ""
+
+
+def test_label_tolerates_a_malformed_origin() -> None:
+    assert peer_rows._agent_starter_label("agent", {MAC: "damian-mac"}) == ""
+    assert peer_rows._agent_starter_label(None, {MAC: "damian-mac"}) == ""
+    assert peer_rows._agent_starter_label({"kind": ["agent"], "source_device": MAC}, {}) == ""
+
+
+def test_label_names_this_device_from_its_own_identity(tmp_path: Path) -> None:
+    from local_operator.network import identity
+
+    mine = identity.mint(tmp_path, name="damian-mac")
+    names = peer_rows._device_names(tmp_path, {})
+    assert names == {mine.device_id: "damian-mac"}
+    # No identity at all: the peers' names only, no crash.
+    assert peer_rows._device_names(tmp_path / "empty", {}) == {}
+
+
+@pytest.mark.parametrize(
+    ("peers", "body"),
+    [
+        (
+            {NODE: "lop-remote-node-2", CO: "co-laptop"},
+            "runs on lop-remote-node-2 · started by an agent on co-laptop",
+        ),
+        ({NODE: "lop-remote-node-2"}, "runs on lop-remote-node-2"),
+    ],
+    ids=["co-member-named", "co-member-unknown"],
+)
+def test_a_co_member_placed_childs_site_card_names_the_co_member_when_known(
+    tmp_path: Path, root: Path, peers: dict[str, str], body: str
+) -> None:
+    """Review m1, end to end: a GENUINE signed site card from a child an agent on a
+    CO-MEMBER placed travels node -> wire -> the operator's listing -> its row.
+    The label names the co-member only when the receiver's own peers list does
+    (never the raw device id a peer could have written); otherwise the row
+    keeps the plain "runs on <node>" body byte for byte."""
+    origin = _agent(CO)
+    wire = _wire(_agent_child_node(tmp_path, origin), origin, HEAD, operator_viewer=True)
+    # The co-member-placed leg carries the site card alone (no ordinary ask).
+    assert _keys(wire) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+
+    class _Peer:
+        def __init__(self, device_id: str, name: str) -> None:
+            self.device_id, self.name = device_id, name
+            self.network_id, self.reachable, self.reason = "n_test", True, ""
+
+    class _Catalog:
+        def peers(self) -> list[Any]:
+            return [_Peer(device_id, name) for device_id, name in peers.items()]
+
+        def rows(self) -> list[Any]:
+            return [PeerRow.from_json(wire, device_id=NODE)]
+
+    [row] = peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+    ra.RemoteAttentionWatcher(root).observe([row])
+    [item] = _items(root)
+    assert item["key"].endswith("a-site")
+    assert item["body_md"] == body
+
+
+def _ask_row(started_by: str, key: str = ASK_KEY) -> SessionRow:
+    return _row(notice=(key, 1, "normal", "Which branch should I use?"))._replace(
+        remote_started_by_agent_on=started_by
+    )
+
+
+def test_an_agent_childs_forwarded_ask_says_who_started_it(root: Path) -> None:
+    ra.RemoteAttentionWatcher(root).observe([_ask_row("damian-mac")])
+    [item] = _items(root)
+    assert item["title"] == "Which branch should I use?"
+    assert item["body_md"] == AGENT_BODY
+
+
+def test_an_unlabelled_forwarded_ask_keeps_the_plain_body(root: Path) -> None:
+    ra.RemoteAttentionWatcher(root).observe([_ask_row("")])
+    [item] = _items(root)
+    assert item["body_md"] == "runs on lop-remote-node-2"
+
+
+def test_a_labelled_rows_notify_item_keeps_the_plain_body(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """The "started by an agent" label belongs to an ask, never a notify item."""
+    row = _row(notice=("k", 1, "high", "Deploy finished"))._replace(
+        remote_started_by_agent_on="damian-mac"
+    )
+    ra.RemoteAttentionWatcher(root).observe([row])
+    [item] = _items(root)
+    assert item["body_md"] == "runs on lop-remote-node-2"
+    assert [call["body"] for call in _no_banner_threads] == ["runs on lop-remote-node-2"]
+
+
+def test_a_high_agent_child_ask_banners_with_the_label(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    row = _row(notice=(ASK_KEY, 1, "high", "Approve the deploy?"))._replace(
+        remote_started_by_agent_on="damian-mac"
+    )
+    ra.RemoteAttentionWatcher(root).observe([row])
+    assert [call["body"] for call in _no_banner_threads] == [AGENT_BODY]

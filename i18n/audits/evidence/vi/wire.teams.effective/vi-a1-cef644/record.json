@@ -1,0 +1,98 @@
+{
+  "locale": "vi",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "key_count": 9,
+  "audit_pass": 1,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "cef644ceab2f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "bdce0d00e792",
+    "actual_model_source": "System runtime model declaration for this session",
+    "fallback_used": false
+  },
+  "source_audit_revision": "e70bc818b8553dca1fad007705257817be49ee37",
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "vi": {
+      "path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/wire.teams.effective.json",
+      "sha256": "4d510633cda89708fa842a0812dc9fff2836383e93e1322c6a6d532cf52cc057"
+    },
+    "translator_receipt": {
+      "path": "/Users/damian/.local-operator/sessions/bdce0d00e792/scratchpad/effective-reasons-vi/translator-receipt.json",
+      "sha256": "ff505f4a6c875eba2bd2a75eeab0e1f64001790bdbddaae62866329e7beca6fd"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    "style_guide": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/report.md",
+      "staging_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/report.md",
+      "sha256": "cfd4a80cdce4ca68a4a0ffa7a8657c6752d9dc034efe4f465889459539ee4f12",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/audit.log",
+      "staging_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/audit.log",
+      "sha256": "ade51bd06c612dbcd1cc23138dc38eb47489f18b8414d6dffd54b9a66426e521",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/mechanical.json",
+      "staging_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/mechanical.json",
+      "sha256": "ffc641049322c86fba4a84877c734b0b03ed3733a50f498d50e51782cd7ad32c",
+      "kind": "mechanical_results"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/validate.py",
+      "staging_path": "/Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/validate.py",
+      "sha256": "030723e8eaeb294040822652516e4d99f2ca4bb27b8d24d892f16f40b14c16da",
+      "kind": "reproduction_script"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings": [],
+  "execution": {
+    "command": "env -u XPC_FLAGS PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/cef644ceab2f/scratchpad/effective-reasons-vi-a1/validate.py",
+    "exit_code": 0,
+    "repository_validator": "check.main([\"--catalogues-only\"]), catalogue_root patched to isolated scratch fixture",
+    "ledger_append": "NOT RUN",
+    "receipt_structural_validation": "repository ledger._rows executed; see receipt-validation.log"
+  },
+  "gaps": [
+    "Second independent high-visibility pass required",
+    "runtime NOT RUN",
+    "pseudo-localization NOT RUN",
+    "fallback NOT RUN",
+    "client bidi NOT RUN",
+    "rendered visuals/fit NOT RUN"
+  ],
+  "retention": {
+    "state": "scratch_staging_only",
+    "intended_record_path": "i18n/audits/evidence/vi/wire.teams.effective/vi-a1-cef644/record.json",
+    "tracked": false,
+    "manager_action": "Promote canonical bundle before ledger append; retain scratch originals until committed"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

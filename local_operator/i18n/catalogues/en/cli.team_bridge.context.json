@@ -257,6 +257,57 @@
   "cli.team_bridge.notify.screening_model_unavailable_body": {
     "role": "local owner notification (inbox item) raised by the agent-messages receiver",
     "tone": "calm, factual, operator-facing; no alarm, no blame",
-    "note": "Body of the same notification. Facts that must survive: (1) the safety check tries Claude Sonnet 5.5 and Claude Opus 5.5 via Anthropic or Radient FIRST, then the owner's own default model and its fallbacks (product and model names stay in Latin script, untranslated); (2) none could run, so new agent messages are held; (3) nothing is lost; (4) the fix: sign in to Anthropic or Radient, add credit in the Radient console, or check that the default model works; (5) held messages are re-screened automatically. Do not imply messages were rejected, deleted, or that a human reviews them."
+    "note": "Body of the same notification. Facts that must survive: (1) the safety check tries Claude Sonnet 5.5 and Claude Opus 5.5 via Anthropic or Radient FIRST, then the owner's own default model and its fallbacks (product and model names stay in Latin script, untranslated); (2) none could run, so new agent messages are held; (3) nothing is lost; (4) the fix: sign in to Anthropic or Radient, add credit in the Radient Console, or check that the default model works; (5) held messages are re-screened automatically. Do not imply messages were rejected, deleted, or that a human reviews them."
+  },
+  "cli.team_bridge.notify.owner_action_hold_title": {
+    "maxCells": 40,
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Title shown ONLY to the owner of the receiving agent when incoming agent messages are held because the Radient hub withdrew the owner's authority for a reason only the owner can fix. A whole-message ICU select over {reason}; translate every arm and keep the selector values (sign_in_required, consent_required, owner_ineligible, other) verbatim. Each specific arm starts with the ACTION the owner must take (sign in again; give consent again; check that Agent messages is on), because the inbox list shows up to 40 cells of the title and three notices can sit side by side: the action must stay visible, so keep every arm within 40 cells. 'other' is a neutral fallback. Do not say 'until you act' or 'waiting on you' (the list's waiting count does not include these). Shown once per receiving machine and reason, never per message; carries no sender, message or conversation detail. Agent messages is the product name of Team Bridge; 'Radient' stays in Latin script."
+  },
+  "cli.team_bridge.notify.owner_action_hold_body": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Body of the same notification: a whole-message ICU select over {reason}; translate every arm and keep the selector values (sign_in_required, consent_required, owner_ineligible, other) verbatim. Each arm states why messages are held, that held messages are KEPT (not discarded), and the fix. sign_in_required covers BOTH an expired sign-in and a sign-in to an account that is not the owner's; the fix is to sign in again as the account owner in the Local Operator app. consent_required: open the app, turn on Agent messages, review and give consent again (consent is 'given', not 'accepted'). owner_ineligible covers the organization not being eligible AND this machine's Agent messages enrollment being missing or inactive; the fix is first to check in the app that Agent messages is on for this machine, then, if it is, to ask an administrator of the Radient organization to check eligibility. Never offer to deliver these messages: this hold has no deliver action. Do not promise automatic delivery or automatic re-screening after the fix. 'Local Operator' and 'Radient' are product names; keep in Latin script."
+  },
+  "cli.team_bridge.status.running": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. pid and version are verbatim numbers (e.g. 48311, 0.102.4); started is a pre-formatted local timestamp. Names the receiver process actually running, as recorded by that process."
+  },
+  "cli.team_bridge.status.running_none": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Shown only when the service manager does NOT report a receiver running and no receiver recorded itself: none was ever started, or it stopped cleanly."
+  },
+  "cli.team_bridge.status.running_unrecorded": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Shown when the service manager reports a receiver running but that receiver recorded no details about itself (pid, version, build). Receivers started by app versions older than this feature never record them, so this usually means an old receiver is still running: a restart is needed, and after it the details appear. 'them' refers to the details."
+  },
+  "cli.team_bridge.status.running_exited": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. pid and version are verbatim. The receiver recorded itself earlier but that process is no longer running."
+  },
+  "cli.team_bridge.status.running_detail": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. generation is a verbatim install directory name such as 20261023T142851Z-0.86.1, or an em dash when the install has none; 'build' means the installed copy of the code the process was started from. versions is a verbatim comma-separated list of identifiers such as bridge_consent_v2, bridge_consent_v3; never translate them."
+  },
+  "cli.team_bridge.status.restart_needed": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. installed is a verbatim version number. Shown when the background receiver runs a DIFFERENT version than the installed app (the line above shows the version it runs); it must restart to load the installed version. A same-version replaced build has its own line (restart_needed_replaced)."
+  },
+  "cli.team_bridge.status.restart_needed_replaced": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. installed is a verbatim version number, usually the SAME as the running version on the line above. Shown when the receiver runs the same version number, but an update has since replaced the installed files it started from; 'the last update' means the most recent update of the app. It must restart to load the installed code. Do not say the version differs."
+  },
+  "cli.team_bridge.setup.mesh_node_relay": {
+    "role": "lop team-bridge setup CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Shown by `lop team-bridge setup` on a device that JOINED a mesh network as a node (not the operator's primary device) and is not enrolled. Agent messages is the product name of Team Bridge; keep 'Team Bridge' verbatim. Safety meaning: Team Bridge is deliberately never set up on mesh nodes because consent cannot be proven remotely, so the line must NOT suggest enabling it here or opening the app. The remedy names two routes to the operator's chief-of-staff session on the primary device: an AGENT on this node uses the in-session `send` tool (not the `lop send` shell command, which only reaches sessions on this device); a PERSON at this shell asks that session on the primary device itself ('there' = on the primary device). 'chief-of-staff session' is the operator's designated session that answers agents; use the same term as setup.designation_missing. 'id' is that session's identifier, found with the `sessions` tool's `list` op (shown as `sessions` `list`, two literal code spans). `peer=<primary device>` is the optional mesh peer-device field of send and may be omitted; it is added only when send cannot find the id. Every backtick span, including `<primary device>` inside it, stays byte-identical and untranslated. 'guide://network' is a literal guide address and stays verbatim."
   }
 }

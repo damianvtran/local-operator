@@ -320,6 +320,16 @@ def test_http_gate_and_login_flow() -> None:
     # as the untouched build fact it is).
     assert capabilities["session_tags"] == {"available": True}
     assert capabilities["features"].get("session_tags") == 1
+    # Per-device push preferences: the app sends ``preferences`` on register
+    # only to a relay advertising this, because the register body refuses
+    # unknown fields (an older relay would refuse the whole registration).
+    assert capabilities["push_preferences"] == {"available": True}
+    # ``preferences.previews`` (descriptive banners) is accepted: a SEPARATE
+    # capability because a push_preferences-only daemon refuses the key.
+    assert capabilities["push_previews"] == {"available": True}
+    # ADR 0009: ``preferences.completions_scope``/``attention`` are accepted; the
+    # app sends them only to a relay advertising this (an older one refuses).
+    assert capabilities["push_routing"] == {"available": True}
     assert capabilities["i18n"] == {"catalogues": 1}
     assert isinstance(capabilities["features"], dict)
     stt = capabilities["stt"]
@@ -3847,11 +3857,13 @@ def test_a_cold_prompt_expands_against_the_durable_cwd(tmp_path, monkeypatch) ->
     (cfg / "sessions" / "cold-skills" / "desktop.json").write_text(json.dumps({"cwd": str(work)}))
     _write_skill(work / ".local-operator" / "skills", "zz-probe", body="Read primary sources.")
 
-    async def capture(config_root, command):  # noqa: ANN001, ANN202
+    async def capture(config_root, command, *, origin=""):  # noqa: ANN001, ANN202
         seen.append(command.text)
+        origins.append(origin)
         return SimpleNamespace(close=lambda: None), "woke it"
 
     seen: list[str] = []
+    origins: list[str] = []
     monkeypatch.setattr(attach_client, "continue_command", capture)
     daemon = MobileDaemon(port=0, password="pw123")
     client = TestClient(build_app(daemon))
@@ -3871,6 +3883,8 @@ def test_a_cold_prompt_expands_against_the_durable_cwd(tmp_path, monkeypatch) ->
     assert len(seen) == 1
     assert seen[0].startswith("$zz-probe fix the login bug\n\n")
     assert "Read primary sources." in seen[0]
+    # ADR 0009: the phone's cold-wake prompt declares its origin.
+    assert origins == ["mobile"]
 
 
 def _continuation_rig(

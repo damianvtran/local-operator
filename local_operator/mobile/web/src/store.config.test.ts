@@ -54,6 +54,10 @@ describe("retainConfigStream", () => {
 		// and the working line's Stop.
 		// relay.usage_reset is the phone /usage sheet's spendable reset credits:
 		// the card's affordance, its inline confirmation and the five outcomes.
+		// relay.diagram is the drawn-diagram block's copy/save/full-size buttons and
+		// its error card, bundled so a diagram in a cold-open transcript is labelled.
+		// relay.pairing is the terminal-free pairing sheet (pairing design v2, A1):
+		// bundled so an unpaired phone's Approve tap renders it with no fetch.
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
@@ -63,10 +67,12 @@ describe("retainConfigStream", () => {
 			"relay.asks",
 			"relay.chrome",
 			"relay.composer",
+			"relay.diagram",
 			"relay.health",
 			"relay.highlights",
 			"relay.library",
 			"relay.notifications",
+			"relay.pairing",
 			"relay.session",
 			"relay.session.tags",
 			"relay.shell",

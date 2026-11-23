@@ -1,0 +1,41 @@
+{
+  "locale": "ru",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "context_sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417",
+  "target_sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "effective-reasons-ru",
+    "session": "9588c120c894",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session-state model declaration",
+    "fallback_used": false,
+    "date": "2026-11-19"
+  },
+  "translator_provenance_source": {
+    "path": "/Users/damian/.local-operator/sessions/18a5766f5b20/scratchpad/ru-audit/receipt.json",
+    "sha256": "8e06df43849a1626952e5396195b4081d776089ba5ba3189ba5ed2bbe91fbe28"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6fa3219bb25e",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session-state model declaration",
+    "fallback": "none observed",
+    "independent_from_translator_session": "9588c120c894",
+    "independent_from_first_auditor_session": "18a5766f5b20",
+    "date": "2026-11-19",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true,
+    "fallback_used": false
+  },
+  "status": "passed",
+  "note": "Second independent audit: 9/9 passed; 0 findings. Scratch record: sessions/6fa3219bb25e/scratchpad/ru-second-audit/record.json. Promote evidence to canonical tracked root before append; no rendered/runtime claim.",
+  "audit_record": {
+    "path": "/Users/damian/.local-operator/sessions/6fa3219bb25e/scratchpad/ru-second-audit/record.json",
+    "sha256": "f3b500280d9e21bfd59c5258a1effe1daa40ea9d81957e627352d75c242120fa"
+  }
+}

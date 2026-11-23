@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "kind": "independent_translation_audit_A",
+  "locale": "es",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "recorded_at": "2026-11-22T10:49:54.273436+00:00",
+  "source_audit_revision": "b1c5ca8be245dcc3f9cae4463d9a5553b3e0c01f",
+  "key_count": 4,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c8fbb0cb0ff6",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Explicit runtime model-switch message in this audit session; substantive audit executed after fallback. No external provider telemetry queried.",
+    "independent_from_translator_session": "e069889d36f8"
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e069889d36f8",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Runtime model-switch message in this session explicitly names openai/gpt-6.1-sol as temporary quota fallback; Spanish authorship and validation occurred after this message. No external provider telemetry queried.",
+    "independent_from_translator_session": false,
+    "role": "author; not an independent auditor"
+  },
+  "translator_provenance_source": "i18n/audits/evidence/es/tui.model_persistence/esa-e069/record.json",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.model_persistence.json",
+      "sha256": "253fc1d487b648e6c778ac0f102ca5a49865dd8e223374ad31981f92ff97cce4"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esA-c8fb/script.py.txt",
+      "sha256": "fdf6f57766180705228ea0eb6b058aa5fec871e740a1410093041046466dc4ab"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esA-c8fb/audit.log",
+      "sha256": "ca745cb91de57b733b572609b09302ea2592ff3f1032b2de89c8e9ef9a236573"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esA-c8fb/report.md",
+      "sha256": "ba2081033069a098acc3fd50183a776131ed11b7e5a85c333cd8e680c10d7689"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esA-c8fb/ledger-dry-run.log",
+      "sha256": "a59be0d375b223fd5feff3e646cd51163b9f84e758b4eaf2ed937ffee380235f"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "current_bytes_match_audited_hashes": true,
+  "notes_kind": "audit_notes_not_execution_log",
+  "validation": {
+    "exit_code": 0,
+    "official_scoped_catalogue_context_icu": true,
+    "plural_select_constructs": 0,
+    "rich_cases": 48,
+    "english_same_code_controls": true,
+    "negative_missing_key": true,
+    "negative_missing_argument": true,
+    "NFC": true,
+    "pseudo": true,
+    "global_checker_run": false,
+    "native_noticeblock_certified": false,
+    "independent_B_complete": false,
+    "ledger_append_dry_run": {
+      "exit_code": 0,
+      "command": "scripts/i18n/ledger.py append --receipt i18n/audits/evidence/es/tui.model_persistence/esA-c8fb/receipt.json --expected-history-sha <ledger.py history-sha --locale es --namespace tui.model_persistence> --dry-run",
+      "actual_output": "i18n/audit-history/es/tui.model_persistence.json",
+      "apply_executed": false
+    },
+    "command": "env -i HOME=<session-scratch>/esA-home LOCAL_OPERATOR_CONFIG_DIR=<session-scratch>/esA-home/config PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=<worktree> /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.model_persistence/esA-c8fb/script.py.txt"
+  },
+  "release_clearance": false
+}

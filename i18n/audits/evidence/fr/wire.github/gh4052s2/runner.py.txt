@@ -1,0 +1,95 @@
+"""Read-only R2: nine-value delta + direct compositions, no activation override."""
+import os,sys,json,hashlib,subprocess,importlib.util,unicodedata
+from pathlib import Path
+ROOT=Path('/Users/damian/local-operator/.worktrees/github-designation-ux-4052'); S=Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])
+os.chdir(ROOT);sys.path.insert(0,str(ROOT))
+from local_operator.i18n import runtime,messages,resolve
+from rich.cells import cell_len
+spec=importlib.util.spec_from_file_location('r2_check',ROOT/'scripts/i18n/check.py'); checker=importlib.util.module_from_spec(spec);sys.modules[spec.name]=checker;spec.loader.exec_module(checker)
+H='b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee'; B='2afbb818b69074d9f11b0fc1a9a6360967218476'; INITIAL='0b754ce89567ae158fe91db3ec0ed0b4a621f312'
+assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==H
+old=json.loads((S/'second-pass-execution.json').read_text()); manifest=json.loads((ROOT/'docs/design/github-designation-ux-i18n.json').read_text())
+keys=manifest['new_keys']+manifest['changed_keys']; locales=manifest['locales'][1:]
+expected={('ru','wire.github.'+x) for x in ['opt_out_step','exclude_added','include_added','wrapper_denied','share_empty']}|{('es','wire.github.share_empty'),('ur','wire.github.wrapper_denied'),('fr','wire.github.failure_unknown'),('ru',manifest['changed_keys'][0])}
+sha=lambda b:hashlib.sha256(b).hexdigest()
+load=lambda ref,p:json.loads(subprocess.check_output(['git','show',ref+':'+p]))
+data={};changes=[];retained=[];hashes={}
+for l in ['en']+locales:
+ for ns in ['wire.github','wire.settings']:
+  p=f'local_operator/i18n/catalogues/{l}/{ns}.json'; raw=(ROOT/p).read_bytes();data[l,ns]=json.loads(raw);hashes[p]=sha(raw)
+for ns in ['wire.github','wire.settings']:
+ p=f'local_operator/i18n/catalogues/en/{ns}.context.json';hashes[p]=sha((ROOT/p).read_bytes())
+for p,h in old['input_hashes'].items():
+ if '/en/' in p: assert hashes[p]==h,('English/context drift',p)
+for l in locales:
+ for ns in ['wire.github','wire.settings']:
+  p=f'local_operator/i18n/catalogues/{l}/{ns}.json'; before=load(B,p);initial=load(INITIAL,p);now=data[l,ns]
+  assert set(before)==set(now)
+  for k in keys:
+   if k not in now:continue
+   changed=before[k]!=now[k]
+   if changed:changes.append({'locale':l,'namespace':ns,'key':k,'before':before[k],'after':now[k]})
+   else:
+    assert initial[k]==now[k],('Unexpected intervening translation drift',l,k)
+    retained.append({'locale':l,'key':k,'sha256':sha(now[k].encode())})
+assert {(x['locale'],x['key']) for x in changes}==expected
+assert len(retained)==474
+print('PASS exact 9 changed values; 474 unchanged locale-key values byte/hash retained from initial audit; all English/context hashes unchanged')
+plural=json.loads((ROOT/'local_operator/i18n/data/plural_rules.json').read_text());rendered=[]
+base={'repo':'octo-org/website','command':'lop network credential github repos','ttl':'TTL','reason':'REASON','remedy':'REMEDY','count':3,'owner':'owner-device-7','failure':'','ago':'AGO','opted':'','detail':'DETAIL'}
+def r(l,k,**params):
+ ns='wire.settings' if k.startswith('wire.settings.') else 'wire.github'; k=k if k.startswith('wire.') else 'wire.github.'+k
+ out=runtime.render_message(data[l,ns][k],{**base,**params},l)
+ rendered.append({'locale':l,'key':k,'text':out,'cell_width':cell_len(out)})
+ return out
+for c in changes:
+ l,ns,k=c['locale'],c['namespace'],c['key'];text=c['after'];en=data['en',ns][k]
+ problem=checker._arguments_problem(runtime.message_arguments(en),runtime.message_arguments(text),translated_source=text,locale=l,plural=plural)
+ assert problem is None,(l,k,problem)
+ problems=[];checker._check_plural_categories(problems,l,ns,k,text,plural,l);assert not problems,problems
+ assert unicodedata.normalize('NFC',text)==text
+ assert not any(0x202A<=ord(ch)<=0x202E or 0x2066<=ord(ch)<=0x2069 or ord(ch) in (0x200E,0x200F) for ch in text)
+ params={}
+ if k.endswith(('opt_out_step','exclude_added','include_added')):
+  params['ttl']=r(l,'ttl',count=5)
+  if k.endswith('opt_out_step'):params['command']='lop network credential github exclude <owner/repo>'
+ r(l,k,**params)
+# Prior findings are checked structurally as well as read semantically below.
+ur=data['ur','wire.github']['wire.github.wrapper_denied']; ru=data['ru','wire.github']['wire.github.wrapper_denied']
+assert 'آلہ' not in ur and ur.count('ڈیوائس')==3
+assert 'кредитор' not in ru and 'недоступна' not in ru
+for k in ['opt_out_step','exclude_added','include_added']:
+ t=data['ru','wire.github']['wire.github.'+k];assert 'выполнять push в него' in t and '{ttl}' in t and 'при следующем получении учётных данных' in t
+reasons=['reason_explicit','reason_unavailable_local','reason_unavailable_remote','reason_excluded_local','reason_excluded_remote','reason_no_repos_local','reason_no_repos_remote']
+for l in ['es','ru']:
+ for reason_key in reasons:
+  reason=r(l,reason_key,failure=' ('+r(l,'failure_unknown_login')+')')
+  remedy_key='remedy_explicit' if reason_key=='reason_explicit' else 'remedy_unavailable' if 'unavailable' in reason_key else 'remedy_excluded' if 'excluded' in reason_key else 'remedy_no_repos'
+  command='lop network credential github repos --use-default' if remedy_key=='remedy_explicit' else 'lop network credential github repos --refresh' if remedy_key=='remedy_unavailable' else 'lop network credential github include octo-org/website'
+  remedy=r(l,remedy_key,command=command)
+  r(l,'share_empty',reason=reason,remedy=remedy)
+# Direct French failure composition and borrower detail, using unchanged producer fragments.
+failure=' ('+r('fr','failure_unknown')+')'
+r('fr','source_last_good',failure=failure,ago=r('fr','age_days',count=2))
+reason=r('fr','reason_unavailable_remote',failure=failure)
+remedy=r('fr','remedy_unavailable',command='lop network credential github repos --refresh')
+r('fr','borrower_unset',detail=r('fr','refusal_detail',reason=reason,remedy=remedy))
+# Expanded technical-token probes, not a full pseudo-localization or native RTL claim.
+long_repo='synthetic-owner-'+('a'*35)+'/synthetic-repository-'+('b'*70)
+long_cmd='lop network credential github repos --refresh'
+for l in ['ur','ru']:
+ t=r(l,'wrapper_denied',repo=long_repo,command=long_cmd)
+ assert long_repo in t and long_cmd in t
+negatives={}
+try:runtime.render_message(ur,{'repo':'octo-org/website'},'ur')
+except runtime.MessageError as e:negatives['missing_command']=type(e).__name__
+else:raise AssertionError('missing command not rejected')
+try:runtime.parse_message('{count, plural, other {broken}')
+except runtime.MessageError as e:negatives['broken_icu']=type(e).__name__
+else:raise AssertionError('broken ICU not rejected')
+controls={l:{'text':messages.render_record('wire.github.progress',{},locale=l).text,'source_locale':messages.render_record('wire.github.progress',{},locale=l).source_locale} for l in locales}
+result={'scope':B+'..'+H,'head':H,'initial_audit_head':INITIAL,'changed_values':changes,'retained_value_hashes':retained,'retained_count':len(retained),'input_hashes':hashes,'renders':rendered,'render_count':len(rendered),'negative_controls':negatives,'production_eligibility_controls':controls,'shipped_locales':resolve.shipped_locales(),'mechanical_problems':[],'limitations':['Explicit-locale real ICU candidate renders, not production locale activation.','Expanded technical parameters are fit probes only, not full pseudo-localization/layout proof.','No browser/native/app screenshot, terminal bidi or Arabic shaping certification.','No translation, ledger, generated-output or shared-worktree writes.']}
+(S/'second-pass-r2-execution.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+(S/'second-pass-r2-rendered.txt').write_text('\n'.join(f"{x['locale']} {x['key']}: {x['text']}" for x in rendered)+'\n')
+print('PASS delta validator rules, NFC/control/token/timing checks;',len(rendered),'actual ICU candidate renders; negative controls',negatives)
+print('Production source locales', {l:c['source_locale'] for l,c in controls.items()},'shipped',resolve.shipped_locales())

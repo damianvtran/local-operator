@@ -142,6 +142,11 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # a surface no user has (the exact defect this module's docstring
         # records for the project registry and the patience class).
         withdraw_ask=lambda *args, **kwargs: {"ok": True},
+        # The Team Integrations consent seam: a real top-level session binds
+        # it whenever the queued engine is live, so the deferred
+        # ``integrations`` tool's inventory line is part of the surface every
+        # signed-in user pays. Presence only; never called by a measurement.
+        integration_consent=object(),
         # The code-requests tool's createIf gate reads the session's own
         # DIRECTORY (its derived index lives beside the transcript) — context
         # DATA rather than a machine probe, so the stub simply carries one;
@@ -338,6 +343,24 @@ def _forced_artifact_data_backend() -> Iterator[None]:
 
 
 @contextmanager
+def _forced_integrations_backend() -> Iterator[None]:
+    """Measure ``integrations`` as a Radient-signed-in session holds it.
+
+    The tool's third gate is a stored Radient OAuth row (a machine probe), so a
+    CI runner would otherwise measure a surface one tool lighter than a
+    signed-in session — the artifact-data leg's reasoning, same fix.
+    """
+    from local_operator.tools import integrations_tool
+
+    saved = integrations_tool._gate_bridge_login
+    integrations_tool._gate_bridge_login = lambda *args, **kwargs: True
+    try:
+        yield
+    finally:
+        integrations_tool._gate_bridge_login = saved
+
+
+@contextmanager
 def _forced_music_backend() -> Iterator[None]:
     """Measure the credential-gated music tools without reading real secrets."""
     from local_operator.tools import music_tool
@@ -370,6 +393,7 @@ def build_real_tools(cwd: str) -> list[AgentTool]:
         _forced_audio_backend(),
         _forced_artifact_data_backend(),
         _forced_music_backend(),
+        _forced_integrations_backend(),
     ):
         return registry.create_tools(build_real_tool_context(cwd))
 

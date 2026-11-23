@@ -1,0 +1,130 @@
+{
+  "locale": "ur",
+  "namespace": "wire.teams.effective",
+  "audit_id": "a2-4a898",
+  "audit_date": "2026-11-19",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "4a898e257f9c",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session Model declaration",
+    "fallback": "none used",
+    "independent_from_translator_session": "8dce6c4d11c0",
+    "independent_from_first_auditor_session": "da45f1eea614",
+    "date": "2026-11-19",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "8dce6c4d11c0",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session host Model declaration",
+    "date": "2026-11-19",
+    "fallback": "none used"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "ur": {
+      "path": "/Users/damian/.local-operator/sessions/8dce6c4d11c0/scratchpad/ur/wire.teams.effective.json",
+      "sha256": "c43b87b8f9cc396da817e7c20da28c3b2a3b00668e6003ba4a4f0872c7ef345a"
+    }
+  },
+  "frozen_worktree": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons",
+  "frozen_head": "e70bc818b8553dca1fad007705257817be49ee37",
+  "first_auditor_receipt": {
+    "path": "/Users/damian/.local-operator/sessions/da45f1eea614/scratchpad/ur-a1/receipt.json",
+    "sha256": "c84a8a9af8a656cab16b55bd821ddeef64332d4a3644d48cb5cd8776d721753e",
+    "read_order": "Read only after independent source+target assessment and report.json creation",
+    "provenance_match": true,
+    "verdict_comparison": "Both passed; second pass derived independently, not inherited"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/4a898e257f9c/scratchpad/ur-a2/report.json",
+      "intended_tracked_path": "i18n/audits/evidence/ur/wire.teams.effective/a2-4a898/report.json",
+      "sha256": "a1cd0cc1e0d6c5aba20ce2c0ae46fdd1aa8cf17e1ab1003084311e9a432335bc",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/4a898e257f9c/scratchpad/ur-a2/mechanical.json",
+      "intended_tracked_path": "i18n/audits/evidence/ur/wire.teams.effective/a2-4a898/mechanical.json",
+      "sha256": "20902ec153d831d000ea3178076530c0c0f6f8953762978debf03736f5fc2800",
+      "kind": "mechanical_result"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/4a898e257f9c/scratchpad/ur-a2/validate.py",
+      "intended_tracked_path": "i18n/audits/evidence/ur/wire.teams.effective/a2-4a898/validate.py",
+      "sha256": "fe7db3275743eb5422a67ac9f399d3b34eebec342c9a5517326908d05cb10447",
+      "kind": "validator_script"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/4a898e257f9c/scratchpad/ur-a2/audit.log",
+      "intended_tracked_path": "i18n/audits/evidence/ur/wire.teams.effective/a2-4a898/audit.log",
+      "sha256": "d9f22e2fcc3def774dd0e8853c50c96952b9f08546c12aa08e776f55bbaa36dc",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/4a898e257f9c/scratchpad/ur-a2/receipt.json",
+      "intended_tracked_path": "i18n/audits/evidence/ur/wire.teams.effective/a2-4a898/receipt.json",
+      "sha256": "0a216563d36ff67ba55c0ab686647ba2bdd278ca92eb1c625eb192756ffe1b1e",
+      "kind": "receipt"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/4a898e257f9c/scratchpad/ur-a2/receipt-validation.log",
+      "intended_tracked_path": "i18n/audits/evidence/ur/wire.teams.effective/a2-4a898/receipt-validation.log",
+      "sha256": "b6fe4f421716a00239c43b2a1aded15b99302fe2a75688ba8d390344b47695be",
+      "kind": "actual_execution_log",
+      "provenance_reference": "record.json"
+    }
+  ],
+  "retention": {
+    "current": "scratch-only, as explicitly assigned",
+    "intended_tracked_record": "i18n/audits/evidence/ur/wire.teams.effective/a2-4a898/record.json",
+    "tracked_or_committed": false,
+    "coordinator_action": "Preserve bundle under canonical tracked root; note points to intended destination, not an assertion that it exists"
+  },
+  "evidence_limits": {
+    "pseudo": "not performed",
+    "fallback": "not performed",
+    "runtime_boundary": "not exercised",
+    "mixed_direction_visual": "not performed",
+    "rendered_fit": "not performed",
+    "inherited_proof": "none used",
+    "scope": "linguistic and catalogue mechanical audit only; not shipping/client RTL approval"
+  },
+  "original_lost_evidence": {
+    "status": "not applicable; new second independent audit, no replacement or historical recreation"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "validation": {
+    "entrypoint": "scripts.i18n.check.main([\"--catalogues-only\"])",
+    "exit_code": 0,
+    "fixture": "/Users/damian/.local-operator/sessions/4a898e257f9c/scratchpad/ur-a2/catalogue-fixture",
+    "normal_catalogue_admission": true,
+    "scope": "Only assigned namespace; no check suppression or admission bypass"
+  },
+  "receipt_validation": {
+    "entrypoint": "scripts/i18n/ledger.py append --receipt <receipt.json> --expected-history-sha <current digest> --dry-run",
+    "exit_code": 0,
+    "expected_history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "output": "i18n/audit-history/ur/wire.teams.effective.json",
+    "applied": false,
+    "note": "Current empty suffix was inspected; receipt dry-run accepted without writes. Coordinator must refresh history digest before actual append."
+  }
+}

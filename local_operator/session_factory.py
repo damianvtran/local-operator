@@ -39,7 +39,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -813,6 +813,22 @@ def resolve_hosting_model_with_source(
         agent_model or flag_model or team_model or config_manager.get_config_value("model_name")
     )
     if not hosting:
+        # Nothing chose a hosting: let Bedrock's documented self-enable rule
+        # (``bedrock/<id>`` model id, or its explicit env signal with Bedrock
+        # the only credentialed provider) fill it in before giving up. Lives
+        # BELOW the whole precedence above, so it can never override a choice.
+        from local_operator.providers.bedrock.auto_select import implied_bedrock_hosting
+
+        # getattr, not attribute access: callers (the SDK and its tests) pass
+        # lighter config-shaped objects with only ``get_config_value``, and this
+        # preflight must reach its own HostingNotConfiguredError, never die on
+        # an AttributeError first. No dir means prefix-only inference.
+        implied = implied_bedrock_hosting(
+            model_name, config_dir=getattr(config_manager, "config_dir", None)
+        )
+        if implied is not None:
+            hosting, model_name = implied
+    if not hosting:
         raise HostingNotConfiguredError("Hosting platform is not configured.")
     # Validate the RESOLVED hosting here, in the same preflight that already
     # catches the not-configured case, rather than letting a garbage value sail
@@ -1102,6 +1118,38 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
                 tool_name,
             )
             return False
+        from local_operator.harness.approval import COMMUNITY_POST_GATE
+
+        if tool_name == COMMUNITY_POST_GATE:
+            # A community post card is approved for its EXACT text, so the
+            # one-line prompt below cannot carry it: ``sanitize_prompt_line``
+            # flattens and cuts at 500 characters with no marker, and a ``y``
+            # would then publish text the person never saw (review R2-1, a
+            # 3,689-character post). Print the whole card, line by line, BEFORE
+            # the question instead. Each line is still sanitised (escapes, Cf
+            # characters), but it is never cut: the limit is ``sys.maxsize``,
+            # not the line's raw length, because sanitising EXPANDS each
+            # invisible Cf character into a visible ``\\u200d``-style escape
+            # (1 char -> 6) before the limit applies, so a raw-length limit
+            # silently dropped the tail of any line with a zero-width joiner,
+            # direction mark or soft hyphen (review R3-1). Totals stay bounded:
+            # the post is capped by ``community.limits.MAX_TEXT_CHARS`` and
+            # the terminal's scrollback is the pager; the question itself stays
+            # short so it is the last thing on screen.
+            card_lines = [
+                sanitize_prompt_line(line, limit=sys.maxsize) for line in description.splitlines()
+            ]
+            try:
+                await asyncio.to_thread(print, "\n".join(card_lines), flush=True)
+                answer = await asyncio.to_thread(
+                    input,
+                    "{}Publish the community post shown above in full? [y/N] ".format(
+                        _bridge_notice_prefix(bridge_latched)
+                    ),
+                )
+            except (EOFError, KeyboardInterrupt):
+                return False
+            return answer.strip().lower() in ("y", "yes")
         try:
             # Sanitised HERE as well as at the source. This is a second
             # human-facing approval surface, it renders onto a real terminal
@@ -1285,7 +1333,11 @@ def _latest_compaction_id(transcript: Any) -> str | None:
     return None
 
 
-def _env_details(cwd: str | None = None, session_id: str = "") -> str:
+def _env_details(
+    cwd: str | None = None,
+    session_id: str = "",
+    tool_names: Collection[str] | None = None,
+) -> str:
     """Volatile environment facts for the env block (date rides there too,
     added by ``build_system_blocks``). Kept tiny and byte-stable within a
     run: no timestamps, no process ids. ``cwd`` comes from the session's
@@ -1307,17 +1359,27 @@ def _env_details(cwd: str | None = None, session_id: str = "") -> str:
     caller with no transcript directory to name gets. The benchmark harness is
     NOT such a caller: ``scripts/bench_context_budget.py`` hand-builds its own
     env text rather than calling here, which is why the ratchet does not price
-    the extra line."""
+    the extra line.
+
+    ``tool_names`` is the session's tool membership; when given, each line
+    ships only where a held tool can use it (``prompts_api.env_detail_flags``),
+    so an MCP-only run's env block is the date and model alone. ``None`` keeps
+    every line."""
     import platform
 
-    text = (
-        f"Platform: {platform.system()} {platform.release()} ({platform.machine()})\n"
-        f"Python: {platform.python_version()}\n"
-        f"Working directory: {cwd if cwd is not None else os.getcwd()}"
-    )
-    if session_id:
-        text += f"\nSession ID: {session_id}"
-    return text
+    from local_operator.prompts_api import env_detail_flags
+
+    workspace, wants_id = env_detail_flags(tool_names)
+    lines: list[str] = []
+    if workspace:
+        lines += [
+            f"Platform: {platform.system()} {platform.release()} ({platform.machine()})",
+            f"Python: {platform.python_version()}",
+            f"Working directory: {cwd if cwd is not None else os.getcwd()}",
+        ]
+    if session_id and wants_id:
+        lines.append(f"Session ID: {session_id}")
+    return "\n".join(lines)
 
 
 #: The SERVER-OWNED shape of a configuration run: the preamble a run is built
@@ -4178,7 +4240,11 @@ def _make_system_blocks_provider(
     authority — it is in context before the first model call.
     """
 
-    environment = _env_details(cwd, session_id)
+    # The env block's lines follow tool MEMBERSHIP (``_env_details``), so it is
+    # rendered per provider call from ``current_tools`` below, never once here:
+    # the construction list is the pre-narrowing snapshot. ``cwd`` and
+    # ``session_id`` are still captured once, so a stable membership renders
+    # byte-identical text (and the cache key already moves with membership).
     # The HOST capability answer, taken ONCE at construction and passed to every
     # render (see ``prompts_api.host_capability_probes`` for the measured
     # incident). It is read here for the same reason ``user_instructions`` and
@@ -4219,6 +4285,18 @@ def _make_system_blocks_provider(
         # zero. Ask the owning Session, never infer from host type or a stub.
         notify_probe = getattr(provider, "notify_available", None)
         has_notify = bool(notify_probe()) if callable(notify_probe) else None
+        # The SESSION's live tool set when it installed the probe (see
+        # ``Session.__init__``'s ``session_tool_membership``), else the factory
+        # list. ``tools`` below is the PRE-narrowing construction snapshot: a
+        # declared SDK/exec inventory, a role prune or ``set_ask_handler`` all
+        # rebind the session's copy, never this one, so rendering block zero
+        # from it shipped usage prose for tools the session did not hold. Every
+        # membership-derived flag and the cache key read ``current_tools`` so the
+        # head moves exactly when membership does.
+        live_probe = getattr(provider, "live_tools", None)
+        current_tools: list[AgentTool] = (
+            cast("list[AgentTool]", live_probe()) if callable(live_probe) else tools
+        )
         # The coordination clause and the ``guide://team-bridge`` it names are
         # ONE unit, so the clause takes the SAME answer the guide resolver and
         # the bridge recommendation above take: does this session actually have
@@ -4233,7 +4311,8 @@ def _make_system_blocks_provider(
         # dead end the recommendation trigger was fixed for above. Enrolled and
         # fresh is unchanged: both halves hold, so the clause still renders.
         has_bridge = (
-            any(tool.name == "bridge" for tool in tools) and "team-bridge" in hooks.guides_by_name
+            any(tool.name == "bridge" for tool in current_tools)
+            and "team-bridge" in hooks.guides_by_name
         )
         # ``model_label`` is passed live by the Session on each provider step, so
         # a deliberate ``set_model`` or a failover fallback is reflected in the
@@ -4342,7 +4421,7 @@ def _make_system_blocks_provider(
             interactive,
             channel,
             open_asks or "",
-            tuple((tool.name, tool.description) for tool in tools),
+            tuple((tool.name, tool.description) for tool in current_tools),
             has_notify,
             has_bridge,
         )
@@ -4354,9 +4433,9 @@ def _make_system_blocks_provider(
         if key == cached_key:
             return list(cached_blocks)
         cached_blocks = build_system_blocks(
-            tools,
+            current_tools,
             knowledge_block,
-            environment,
+            _env_details(cwd, session_id, [tool.name for tool in current_tools]),
             date_str,
             goal=goal,
             goal_status=goal_status,
@@ -4390,6 +4469,8 @@ def _make_system_blocks_provider(
     # protocol explicitly; benchmarks can still call this builder read-only.
     setattr(provider, "append_only_state", True)
     setattr(provider, "session_notify_membership", True)
+    # Asks the owning Session to install ``live_tools`` (see ``provider``).
+    setattr(provider, "session_tool_membership", True)
     # Asks the owning Session to install ``cos_display_name`` (see above).
     setattr(provider, "session_cos_identity", True)
     setattr(provider, "repo_guidance", repo_guidance)
@@ -5120,6 +5201,21 @@ async def _prepare(
         acquire_session_lease(transcript_dir) if transcript_dir.parent.name == "sessions" else None
     )
 
+    goal_wake_due: int | None = getattr(args, "goal_wake_due", None)
+    if goal_wake_due is not None:
+        from local_operator.session.runtime.launch import RuntimeStartupError
+        from local_operator.wakes.goals import permits_wake
+
+        # The supervisor and launcher both yield before the owner holds the
+        # transcript lease. Refuse stale work before claiming or opening it.
+        try:
+            if session_lease is None or not permits_wake(transcript_dir, goal_wake_due):
+                raise RuntimeStartupError("automatic goal wake is no longer eligible")
+        except BaseException:
+            if session_lease is not None:
+                session_lease.release()
+            raise
+
     # CLAIM BEFORE creating the directory, and in that order. The claim marker
     # is what tells anything scanning the store (the user-enabled cleanup
     # policy, the picker, the mobile daemon) that this directory belongs to a
@@ -5266,6 +5362,9 @@ async def _prepare(
     auth_store = build_auth_store(
         config_manager.config_dir, db_path=config_manager.config_dir / "auth.db"
     )
+    from local_operator.providers.bedrock.connection import configure_invocation_auth
+
+    configure_invocation_auth(auth_store, hosting)
     # A fork inherits its PARENT's provider cache key. The fork's transcript is
     # a byte-identical copy, so its first request reproduces the parent's cached
     # prefix exactly and should be routed to it rather than opening a fresh one.
@@ -5504,14 +5603,18 @@ async def _prepare(
     # a gate miss leaves the field None and the createIf behaves as before.
     from local_operator.team_bridge.host import bridge_runtime_for_session
 
+    # One host-resolved name snapshot, shared by construction and dispatch.
+    bridge_session_agent_display = agent.name if agent is not None else None
     bridge_runtime = bridge_runtime_for_session(
         config_manager=config_manager,
         session_id=transcript.directory.name,
+        session_agent_display=bridge_session_agent_display,
     )
     # One value, both roles: the table assembled below inspects this context for
     # PRESENCE, and the Session executes against the same runtime. Two
     # resolutions here would be two answers waiting to disagree.
     tool_context.bridge_runtime = bridge_runtime
+    tool_context.bridge_session_agent_display = bridge_session_agent_display
     tools = create_tools(tool_context)
     # The mesh credential binding recorder: created with the transcript in hand
     # (it appends the durable rows), gated on THIS root holding a credential
@@ -5637,6 +5740,7 @@ async def _prepare(
         skill_resolver=_make_knowledge_resolver(hooks),
         request_approval=request_approval,
         goal_state=goal_state,
+        goal_wake_due=goal_wake_due,
         variables=variable_store,
         agent_registry=agent_registry,
         team_registry=team_registry,
@@ -6119,8 +6223,21 @@ async def wire_mcp_into_session(
         live = list(getattr(session, "_tools", None) or getattr(session, "tools", None) or ())
         base = [tool for tool in live if tool.name not in installed_mcp] or base_inventory
         selected = selected_tools(source)
+        # ONE COPY PER NAME, ``selected`` winning. ``base`` is "whatever is live
+        # that this function did not install", so a tool that entered the
+        # inventory by another route -- a declaration's grant
+        # (``Session.materialize_declared_tools``) -- is still in it when the
+        # model later activates the same tool through an over-cap ``mcp://``
+        # read. Concatenating both published the name twice, and Anthropic
+        # refuses a request whose tool names repeat (400 "Tool names must be
+        # unique"), so every later request in the session failed (PR #4349
+        # agent review round 1, R1). The selected copy wins because it is the
+        # one this wiring tracks: it gets fresh schemas on ``tools/list_changed``
+        # and is the copy cold-boundary demotion knows how to remove.
+        selected_names = {tool.name for tool in selected}
+        base = [tool for tool in base if tool.name not in selected_names]
         installed_mcp.clear()
-        installed_mcp.update(tool.name for tool in selected)
+        installed_mcp.update(selected_names)
         return session.refresh_tools(base + selected)
 
     # Per-origin USE clock, in session runs (``Session._generation``, bumped
@@ -6142,6 +6259,42 @@ async def wire_mcp_into_session(
         enabled_origins.add((server_name, raw_tool_name))
         stamp_use(server_name, raw_tool_name)
         return refresh_selected(manager.get_tools())
+
+    def activate_named(names: Collection[str]) -> tuple[str, ...]:
+        """Activate the manager's tools named in ``names``, as ``activate`` does.
+
+        WHY. ``Session.wait_for_tools`` grants a lazy MCP tool a caller named,
+        which is the activation a model would otherwise perform by reading its
+        ``mcp://`` URL. Installing it straight into the session's inventory left
+        it outside ``enabled_origins``/``installed_mcp``, so a later read of the
+        same over-cap tool selected it AGAIN beside the untracked copy (two tools
+        of one name, an Anthropic 400 on every later request), it was never
+        demoted at a cold boundary, and it outlived a ``tools/list_changed``
+        that removed it (PR #4349 agent review round 1, R1). Routing the grant
+        through this wiring keeps one bookkeeping for every activation.
+
+        Returns the names whose origin was enabled; one rebind for the batch.
+        Names the manager does not list, or lists without an origin, are
+        skipped, never guessed.
+        """
+        wanted = set(names)
+        enabled: list[str] = []
+        for tool in manager.get_tools():
+            if tool.name not in wanted:
+                continue
+            meta = manager.get_tool_meta(tool.name) or {}
+            server_name = str(meta.get("server_name", ""))
+            raw_name = str(meta.get("mcp_tool_name", ""))
+            if not server_name or not raw_name:
+                continue
+            enabled_origins.add((server_name, raw_name))
+            stamp_use(server_name, raw_name)
+            enabled.append(tool.name)
+        if enabled:
+            refresh_selected(manager.get_tools())
+        return tuple(enabled)
+
+    setattr(session, "_mcp_activate_named", activate_named)
 
     def cold_boundary_prune() -> bool:
         """Demote published-but-idle MCP schemas at a cache-cold boundary.

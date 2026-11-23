@@ -54,6 +54,11 @@ from tests.e2e.watchdog import bounded
 
 pytestmark = pytest.mark.e2e
 
+#: A busy mailbox delivery's receipt (``Session`` answers it inline; there is
+#: no exported constant). Since #4159 a drained runtime whose turn is still
+#: streaming gives this, not ``SPOOL_RECEIPT_WAKE``.
+LIVE_MAILBOX_RECEIPT = "delivered to the mailbox (will be read on the next turn)"
+
 #: The words the operator must never read after a refresh. ``stopped`` covers
 #: the parked "this session was stopped" screen a mis-read ``stopping`` frame
 #: would park the viewer in; ``interrupted`` the synthesised abort a viewer
@@ -1051,8 +1056,9 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
         answered with the spool receipt;
     (ii) nothing in flight is aborted: the turn's own reply lands, and nothing
         on screen says ``interrupted``/``stopped``;
-    (iii) a peer message sent mid-drain is SPOOLED for the successor, not
-        refused and not run against the build that is leaving;
+    (iii) a peer message sent mid-drain while the turn still streams is
+        delivered LIVE into that turn (#4159), and the successor does not run
+        it a second time;
     (iv) the runtime leaves for the build on disk, and the viewer's eager
         re-engage boots a successor from the NEW stamp.
     """
@@ -1212,7 +1218,24 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                 finally:
                     await joiner.dispose()
 
-                # (iii) a peer message is spooled for the successor instead.
+                # (iii) a peer message sent WHILE THE TURN STILL STREAMS is
+                # delivered live, into the turn already running. This step
+                # used to assert the spool receipt: the drain latched, so every
+                # local send was held for the successor. #4159 changed that
+                # contract — delivering into a turn already in flight starts no
+                # NEW work, which is all the drain forbids, and holding sends
+                # behind one busy turn was the defect (node2, 2026-11-17: ~40
+                # min of peer messages and wakes answered "held for the next
+                # runtime" and delivered nothing). So: busy and streaming →
+                # live; stopped admitting (idle, exit committed, disposing) →
+                # spool. The spool side is covered by the unit cells
+                # ``test_serving_drain.py::test_once_admission_has_stopped_the_
+                # same_send_spools[idle|exit-committed|disposing]``; it is not
+                # re-driven here because the gap between this runtime's turn
+                # ending and its exit is not something an e2e can hit on time.
+                assert getattr(
+                    viewer.frontend_state, "streaming", False
+                ), "the peer send must land while the drained turn is STILL running"
                 sent = subprocess.run(
                     [
                         sys.executable,
@@ -1230,7 +1253,22 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                     timeout=60,
                 )
                 assert sent.returncode == 0, sent.stdout + sent.stderr
-                assert SPOOL_RECEIPT_WAKE in (sent.stdout + sent.stderr), sent.stdout + sent.stderr
+                sent_out = sent.stdout + sent.stderr
+                assert LIVE_MAILBOX_RECEIPT in sent_out, sent_out
+                assert SPOOL_RECEIPT_WAKE not in sent_out, sent_out
+                # Live means THIS runtime's transcript holds it now, and the
+                # successor's inbox holds nothing for it.
+                from local_operator.session.runtime.inbox import peek_inbox
+                from local_operator.session.transcript import Transcript
+
+                session_dir = config / "sessions" / session_id
+                assert any(
+                    "hello from a peer" in str(entry.payload)
+                    for entry in Transcript(session_dir).entries()
+                ), "the live peer message has no durable row in the leaving runtime"
+                assert not [
+                    line for line in peek_inbox(session_dir) if "hello from a peer" in line.text
+                ], "a live-delivered peer message was also spooled for the successor"
 
                 # (ii) the turn finishes rather than being aborted, and the
                 # runtime leaves once it has.
@@ -1266,34 +1304,35 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                 ), "no successor runtime was engaged after the drain"
                 assert not viewer.is_cold
                 assert new_record.source_ref == NEW_MARKER.split()[0]
-                # The spooled peer message is read by that successor, before
-                # its socket even listens — so the work in flight was not the
-                # only thing the drain preserved. Read from the TRANSCRIPT, the
-                # durable copy: this is the receipt a later resume reads.
-                from local_operator.session.transcript import Transcript
-
-                durable = ""
-                deadline = time.monotonic() + 60
-                while time.monotonic() < deadline:
-                    await asyncio.sleep(0.1)
-                    sessions_dir = config / "sessions" / session_id
-                    durable = "\n".join(
-                        str(entry.payload) for entry in Transcript(sessions_dir).entries()
-                    )
-                    if "hello from a peer" in durable:
-                        break
-                assert "hello from a peer" in durable, "the spooled peer message was lost"
                 # AND THE OWNER'S MESSAGE RAN IN THE SUCCESSOR, as their own
                 # turn: the row carries the command id this viewer sent, so the
                 # message that was queued IS the message that ran — once (the
                 # durable index answers a twice-spooled row), and as a plain user
                 # message rather than a peer card (`inbox.SOURCE_USER`).
-                ours = [
-                    entry
-                    for entry in Transcript(config / "sessions" / session_id).entries()
-                    if "run the report while the build moves" in str(entry.payload)
-                ]
+                # Polled because the successor drains its inbox on its own
+                # schedule; the record existing does not order that read.
+                ours: list[Any] = []
+                peer_rows: list[Any] = []
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    entries = list(Transcript(session_dir).entries())
+                    ours = [
+                        entry
+                        for entry in entries
+                        if "run the report while the build moves" in str(entry.payload)
+                    ]
+                    peer_rows = [
+                        entry for entry in entries if "hello from a peer" in str(entry.payload)
+                    ]
+                    if ours:
+                        break
+                    await asyncio.sleep(0.1)
                 assert ours, "the queued message never ran in the successor"
+                # The peer message the leaving turn took live is NOT run a
+                # second time by the successor: the successor read the same
+                # inbox batch as the owner's rows above, so a duplicate would
+                # already be here (#4159).
+                assert len(peer_rows) == 1, [entry.payload for entry in peer_rows]
                 assert [entry.id for entry in ours] == [queued_command], [
                     entry.id for entry in ours
                 ]

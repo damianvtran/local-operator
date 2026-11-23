@@ -1733,7 +1733,7 @@ class ArgumentHighlightChanged(Message):
 
 
 #: The composer's resting prose. Named rather than inlined because the app
-#: swaps it for :data:`READ_ONLY_PLACEHOLDER` while the full-page subagent
+#: swaps it for :func:`read_only_placeholder` while the full-page subagent
 #: view is open and has to be able to put this one back.
 #:
 #: It carried a ``ctrl+v pastes an image`` suffix for one release, added as the
@@ -1753,8 +1753,8 @@ class ArgumentHighlightChanged(Message):
 #: through :func:`default_placeholder` — :attr:`Editor.resting_placeholder` and
 #: the constructor default — so a live ``/language`` switch is not shadowed by
 #: the language the process booted in (the by-value-at-import bug class that
-#: ``tui.notify._reload_copy`` documents). The other mode placeholders beside it
-#: are not keyed yet.
+#: ``tui.notify._reload_copy`` documents). The read-only hint below also resolves
+#: at render time; the remaining mode placeholders are not keyed yet.
 _composer_t = tr("tui.composer")
 
 
@@ -1774,10 +1774,20 @@ def _reload_copy() -> None:
 
 register_refresh(_reload_copy)
 
+
 #: What the composer says while it refuses input. It names the state AND the
 #: consequence, because the only useful thing to tell someone whose keys are
 #: being ignored is how to get a composer that accepts them.
-READ_ONLY_PLACEHOLDER = "Read-only · esc back"
+def read_only_placeholder() -> str:
+    """Resolve the read-only hint now, not in the language of module import.
+
+    The key token belongs to the keyboard binding, not the translator. The app
+    also calls this through its mode ladder when a mounted locale changes.
+    """
+    from local_operator.i18n.keys import tui_editor_readonly
+
+    return tr("tui.editor_readonly")(tui_editor_readonly.hint(key="esc"))
+
 
 #: What the composer says while the `/btw` aside card owns it — what the FIELD
 #: does, in ``DEFAULT_PLACEHOLDER``'s shape, and nothing about how to leave.

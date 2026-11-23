@@ -1,0 +1,6 @@
+{
+ "tui.model_persistence.persist": "/model default сохраняет эту модель по умолчанию для новых сессий",
+ "tui.model_persistence.settings": "/settings тоже меняет модель по умолчанию",
+ "tui.model_persistence.saved": "перейти в этой сессии на сохранённую модель по умолчанию — /model saved",
+ "tui.model_persistence.with_model": "модель: {label} — {routes}"
+}

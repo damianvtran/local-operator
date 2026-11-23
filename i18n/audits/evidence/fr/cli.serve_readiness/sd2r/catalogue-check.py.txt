@@ -1,0 +1,200 @@
+"""Read-only catalogue validator and NEW sd2r evidence emitter, not a test rig.
+Run from worktree root:
+  python3 -B i18n/audits/evidence/fr/cli.serve_readiness/sd2r/catalogue-check.py.txt
+No translation edits, eligibility overrides, fixtures, services, installs,
+pytest, commits or history writes. Existing audit bundles are read only.
+"""
+from __future__ import annotations
+import datetime, hashlib, json, re, subprocess, sys, unicodedata
+from pathlib import Path
+ROOT=Path.cwd().resolve()
+sys.path.insert(0,str(ROOT))
+from local_operator.i18n import runtime
+from local_operator.i18n.format import plural_category
+NS='cli.serve_readiness'
+LOCALES=['fr','es','ru','vi','hi','ur','zh-CN']
+BASE=ROOT/'i18n/audits/evidence'
+CAT=ROOT/'local_operator/i18n/catalogues'
+COMMON=BASE/'fr'/NS/'sd2r'
+CHANGES={'fr':['not_reporting'],'es':['not_reporting'],
+         'ru':['not_reporting','cgroup_unknown','identity_restart'],
+         'vi':['cgroup_unknown'],'hi':['cgroup_unknown'],
+         'ur':['cgroup_unknown'],'zh-CN':['cgroup_unknown']}
+FINDINGS={'fr':[('FR-SD1-01','MINOR')],'es':[('ES-SD1-01','MINOR')],
+          'ru':[('RU-SD1-01','MAJOR'),('RU-SD1-02','MAJOR'),('RU-SD1-03','MINOR')],
+          'vi':[('VI-SD1-01','MINOR')],'hi':[('HI-SD1-01','MAJOR')],
+          'ur':[('UR-SD1-M1','MAJOR')],'zh-CN':[('ZH-SD1-01','MINOR')]}
+REASONS={
+ 'FR-SD1-01':'signal de vie is idiomatic French for a heartbeat/liveness signal. It reports ceased signalling, not confirmed death; recorded and not answering remain explicit. No identity claim is introduced.',
+ 'ES-SD1-01':'señales de actividad naturally conveys heartbeat/liveness signals in Spanish, avoiding the literal loan. It preserves no response and cessation of reporting, not proof that the process died.',
+ 'RU-SD1-01':'сигналы активности больше не поступают naturally states that heartbeat signals no longer arrive. The non-answering record is not promoted to a dead or identity-proven process.',
+ 'RU-SD1-02':'не может распознать expresses inability of this check to recognize/classify the cgroup rather than determine its spatial position. It does not assert absent cgroup membership or known unsupervised execution.',
+ 'RU-SD1-03':'The respectful выполните instruction keeps exact status/restart commands and order. просмотреть записи and записать идентификационные данные процессов are natural in this technical context; данные is explicitly about processes, not user credentials. перед перезапуском команда проверяет keeps the command as checking actor and places per-daemon checks before restart; no unconditional restart or guaranteed identity recovery is promised.',
+ 'VI-SD1-01':'chưa phân loại được unambiguously means the check has not been able to classify the cgroup, replacing spatial vị trí. It retains uncertainty and developer-register cgroup without inventing a known supervisor or missing group.',
+ 'HI-SD1-01':'श्रेणी ... पता नहीं चल पा रही है states that the check cannot determine the category. It replaces spatial स्थान, remains idiomatic standard Hindi and does not infer absent supervision.',
+ 'UR-SD1-M1':'نوعیت ... متعین نہیں کر سکتی means this check cannot determine the nature/type. It removes spatial جگہ and preserves uncertainty. cgroup stays Latin in logical order; no manual bidi controls are introduced.',
+ 'ZH-SD1-01':'无法判定 ... cgroup的归属 describes uncertain cgroup ownership/classification, not inability to locate a path. 所在cgroup preserves membership context; it does not assert unsupervised execution or change the surrounding unknown verdict.'}
+COUNTS=[0,1,2,3,4,5,11,21,22,25,1.5,1000000,1500000]
+CATEGORIES={'fr':{'one','many','other'},'es':{'one','many','other'},
+            'ru':{'one','few','many','other'},'vi':{'other'},
+            'hi':{'one','other'},'ur':{'one','other'},'zh-CN':{'other'}}
+BIDI=set('\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+def rel(p): return str(p.relative_to(ROOT))
+def read(p): return json.loads(p.read_text(encoding='utf-8'))
+def put(p,text):
+ p.parent.mkdir(parents=True,exist_ok=True)
+ with p.open('x',encoding='utf-8') as f: f.write(text)
+def dump(p,obj): put(p,json.dumps(obj,ensure_ascii=False,indent=2)+'\n')
+NOW=datetime.datetime.now(datetime.timezone.utc).isoformat()
+HEAD=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+SOURCE=CAT/'en'/(NS+'.json'); CONTEXT=CAT/'en'/(NS+'.context.json')
+en=read(SOURCE); context=read(CONTEXT)
+assert len(en)==11 and set(en)==set(context)
+paths=[SOURCE,CONTEXT,ROOT/'i18n/glossary.md']
+paths += [CAT/l/(NS+'.json') for l in LOCALES]
+paths += [ROOT/'i18n/style-guides'/(l+'.md') for l in LOCALES]
+paths += [BASE/l/NS/'sd2'/n for l in LOCALES for n in ['record.json','report.md','rendered.txt','receipt.json']]
+initial={rel(p):sha(p) for p in paths}
+provenance={'agent':'Local Operator — second independent i18n auditor (sd2r)',
+ 'session':'85af124f4a9f','model':'openai/gpt-6.1-sol',
+ 'actual_model_source':'Host session declaration; same resumed independent auditor session as sd2.',
+ 'fallback':'none observed or reported',
+ 'independence':'Not translator acf0a84cd992 and not any first-pass auditor. No translation contribution or changes authored by this auditor. Fresh target semantics independently reviewed before reading sd1 finding IDs/suggestions; historical sd2 clean status does not override sd1 findings.',
+ 'native_speaker_claim':False,'round':'second-pass remediation'}
+logs=[f'$ python3 -B {rel(COMMON/"catalogue-check.py.txt")}',f'cwd={ROOT}',
+      f'python={sys.version}',f'date={NOW}',f'HEAD={HEAD}',
+      'Scope: exact nine-key remediation, direct semantic neighbors and inherited unchanged sd2 coverage; bounded catalogue checks only.']
+results=[]
+for locale in LOCALES:
+ directory=BASE/locale/NS/'sd2r'
+ prior_dir=BASE/locale/NS/'sd2'
+ prior=read(prior_dir/'record.json')
+ for name,path in [('en',SOURCE),('context',CONTEXT)]:
+  assert sha(path)==prior['input_hashes'][name],(locale,name,'changed source/context')
+ for p in [ROOT/'i18n/glossary.md',ROOT/'i18n/style-guides'/(locale+'.md')]:
+  assert sha(p)==prior['supporting_input_hashes'][rel(p)],(locale,'style/glossary changed')
+ # Existing sd2 receipts must remain byte-valid, never rewritten.
+ for name,digest in read(prior_dir/'receipt.json')['sha256'].items():
+  assert sha(prior_dir/name)==digest,(locale,'prior receipt',name)
+ target_path=CAT/locale/(NS+'.json'); target=read(target_path)
+ assert len(target)==11 and set(target)==set(en)
+ # Recover the ORIGINAL values of the nine nonplural changed keys from the
+ # actual sd2 runtime text, undo only those replacements in a copy in memory,
+ # and require byte SHA equality with the complete original target catalogue.
+ # This binds all remaining 68 values AND JSON formatting without trusting a
+ # translator claim, a current Git base or a narrow diff excerpt.
+ old_rendered=(prior_dir/'rendered.txt').read_text(encoding='utf-8')
+ reconstructed=dict(target); delta=[]
+ for short in CHANGES[locale]:
+  key=NS+'.'+short
+  marker=f'## {key} | count=1 | CLDR=n/a\n\n'
+  assert old_rendered.count(marker)==1
+  old=old_rendered.split(marker,1)[1].split('\n',1)[0]
+  if short=='identity_restart': old=old.replace('host-sd2','{device}')
+  assert old!=target[key],(locale,key,'no actual change')
+  reconstructed[key]=old
+  delta.append({'key':key,'before':old,'after':target[key]})
+ reconstructed_bytes=(json.dumps(reconstructed,ensure_ascii=False,indent=2)+'\n').encode('utf-8')
+ assert hashlib.sha256(reconstructed_bytes).hexdigest()==prior['input_hashes']['target'],(locale,'unexpected bytes beyond declared remediation')
+ assert target_path.read_bytes()==(json.dumps(target,ensure_ascii=False,indent=2)+'\n').encode('utf-8')
+ logs.append(f'PASS {locale}: reconstructed full prior target SHA256={prior["input_hashes"]["target"]}; changed keys={CHANGES[locale]}; remaining {11-len(delta)} values and formatting unchanged')
+ rendered=[f'# sd2r rendered catalogue text — {locale}',
+ 'Offline production ICU runtime with explicit locale; not service execution or a screenshot.','']
+ seen=set(); renders=0; pseudo=0
+ for key,text in target.items():
+  assert runtime.message_arguments(en[key])==runtime.message_arguments(text),(locale,key,'argument order/kind')
+  assert not any(c in BIDI or unicodedata.category(c)=='Cc' for c in text)
+  if locale=='vi': assert unicodedata.normalize('NFC',text)==text
+  plurals=runtime.plural_selectors(text)
+  for selectors in plurals: assert set(selectors)==CATEGORIES[locale]
+  literals=set(re.findall(r'`([^`]+)`',en[key]))
+  assert literals==set(re.findall(r'`([^`]+)`',text))
+  for node in runtime.parse_message(text):
+   if getattr(node,'kind',None)=='plural':
+    expected={n for n,k in runtime.message_arguments(en[key]) if k!='plural'}
+    for selector,body in node.parts:
+     assert {n.name for n in body if hasattr(n,'name')}==expected
+     branch_literals=set()
+     for n in body:
+      if hasattr(n,'value'): branch_literals.update(re.findall(r'`([^`]+)`',n.value))
+     assert branch_literals==literals
+  for count in (COUNTS if plurals else [1]):
+   params={'count':count,'device':'host-sd2r','pids':'4101, 4102','holders':'worker.service',
+           'builds':'v0.99.1+running','recorded':'v0.99.0+recorded','install':'v0.99.2+installed'}
+   # Direct neighbor composition uses CURRENT remediated reasons, not an
+   # unrelated old reason. This also checks the uncertainty wrapper at all counts.
+   params['reasons']='pid 4101: '+runtime.render_message(target[NS+'.not_reporting'],{},locale)+'; pid 4102: '+runtime.render_message(target[NS+'.cgroup_unknown'],{},locale)
+   result=runtime.render_message(text,params,locale)
+   for name,kind in runtime.message_arguments(text):
+    if kind=='simple': assert params[name] in result
+   assert set(re.findall(r'`([^`]+)`',result))==literals
+   category=plural_category(locale,count) if plurals else 'n/a'
+   if plurals: seen.add(category)
+   rendered += [f'## {key} | count={count} | CLDR={category}','',result,'']
+   renders+=1
+   opaque=dict(params,device='[!!host-α!!]',reasons='[!!reason-ß!!]')
+   sample=runtime.render_message(text,opaque,locale)
+   for name,kind in runtime.message_arguments(text):
+    if kind=='simple': assert opaque[name] in sample
+   pseudo+=1
+ assert seen==CATEGORIES[locale]
+ put(directory/'rendered.txt','\n'.join(rendered)+'\n')
+ dump(directory/'delta.json',delta)
+ dispositions=[]
+ for (finding,severity),change in zip(FINDINGS[locale],delta):
+  dispositions.append({'id':finding,'original_severity':severity,'key':change['key'],
+                       'disposition':'fixed','current_target_sha256':sha(target_path),
+                       'independent_assessment':REASONS[finding]})
+ logs.append(f'PASS {locale}: 11 keys; {renders} renders; {pseudo} pseudo/opaque renders; categories={sorted(seen)}; placeholders/literal commands in every branch; Unicode controls absent')
+ report=[f'# Independent second-pass remediation audit — {locale} / {NS} / sd2r','',
+         '**Current verdict: PASSED.** Changed values independently assessed on fresh target bytes; zero unresolved findings in this reassessment. This is not a claim that the earlier initial clean sd2 verdict overrode first-pass findings.','',
+         f'Auditor: Local Operator, session `85af124f4a9f`, actual model `openai/gpt-6.1-sol` (host declaration), no fallback observed/reported. Translator is `acf0a84cd992`; auditor authored/edited no translation. Not a native-speaker, terminal-shaping, design or release-eligibility approval.',
+         f'Audit time: {NOW}; HEAD `{HEAD}`; working-tree bytes are authoritative.','',
+         '## Fresh-byte inputs','',f'- English SHA256: `{sha(SOURCE)}`',f'- Context SHA256: `{sha(CONTEXT)}`',
+         f'- Current target SHA256: `{sha(target_path)}`',
+         f'- Prior target SHA256 (sd2): `{prior["input_hashes"]["target"]}`','',
+         'English, context, glossary and locale style guide match the prior second-pass input hashes. Only the declared changed values differ: restoring their old sd2 rendered values and serializing the complete catalogue reproduces the exact prior whole-file SHA256. This independently verifies unchanged values and formatting, not merely the count of changed keys.','',
+         '## Finding dispositions on current targets','']
+ for disposition in dispositions:
+  report += [f'### {disposition["id"]} — {disposition["original_severity"]} — FIXED',
+             f'Key: `{disposition["key"]}`',REASONS[disposition['id']],'']
+ report += ['## Direct semantic neighbors and retained coverage','',
+            'Rechecked the relationship of not_reporting, cgroup_unknown, unproven, recorded_gap, unknown and identity_restart. A non-answering recorded daemon is not asserted dead; unproven identity stays unproven. recorded_gap remains stored-build information, unlike the confirmed-live stale message. The unknown wrapper stays noncommittal about installed-build match and supervision. Guarded restart still checks each daemon before action; both literal commands and status-then-restart order survive.',
+            'The unchanged stale and other_unit wording continues to distinguish installed versus running build and an alternate supervisor versus no supervision. Unchanged key semantics retain the prior independent all-key sd2 coverage, rather than receiving a new unrelated full linguistic audit.','',
+            f'Changed keys ({len(delta)}): '+', '.join('`'+d['key']+'`' for d in delta)+'.',
+            'Unchanged keys carried forward: '+', '.join('`'+k+'`' for k in en if k not in {d['key'] for d in delta})+'.','',
+            '## Lightweight catalogue validation','',
+            f'Production ICU parser/runtime: 11 keys mechanically checked, {renders} ordinary renders, {pseudo} opaque/pseudo-parameter renders; counts {COUNTS}; every declared CLDR category exercised. Per-branch placeholders, argument order/kinds, literals and raw Unicode checked. `rendered.txt` includes the current changed values and composed uncertainty wrappers. Urdu stays logical order with no embedded bidi controls, and technical Latin bytes remain unchanged; no actual terminal bidi/shaping or screenshot proof is claimed. No arbitrary width cap is invented because the context declares none.','',
+            'Actual shared command output: `i18n/audits/evidence/fr/cli.serve_readiness/sd2r/audit.log`. Reproducer: `i18n/audits/evidence/fr/cli.serve_readiness/sd2r/catalogue-check.py.txt`. No tests/fixtures/rigs, installs, generated files, translation edits, commits, or ledger/history appends. First auditors/parent own any fresh ledger receipts.','',
+            'No remaining blocker, major, minor or nit is raised by this fresh-target reassessment. Approval is limited to the target SHA256 above and the unchanged source/context; further edits require a new binding.']
+ put(directory/'report.md','\n'.join(report)+'\n')
+ record={'locale':locale,'namespace':NS,'audit_date':NOW,'key_count':11,'auditor':provenance,
+         'source_audit_revision':HEAD,'input_hashes':{'en':sha(SOURCE),'context':sha(CONTEXT),'target':sha(target_path)},
+         'input_paths':{'en':rel(SOURCE),'context':rel(CONTEXT),'target':rel(target_path)},
+         'prior_second_pass_record':rel(prior_dir/'record.json'),'prior_target_sha256':prior['input_hashes']['target'],
+         'current_report_verdict':'passed','unresolved_blocker_major_count':0,'findings':[],
+         'finding_dispositions':dispositions,'changed_keys_reassessed':[d['key'] for d in delta],
+         'all_keys_covered':list(en),'coverage_basis':'Changed keys/direct neighbors freshly reassessed; exact-byte-proven unchanged values retain prior sd2 semantic coverage; all keys mechanically rendered.',
+         'unchanged_keys_carried_forward':[k for k in en if k not in {d['key'] for d in delta}],
+         'unchanged_bytes_proof':'Full prior target SHA256 reconstructed after undoing only declared changed values in memory; current serialization byte-equal.',
+         'current_bytes_match_audited_hashes':True,
+         'validation':{'ordinary_renders':renders,'pseudo_renders':pseudo,'cldr_categories':sorted(seen),'exit_code':0},
+         'artifacts':{'report':rel(directory/'report.md'),'delta':rel(directory/'delta.json'),'rendered':rel(directory/'rendered.txt'),
+                      'shared_log':rel(COMMON/'audit.log'),'shared_reproducer':rel(COMMON/'catalogue-check.py.txt')},
+         'ledger_history_appended':False,'translation_edits':False}
+ dump(directory/'record.json',record)
+ results.append((locale,directory,record))
+assert sum(len(v) for v in CHANGES.values())==9
+assert all(sha(ROOT/p)==digest for p,digest in initial.items()),'input/prior evidence changed during audit'
+logs += ['PASS exact delta: 9 changed values across 7 locales, 68 unchanged values proven; English/context unchanged.',
+         'PASS source/target/glossary/style and prior sd2 evidence hashes unchanged throughout this run.',
+         'EXIT_CODE=0']
+put(COMMON/'audit.log','\n'.join(logs)+'\n')
+for locale,directory,record in results:
+ companions=[directory/n for n in ['record.json','report.md','rendered.txt','delta.json']]
+ if locale=='fr': companions += [COMMON/'audit.log',COMMON/'catalogue-check.py.txt']
+ dump(directory/'receipt.json',{'locale':locale,'namespace':NS,'audit_id':'sd2r',
+                               'sha256':{rel(p):sha(p) for p in companions},
+                               'shared_audit_log_sha256':sha(COMMON/'audit.log')})
+for line in logs: print(line)

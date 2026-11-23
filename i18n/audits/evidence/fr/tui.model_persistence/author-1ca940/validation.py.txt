@@ -1,0 +1,46 @@
+import hashlib
+import json
+from pathlib import Path
+import local_operator.i18n.runtime as runtime
+from local_operator.i18n import catalogues
+from scripts.i18n.check import arguments_match
+
+root = Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+namespace = 'tui.model_persistence'
+assert Path(runtime.__file__).resolve().is_relative_to(root)
+assert Path(catalogues.__file__).resolve().is_relative_to(root)
+print(f'Runtime module: {runtime.__file__}')
+expected_hashes = {'en/tui.model_persistence.json': '4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff', 'en/tui.model_persistence.context.json': 'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc'}
+for path, expected in expected_hashes.items():
+    actual = hashlib.sha256((root/'local_operator/i18n/catalogues'/path).read_bytes()).hexdigest()
+    assert actual == expected
+    print(f'Frozen input SHA-256 {path}: {actual}')
+en = catalogues.load_catalogue('en', namespace)
+fr = catalogues.load_catalogue('fr', namespace)
+assert list(fr) == list(en) and len(fr) == 4
+print('JSON/catalogue/key count and source order: OK (4 keys)')
+for key, value in fr.items():
+    args = runtime.message_arguments(value)
+    assert arguments_match(runtime.message_arguments(en[key]), args)
+    assert all(kind == 'simple' for _, kind in args)
+    assert runtime.plural_selectors(value) == ()
+    assert runtime.plural_selectors(en[key]) == ()
+    for name, _ in args:
+        assert value.count('{'+name+'}') == 1
+    assert not any(c in value for c in '\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+    print(f'{key}: ICU args={args!r}; plural/select arms=0')
+for suffix, token in [('persist', '/model default'), ('settings', '/settings'), ('saved', '/model saved')]:
+    assert fr[f'{namespace}.{suffix}'].count(token) == 1
+    print(f'Protected literal: {token!r} byte-exact (ASCII)')
+routes = ' · '.join(runtime.render_message(fr[f'{namespace}.{suffix}'], {}, 'fr') for suffix in ('persist', 'saved', 'settings'))
+for label in ('openai/gpt-6.1-sol', 'provider/very-long-opaque-model-identity-2026-11-22:preview'):
+    rendered = runtime.render_message(fr[f'{namespace}.with_model'], {'label': label, 'routes': routes}, 'fr')
+    assert rendered == 'modèle\u202f: '+label+' — '+routes
+    print('Scoped ICU render: '+rendered)
+settings = runtime.render_message(fr[f'{namespace}.settings'], {}, 'fr')
+assert '/model' not in settings and '/settings' in settings
+print('Settings-only clause: '+settings)
+print('No declared maxCells/maxChars; live NoticeBlock wrapping at 80/100/120 and UI integration are owner-owned, NOT validated here.')
+target = root/'local_operator/i18n/catalogues/fr/tui.model_persistence.json'
+print('Target SHA-256: '+hashlib.sha256(target.read_bytes()).hexdigest())
+print('Scoped mechanical validation: OK. Translation status: translated; independent audits NOT performed.')

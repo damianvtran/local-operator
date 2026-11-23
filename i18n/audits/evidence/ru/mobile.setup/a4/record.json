@@ -1,0 +1,84 @@
+{
+ "schema": 1,
+ "audit_id": "a4",
+ "audit_kind": "independent_translation_audit",
+ "locale": "ru",
+ "namespace": "mobile.setup",
+ "source_sha256": "d99fe54d374c3e0548c1c1f0775b99039a85c8b3085c097a443d12872e36429b",
+ "target_sha256": "0d72276bf9e268e650e9a24dd1e8c7c1c7e2deceeca84a82f87d9bf0d01768a8",
+ "audit_date": "2026-11-14",
+ "key_count": 108,
+ "keys_audited": 3,
+ "new_keys": [
+  "mobile.setup.operation_failed_tui",
+  "mobile.setup.disabled_resume",
+  "mobile.setup.billing_lapsed_resume"
+ ],
+ "changed_keys": [],
+ "removed_keys": [
+  "mobile.setup.mobile_bundle_tui"
+ ],
+ "source_audit_revision": "139bca9037fda9e936e77dd9f145c99ce1188315",
+ "working_tree_uncommitted": false,
+ "scope": "983511c54..139bca903 (git diff -- local_operator/i18n/); unchanged keys passed in earlier rounds (a3/a3r2), not re-audited",
+ "pr": "#3958 (branch fix/tunnel-remedy-no-commands)",
+ "translator": {
+  "agent": "coder subagent of host Local Operator session 25fe8dfbf610 (values committed in 139bca903 on fix/tunnel-remedy-no-commands; English source by the same coder)",
+  "model": null,
+  "date": "2026-11-14",
+  "model_note": "not disclosed to the auditor; recorded null rather than invented"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev team), independent Local Operator session b3a764eb5573; not the translator/coder (25fe8dfbf610); edited no catalogue value",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-14",
+  "result": "passed",
+  "model_note": "served model per this session's system prompt (`Model: anthropic/claude-opus-5-5`); no provider fallback observed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.json",
+   "sha256": "d99fe54d374c3e0548c1c1f0775b99039a85c8b3085c097a443d12872e36429b"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+   "sha256": "7b0fd4b65c470b8d51847ea47ed6b23a06ed9ebe234d781ca975145d81f16634"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/ru/mobile.setup.json",
+   "sha256": "0d72276bf9e268e650e9a24dd1e8c7c1c7e2deceeca84a82f87d9bf0d01768a8"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/ru.md",
+   "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+  }
+ },
+ "findings": {
+  "blocker": 0,
+  "major": 0,
+  "minor_or_nit": 1,
+  "items": [
+   {
+    "id": "RU4-m1",
+    "severity": "minor",
+    "key": "mobile.setup.operation_failed_tui",
+    "current": "… Radient недоступен или нужно заново войти в аккаунт.",
+    "proposed": "… Radient недоступен или нужно войти заново.",
+    "reason": "'аккаунт' is the only use in ru mobile.setup, which renders account as 'учётная запись' throughout (login_plain, owner_missing_plain); the English names the sign-in, not the account, so dropping the noun removes the drift."
+   }
+  ]
+ },
+ "artifacts": {
+  "report.md": "17330d88b0b2fdc64f1f807470aadeb29c1bd9e2a3c0a6bc875b2169bcdbb170",
+  "audit.log": "dd167f120a4b28536b9b74a3a0ea30037e8c54dcd5fd5d459362b7f13071257d"
+ },
+ "reproduction_script": {
+  "path": "~/.local-operator/sessions/b3a764eb5573/scratchpad/i18n-audit-3958-a4/mech.py",
+  "sha256": "4b31cf9d311f79c4c237a713b92b2c026fe81d2239cfa73684cf4936a5b09b15",
+  "note": "session scratch, outside the repo; its stdout is captured in audit.log"
+ }
+}

@@ -1,0 +1,12 @@
+{
+  "wire.phone_access.title": "Acceso telefónico",
+  "wire.phone_access.description": "Cómo mantiene este equipo en funcionamiento su túnel de Radient para la aplicación del teléfono. Los cambios se aplican en el próximo inicio de sesión.",
+  "wire.phone_access.auto_setup.label": "Reconectar el acceso telefónico tras iniciar sesión",
+  "wire.phone_access.auto_setup.help": "Cuando inicias sesión en Radient en un equipo que ya tiene acceso telefónico, su túnel se reconecta o se repara en segundo plano. Nunca activa la facturación ni gasta crédito; en su lugar, se te muestra cualquier precio o la falta de crédito.",
+  "wire.phone_access.away_after.label": "Enviar al teléfono cuando esté lejos de mi ordenador durante",
+  "wire.phone_access.away_after.help": "Cuánto tiempo puede pasar este ordenador sin actividad del teclado o del ratón antes de que una tarea terminada que te mostraría aquí se envíe a tu teléfono. Bloquear la pantalla cuenta como ausencia de inmediato. Requiere la aplicación de escritorio.",
+  "wire.phone_access.away_after.choice.1m.label": "1 minuto",
+  "wire.phone_access.away_after.choice.2m.label": "2 minutos",
+  "wire.phone_access.away_after.choice.5m.label": "5 minutos",
+  "wire.phone_access.away_after.choice.10m.label": "10 minutos"
+}

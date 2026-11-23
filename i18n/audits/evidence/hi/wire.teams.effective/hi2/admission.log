@@ -1,0 +1,5 @@
+COMMAND: .venv/bin/python scripts/i18n/ledger.py history-sha --locale hi --namespace wire.teams.effective
+Expected effective history: 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+COMMAND: .venv/bin/python scripts/i18n/ledger.py append --receipt <this bundle>/receipt.json --expected-history-sha <above> --dry-run
+i18n/audit-history/hi/wire.teams.effective.json
+EXIT: 0

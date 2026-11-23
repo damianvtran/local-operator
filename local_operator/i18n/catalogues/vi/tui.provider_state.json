@@ -1,0 +1,7 @@
+{
+  "tui.provider_state.logged_in": "đã đăng nhập",
+  "tui.provider_state.env_key": "khóa từ biến môi trường",
+  "tui.provider_state.needs_login": "cần đăng nhập",
+  "tui.provider_state.local_ready": "máy chủ đã cấu hình",
+  "tui.provider_state.local_unconfigured": "cấu hình máy chủ"
+}

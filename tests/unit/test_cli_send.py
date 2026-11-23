@@ -473,10 +473,11 @@ def test_a_non_utf8_pipe_is_a_clean_error_not_a_traceback(monkeypatch) -> None:
         patch("local_operator.cli._peer_red") as red,
     ):
         rc = send_command(args)
-    # The pre-existing error survives verbatim; the decode never surfaces.
+    # The pre-existing error survives (now extended with the device-local
+    # pid hint, see the remote-pid tests below); the decode never surfaces.
     assert rc == 1
     send.assert_not_called()
-    assert red.call_args[0][0] == "no session found with pid 777777"
+    assert red.call_args[0][0].startswith("no session found with pid 777777 — ")
 
 
 def test_a_non_utf8_pipe_is_delivered_as_replacement_characters(monkeypatch) -> None:
@@ -1209,3 +1210,108 @@ def test_a_role_word_target_is_refused_with_exit_1_and_delivers_nothing() -> Non
     assert "`lop sessions` lists the sessions whose names contain 'manager'" in message
     # NOT the no-match form — that wording reopens the stored fallback.
     assert "no live session matches" not in message
+
+
+# ---------------------------------------------------------------------------
+# a REMOTE pid — `lop send --pid N` for a pid `lop sessions` listed elsewhere
+# ---------------------------------------------------------------------------
+#
+# Same rule as the in-session `send` tool (``peer_send.remote_pid_decision``),
+# in this command's grammar. `lop send` has no cross-device route of its own,
+# so the one-live-match case names the mesh command instead of delivering.
+
+
+def _remote_pid_rows(monkeypatch, rows) -> list[int]:
+    """Replace the ONE fresh catalogue read; returns the pids it was asked for."""
+    asked: list[int] = []
+
+    def fake(pid, root=None, *, catalog=None):  # noqa: ANN001, ANN202
+        asked.append(pid)
+        return list(rows)
+
+    monkeypatch.setattr("local_operator.session.peer_rows.peer_pid_rows", fake)
+    # A terminal, so the body comes from argv and stdin is never read.
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    return asked
+
+
+def test_cli_remote_pid_with_one_live_row_names_the_session_and_device(monkeypatch) -> None:
+    """Base-red: base printed only "no session found with pid 89338"."""
+    from local_operator.session.peer_rows import PeerPidRow
+
+    asked = _remote_pid_rows(
+        monkeypatch, [PeerPidRow("79bddc262663", "d_mac", "damians-MacBook-Pro", True)]
+    )
+    args = _parse_send(["--pid", "89338", "hi"])
+    with (
+        patch("local_operator.mobile.peer_client.send_peer_message") as send,
+        patch("local_operator.cli._peer_red") as red,
+    ):
+        rc = send_command(args)
+    assert rc == 1
+    send.assert_not_called()
+    assert asked == [89338]
+    assert red.call_args[0][0] == (
+        "pid 89338 is session 79bddc262663 on damians-MacBook-Pro; `lop send` does not "
+        "cross devices — deliver by session id with `lop network sessions --peer d_mac "
+        "--send 79bddc262663 --mailbox -- '<message>'`"
+    )
+
+
+def test_cli_remote_pid_on_two_devices_lists_both(monkeypatch) -> None:
+    from local_operator.session.peer_rows import PeerPidRow
+
+    _remote_pid_rows(
+        monkeypatch,
+        [
+            PeerPidRow("79bddc262663", "d_mac", "damians-MacBook-Pro", True),
+            PeerPidRow("aaaabbbbcccc", "d_node2", "node2", True),
+        ],
+    )
+    with patch("local_operator.cli._peer_red") as red:
+        rc = send_command(_parse_send(["--pid", "89338", "hi"]))
+    assert rc == 1
+    text = red.call_args[0][0]
+    assert "2 sessions on other devices report it" in text
+    assert "--peer d_mac --send 79bddc262663" in text
+    assert "--peer d_node2 --send aaaabbbbcccc" in text
+
+
+def test_cli_stale_remote_pid_row_is_refused_naming_the_session(monkeypatch) -> None:
+    from local_operator.session.peer_rows import PeerPidRow
+
+    _remote_pid_rows(
+        monkeypatch,
+        [
+            PeerPidRow(
+                "79bddc262663",
+                "d_mac",
+                "damians-MacBook-Pro",
+                False,
+                "its device did not answer this read",
+            )
+        ],
+    )
+    with patch("local_operator.cli._peer_red") as red:
+        rc = send_command(_parse_send(["--pid", "89338", "hi"]))
+    assert rc == 1
+    text = red.call_args[0][0]
+    assert text.startswith("no session found with pid 89338 on this device, and not routed:")
+    assert "session 79bddc262663 on damians-MacBook-Pro reports pid 89338" in text
+
+
+def test_cli_local_pid_refusal_never_reads_the_catalogue(monkeypatch) -> None:
+    """Local wins: a pid this device DOES hold (here refused as wedged) keeps
+    its own answer and the catalogue is never consulted."""
+    asked = _remote_pid_rows(monkeypatch, [])
+    with (
+        patch(
+            "local_operator.cli._resolve_peer_target",
+            return_value=(None, [], "target pid 4242 has not reported for 1m"),
+        ),
+        patch("local_operator.cli._peer_red") as red,
+    ):
+        rc = send_command(_parse_send(["--pid", "4242", "hi"]))
+    assert rc == 1
+    assert asked == []
+    assert red.call_args[0][0] == "target pid 4242 has not reported for 1m"

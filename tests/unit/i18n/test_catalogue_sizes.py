@@ -49,17 +49,28 @@ EAGER_MAX_BYTES = 32 * 1024
 #: next order of magnitude.
 DEFERRED_MAX_BYTES = 160 * 1024
 
-#: Total raw bytes of eager wire files per locale. Measured 2026-11-12 (26 eager
-#: namespaces each; sum of ``catalogue_bytes`` as below): hi 66,548 B, ru 55,691,
-#: ur 51,407, vi 43,919, fr 43,362, es 40,837, en 36,068, zh-CN 35,308. hi was
-#: already 65,187 B on main (349 B under the old 64 KiB cap) and the
-#: temporary-chat desktop error codes (+1,361 B in hi `wire.errors.desktop`)
-#: crossed it. Those codes are envelope identities the desktop resolves from
-#: the bundle, so deferral, the structural remedy, does not apply; 72 KiB is the
-#: next 8 KiB step above that max (73,728 B: 7,180 B of headroom in hi).
-#: The ceiling is per locale, not per bundle, so a new locale cannot arrive with
-#: a payload no one measured.
-EAGER_TOTAL_MAX_BYTES = 72 * 1024
+#: Total raw bytes of eager wire files per locale. The ceiling is per locale, not
+#: per bundle, so a new locale cannot arrive with a payload no one measured.
+#:
+#: Measured basis (2026-11-15): merged main c7f96b4ec has 26 eager namespaces
+#: in each of 8 shipped locales; hi is largest at 67,674 raw UTF-8 bytes.
+#: The 72 KiB ceiling leaves 6,054 B for ordinary copy edits while bringing the
+#: split-or-defer conversation back before structural growth accumulates.
+#: It stays a growth guard, not a packing target or a compressed-byte budget.
+#:
+#: Raised 72 -> 76 KiB (77,824 B) when wire.voice was translated: wire.voice
+#: (37 keys, ~7 KB in hi) is eager and cannot be deferred (envelope-identity
+#: ratchet); hi is the largest locale by UTF-8 bytes and measured 77,139 B.
+#:
+#: NOT raised for wire.errors.sdk_spec (PR #4349): its new key put hi at
+#: 77,924 B, 100 B over, and the namespace meets the deferral criterion (SDK
+#: refusals are finished strings rendered in the embedding process), so it was
+#: deferred instead, returning hi to 72,321 B.
+#:
+#: NOT raised for wire.team_integrations (PR #4297): its 22 consent-card keys
+#: put hi at 78,277 B, 453 B over; the card is rendered in-process into plain
+#: strings, so the namespace was deferred instead, returning hi to 74,472 B.
+EAGER_TOTAL_MAX_BYTES = 76 * 1024
 
 
 def _eager_namespaces(locale: str) -> tuple[str, ...]:
@@ -91,6 +102,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.settings.hub_defaults",
         "wire.settings.hub_org",
         "wire.settings.keymap",
+        "wire.settings.transcript_display",
         "wire.language_receipts",
         "wire.voice_availability",
         "wire.harness_import_detail",
@@ -109,6 +121,14 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.slash.library",
         "wire.slash.notifications_page",
         "wire.tool_rows.bridge",
+        "wire.sessions",
+        "wire.operator_setup",
+        "wire.github",
+        "wire.errors.bedrock",
+        "wire.login.bedrock",
+        "wire.providers.reauth",
+        "wire.errors.sdk_spec",
+        "wire.team_integrations",
     }, (
         "The deferred set is a reviewed policy, not a place to park a large "
         "namespace. Adding one requires updating this assertion, recording its "
@@ -190,8 +210,9 @@ def test_the_total_ceiling_still_catches_an_oversized_payload(
     # Three small files, none near the per-file ceiling: the accumulation class
     # the per-namespace ceiling cannot see (a single over-total file would also
     # trip the per-file ceiling, which would prove the wrong guard).
-    # The last file takes the remainder so the sum is ceiling - 1 whatever the
-    # ceiling's residue mod 3 (64 KiB happened to leave exactly 1; 72 KiB is 0).
+    # The last file takes the remainder, so the sum sits one byte under ANY
+    # ceiling (at 64 KiB, 3 * (ceiling // 3) happened to be ceiling - 1, because
+    # 65,536 is 1 mod 3; 80 KiB is not, so the remainder is computed).
     third = EAGER_TOTAL_MAX_BYTES // 3
     sizes = [third, third, EAGER_TOTAL_MAX_BYTES - 1 - 2 * third]
     paths = []

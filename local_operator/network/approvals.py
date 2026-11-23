@@ -94,12 +94,17 @@ KIND_LOCAL_AUTHORITY = "local_authority"
 #: from each other's runner or card text.
 KIND_PROFILE_SAVE = "profile_save"
 KIND_OPERATOR_DEVICE_PAIR = "operator_device_pair"
+#: Dormant owner-local file authority: neither credential consent nor enrollment.
+#: Its provider enforces authenticated incoming-key provenance and installed
+#: presence at every mutation boundary; no existing generic signer can mint it.
+KIND_FILE_DEVICE_APPROVAL = "file_device_approval"
 KINDS: tuple[str, ...] = (
     KIND_DEVICE_ONBOARD,
     KIND_LOCAL_AUTHORITY,
     KIND_PROFILE_SAVE,
     enrollment.KIND,
     KIND_OPERATOR_DEVICE_PAIR,
+    KIND_FILE_DEVICE_APPROVAL,
 )
 
 #: The envelope block each kind files, and therefore the block ``request_digest`` binds in
@@ -113,6 +118,7 @@ _SUBJECT_BLOCKS: dict[str, str] = {
     KIND_LOCAL_AUTHORITY: "machine",
     # A profile save names a LOCAL target (row id, name, scope), not a device.
     KIND_PROFILE_SAVE: "machine",
+    KIND_FILE_DEVICE_APPROVAL: "machine",
 }
 
 STATE_REQUESTED = "requested"
@@ -376,6 +382,10 @@ def _write_record(record: Mapping[str, Any], root: Path | None = None) -> Path:
     """
     from local_operator.network import store
 
+    if record.get("kind") == KIND_FILE_DEVICE_APPROVAL:
+        from local_operator.network.file_device_approval import require_write
+
+        require_write(record, root)
     selected = _namespace(str(record["approval_id"]))
     ensure_approvals_dir(root, enrollment_only=selected)
     payload = enrollment.encode(record) if selected else dict(record)
@@ -477,9 +487,146 @@ def presented(record: Mapping[str, Any], now: float | None = None) -> dict[str, 
         and expires_at > 0
         and view.get("state") not in TERMINAL_STATES
         and moment >= float(expires_at)
+        and not expiry_deferred(view, moment)
     ):
         view["state"] = STATE_EXPIRED
     return view
+
+
+def approval_snapshot(
+    root: Path | None,
+    *,
+    cached: tuple[Any, Any, float, str | None] | None = None,
+    now: float | None = None,
+) -> tuple[tuple[Any, ...], bool, float, str | None]:
+    """``(fingerprint, pending, next_expiry, pair_request)``: the cheap "anything to answer?".
+
+    Moved here from ``DesktopFeed._approval_snapshot`` (pairing design v2 §2.3) so the
+    desktop feed and the TUI share one fingerprint. ``fingerprint`` is the two approval
+    directories' ``(inode, mtime_ns)``: every record write is a staged rename into one
+    of them, so an unchanged fingerprint before ``next_expiry`` means nothing to
+    recompute and ``cached`` (the caller's previous answer) is returned as is.
+
+    ``pending``: any record ``requested``. ``pair_request``: the approval id of the one
+    LIVE ``pair_phone`` record (one live request is the filing rule), from ``requested``
+    through the run, so a pairing card stays up while its own signature is in flight.
+    Reads presentation-free state only (``list_records`` folds expiry, no secret).
+    """
+    directories = [approvals_dir(root), approvals_dir(root, enrollment_only=True)]
+    token: list[Any] = []
+    for directory in directories:
+        try:
+            stat = directory.stat()
+            token.append((stat.st_ino, stat.st_mtime_ns))
+        except FileNotFoundError:
+            token.append(None)
+    fingerprint = tuple(token)
+    moment = time.time() if now is None else now
+    if (
+        cached is not None
+        and fingerprint == cached[0]
+        and cached[1] is not None
+        and (cached[2] == 0 or moment < cached[2])
+    ):
+        return fingerprint, bool(cached[1]), float(cached[2]), cached[3]
+    records = list_records(root=root, now=moment)
+    requested = [record for record in records if record.get("state") == STATE_REQUESTED]
+    live_pairs = [
+        record
+        for record in records
+        if record.get("kind") == KIND_OPERATOR_DEVICE_PAIR
+        and record.get("state") not in TERMINAL_STATES
+    ]
+    expirations: list[float] = []
+    for record in [*requested, *live_pairs]:
+        expires_at = record.get("expires_at")
+        if isinstance(expires_at, (int, float)) and expires_at > moment:
+            expirations.append(float(expires_at))
+        elif expiry_deferred(record, moment):
+            # A DEFERRED card (past ``expires_at``, still live) dies with NO write, so
+            # the fingerprint cannot tell this cache it changed (round-1 R1). Its own
+            # deferral end is the recheck deadline; ``moment`` itself forces a
+            # recompute on the next tick for a run whose end is not a number.
+            expirations.append(deferral_end(record, moment))
+    pair_request = str(live_pairs[0].get("approval_id") or "") or None if live_pairs else None
+    return fingerprint, bool(requested), min(expirations, default=0.0), pair_request
+
+
+def deferral_end(record: Mapping[str, Any], moment: float) -> float:
+    """When a record :func:`expiry_deferred` exempts at ``moment`` stops being exempt.
+
+    Each bound is the one :func:`expiry_deferred` itself tests, so no new number:
+
+    * ``requested`` -- the op's ``decision_deadline`` (the decision plus the signer's
+      ``SIGN_TIMEOUT_SECONDS``);
+    * ``approved`` -- ``decided_at + STALE_RUN_AFTER_S``;
+    * ``connecting`` -- ``moment``: the exemption ends when the run's lease pid dies
+      (:func:`run_is_stale`), which has no clock instant. Returning ``moment`` makes
+      the snapshot's cache expire on its next read, i.e. it is not cached at all while
+      such a run is live -- bounded by the run, which is one admin prompt.
+
+    Callers only use the value when :func:`expiry_deferred` returned ``True``.
+    """
+    state = str(record.get("state") or "")
+    if state == STATE_REQUESTED:
+        from local_operator.network import approval_ops
+
+        operation = approval_ops.for_kind(str(record.get("kind") or ""))
+        deadline_of = getattr(operation, "decision_deadline", None)
+        deadline = deadline_of(record) if deadline_of is not None else None
+        return float(deadline) if isinstance(deadline, (int, float)) else moment
+    if state == STATE_APPROVED:
+        decided = record.get("decided_at")
+        if isinstance(decided, (int, float)):
+            return float(decided) + STALE_RUN_AFTER_S
+    return moment
+
+
+def expiry_deferred(record: Mapping[str, Any], moment: float) -> bool:
+    """Whether a live record past ``expires_at`` is NOT folded to ``expired`` yet.
+
+    Pairing design v2 §2.1 (U11): for an op registered with ``expiry_scope="decision"``
+    (only ``pair_phone``) the window bounds the person's DECISION, not a run that
+    decision started. ``expires_at`` itself is never mutated, so "an expiry is never
+    extended" stays literally true; what changes is which live states the fold may
+    take, and every exemption is bounded by a number the engine already had:
+
+    * ``requested`` -- only inside the op's own signing gap (``decision_pending``):
+      the code/confirm receipt was written inside the window and the signer's
+      presence timeout has not run out since. Without this a Touch ID prompt that
+      straddles the window would lose the card to the fold mid-gesture;
+    * ``approved`` -- decided inside the window and silent for no longer than
+      :data:`STALE_RUN_AFTER_S` (the run starts immediately after the decision, so
+      a record still ``approved`` past that bound has no runner);
+    * ``connecting`` -- decided inside the window and the run is not stale
+      (:func:`run_is_stale`: the lease's pid is alive). A stale run is NOT deferred;
+      the writer fold settles it ``failed`` rather than ``expired``
+      (:func:`_materialize_expiry`).
+
+    ``failed`` past the window still folds to ``expired`` ("Try again" is offered only
+    while the window is open), and every other op keeps the whole-window rule.
+    """
+    state = str(record.get("state") or "")
+    if state not in (STATE_REQUESTED, STATE_APPROVED, STATE_CONNECTING):
+        return False
+    from local_operator.network import approval_ops
+
+    kind = str(record.get("kind") or "")
+    if approval_ops.expiry_scope(kind) != approval_ops.EXPIRY_SCOPE_DECISION:
+        return False
+    expires_at = record.get("expires_at")
+    if not isinstance(expires_at, (int, float)):
+        return False
+    if state == STATE_REQUESTED:
+        operation = approval_ops.for_kind(kind)
+        pending = getattr(operation, "decision_pending", None)
+        return bool(pending is not None and pending(record, moment))
+    decided = record.get("decided_at")
+    if not isinstance(decided, (int, float)) or float(decided) >= float(expires_at):
+        return False
+    if state == STATE_APPROVED:
+        return moment - float(decided) <= STALE_RUN_AFTER_S
+    return not run_is_stale(record, now=moment)
 
 
 def _load_raw(approval_id: str, root: Path | None = None) -> dict[str, Any]:
@@ -564,7 +711,9 @@ def load_record(
 #: imported from disk by ``profile_proposals.import_legacy`` — so every mesh
 #: listing (desktop Mesh tray, event-feed badge, ``lop network approvals``, the
 #: phone pairing budget) hides them at the source rather than per reader.
-NON_MESH_KINDS: frozenset[str] = frozenset({KIND_PROFILE_SAVE})
+# The file provider has no reviewed UI yet. Keep its private dormant cards out
+# of generic Mesh listings/badges; registration must not expose a new interaction.
+NON_MESH_KINDS: frozenset[str] = frozenset({KIND_PROFILE_SAVE, KIND_FILE_DEVICE_APPROVAL})
 
 
 def list_records(
@@ -741,7 +890,18 @@ def _pair_filing_guard(record: Mapping[str, Any], root: Path | None) -> None:
 #: Per-kind validators run INSIDE ``create_request``, before the record is written.
 #: A kind absent here files with the envelope checks alone (its payload is validated by
 #: whichever op signs it); a kind present is refused here rather than at the signer.
-_FILING_GUARDS: dict[str, Any] = {KIND_OPERATOR_DEVICE_PAIR: _pair_filing_guard}
+def _file_filing_guard(record: Mapping[str, Any], root: Path | None) -> None:
+    # Keep the legacy approval store import-light. The new kind alone reaches
+    # its closed listener/native-account/presence provenance validator.
+    from local_operator.network.file_device_approval import require_filing_shape
+
+    require_filing_shape(record, root)
+
+
+_FILING_GUARDS: dict[str, Any] = {
+    KIND_OPERATOR_DEVICE_PAIR: _pair_filing_guard,
+    KIND_FILE_DEVICE_APPROVAL: _file_filing_guard,
+}
 
 
 def create_request(
@@ -937,8 +1097,13 @@ def signed_payload(
 
     if APPROVAL_DOMAIN != APPROVAL_DOMAIN_LITERAL:  # pragma: no cover — a drift guard
         raise MeshRefusal("approval_invalid", "the approval domain tag drifted between modules")
+    domain = enrollment.DECISION_DOMAIN if kind == enrollment.KIND else APPROVAL_DOMAIN
+    if kind == KIND_FILE_DEVICE_APPROVAL:
+        from local_operator.network.file_device_approval import DECISION_DOMAIN
+
+        domain = DECISION_DOMAIN
     return (
-        (enrollment.DECISION_DOMAIN if kind == enrollment.KIND else APPROVAL_DOMAIN)
+        domain
         + _lp(str(kind))
         + _lp(str(request_id))
         + _lp(str(request_digest))
@@ -999,6 +1164,10 @@ def sign_decision(
     # rather than the process default; those routes also refuse a backend whose root is not
     # the ambient one (``enrollment.bound_profile``), so the two cannot name different keys.
     root = config_root if config_root is not None else config_dir()
+    if kind == KIND_FILE_DEVICE_APPROVAL:
+        from local_operator.network.file_device_approval import require_signing
+
+        require_signing(request_id, request_digest, root)
     signer = None
     try:
         signer = load_signer(config_root=root, backend_name=resolve_backend_name(root))
@@ -1015,7 +1184,22 @@ def sign_decision(
             KEY_DID_NOT_SIGN if _anchor_installed() else NO_SIGNING_SURFACE_SENTENCE,
         )
     try:
-        return sign_message(signer, message, timeout=None).sig
+        signature = sign_message(signer, message, timeout=None).sig
+        if kind == KIND_FILE_DEVICE_APPROVAL:
+            # A successful gesture does not excuse a changed account/key/link or
+            # installed anchor while the prompt was open. No disk lock is held.
+            from local_operator.network.file_device_approval import (
+                _refuse,
+                prepare_current,
+                require_current,
+            )
+
+            current = _find_by_request_id(request_id, root)
+            if current is None or current.get("request_digest") != request_digest:
+                raise _refuse("file_approval_intent_changed")
+            prepare_current(current, root)
+            require_current(current, root)
+        return signature
     except KeyBackendError as exc:
         # The key exists and did not sign (a dismissed prompt). No exception text in the
         # sentence: it can carry paths and OS jargon (UX U4).
@@ -1132,8 +1316,18 @@ def _materialize_expiry(record: dict[str, Any], now: float, root: Path | None) -
         or expires_at <= 0
         or record.get("state") in TERMINAL_STATES
         or now < float(expires_at)
+        or expiry_deferred(record, now)
     ):
         return False
+    if _settle_stale_decided_run(record, now, root):
+        # The stale run settles ``failed``, NOT ``expired`` (§2.1): what ended it was a
+        # runner that died, and rollout watch counts exactly these (§11). This pass
+        # writes only that edge; ``failed`` past the window folds to ``expired`` for
+        # readers (``presented``) and at the next writer, so "Try again" is still only
+        # offered while the window is open. True, like an expiry: every caller that
+        # checks this result must stop exactly as it would on ``expired`` (``begin_run``
+        # in particular must not take ``failed -> connecting`` past the window).
+        return True
     _require_transition(record, STATE_EXPIRED)
     record["state"] = STATE_EXPIRED
     record["decided_at"] = float(now)
@@ -1145,6 +1339,53 @@ def _materialize_expiry(record: dict[str, Any], now: float, root: Path | None) -
         subject=str(record.get("approval_id")),
         root=root,
         detail={"kind": str(record.get("kind"))},
+    )
+    return True
+
+
+def _settle_stale_decided_run(record: dict[str, Any], now: float, root: Path | None) -> bool:
+    """A decision-scoped record whose run went stale past its window settles ``failed``.
+
+    Pairing design v2 §2.1: a stale run is a run that stopped (its pid is gone), not
+    a window that ran out, so its record says ``failed`` with a ``stale`` receipt
+    before the fold may expire it. Mutates ``record`` in place; the caller writes.
+    Only ``connecting`` records of a ``decision``-scope op whose decision landed
+    inside the window qualify; everything else is the ordinary fold.
+    """
+    if str(record.get("state")) != STATE_CONNECTING:
+        return False
+    from local_operator.network import approval_ops
+
+    kind = str(record.get("kind") or "")
+    if approval_ops.expiry_scope(kind) != approval_ops.EXPIRY_SCOPE_DECISION:
+        return False
+    decided = record.get("decided_at")
+    expires_at = record.get("expires_at")
+    if not isinstance(decided, (int, float)) or not isinstance(expires_at, (int, float)):
+        return False
+    if float(decided) >= float(expires_at) or not run_is_stale(record, now=now):
+        return False
+    _require_transition(record, STATE_FAILED)
+    run = _active_run(record) or {}
+    record["state"] = STATE_FAILED
+    record.setdefault("receipts", []).append(
+        {
+            "run_id": str(run.get("run_id") or ""),
+            "step": "stale",
+            "at": float(now),
+            "ok": False,
+            "detail": "the run stopped reporting before it finished; nothing else ran",
+            "digest": "",
+        }
+    )
+    record.setdefault("audit", []).append("onboard_run_stale")
+    _write_record(record, root)
+    _audit(
+        "onboard_run_stale",
+        actor="self",
+        subject=str(record.get("approval_id")),
+        root=root,
+        detail={"kind": kind},
     )
     return True
 
@@ -1165,7 +1406,17 @@ def _record_decision(
     displayed and validated BEFORE its prompt (no lock spans the OS prompt). ``changed``
     is that surface's own refusal for a mismatch; the enrollment card's is the default.
     """
-    with _record_lock(approval_id, root):
+    lock = _record_lock(approval_id, root)
+    if (
+        decision == "approve"
+        and _load_raw(approval_id, root).get("kind") == KIND_FILE_DEVICE_APPROVAL
+    ):
+        # The new kind alone performs local-control preflight BEFORE acquiring
+        # a mutation lock. Its inner guards do only local immutable/CAS reads.
+        from local_operator.network.file_device_approval import decision_lock
+
+        lock = decision_lock(approval_id, root)
+    with lock:
         record = _load_raw(approval_id, root)
         # RECOMPUTED, not only the stored field (agent review #3002 round 1, R1): an edit to
         # ``what`` inside the prompt window that leaves the ``request_digest`` field alone
@@ -1247,6 +1498,12 @@ def _record_decision(
                 from local_operator.operator import pair_op
 
                 pair_op.require_acked(record)
+            if str(record.get("kind")) == KIND_FILE_DEVICE_APPROVAL:
+                from local_operator.network.file_device_approval import require_current
+
+                # Local checks only under this record lock: canonical /me ran
+                # before the prompt and is checked again before state activation.
+                require_current(record, root)
 
         decided = float(decided_at if decided_at is not None else moment)
         signature: dict[str, Any] | None = None
@@ -2027,6 +2284,10 @@ def verify_for_run(approval_id: str, *, root: Path | None = None) -> dict[str, A
             "the decision signature no longer verifies against this machine's operator "
             "key; the approval will not be executed — file a new request",
         )
+    if record.get("kind") == KIND_FILE_DEVICE_APPROVAL:
+        from local_operator.network.file_device_approval import require_current
+
+        require_current(record, root)
     return presented(record)
 
 
@@ -2080,6 +2341,21 @@ def _sweep_namespace(
     materialized = pruned = 0
     tombstones = 0
     directory = approvals_dir(root, enrollment_only=enrollment_only)
+    # The operator-binding proofs in use (manager decision M1, 2026-11-15): the
+    # newest signed onboarding decision per network is what this device presents
+    # to its nodes as "the operator's device" (``network.operator_binding``).
+    # Pruning it would silently turn every node in that network back to "shown
+    # on this node only" until the next onboarding, so it is exempt from the
+    # 30-day terminal prune; older decisions still go. Computed BEFORE the loop:
+    # it reads records without their locks, and the loop holds one lock at a time.
+    binding_ids: frozenset[str] = frozenset()
+    if directory.is_dir():
+        try:
+            from local_operator.network.operator_binding import retained_approval_ids
+
+            binding_ids = retained_approval_ids(root)
+        except Exception:  # noqa: BLE001 — a failed read keeps nothing extra, prunes as before
+            binding_ids = frozenset()
     if directory.is_dir():
         for path in sorted(directory.glob("apn_*.json" if enrollment_only else "ap_*.json")):
             data = _read_json(path)
@@ -2114,6 +2390,7 @@ def _sweep_namespace(
                     )
                     if (
                         not permission_source
+                        and approval_id not in binding_ids
                         and record.get("state") in TERMINAL_STATES
                         and (moment - _terminal_at(record) >= TERMINAL_PRUNE_AGE_S)
                     ):

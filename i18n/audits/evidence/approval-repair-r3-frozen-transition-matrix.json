@@ -1,0 +1,77 @@
+{
+  "kind": "manager-frozen-transition-authority-matrix-not-native-audit",
+  "base": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+  "round": 3,
+  "reason": "Two completed linguistic cycles; only eight concrete major locale/key findings remain. No new scope.",
+  "frozen_majors": [
+    {
+      "locale": "es",
+      "id": "ES-B-R2-M1",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "source_receipt": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json"
+    },
+    {
+      "locale": "es",
+      "id": "ES-B-R2-M2",
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "source_receipt": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json"
+    },
+    {
+      "locale": "es",
+      "id": "ES-B-R2-M3",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "source_receipt": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json"
+    },
+    {
+      "locale": "es",
+      "id": "ES-B-R2-M4",
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "source_receipt": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json"
+    },
+    {
+      "locale": "es",
+      "id": "ES-B-R2-M5",
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "source_receipt": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json"
+    },
+    {
+      "locale": "es",
+      "id": "ES-B-R2-M6",
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "source_receipt": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json"
+    },
+    {
+      "locale": "es",
+      "id": "ES-B-R2-M7",
+      "key": "wire.settings.shell_environment_mode.help",
+      "source_receipt": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json"
+    },
+    {
+      "locale": "vi",
+      "id": "VI-B-R2-M1",
+      "key": "wire.settings.display_nerd_icons.help",
+      "source_receipt": "/Users/damian/.local-operator/sessions/465096fd021d/scratchpad/approval-repair-audit-vi-B-r2.json"
+    }
+  ],
+  "owners": {
+    "es": "fresh LLM translator; seven help values only",
+    "vi": "fresh LLM translator; one major plus three adjacent glossary minor values"
+  },
+  "expected_transition": {
+    "es": "Human help identifies actual localized Choice.label; any genuine API/config token remains explicitly marked code. Do not substitute invented activado/desactivado when current display labels are si/no. Derive actual accented labels from approved candidate input.",
+    "vi": "Ordinary terminal/emulator wording becomes native Vietnamese; actual endpoint and pip extra keep scoped glossary spellings with surrounding prose translated."
+  },
+  "allowed_vi_minor_keys": [
+    "wire.settings.providers_openrouter_enforce_distillable_text.help",
+    "wire.settings.providers_openrouter_zdr.help",
+    "wire.settings.web_fetch_render_backend.help"
+  ],
+  "exit_criteria": [
+    "ES exact seven major helpers resolve against actual displayed choice labels and all stable serialized identifiers stay unchanged",
+    "VI one ordinary-English terminal help major resolves plus three same-stream glossary neighbors; no other value changes",
+    "Fresh independent A/B follow-up only ES7 and VI4 plus direct regression neighbors; five clean locales retained solely by exact EN/context/target byte compatibility",
+    "Preserve all original failed audits and author/model qualifications; no zero-key pass, no native shaping/render/global shipping claims",
+    "No third-wave scope growth, no minor-only follow-up; any persistent unknown escalates with the frozen ledger rather than retries"
+  ],
+  "deferred": "All other clean-stream minor/width findings remain deferred, not reasons to rerun zh-CN/fr/ru/hi/ur."
+}

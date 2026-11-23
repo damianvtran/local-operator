@@ -153,6 +153,17 @@ VIEWED_MOVE_REFUSAL = (
     "try again, or queue the move to run at the next safe point."
 )
 
+#: The post-viewer residency window a claimed runtime keeps before it drains, in
+#: seconds. ``session/runtime/process.py`` owns the semantics (its comment above
+#: the re-export explains the window and why 0 disables it) and re-exports this
+#: name unchanged; it is DEFINED here, in the stdlib-only types module, because
+#: the mesh relay reads it too — ``network.mobility._arrival_active`` uses it as
+#: "a person was just using this conversation" — and the relay may not import
+#: ``session.runtime.process`` at all: that module owns sessions, and
+#: ``tests/unit/network/test_relay_e2e.py::test_the_relay_never_becomes_a_session_owner``
+#: pins that the relay never imports a session owner.
+DEFAULT_KEEP_ALIVE_SECONDS = 300
+
 #: Additive attach capability: this owner accepts ``event_mute``/``event_unmute``
 #: ops, which stop and resume DELTA-GRADE frames on an attach connection that
 #: already subscribed to the raw event relay (``"events": true``).
@@ -185,6 +196,16 @@ EVENT_MUTE_CAPABILITY = "event-mute-v1"
 #: its attach every ten seconds. Same argument, same shape as
 #: ``EVENT_MUTE_CAPABILITY`` above; presence of the string is the whole check.
 ATTACH_ACTIVITY_CAPABILITY = "attach-activity-v1"
+
+#: This session reads the Team Bridge inbox through the ROUTED-session lookup
+#: (``COALESCE(routed_session, designated_session)``), so the connector may hand
+#: it a message addressed to the session that asked rather than the designated
+#: one. Advertised because the connector and the session are separate processes
+#: that can run different builds during an upgrade: a session without this string
+#: would never find a row routed to it, and the connector must not route there.
+#: Unconditional like ``EVENT_MUTE_CAPABILITY``: the lookup is the session
+#: runtime's own code, not something a handle implements.
+TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY = "team-bridge-routed-inbox-v1"
 
 #: Additive attach capability: this owner accepts the ``operator_challenge`` op
 #: and will admit an authority-increasing frame that carries a valid
@@ -1554,6 +1575,11 @@ class SessionRecord:
     #: cost has to be findable — this field is what puts it in `lop sessions`
     #: and sorts it first in the picker.
     pending: str | None = None
+    #: ``pending`` is the ask QUEUE's claim (an open queued ask, nothing parked)
+    #: rather than a parked gate's. Peers paint both as "needs you" but park
+    #: only on a gate (``peer_rows.park_edges``; PR #3934 Q1/R1-3). Additive and
+    #: keyless on an older reader, like ``watching``.
+    pending_queued: bool = False
     #: This runtime HAS COMMITTED TO LEAVING and is finishing work in flight
     #: first: a short phrase (``LEAVING_ON_SIGNAL``) while that drain runs,
     #: ``""`` when it is going nowhere. Set by the signal drain

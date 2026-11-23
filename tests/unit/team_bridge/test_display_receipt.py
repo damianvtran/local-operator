@@ -27,7 +27,43 @@ def carriage():
 
 
 def owner():
-    return SimpleNamespace(account_id="account", tenant_id="tenant", endpoint_id="endpoint")
+    # A REAL OwnerSnapshot, not a SimpleNamespace stand-in: since PR #4348,
+    # ``_deliver_card`` asks the bridge Store for the card's hand-off binding
+    # BEFORE dispatch (``Store.card_handoff_bindings``), and the store keys
+    # that lookup on the full owner identity (``canonical_base_url`` +
+    # account/tenant/endpoint, live ``enrollment_generation``). A partial
+    # owner would no longer reach the display path at all. The ids still
+    # match ``bridge_receipt_source`` so the source-binding checks are real.
+    from local_operator.team_bridge.types import OwnerSnapshot
+
+    return OwnerSnapshot(
+        credential_id=1,
+        account_id="account",
+        tenant_id="tenant",
+        endpoint_id="endpoint",
+        canonical_base_url="https://api.radienthq.com/v1",
+        enrollment_generation=1,
+    )
+
+
+def enrolled_store(config_dir):
+    """A disposable Store under ``config_dir`` with ``owner()`` committed.
+
+    The card hand-off gate reads the binding only for the LIVE owner (a fenced
+    owner reads every id as unreserved without looking). Enrolling makes the
+    tests drive that real lookup: these cards have no body reservation row, so
+    the store answers UNRESERVED and the card takes its historical minted-id
+    path — the precondition the display assertions rely on, not a bypass.
+    """
+
+    from local_operator.team_bridge.store import OwnerReceipt, Store
+
+    store = Store(config_dir)
+    store.commit_enrollment(
+        owner(), OwnerReceipt("bridge_consent_v1", "ref-display"), cos_session_id=None
+    )
+    assert store.active_owner() == owner()
+    return store
 
 
 def test_display_receipt_is_metadata_only_and_source_bound():
@@ -135,6 +171,7 @@ async def test_real_metadata_handoff_live_and_replay_keep_the_same_display_witho
 
     monkeypatch.setattr(peer_send, "session_has_durable_history", lambda session_id: True)
     monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", primitive)
+    enrolled_store(tmp_path)
     metadata = ConversationCardMetadata(
         conversation_id="conversation",
         tenant_id="tenant",
@@ -225,6 +262,15 @@ async def test_unadmitted_coalesced_card_has_counts_and_ordered_sources_but_no_i
         return "delivered"
 
     monkeypatch.setattr(conversation, "deliver_wake", deliver)
+    from local_operator.team_bridge.store import CARD_HANDOFF_UNRESERVED
+
+    store = enrolled_store(tmp_path)
+    # The unadmitted recovery card never had a reservation row: the live
+    # owner's real binding lookup must say so, or this is not that card.
+    assert store.card_handoff_bindings(owner(), "conversation", ["older", "newer"]) == {
+        "older": CARD_HANDOFF_UNRESERVED,
+        "newer": CARD_HANDOFF_UNRESERVED,
+    }
     metadata = ConversationCardMetadata(
         conversation_id="conversation",
         tenant_id="tenant",
@@ -249,3 +295,110 @@ async def test_unadmitted_coalesced_card_has_counts_and_ordered_sources_but_no_i
     assert "admission" not in receipt["bridge_receipt"]
     assert "body" not in receipt["bridge_receipt"]
     assert "images" not in receipt["bridge_receipt"]
+
+
+def test_session_display_receipt_closed_roundtrip_and_projection():
+    from local_operator.team_bridge.display_receipt import projected_display_receipt
+
+    value = carriage()
+    value["bridge_receipt"]["sender"] = {
+        "kind": "agent",
+        "name": "Endpoint (Owner)",
+        "agent_session": {"display_label": "Task"},
+    }
+    checked = validated_display_receipt(value, owner=owner())
+    assert checked == value
+    assert projected_display_receipt(checked) == checked
+    value["bridge_receipt"]["sender"]["agent_session"]["display_label"] = "mutated"
+    assert checked["bridge_receipt"]["sender"]["agent_session"]["display_label"] == "Task"
+    checked["bridge_receipt"]["sender"]["agent_session"]["authority"] = "spoof"
+    assert validated_display_receipt(checked, owner=owner()) == {}
+
+
+@pytest.mark.asyncio
+async def test_hostile_session_display_producer_validator_projection(tmp_path, monkeypatch):
+    """The optional leaf stays safe without becoming an identity or route."""
+    import hashlib
+
+    from local_operator.mobile import peer_send
+    from local_operator.team_bridge.connector.conversation import (
+        ConversationCardMetadata,
+        _deliver_card,
+        _post_allow_session_display,
+    )
+    from local_operator.team_bridge.display_receipt import projected_display_receipt
+    from local_operator.team_bridge.types import ConversationFeedRef
+    from tests.unit.team_bridge.test_conversation_delivery import _enroll
+
+    store = _enroll(tmp_path, owner(), "synthetic-session")
+    body = "screened bytes unchanged"
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    bidi_controls = "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+    hostile = 'Task "quoted"\n\x00\x1b' + bidi_controls + "z" * 500
+    sent = []
+
+    class Client:
+        async def conversation_body(self, cid, mid, **kwargs):
+            assert kwargs["refresh_on_401"] is False
+            return {
+                "message_id": mid,
+                "body": body,
+                "body_hash": digest,
+                "sender_kind": "agent",
+                "agent_session": {"display_label": hostile, "authority": "spoof"},
+            }
+
+    label = await _post_allow_session_display(
+        Client(),
+        owner(),
+        SimpleNamespace(credential_id=1),
+        ConversationFeedRef(
+            conversation_id="conversation", message_id="message", conversation_seq=4, mention=False
+        ),
+        digest,
+        store=store,
+        settings=None,
+    )
+    assert label is not None and len(label) == 200
+    assert '"quoted"' in label
+    assert not any(c in bidi_controls or ord(c) < 32 for c in label)
+
+    async def primitive(_context, **kwargs):
+        sent.append(kwargs)
+        return SimpleNamespace(detail="delivered", state="delivered")
+
+    monkeypatch.setattr(peer_send, "session_has_durable_history", lambda _: True)
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", primitive)
+    metadata = ConversationCardMetadata(
+        conversation_id="conversation",
+        tenant_id="tenant",
+        conversation_label="Project notes",
+        sender_label="Endpoint (Owner)",
+        sender_kind="agent",
+        mention=False,
+        message_id="message",
+        conversation_seq=4,
+        conversation_kind="dm",
+        session_agent_display=label,
+    )
+    assert (
+        await _deliver_card(owner(), metadata, session_id="synthetic-session", config_dir=tmp_path)
+        == "delivered"
+    )
+    checked = validated_display_receipt(sent[0]["sender"], owner=owner())
+    projected = projected_display_receipt(checked)
+    assert projected == checked
+    assert projected["bridge_receipt"]["sender"] == {
+        "name": "Endpoint (Owner)",
+        "kind": "agent",
+        "agent_session": {"display_label": label},
+    }
+    assert projected["bridge_receipt_source"] == carriage()["bridge_receipt_source"]
+    assert "authority" not in str(projected)
+    assert body not in str(projected)
+    # A hostile leaf arriving directly at the validator also cannot leak bidi;
+    # discard only that leaf, preserving the admitted owner-bound receipt.
+    checked["bridge_receipt"]["sender"]["agent_session"]["display_label"] = "Task\u202eOwner\u202c"
+    fallback = projected_display_receipt(validated_display_receipt(checked, owner=owner()))
+    assert fallback["bridge_receipt"]["sender"] == {"name": "Endpoint (Owner)", "kind": "agent"}
+    assert fallback["bridge_receipt_source"] == projected["bridge_receipt_source"]

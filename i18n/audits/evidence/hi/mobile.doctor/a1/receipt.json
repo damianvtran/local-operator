@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "audit_id": "a1",
+  "locale": "hi",
+  "namespace": "mobile.doctor",
+  "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+  "target_sha256": "56377a70658d5f432a88b63722b823e44fa561aa8c4b8944f3cb8a868d2bab69",
+  "verdict": "passed",
+  "auditor": {
+    "agent": "independent i18n-auditor (C4 hi/ur lane, `task` subagent), session f9d4556f4a66; did not translate, draft or edit any value it judged",
+    "model": "anthropic/claude-opus-5-5 (served model; no provider fallback observed)"
+  },
+  "hashes": {
+    "record.json": "7443a5eeac7ca81e4d906eaa76f63822a9efb5a12a799c3cf1c2ffe631dd3aab",
+    "report.md": "165e8f7223355d16c9250bb8a7144980a3644b3505a2022b8e5149ffa0fe2526",
+    "audit.log": "9ff2e6efd057ab0f2a2a967b818f6ca8e5f34f53ab3ec51357c0263c08cb2536",
+    "dryrun.log": "edc9977062997415a4b4d09c8d34d1185582dad2cd16aae69d5c84541e6be2b1"
+  }
+}

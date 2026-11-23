@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "audit_id": "ls2",
+  "locale": "hi",
+  "namespace": "wire.session_status",
+  "record": "i18n/audits/evidence/hi/wire.session_status/ls2/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable receipt, copied byte-for-byte from its session scratchpad (~/.local-operator/sessions/debc6546fb46/scratchpad/live-status-reaudit-hi-round2.json)",
+  "record_sha256": "d761b102631c154ce9534c426972a432780e51134e8cd8bc65f7e0fdaa0dd4c6",
+  "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+  "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+  "target_sha256": "79ca2fc7df157f28027f510092c21157a5049479c2aa266851bff9339525c5a5",
+  "verdict": "passed",
+  "commit_audited": "514d51243ce3fd88ddd215aac473d9b8c0646806 (worktree head; locale bytes uncommitted at audit time)",
+  "auditor": {
+    "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+    "session": "debc6546fb46",
+    "model": "openai/gpt-6.1-sol"
+  },
+  "ledger_receipt": {
+    "locale": "hi",
+    "namespace": "wire.session_status",
+    "source_sha256": "deb0b332d1fb3a868a481f2cd0ac030d918fb6ece3cb5dfbc9c75a8b0055a71e",
+    "context_sha256": "632f70add6369a00a75ac86bc6ee5987e6bdf615bb3a5643bf9602d7ae4bbd20",
+    "target_sha256": "79ca2fc7df157f28027f510092c21157a5049479c2aa266851bff9339525c5a5",
+    "translator": {
+      "agent": "translator (lopdev task subagent, profile 'translator'), remediation pass",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-20",
+      "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+      "session": "debc6546fb46",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-20",
+      "result": "clean",
+      "findings": 0,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "finding_ids": [],
+      "fallback_used": false,
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own receipt (model field)"
+    },
+    "status": "passed",
+    "note": "Round 2 independent audit of the live session-status labels (wire.session_status). Auditor debc6546fb46 (openai/gpt-6.1-sol, no fallback) verdict CLEAN: 0 blocker, 0 major, 0 minor, 0 nit. Scope: round-2 remediation re-audit of the round-1 finding keys plus consistency neighbours, at worktree head 514d51243ce3; the remaining keys carry the round-1 full-namespace audit (ls1) at unchanged values. r1 HI-1/HI-2 (minor) resolved in these bytes; round-2 auditor verdict clean. Record: i18n/audits/evidence/hi/wire.session_status/ls2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/hi/wire.session_status/ls2/record.json",
+    "round": "ls2"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "cli.serve_readiness.unproven": "recorded, but process identity cannot be proven (no start-time stamp could be compared)",
+  "cli.serve_readiness.not_reporting": "recorded but not responding (heartbeat stopped)",
+  "cli.serve_readiness.not_this_daemon": "recorded, but PID reuse was detected",
+  "cli.serve_readiness.unknown_state": "recorded in an unknown state",
+  "cli.serve_readiness.install_unknown": "runs a build the install cannot be compared with",
+  "cli.serve_readiness.cgroup_unknown": "runs in a cgroup this check cannot place",
+  "cli.serve_readiness.recorded_gap": "the record says build {recorded}; {install} is installed",
+  "cli.serve_readiness.unknown": "{count, plural, one {the `lop serve` daemon on {device} — {reasons}, so whether it is current and supervised is not known} other {the `lop serve` daemons on {device} — {reasons}, so whether they are current and supervised is not known}}",
+  "cli.serve_readiness.stale": "{count, plural, one {the `lop serve` daemon on {device} ({pids}) runs {builds} but the install is {install}: the remote sessions it hosts run that other build} other {the `lop serve` daemons on {device} ({pids}) run {builds} but the install is {install}: the remote sessions they host run those other builds}}",
+  "cli.serve_readiness.other_unit": "{count, plural, one {the `lop serve` daemon on {device} is held by another service ({holders}), not a lop serve unit} other {the `lop serve` daemons on {device} are held by other services ({holders}), not a lop serve unit}}",
+  "cli.serve_readiness.identity_restart": "on {device}, run `lop services restart` to move the recorded daemon onto the installed build; restart checks each daemon before acting",
+  "cli.serve_readiness.pid_reason": "{count, plural, one {PID {pids} — {reason}} other {PIDs {pids} — {reason}}}",
+  "cli.serve_readiness.and_more": "{count, plural, one {and # more} other {and # more}}",
+  "cli.serve_readiness.identity_no_action": "{count, plural, one {the unproven record matches the installed build; no action is needed for this non-required check} other {the unproven records match the installed build; no action is needed for this non-required check}}",
+  "cli.serve_readiness.identity_restart_manual": "on {device}, restart `lop serve` by hand to move the recorded daemon onto the installed build; it cannot reload itself in place"
+}

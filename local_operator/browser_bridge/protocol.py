@@ -98,12 +98,23 @@ def proto_supported(
 #: 0.1.26 is the first tree with the pairing TAB (`pair/pair.html`): a normal
 #: extension page that survives focus loss, opened by the `show_pairing` event
 #: `lop browser pair` sends, and on first install.
-EXPECTED_EXTENSION_VERSION = "0.1.26"
+#: 0.1.27 is the first tree that pairs from Chrome managed policy
+#: (`storage.managed_schema`, `src/managed-pairing.ts`): the headless-node path,
+#: where `lop browser setup --node` delivers the code because nobody can type it.
+#: 0.1.28 is the first tree that re-checks the tab's CURRENT origin against the
+#: site grants before every page-touching command (`src/surface-origin.ts`), so
+#: a page that navigates itself off an approved site is not read unasked.
+EXPECTED_EXTENSION_VERSION = "0.1.28"
 
 #: The first extension version that opens its pairing tab on `show_pairing`.
 #: An older install ignores the event, so `lop browser pair` tells its user to
 #: click the toolbar icon instead of pointing at a tab that never opened.
 SHOW_PAIRING_MIN_EXTENSION_VERSION = "0.1.26"
+
+#: The first extension version that reads a pairing code from managed policy.
+#: `lop browser setup --node` refuses to pack an older tree: its CRX would
+#: install and then sit unpaired forever on a node where nobody can type a code.
+MANAGED_PAIRING_MIN_EXTENSION_VERSION = "0.1.27"
 
 #: The first extension version that serves each capability-gated method.
 #:
@@ -467,6 +478,23 @@ METHODS = (
     # Requester-bound cancellation removes only this session's exact-origin
     # pending entry; it cannot dismiss another session's consent prompt.
     "cancel_access",
+    # Headless-node site approval (``site_approval.py``): the operator's SIGNED
+    # answer to a node's site ask, sent by the session runtime after its own
+    # authority seam admitted the signed ``decide`` frame. The extension
+    # verifies the signature itself against the managed-policy anchor
+    # (``extension/src/signed-decision.ts``), so holding the bridge token is
+    # not enough to approve a site. Refusals are ``ok`` results with
+    # ``applied: false`` and a ``reason`` — never a new error code, which a
+    # released daemon would fail to decode.
+    "submit_signed_decision",
+    # The stored per-site decisions on a headless node, and their removal
+    # (``lop browser sites [--revoke ORIGIN]``; ``extension/src/
+    # node-site-decisions.ts``). A node's Chrome has no reachable Settings page,
+    # so this is the only way to see or take back what the operator approved —
+    # or to let an agent ask again about a site they denied. Removal only ever
+    # reduces what is allowed, so neither needs the operator's signature.
+    "list_access",
+    "revoke_access",
     # Push a session title that arrived AFTER the tab was opened, so the tab
     # group stops wearing the label the session had at open time. A
     # conversation names itself asynchronously a second or two into its first
@@ -643,6 +671,11 @@ COMMAND_TIMEOUTS = {
     # never needs the awaiting_origin deadline-extension machinery above.
     "await_access": 25.0,
     "cancel_access": 20.0,
+    # One managed-policy read, at most 16 digests and one ECDSA verify.
+    "submit_signed_decision": 20.0,
+    # One storage read (and for revoke, one write) on the shared lane.
+    "list_access": 20.0,
+    "revoke_access": 20.0,
     # retitle touches chrome.tabGroups and nothing else — no navigation, no
     # settle, no debugger. It rides the ordinary floor rather than a tighter
     # bound because the group queue it joins is shared and briefly serialises

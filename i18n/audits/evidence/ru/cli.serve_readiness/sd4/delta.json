@@ -1,0 +1,70 @@
+{
+  "prior_record": "i18n/audits/evidence/ru/cli.serve_readiness/sd2r/record.json",
+  "prior_target_sha256": "96e894546a1cfee95ea96aabcdefd029af9b3d7fd78a7523bd4143d8edf8d256",
+  "prior_catalogue_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+  "unchanged_keys": [
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.stale"
+  ],
+  "changed_new_keys": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.not_this_daemon",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ],
+  "before_after": {
+    "cli.serve_readiness.unproven": {
+      "before": "зарегистрирован, но идентичность его процесса не может быть подтверждена (не удалось сравнить отметку времени запуска)",
+      "after": "есть запись, но идентичность процесса нельзя подтвердить (не удалось сравнить отметку времени запуска)"
+    },
+    "cli.serve_readiness.not_reporting": {
+      "before": "зарегистрирован, но не отвечает (сигналы активности больше не поступают)",
+      "after": "есть запись, но ответа нет (сигналы активности больше не поступают)"
+    },
+    "cli.serve_readiness.not_this_daemon": {
+      "before": "зарегистрирован, но этот PID теперь принадлежит другому процессу",
+      "after": "есть запись, но этот PID теперь принадлежит другому процессу"
+    },
+    "cli.serve_readiness.unknown_state": {
+      "before": "зарегистрирован в неизвестном состоянии",
+      "after": "запись с неизвестным состоянием"
+    },
+    "cli.serve_readiness.recorded_gap": {
+      "before": "сборка в записи {recorded}, установленная сборка {install} (идентичность процесса не подтверждена)",
+      "after": "в записи указана сборка {recorded}; установлена сборка {install}"
+    },
+    "cli.serve_readiness.unknown": {
+      "before": "{count, plural, one {демон `lop serve` на {device}: {reasons}, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением} few {демоны `lop serve` на {device}: {reasons}, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением} many {демоны `lop serve` на {device}: {reasons}, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением} other {демоны `lop serve` на {device}: {reasons}, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением}}",
+      "after": "{count, plural, one {демон `lop serve` на {device} — {reasons}, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением} few {демоны `lop serve` на {device} — {reasons}, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением} many {демоны `lop serve` на {device} — {reasons}, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением} other {демоны `lop serve` на {device} — {reasons}, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением}}"
+    },
+    "cli.serve_readiness.identity_restart": {
+      "before": "на {device} выполните `lop services status`, чтобы просмотреть записи, затем `lop services restart`, чтобы записать идентификационные данные процессов; перед перезапуском команда проверяет каждый демон",
+      "after": "на {device} выполните `lop services restart`, чтобы перевести демон из записи на установленную сборку; перед действием команда проверяет каждый демон"
+    },
+    "cli.serve_readiness.pid_reason": {
+      "before": null,
+      "after": "{count, plural, one {идентификатор процесса {pids} — {reason}} few {идентификаторы процессов {pids} — {reason}} many {идентификаторы процессов {pids} — {reason}} other {идентификаторы процессов {pids} — {reason}}}"
+    },
+    "cli.serve_readiness.and_more": {
+      "before": null,
+      "after": "{count, plural, one {и ещё #} few {и ещё #} many {и ещё #} other {и ещё #}}"
+    },
+    "cli.serve_readiness.identity_no_action": {
+      "before": null,
+      "after": "{count, plural, one {запись с неподтверждённой идентичностью процесса соответствует установленной сборке; для этой необязательной проверки никаких действий не требуется} few {записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется} many {записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется} other {записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется}}"
+    },
+    "cli.serve_readiness.identity_restart_manual": {
+      "before": null,
+      "after": "на {device} перезапустите `lop serve` вручную, чтобы перевести демон из записи на установленную сборку; он не может перезагрузить себя в текущем процессе"
+    }
+  }
+}

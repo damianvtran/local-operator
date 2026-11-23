@@ -1,0 +1,12 @@
+{
+  "wire.phone_access.title": "فون رسائی",
+  "wire.phone_access.description": "یہ کمپیوٹر فون ایپ کے لیے اپنے Radient ٹنل کو کیسے فعال رکھتا ہے۔ تبدیلیاں اگلے سائن اِن پر لاگو ہوتی ہیں۔",
+  "wire.phone_access.auto_setup.label": "سائن اِن کے بعد فون رسائی دوبارہ منسلک کرنا",
+  "wire.phone_access.auto_setup.help": "جب آپ کسی ایسے کمپیوٹر پر Radient میں سائن اِن کرتے ہیں جس پر پہلے سے فون رسائی موجود ہے، تو اس کا ٹنل بیک گراؤنڈ میں دوبارہ منسلک یا ٹھیک کیا جاتا ہے۔ یہ کبھی بلنگ ایکٹیویٹ نہیں کرتا اور نہ کریڈٹ خرچ کرتا ہے؛ اس کے بجائے کوئی بھی قیمت یا کریڈٹ کی کمی آپ کو دکھائی جاتی ہے۔",
+  "wire.phone_access.away_after.label": "جب میں اتنی دیر کمپیوٹر سے دور رہوں تو فون پر بھیجیں",
+  "wire.phone_access.away_after.help": "یہ کمپیوٹر کتنی دیر کی‌بورڈ یا ماؤس کے استعمال کے بغیر رہ سکتا ہے، اس کے بعد مکمل ہونے والا کام جو آپ کو یہاں دکھایا جاتا، آپ کے فون پر بھیج دیا جائے گا۔ اسکرین لاک کرنا فوراً غیر موجودگی شمار ہوتا ہے۔ ڈیسک ٹاپ ایپ درکار ہے۔",
+  "wire.phone_access.away_after.choice.1m.label": "1 منٹ",
+  "wire.phone_access.away_after.choice.2m.label": "2 منٹ",
+  "wire.phone_access.away_after.choice.5m.label": "5 منٹ",
+  "wire.phone_access.away_after.choice.10m.label": "10 منٹ"
+}

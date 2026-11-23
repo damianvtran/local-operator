@@ -1,0 +1,106 @@
+[
+  {
+    "locale": "fr",
+    "namespace": "wire.settings",
+    "accepted_keys": 895
+  },
+  {
+    "locale": "fr",
+    "namespace": "tui.small",
+    "refusal": "CatalogueNotFound",
+    "reason": "'fr/tui.small escapes the catalogue root'"
+  },
+  {
+    "locale": "fr",
+    "namespace": "tui.settings_view.chrome",
+    "refusal": "CatalogueNotFound",
+    "reason": "'fr/tui.settings_view.chrome escapes the catalogue root'"
+  },
+  {
+    "technical": "shell_environment.mode",
+    "paint": "⁦shell_environment.mode⁩",
+    "raw_recovered": true,
+    "balanced": true
+  },
+  {
+    "technical": "providers.openrouter.enforce_distillable_text",
+    "paint": "⁦providers.openrouter.enforce_distillable_text⁩",
+    "raw_recovered": true,
+    "balanced": true
+  },
+  {
+    "technical": "PATH/HOME/SHELL/TERM/USER/LOGNAME",
+    "paint": "⁦PATH/HOME/SHELL/TERM/USER/LOGNAME⁩",
+    "raw_recovered": true,
+    "balanced": true
+  },
+  {
+    "technical": "/login <provider>",
+    "paint": "⁦/login <provider>⁩",
+    "raw_recovered": true,
+    "balanced": true
+  },
+  {
+    "actual_ur_key": "tool_approval_mode",
+    "field": "detail",
+    "isolate_open": 1,
+    "isolate_close": 1,
+    "balanced": true
+  },
+  {
+    "actual_ur_key": "tool_approval_mode",
+    "field": "summary",
+    "isolate_open": 0,
+    "isolate_close": 0,
+    "balanced": true
+  },
+  {
+    "actual_ur_key": "tool_approval_mode",
+    "field": "pane",
+    "isolate_open": 9,
+    "isolate_close": 9,
+    "balanced": true
+  },
+  {
+    "actual_ur_key": "shell_environment.mode",
+    "field": "detail",
+    "isolate_open": 0,
+    "isolate_close": 0,
+    "balanced": true
+  },
+  {
+    "actual_ur_key": "shell_environment.mode",
+    "field": "summary",
+    "isolate_open": 0,
+    "isolate_close": 0,
+    "balanced": true
+  },
+  {
+    "actual_ur_key": "shell_environment.mode",
+    "field": "pane",
+    "isolate_open": 7,
+    "isolate_close": 7,
+    "balanced": true
+  },
+  {
+    "actual_ur_key": "providers.openrouter.enforce_distillable_text",
+    "field": "detail",
+    "isolate_open": 1,
+    "isolate_close": 1,
+    "balanced": true
+  },
+  {
+    "actual_ur_key": "providers.openrouter.enforce_distillable_text",
+    "field": "summary",
+    "isolate_open": 0,
+    "isolate_close": 0,
+    "balanced": true
+  },
+  {
+    "actual_ur_key": "providers.openrouter.enforce_distillable_text",
+    "field": "pane",
+    "isolate_open": 9,
+    "isolate_close": 9,
+    "balanced": true
+  }
+]

@@ -1,0 +1,18 @@
+{
+  "shipped": [
+    "en",
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "production_executions": 51,
+  "changed_messages": 9,
+  "reason_compositions": 14,
+  "restored_smokes": 28,
+  "fallback_controls": "passed",
+  "native_shaping_certified": false
+}

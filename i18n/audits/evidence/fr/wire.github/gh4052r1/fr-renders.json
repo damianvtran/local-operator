@@ -1,0 +1,5042 @@
+[
+  {
+    "key": "wire.github.progress",
+    "count": 0,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 2,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 3,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 4,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 5,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 11,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 21,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 22,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 25,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1.5,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1000000,
+    "form": "other",
+    "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 0,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 2,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 3,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 4,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 5,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 11,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 21,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 22,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 25,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1.5,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1000000,
+    "form": "other",
+    "text": "exclusions : aucune"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 0,
+    "form": "other",
+    "text": "exclusions (0) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1,
+    "form": "other",
+    "text": "exclusions (1) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 2,
+    "form": "other",
+    "text": "exclusions (2) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 3,
+    "form": "other",
+    "text": "exclusions (3) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 4,
+    "form": "other",
+    "text": "exclusions (4) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 5,
+    "form": "other",
+    "text": "exclusions (5) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 11,
+    "form": "other",
+    "text": "exclusions (11) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 21,
+    "form": "other",
+    "text": "exclusions (21) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 22,
+    "form": "other",
+    "text": "exclusions (22) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 25,
+    "form": "other",
+    "text": "exclusions (25) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1.5,
+    "form": "other",
+    "text": "exclusions (1,5) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1000000,
+    "form": "other",
+    "text": "exclusions (1 000 000) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 0,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 2,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 3,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 4,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 5,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 11,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 21,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 22,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 25,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 0,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 2,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 3,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 4,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 5,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 11,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 21,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 22,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 25,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "Dépôts GitHub : aucun — REASON ; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 0,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 0 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 1 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 2,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 2 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 3,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 3 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 4,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 4 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 5,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 5 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 11,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 11 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 21,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 21 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 22,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 22 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 25,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 25 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1.5,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 1,5 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1000000,
+    "form": "other",
+    "text": "Dépôts GitHub accessibles par prêt : 1 000 000 — SOURCE"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 0,
+    "form": "other",
+    "text": ", moins 0 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1,
+    "form": "other",
+    "text": ", moins 1 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 2,
+    "form": "other",
+    "text": ", moins 2 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 3,
+    "form": "other",
+    "text": ", moins 3 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 4,
+    "form": "other",
+    "text": ", moins 4 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 5,
+    "form": "other",
+    "text": ", moins 5 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 11,
+    "form": "other",
+    "text": ", moins 11 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 21,
+    "form": "other",
+    "text": ", moins 21 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 22,
+    "form": "other",
+    "text": ", moins 22 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 25,
+    "form": "other",
+    "text": ", moins 25 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1.5,
+    "form": "other",
+    "text": ", moins 1,5 exclusions"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1000000,
+    "form": "other",
+    "text": ", moins 1 000 000 exclusions"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 0,
+    "form": "other",
+    "text": "  … et 0 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1,
+    "form": "other",
+    "text": "  … et 1 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 2,
+    "form": "other",
+    "text": "  … et 2 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 3,
+    "form": "other",
+    "text": "  … et 3 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 4,
+    "form": "other",
+    "text": "  … et 4 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 5,
+    "form": "other",
+    "text": "  … et 5 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 11,
+    "form": "other",
+    "text": "  … et 11 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 21,
+    "form": "other",
+    "text": "  … et 21 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 22,
+    "form": "other",
+    "text": "  … et 22 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 25,
+    "form": "other",
+    "text": "  … et 25 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1.5,
+    "form": "other",
+    "text": "  … et 1,5 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1000000,
+    "form": "other",
+    "text": "  … et 1 000 000 autres — tout voir : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 0,
+    "form": "other",
+    "text": "cela dépasse les 0 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1,
+    "form": "other",
+    "text": "cela dépasse les 1 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 2,
+    "form": "other",
+    "text": "cela dépasse les 2 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 3,
+    "form": "other",
+    "text": "cela dépasse les 3 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 4,
+    "form": "other",
+    "text": "cela dépasse les 4 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 5,
+    "form": "other",
+    "text": "cela dépasse les 5 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 11,
+    "form": "other",
+    "text": "cela dépasse les 11 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 21,
+    "form": "other",
+    "text": "cela dépasse les 21 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 22,
+    "form": "other",
+    "text": "cela dépasse les 22 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 25,
+    "form": "other",
+    "text": "cela dépasse les 25 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1.5,
+    "form": "other",
+    "text": "cela dépasse les 1,5 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1000000,
+    "form": "other",
+    "text": "cela dépasse les 1 000 000 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 0,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 2,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 3,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 4,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 5,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 11,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 21,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 22,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 25,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1.5,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1000000,
+    "form": "other",
+    "text": "exclure un dépôt : lop network credential github repos --use-default — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "la liste choisie à la main (paramètre des dépôts GitHub)"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 0,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 2,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 3,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 4,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 5,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 11,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 21,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 22,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 25,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1.5,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1000000,
+    "form": "other",
+    "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "la liste choisie à la main"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website était déjà exclu"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website n’était pas exclu"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 0,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 2,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 3,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 4,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 5,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 11,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 21,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 22,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 25,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 0,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 2,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 3,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 4,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 5,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 11,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 21,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 22,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 25,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 0,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (0) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (1) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 2,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (2) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 3,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (3) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 4,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (4) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 5,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (5) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 11,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (11) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 21,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (21) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 22,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (22) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 25,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (25) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (1,5) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (1 000 000) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 0,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (0) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (1) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 2,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (2) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 3,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (3) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 4,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (4) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 5,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (5) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 11,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (11) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 21,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (21) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 22,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (22) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 25,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (25) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (1,5) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (1 000 000) sont exclus"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 0,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 2,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 3,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 4,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 5,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 11,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 21,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 22,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 25,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 0,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 2,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 3,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 4,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 5,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 11,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 21,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 22,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 25,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "son compte GitHub ne peut envoyer de push à aucun dépôt"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 0,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 2,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 3,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 4,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 5,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 11,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 21,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 22,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 25,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1.5,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1000000,
+    "form": "other",
+    "text": "réessayez quand GitHub est joignable : lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 0,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 2,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 3,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 4,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 5,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 11,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 21,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 22,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 25,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1.5,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1000000,
+    "form": "other",
+    "text": "réincluez un dépôt avec lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 0,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 2,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 3,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 4,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 5,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 11,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 21,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 22,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 25,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1.5,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1000000,
+    "form": "other",
+    "text": "donnez à ce compte GitHub le droit de push sur un dépôt"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 0,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 2,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 3,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 4,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 5,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 11,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 21,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 22,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 25,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1.5,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1000000,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 0,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 2,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 3,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 4,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 5,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 11,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 21,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 22,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 25,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1.5,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1000000,
+    "form": "other",
+    "text": "à une date inconnue"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 0,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 2,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 3,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 4,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 5,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 11,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 21,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 22,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 25,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1.5,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1000000,
+    "form": "other",
+    "text": "à l’instant"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 0,
+    "form": "other",
+    "text": "il y a 0 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1,
+    "form": "other",
+    "text": "il y a 1 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 2,
+    "form": "other",
+    "text": "il y a 2 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 3,
+    "form": "other",
+    "text": "il y a 3 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 4,
+    "form": "other",
+    "text": "il y a 4 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 5,
+    "form": "other",
+    "text": "il y a 5 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 11,
+    "form": "other",
+    "text": "il y a 11 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 21,
+    "form": "other",
+    "text": "il y a 21 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 22,
+    "form": "other",
+    "text": "il y a 22 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 25,
+    "form": "other",
+    "text": "il y a 25 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1.5,
+    "form": "other",
+    "text": "il y a 1,5 min"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1000000,
+    "form": "other",
+    "text": "il y a 1 000 000 min"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 0,
+    "form": "other",
+    "text": "il y a 0 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1,
+    "form": "other",
+    "text": "il y a 1 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 2,
+    "form": "other",
+    "text": "il y a 2 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 3,
+    "form": "other",
+    "text": "il y a 3 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 4,
+    "form": "other",
+    "text": "il y a 4 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 5,
+    "form": "other",
+    "text": "il y a 5 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 11,
+    "form": "other",
+    "text": "il y a 11 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 21,
+    "form": "other",
+    "text": "il y a 21 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 22,
+    "form": "other",
+    "text": "il y a 22 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 25,
+    "form": "other",
+    "text": "il y a 25 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1.5,
+    "form": "other",
+    "text": "il y a 1,5 h"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1000000,
+    "form": "other",
+    "text": "il y a 1 000 000 h"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 0,
+    "form": "other",
+    "text": "il y a 0 jour"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1,
+    "form": "other",
+    "text": "il y a 1 jour"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 2,
+    "form": "other",
+    "text": "il y a 2 jours"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 3,
+    "form": "other",
+    "text": "il y a 3 jours"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 4,
+    "form": "other",
+    "text": "il y a 4 jours"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 5,
+    "form": "other",
+    "text": "il y a 5 jours"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 11,
+    "form": "other",
+    "text": "il y a 11 jours"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 21,
+    "form": "other",
+    "text": "il y a 21 jours"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 22,
+    "form": "other",
+    "text": "il y a 22 jours"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 25,
+    "form": "other",
+    "text": "il y a 25 jours"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1.5,
+    "form": "other",
+    "text": "il y a 1,5 jour"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1000000,
+    "form": "other",
+    "text": "il y a 1 000 000 jours"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 0,
+    "form": "other",
+    "text": "sous 0 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1,
+    "form": "other",
+    "text": "sous 1 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 2,
+    "form": "other",
+    "text": "sous 2 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 3,
+    "form": "other",
+    "text": "sous 3 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 4,
+    "form": "other",
+    "text": "sous 4 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 5,
+    "form": "other",
+    "text": "sous 5 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 11,
+    "form": "other",
+    "text": "sous 11 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 21,
+    "form": "other",
+    "text": "sous 21 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 22,
+    "form": "other",
+    "text": "sous 22 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 25,
+    "form": "other",
+    "text": "sous 25 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1.5,
+    "form": "other",
+    "text": "sous 1,5 min"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1000000,
+    "form": "other",
+    "text": "sous 1 000 000 min"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub a refusé ce compte"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub est injoignable"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub a renvoyé une erreur"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 0,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 2,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 3,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 4,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 5,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 11,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 21,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 22,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 25,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1.5,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1000000,
+    "form": "other",
+    "text": "échec de la liste des dépôts GitHub"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 0,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 2,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 3,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 4,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 5,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 11,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 21,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 22,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 25,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1.5,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1000000,
+    "form": "other",
+    "text": "la liste des dépôts n’a pas encore été récupérée"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 0,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 2,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 3,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 4,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 5,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 11,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 21,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 22,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 25,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1.5,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1000000,
+    "form": "other",
+    "text": "la liste enregistrée concerne un ancien compte GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 0,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 2,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 3,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 4,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 5,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 11,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 21,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 22,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 25,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1.5,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1000000,
+    "form": "other",
+    "text": "le compte associé à la liste GitHub enregistrée est inconnu"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 0,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 2,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 3,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 4,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 5,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 11,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 21,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 22,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 25,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1.5,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1000000,
+    "form": "other",
+    "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 0,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 2,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 3,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 4,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 5,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 11,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 21,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 22,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 25,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 0,
+    "form": "other",
+    "text": ", 0 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1,
+    "form": "other",
+    "text": ", 1 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 2,
+    "form": "other",
+    "text": ", 2 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 3,
+    "form": "other",
+    "text": ", 3 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 4,
+    "form": "other",
+    "text": ", 4 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 5,
+    "form": "other",
+    "text": ", 5 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 11,
+    "form": "other",
+    "text": ", 11 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 21,
+    "form": "other",
+    "text": ", 21 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 22,
+    "form": "other",
+    "text": ", 22 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 25,
+    "form": "other",
+    "text": ", 25 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1.5,
+    "form": "other",
+    "text": ", 1,5 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1000000,
+    "form": "other",
+    "text": ", 1 000 000 exclusions"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 0,
+    "form": "other",
+    "text": "0 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1,
+    "form": "other",
+    "text": "1 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 2,
+    "form": "other",
+    "text": "2 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 3,
+    "form": "other",
+    "text": "3 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 4,
+    "form": "other",
+    "text": "4 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 5,
+    "form": "other",
+    "text": "5 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 11,
+    "form": "other",
+    "text": "11 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 21,
+    "form": "other",
+    "text": "21 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 22,
+    "form": "other",
+    "text": "22 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 25,
+    "form": "other",
+    "text": "25 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1.5,
+    "form": "other",
+    "text": "1,5 autres"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1000000,
+    "form": "other",
+    "text": "1 000 000 autres"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "la liste choisie à la main sur cet appareil"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 0,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 2,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 3,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 4,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 5,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 11,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 21,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 22,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 25,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1.5,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1000000,
+    "form": "other",
+    "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 0,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 2,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 3,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 4,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 5,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 11,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 21,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 22,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 25,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1.5,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1000000,
+    "form": "other",
+    "text": " — liste complète : lop network credential github repos --use-default sur lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 0,
+    "form": "one",
+    "text": "octo-org/api (0 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (0 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1,
+    "form": "one",
+    "text": "octo-org/api (1 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (1 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 2,
+    "form": "one",
+    "text": "octo-org/api (2 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (2 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 3,
+    "form": "one",
+    "text": "octo-org/api (3 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (3 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 4,
+    "form": "one",
+    "text": "octo-org/api (4 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (4 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 5,
+    "form": "one",
+    "text": "octo-org/api (5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 11,
+    "form": "one",
+    "text": "octo-org/api (11 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (11 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 21,
+    "form": "one",
+    "text": "octo-org/api (21 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (21 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 22,
+    "form": "one",
+    "text": "octo-org/api (22 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (22 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 25,
+    "form": "one",
+    "text": "octo-org/api (25 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (25 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1.5,
+    "form": "one",
+    "text": "octo-org/api (1,5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (1,5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1000000,
+    "form": "one",
+    "text": "octo-org/api (1 000 000 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website et octo-org/api (1 000 000 — SOURCE)"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 0,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 2,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 3,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 4,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 5,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 11,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 21,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 22,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 25,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1.5,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1000000,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 0,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 2,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 3,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 4,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 5,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 11,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 21,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 22,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 25,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1.5,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1000000,
+    "form": "other",
+    "text": "lender-qa n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos --use-default sur lender-qa ; aucun accès n’a été prêté."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 0,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 2,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 3,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 4,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 5,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 11,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 21,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 22,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 25,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1.5,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1000000,
+    "form": "other",
+    "text": "lender-qa a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur lender-qa, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos --use-default sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête."
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 0,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 2,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 3,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 4,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 5,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 11,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 21,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 22,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 25,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1.5,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1000000,
+    "form": "other",
+    "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 0,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 2,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 3,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 4,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 5,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 11,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 21,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 22,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 25,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1.5,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1000000,
+    "form": "other",
+    "text": "repos n’accepte aucun dépôt"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 0,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 2,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 3,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 4,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 5,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 11,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 21,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 22,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 25,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1.5,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1000000,
+    "form": "other",
+    "text": "--use-default s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 0,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 2,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 3,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 4,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 5,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 11,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 21,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 22,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 25,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1.5,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1000000,
+    "form": "other",
+    "text": "--refresh s’applique uniquement à repos"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 0,
+    "form": "other",
+    "text": "0 dépôts ; un partage peut en contenir au plus 0"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1,
+    "form": "other",
+    "text": "1 dépôts ; un partage peut en contenir au plus 1"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 2,
+    "form": "other",
+    "text": "2 dépôts ; un partage peut en contenir au plus 2"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 3,
+    "form": "other",
+    "text": "3 dépôts ; un partage peut en contenir au plus 3"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 4,
+    "form": "other",
+    "text": "4 dépôts ; un partage peut en contenir au plus 4"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 5,
+    "form": "other",
+    "text": "5 dépôts ; un partage peut en contenir au plus 5"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 11,
+    "form": "other",
+    "text": "11 dépôts ; un partage peut en contenir au plus 11"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 21,
+    "form": "other",
+    "text": "21 dépôts ; un partage peut en contenir au plus 21"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 22,
+    "form": "other",
+    "text": "22 dépôts ; un partage peut en contenir au plus 22"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 25,
+    "form": "other",
+    "text": "25 dépôts ; un partage peut en contenir au plus 25"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1.5,
+    "form": "other",
+    "text": "1,5 dépôts ; un partage peut en contenir au plus 1,5"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1000000,
+    "form": "other",
+    "text": "1 000 000 dépôts ; un partage peut en contenir au plus 1 000 000"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 0,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 2,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 3,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 4,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 5,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 11,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 21,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 22,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 25,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1.5,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1000000,
+    "form": "other",
+    "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 0,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 2,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 3,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 4,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 5,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 11,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 21,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 22,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 25,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1.5,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1000000,
+    "form": "other",
+    "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+  }
+]

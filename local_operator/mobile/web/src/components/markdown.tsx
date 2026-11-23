@@ -12,15 +12,13 @@
  * Links are forced https? and open in a new tab: this is a remote-control
  * surface, and a javascript: URL in agent output must never be clickable.
  */
-import { useLayoutEffect, useRef, useState } from "react";
+import { Component, Fragment, memo, useLayoutEffect, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { isolateTechnicalRuns } from "../lib/bidi";
-
-let keySeq = 0;
-function key(): string {
-	return `md-${keySeq++}`;
-}
+import { diagramKey, shouldDrawDiagram } from "../lib/diagram-fence";
+import { DiagramBlock } from "./diagram-block";
+import { allowsReveal, revealText, settleReveals } from "../lib/stream-reveal";
 
 /* ------------------------------------------------------------------ */
 /* Inline                                                             */
@@ -34,21 +32,121 @@ function key(): string {
 const INLINE_RE =
 	/(`[^`]+`)|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*\n]+)\*|_([^_\n]+)_/g;
 
-function renderInline(text: string): ReactNode[] {
+type ProseReveal = { node: HTMLSpanElement | null; settled: boolean; attach: (node: HTMLSpanElement | null) => void };
+type ProsePart = { start: number; reveal?: ProseReveal };
+
+function selects(node: Node): boolean {
+	const selection = node.ownerDocument?.getSelection();
+	if (!selection || selection.isCollapsed) return false;
+	for (let i = 0; i < selection.rangeCount; i++) {
+		if (selection.getRangeAt(i).intersectsNode(node)) return true;
+	}
+	return false;
+}
+
+/** Don't split a grapheme, a shaping word, or an FSI/PDI technical isolate.
+ * Deltas inside a word are visible immediately; the next safe word boundary
+ * starts the fade, never a wait-for-a-word buffer. */
+function proseBoundary(text: string, at: number): number | undefined {
+	if (/[\u2066-\u2069]/u.test(text)) return;
+	const suffix = text.slice(at);
+	if ((at === 0 || /[ \t]/.test(text[at - 1])) && /^[\p{L}\p{N}\p{P}\p{S}]/u.test(suffix)) return at;
+	const gap = /[ \t]+(?=[\p{L}\p{N}\p{P}\p{S}])/u.exec(suffix);
+	// Keep a leading separator on the new span so an ordinary word append
+	// does not even write to the existing prefix text node.
+	return gap ? at + gap.index : undefined;
+}
+
+const Prose = memo(function Prose({ text, from }: { text: string; from?: number }) {
+	const committed = useRef<{ text: string; parts: ProsePart[] } | null>(null);
+	const [, retire] = useReducer((version: number) => version + 1, 0);
+	const before = committed.current;
+	const append = before && text.startsWith(before.text);
+	const cut = (append || !before) && from !== undefined
+		? proseBoundary(text, Math.max(from, before?.text.length ?? 0)) : undefined;
+	const parts: ProsePart[] = [];
+	const selected: Node[] = [];
+	let compacting: Node | null = null;
+	const keep = (part: ProsePart, next: ProsePart | undefined) => {
+		const reveal = part.reveal;
+		if (reveal?.settled) {
+			const node = reveal.node;
+			if (node && selects(node)) {
+				selected.push(node);
+			} else {
+				// Retirement merges to the left. The following plain part loses
+				// its text node even if the range has already left this span.
+				// Only the next part of *this* prose run can be removed here;
+				// a wrapped neighbor decides whether to retire on its own.
+				const right = next && !next.reveal ? node?.nextSibling : null;
+				if (right?.nodeType === Node.TEXT_NODE && selects(right)) {
+					selected.push(right);
+				} else {
+					compacting ??= node?.parentNode ?? null;
+					part = { start: part.start };
+				}
+			}
+		}
+		// The rest is a steady plain-text run, not one element per frame.
+		// Keep wrappers only for live fades or to protect a range at the seam.
+		if (part.reveal || parts.at(-1)?.reveal || !parts.length) parts.push(part);
+	};
+	if (append) for (const [i, part] of before.parts.entries()) keep(part, before.parts[i + 1]);
+	if (!parts.length && (cut ?? text.length) > 0) parts.push({ start: 0 });
+	if (cut !== undefined) {
+		const reveal: ProseReveal = {
+			node: null, settled: false,
+			attach(node) {
+				reveal.node = node;
+				if (node) revealText(node, () => {
+					if (reveal.node !== node) return;
+					reveal.settled = true;
+					retire();
+				});
+			},
+		};
+		parts.push({ start: cut, reveal });
+	}
+	useLayoutEffect(() => { committed.current = { text, parts }; });
+	useLayoutEffect(() => {
+		const doc = selected[0]?.ownerDocument;
+		if (!doc) return;
+		// No polling and no listener for an unrelated selection/resting caret.
+		// Once the range leaves the affected node, retry the deferred merge.
+		const changed = () => { if (selected.some(node => !selects(node))) retire(); };
+		doc.addEventListener("selectionchange", changed);
+		return () => doc.removeEventListener("selectionchange", changed);
+	});
+	return <SelectionGuard scope={() => compacting}>
+		{parts.map(({ start, reveal }, i) => {
+			const piece = text.slice(start, parts[i + 1]?.start);
+			return reveal ? <span key={start} ref={reveal.attach}>{piece}</span> : <Fragment key={start}>{piece}</Fragment>;
+		})}
+	</SelectionGuard>;
+});
+
+function renderInline(text: string, from?: number): ReactNode[] {
 	const out: ReactNode[] = [];
 	let last = 0;
+	const prose = (start: number, end: number, isolate: boolean) => {
+		const raw = text.slice(start, end);
+		const value = isolate ? isolateTechnicalRuns(raw) : raw;
+		return <Prose key={`p${start}`} text={value}
+			from={value === raw && from !== undefined && from < end ? Math.max(0, from - start) : undefined} />;
+	};
 	for (const m of text.matchAll(INLINE_RE)) {
 		const idx = m.index ?? 0;
 		if (idx > last) {
 			/* Plain prose: paths and URLs get an isolate so an RTL paragraph cannot
 			   detach their leading "/" or trailing punctuation (QA Q-6). */
-			out.push(isolateTechnicalRuns(text.slice(last, idx)));
+			out.push(prose(last, idx, true));
 		}
 		const [full, code, linkText, href, bold1, bold2, strike, italic1, italic2] = m;
+		const ref = from !== undefined && idx >= from ? revealText : undefined;
 		if (code !== undefined) {
 			out.push(
 				<code
-					key={key()}
+					key={idx} ref={ref}
 					dir="ltr"
 					className="rounded-xs bg-sunken px-0.5 font-mono text-mono-sm"
 				>
@@ -60,7 +158,7 @@ function renderInline(text: string): ReactNode[] {
 			if (safe) {
 				out.push(
 					<a
-						key={key()}
+						key={idx} ref={ref}
 						href={href}
 						target="_blank"
 						rel="noopener noreferrer"
@@ -71,28 +169,28 @@ function renderInline(text: string): ReactNode[] {
 				);
 			} else {
 				/* Unsafe scheme: render the visible text, drop the target. */
-				out.push(<span key={key()}>{linkText}</span>);
+				out.push(<span key={idx} ref={ref}>{linkText}</span>);
 			}
 		} else if (bold1 !== undefined || bold2 !== undefined) {
 			out.push(
-				<strong key={key()} className="font-semibold">
+				<strong key={idx} ref={ref} className="font-semibold">
 					{renderInline(bold1 ?? bold2 ?? "")}
 				</strong>,
 			);
 		} else if (strike !== undefined) {
 			out.push(
-				<s key={key()} className="text-ink-muted">
+				<s key={idx} ref={ref} className="text-ink-muted">
 					{strike}
 				</s>,
 			);
 		} else if (italic1 !== undefined || italic2 !== undefined) {
-			out.push(<em key={key()}>{italic1 ?? italic2}</em>);
+			out.push(<em key={idx} ref={ref}>{italic1 ?? italic2}</em>);
 		} else {
 			out.push(full);
 		}
 		last = idx + full.length;
 	}
-	if (last < text.length) out.push(text.slice(last));
+	if (last < text.length) out.push(prose(last, text.length, false));
 	return out;
 }
 
@@ -104,7 +202,12 @@ interface Block {
 	kind: "code" | "heading" | "ul" | "ol" | "quote" | "hr" | "table" | "para";
 	level?: number;
 	lang?: string;
+	/** A fence reached its closing line; an open one is a reply still streaming in. */
+	closed?: boolean;
 	lines: string[];
+	/** Source positions, even where the renderer strips a heading/list marker. */
+	start: number;
+	lineStarts: number[];
 }
 
 /* A GFM table row: leading/trailing pipes, at least one inner pipe. */
@@ -134,12 +237,23 @@ function splitTableRow(line: string): string[] {
 	return cells;
 }
 
-function splitBlocks(text: string): Block[] {
+function splitBlocks(text: string, start = 0): Block[] {
 	const blocks: Block[] = [];
-	const lines = text.split("\n");
+	const lines = text.slice(start).split("\n");
+	let offset = start;
+	const offsets = lines.map((line) => {
+		const position = offset;
+		offset += line.length + 1;
+		return position;
+	});
 	let i = 0;
 	while (i < lines.length) {
+		const head = i;
 		const line = lines[i];
+		const push = (block: Omit<Block, "start" | "lineStarts">, first = head) => {
+			blocks.push({ ...block, start: offsets[head], lineStarts: block.lines.map((content, n) =>
+				offsets[first + n] + lines[first + n].length - content.length) });
+		};
 
 		const fence = line.match(/^```(\w*)\s*$/);
 		if (fence) {
@@ -149,14 +263,15 @@ function splitBlocks(text: string): Block[] {
 				buf.push(lines[i]);
 				i++;
 			}
+			const closed = i < lines.length;
 			i++; /* consume the closing fence (or EOF, which ends the block) */
-			blocks.push({ kind: "code", lang: fence[1] || undefined, lines: buf });
+			push({ kind: "code", lang: fence[1] || undefined, closed, lines: buf }, head + 1);
 			continue;
 		}
 
 		const heading = line.match(/^(#{1,4})\s+(.*)$/);
 		if (heading) {
-			blocks.push({
+			push({
 				kind: "heading",
 				level: heading[1].length,
 				lines: [heading[2]],
@@ -166,7 +281,7 @@ function splitBlocks(text: string): Block[] {
 		}
 
 		if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) {
-			blocks.push({ kind: "hr", lines: [] });
+			push({ kind: "hr", lines: [] });
 			i++;
 			continue;
 		}
@@ -177,7 +292,7 @@ function splitBlocks(text: string): Block[] {
 				buf.push(lines[i].replace(/^\s*[-*+]\s+/, ""));
 				i++;
 			}
-			blocks.push({ kind: "ul", lines: buf });
+			push({ kind: "ul", lines: buf });
 			continue;
 		}
 
@@ -187,7 +302,7 @@ function splitBlocks(text: string): Block[] {
 				buf.push(lines[i].replace(/^\s*\d+[.)]\s+/, ""));
 				i++;
 			}
-			blocks.push({ kind: "ol", lines: buf });
+			push({ kind: "ol", lines: buf });
 			continue;
 		}
 
@@ -197,7 +312,7 @@ function splitBlocks(text: string): Block[] {
 				buf.push(lines[i].replace(/^\s*>\s?/, ""));
 				i++;
 			}
-			blocks.push({ kind: "quote", lines: buf });
+			push({ kind: "quote", lines: buf });
 			continue;
 		}
 
@@ -215,7 +330,7 @@ function splitBlocks(text: string): Block[] {
 				buf.push(lines[i]);
 				i++;
 			}
-			blocks.push({ kind: "table", lines: buf });
+			push({ kind: "table", lines: buf });
 			continue;
 		}
 
@@ -242,7 +357,7 @@ function splitBlocks(text: string): Block[] {
 			i++;
 		}
 		if (buf.length > 0) {
-			blocks.push({ kind: "para", lines: buf });
+			push({ kind: "para", lines: buf });
 		} else {
 			i++; /* blank line */
 		}
@@ -465,7 +580,7 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 			>
 				{rows.map((row, rowIndex) => (
 					<div
-						key={`${signature}-${rowIndex}`}
+						key={rowIndex}
 						role="row"
 						className={rowIndex > 0 ? "border-t border-hairline px-2 py-1.5" : "px-2 py-1.5"}
 					>
@@ -476,7 +591,7 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 							   it replaces supplied that natively, so hiding it was a
 							   regression in the form that claims to preserve the table.
 							   Visible text in the same cell IS the association. */
-							<div key={`${head[column] ?? ""}-${column}`} role="cell" className="flex min-w-0 gap-2">
+							<div key={column} role="cell" className="flex min-w-0 gap-2">
 								<span className="shrink-0 break-words text-ink-dim">{markdownTableText(head[column] ?? "")}:</span>
 								{/* `break-words` splits ONLY a token too long to fit a line by
 								    itself (a URL, a hash). An ordinary word always fits, so it
@@ -497,7 +612,7 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 					<tr className="bg-sunken">
 						{Array.from({ length: columns }, (_, column) => (
 							<th
-								key={`${head[column] ?? ""}-${column}`}
+								key={column}
 								className="border-b border-hairline px-2 py-1 text-start font-semibold text-ink"
 							>
 								{renderInline(head[column] ?? "")}
@@ -507,10 +622,10 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 				</thead>
 				<tbody>
 					{rows.map((row, rowIndex) => (
-						<tr key={`${signature}-row-${rowIndex}`}>
+						<tr key={rowIndex}>
 							{Array.from({ length: columns }, (_, column) => (
 								<td
-									key={`${row[column] ?? ""}-${column}`}
+									key={column}
 									className="border-b border-hairline px-2 py-1 align-top text-ink-muted last:border-b-0"
 								>
 									{renderInline(row[column] ?? "")}
@@ -524,87 +639,153 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 	);
 }
 
-export function Markdown({ text }: { text: string }) {
-	const blocks = splitBlocks(text);
-	return (
-		<div className="flex min-w-0 flex-col gap-1.5 break-words">
-			{blocks.map((b) => {
-				switch (b.kind) {
-					case "code":
-						return (
-							/* WRAPS, NEVER SCROLLS SIDEWAYS (operator finding B): a
-							   transcript has zero horizontal play on a phone. The block
-							   used to keep long lines intact and scroll them inside the
-							   message — a sideways gesture nested in a vertical scroller.
-							   `pre-wrap` keeps indentation and line breaks;
-							   `overflow-wrap: anywhere` breaks a token with no spaces
-							   (a URL, a hash) instead of letting it widen the column. */
-							<pre
-								key={key()}
-								dir="ltr"
-								className="max-w-full rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre-wrap [overflow-wrap:anywhere]"
-							>
-								{b.lines.join("\n")}
-							</pre>
-						);
-					case "heading":
-						return (
-							<div
-								key={key()}
-								className={HEADING_CLASSES[(b.level ?? 1) - 1]}
-							>
-								{renderInline(b.lines[0])}
-							</div>
-						);
-					case "hr":
-						return (
-							<hr key={key()} className="border-hairline" />
-						);
-					case "ul":
-						return (
-							<ul key={key()} className="flex list-disc flex-col gap-0.5 ps-5">
-								{b.lines.map((li) => (
-									<li key={key()}>{renderInline(li)}</li>
-								))}
-							</ul>
-						);
-					case "ol":
-						return (
-							<ol
-								key={key()}
-								className="flex list-decimal flex-col gap-0.5 ps-5"
-							>
-								{b.lines.map((li) => (
-									<li key={key()}>{renderInline(li)}</li>
-								))}
-							</ol>
-						);
-					case "quote":
-						return (
-							<div
-								key={key()}
-								className="border-s-2 border-control ps-3 text-ink-muted"
-							>
-								{b.lines.map((q) => (
-									<div key={key()}>{renderInline(q)}</div>
-								))}
-							</div>
-						);
-					case "table":
-						return <MarkdownTable key={key()} lines={b.lines} />;
-					default:
-						return (
-							<p key={key()}>
-								{b.lines.map((line, i) => (
-									<span key={key()}>
-										{i > 0 ? <br /> : null}
-										{renderInline(line)}
-									</span>
-								))}
-							</p>
-						);
-				}
-			})}
-		</div>
-	);
+interface ParsedMarkdown {
+	text: string;
+	blocks: Block[];
 }
+
+function parseMarkdown(text: string, previous: ParsedMarkdown | null): Block[] {
+	if (previous?.text === text) return previous.blocks;
+	if (!previous || !text.startsWith(previous.text)) return splitBlocks(text);
+	// An append can change the type of the last line (e.g. a rule becomes
+	// prose), which may rejoin its previous block. Keep those two blocks as
+	// parser lookbehind; earlier lines already have a fixed following line.
+	const boundary = Math.max(0, previous.blocks.length - 2);
+	const parsed = splitBlocks(text, previous.blocks[boundary]?.start ?? 0);
+	return previous.blocks.slice(0, boundary).concat(parsed.map((next, i) => {
+		const old = previous.blocks[boundary + i];
+		return old && old.start === next.start && old.kind === next.kind && old.lang === next.lang &&
+			old.level === next.level && old.closed === next.closed && old.lines.length === next.lines.length &&
+			old.lines.every((line, j) => line === next.lines[j] && old.lineStarts[j] === next.lineStarts[j]) ? old : next;
+	}));
+}
+
+const MarkdownBlock = memo(function MarkdownBlock({ block: b, from }: {
+	block: Block; from?: number;
+}) {
+	const line = (index: number) => renderInline(b.lines[index], from === undefined || index !== b.lines.length - 1
+		? undefined : Math.max(0, from - b.lineStarts[index]));
+	const ref = from !== undefined && b.start >= from ? revealText : undefined;
+	// A new block already fades as a unit; only append inside old blocks needs
+	// an inline effect. A diagram keys itself by source, not its fence position.
+	const inline = (index: number) => ref ? renderInline(b.lines[index]) : line(index);
+	switch (b.kind) {
+		case "code": {
+			const source = b.lines.join("\n");
+			const plain = (
+				/* WRAPS, NEVER SCROLLS SIDEWAYS: keep indentation and line breaks
+				   without letting a long URL or hash widen the phone column. */
+				<pre ref={ref} dir="ltr" className="max-w-full rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre-wrap [overflow-wrap:anywhere]">
+					{source}
+				</pre>
+			);
+			if (!shouldDrawDiagram({ lang: b.lang, closed: b.closed === true, source })) return plain;
+			return <DiagramBlock source={source} fallback={plain} />;
+		}
+		case "heading":
+			return <div ref={ref} className={HEADING_CLASSES[(b.level ?? 1) - 1]}>{inline(0)}</div>;
+		case "hr":
+			return <hr ref={ref} className="border-hairline" />;
+		case "ul":
+			return <ul ref={ref} className="flex list-disc flex-col gap-0.5 ps-5">
+				{b.lines.map((_, i) => <li key={b.lineStarts[i]}>{inline(i)}</li>)}
+			</ul>;
+		case "ol":
+			return <ol ref={ref} className="flex list-decimal flex-col gap-0.5 ps-5">
+				{b.lines.map((_, i) => <li key={b.lineStarts[i]}>{inline(i)}</li>)}
+			</ol>;
+		case "quote":
+			return <div ref={ref} className="border-s-2 border-control ps-3 text-ink-muted">
+				{b.lines.map((_, i) => <div key={b.lineStarts[i]}>{inline(i)}</div>)}
+			</div>;
+		case "table":
+			return <MarkdownTable lines={b.lines} />;
+		default:
+			return <p ref={ref}>
+				{b.lines.map((_, i) => <span key={b.lineStarts[i]}>
+					{i > 0 ? <br /> : null}{inline(i)}
+				</span>)}
+			</p>;
+	}
+});
+
+type SelectionGuardProps = { scope: () => Node | null; children: ReactNode };
+type SelectionSnapshot = { selection: Selection; anchor: Node; focus: Node; anchorOffset: number; focusOffset: number };
+
+/** React writes CharacterData for an append inside a word. The browser keeps
+ * the node but can reset its Selection offsets to zero. Take the snapshot
+ * before that write and restore only ranges whose original endpoints survived;
+ * don't guess a new range across a genuine Markdown structure change. */
+class SelectionGuard extends Component<SelectionGuardProps> {
+	getSnapshotBeforeUpdate(): SelectionSnapshot | null {
+		const root = this.props.scope();
+		const selection = root?.ownerDocument?.getSelection();
+		if (!selection || selection.isCollapsed) return null;
+		const { anchorNode: anchor, focusNode: focus, anchorOffset, focusOffset } = selection;
+		if (!root || !anchor || !focus || (!root.contains(anchor) && !root.contains(focus))) return null;
+		return { selection, anchor, focus, anchorOffset, focusOffset };
+	}
+
+	componentDidUpdate(_props: SelectionGuardProps, _state: unknown, snapshot: SelectionSnapshot | null) {
+		if (!snapshot) return;
+		const { selection, anchor, focus, anchorOffset, focusOffset } = snapshot;
+		const length = (node: Node) => node.nodeType === Node.TEXT_NODE ? node.textContent?.length ?? 0 : node.childNodes.length;
+		if (!anchor.isConnected || !focus.isConnected || length(anchor) < anchorOffset || length(focus) < focusOffset) return;
+		if (selection.anchorNode !== anchor || selection.focusNode !== focus ||
+			selection.anchorOffset !== anchorOffset || selection.focusOffset !== focusOffset) {
+			selection.setBaseAndExtent(anchor, anchorOffset, focus, focusOffset);
+		}
+	}
+
+	render() {
+		return this.props.children;
+	}
+}
+
+// Settled block objects are shared by the incremental parser. Reuse the
+// closed fence's source and keys instead of joining and hashing it per token.
+const diagramOwners = new WeakMap<Block, { source: string; keys: string[] }>();
+function diagramOwner(block: Block) {
+	if (block.kind !== "code" || !block.closed || block.lang?.toLowerCase() !== "mermaid") return;
+	const previous = diagramOwners.get(block);
+	if (previous) return previous;
+	const source = block.lines.join("\n");
+	if (!shouldDrawDiagram({ lang: block.lang, closed: true, source })) return;
+	const owner = { source, keys: [] as string[] };
+	diagramOwners.set(block, owner);
+	return owner;
+}
+
+export const Markdown = memo(function Markdown({ text, live = false }: { text: string; live?: boolean }) {
+	const root = useRef<HTMLDivElement>(null);
+	const committed = useRef<ParsedMarkdown | null>(null);
+	const previous = committed.current;
+	const blocks = parseMarkdown(text, previous);
+	const append = previous && text.startsWith(previous.text);
+	const grew = !!append && previous.text.length < text.length;
+	const from = live && grew && allowsReveal() ? previous.text.length : undefined;
+	useLayoutEffect(() => {
+		if (!live || (previous && !append)) settleReveals(root.current);
+		committed.current = { text, blocks };
+	}, [text, live, blocks, previous, append]);
+	const diagramSeen = new Map<string, number>();
+	return <div ref={root} className="flex min-w-0 flex-col gap-1.5 break-words">
+		<SelectionGuard scope={() => grew ? root.current : null}>
+			{/* A burst can complete pages in one snapshot. Reveal the tail, not a
+			    separate animation on every just-arrived block or line. */}
+			{blocks.map((block, i) => {
+				let key: string | number = block.start;
+				const owner = diagramOwner(block);
+				if (owner) {
+					// Key the owner, not only the drawing: corrections before the
+					// fence must not close its viewer or lose its copy/focus state.
+					const occurrence = diagramSeen.get(owner.source) ?? 0;
+					diagramSeen.set(owner.source, occurrence + 1);
+					key = owner.keys[occurrence] ??= diagramKey(owner.source, occurrence);
+				}
+				return <MarkdownBlock key={key} block={block}
+					from={i === blocks.length - 1 && block !== previous?.blocks[i] ? from : undefined} />;
+			})}
+		</SelectionGuard>
+	</div>;
+});

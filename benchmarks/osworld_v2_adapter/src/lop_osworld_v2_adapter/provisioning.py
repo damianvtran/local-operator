@@ -21,6 +21,7 @@ import os
 import re
 import stat
 from dataclasses import dataclass
+from typing import Literal
 
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
@@ -47,6 +48,9 @@ _INSTANCE_TYPE_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.[a-z0-9]+(?:-[a
 # ``image`` field when that field is a valid AMI id.
 _DEFAULT_AMI = "ami-01017272139e01feb"
 _DEFAULT_INSTANCE_TYPE = "t3.xlarge"
+
+#: Where a plan's root volume size came from; see ``_resolve_root_volume``.
+VolumeSource = Literal["task", "override"]
 
 # Root volume bounds for AWS_ROOT_VOLUME_SIZE, checked at prepare time.
 #
@@ -103,6 +107,14 @@ class ProvisioningPlan:
     file_base_url: str
     tags: tuple[tuple[str, str], ...]
     client_token: str
+    # WHERE ``volume_gb`` came from: ``"task"`` (the task file's own
+    # ``volume_size``, which upstream honours first), ``"override"`` (the
+    # ``AWS_ROOT_VOLUME_SIZE`` default, filling a task that declares none -- extra
+    # disk upstream's documented run never grants, so a disclosed deviation), or
+    # None (nothing requested). Recorded in ``guest-preparation.json`` so a
+    # bundle shows which grows were faithful. Defaulted only so hand-built plans
+    # in tests stay terse; ``resolve`` always sets it.
+    volume_source: VolumeSource | None = None
 
     def tag_dict(self) -> dict[str, str]:
         return dict(self.tags)
@@ -132,7 +144,7 @@ def resolve(
         task.image if task.image is not None and _AMI_RE.fullmatch(task.image) else _DEFAULT_AMI
     )
     instance_type = _resolve_instance_type(task, infra_values)
-    volume_gb = _resolve_root_volume_gb(task, infra_values)
+    volume_gb, volume_source = _resolve_root_volume(task, infra_values)
 
     region = (
         _infra(infra_values, "AWS_REGION") if _has(infra_values, "AWS_REGION") else _DEFAULT_REGION
@@ -169,6 +181,7 @@ def resolve(
         file_base_url=file_base_url,
         tags=tags,
         client_token=client_token,
+        volume_source=volume_source,
     )
 
 
@@ -290,6 +303,71 @@ def validate_proxy_config_file(
     return path
 
 
+def resolve_evaluator_tool_path(
+    infra_values: tuple[ScopedInfraValue, ...],
+    *,
+    forbidden_roots: tuple[str, ...],
+) -> tuple[str, ...] | None:
+    """``EVALUATOR_TOOL_PATH`` as the directories to append, or ``None`` when unset.
+
+    WHY IT EXISTS. The worker's environment is constructed from a closed
+    allowlist and has no PATH, so an evaluator that shells out to a host tool
+    finds only what the interpreter's default search path holds. This is the
+    declared way to widen that -- deliberately not a PATH passthrough, which
+    would make the tool set depend on whichever shell launched the run and
+    leave nothing in the bundle to say so.
+
+    THE RULES, each for a reason:
+
+    * every entry is absolute and already normalised (no ``..``, no trailing
+      slash). The manifest stamps the value as REQUESTED -- there is no channel
+      to read the applied one back -- so the only honest stamp is one where
+      the two cannot differ;
+    * every entry is an existing directory. A typo would otherwise be applied,
+      stamped and silently contribute nothing, which is the failure this value
+      exists to remove;
+    * no entry is, or sits under, a ``forbidden_roots`` directory (the adapter
+      workspace and the episode's own artifact root), compared after resolving
+      symlinks. Those are where an episode's files land: a tool directory
+      there would let a run's own output be executed as its evaluator's tool;
+    * no empty entry. POSIX reads an empty PATH element as the current
+      directory, and the worker's cwd is the episode scratch.
+
+    Tool NAMES are deliberately not this function's business: which tools an
+    evaluator wants is the task's affair, and the operator names directories.
+    """
+
+    entries = [item.value for item in infra_values if item.name == "EVALUATOR_TOOL_PATH"]
+    if not entries:
+        return None
+    if len(entries) > 1:
+        raise ProvisioningError("EVALUATOR_TOOL_PATH was supplied more than once")
+    directories = tuple(entries[0].split(os.pathsep))
+    roots = [os.path.realpath(root) for root in forbidden_roots]
+    for directory in directories:
+        if not directory:
+            raise ProvisioningError(
+                "EVALUATOR_TOOL_PATH has an empty entry (an empty PATH element means the "
+                f"current directory); give {os.pathsep!r}-separated absolute directories"
+            )
+        if not os.path.isabs(directory) or os.path.normpath(directory) != directory:
+            raise ProvisioningError(
+                f"EVALUATOR_TOOL_PATH entry {directory!r} is not an absolute, normalised path"
+            )
+        if not os.path.isdir(directory):
+            raise ProvisioningError(
+                f"EVALUATOR_TOOL_PATH entry {directory!r} is not an existing directory"
+            )
+        real = os.path.realpath(directory)
+        for root in roots:
+            if os.path.commonpath([real, root]) == root:
+                raise ProvisioningError(
+                    f"EVALUATOR_TOOL_PATH entry {directory!r} is inside {root!r}, where this "
+                    "episode's own files are written; name a directory outside it"
+                )
+    return directories
+
+
 def _has(infra_values: tuple[ScopedInfraValue, ...], name: str) -> bool:
     # Delegates to _get so this module has ONE lookup rule: a second scan with
     # its own matching logic is how "present" and "readable" drift apart.
@@ -352,11 +430,15 @@ def _resolve_instance_type(
     return task.instance_type or _DEFAULT_INSTANCE_TYPE
 
 
-def _resolve_root_volume_gb(
+def _resolve_root_volume(
     task: TaskDescriptor,
     infra_values: tuple[ScopedInfraValue, ...],
-) -> int | None:
-    """Root volume size in GiB: operator override, else the task's pin, else None.
+) -> tuple[int | None, VolumeSource | None]:
+    """Root volume size in GiB and its source: the task's pin, else the override.
+
+    Returns ``(size, source)``: ``(task.volume_size, "task")`` when the task
+    declares one, else ``(override, "override")`` when ``AWS_ROOT_VOLUME_SIZE``
+    is set, else ``(None, None)``.
 
     WHY THIS KNOB EXISTS. Every OSWorld episode died at roughly the same
     WALL-CLOCK time -- 7 of 8 runs first failed in a 424-466s window --
@@ -381,25 +463,47 @@ def _resolve_root_volume_gb(
     ``volume_size`` there invalidates the very digest that makes a score
     reproducible. The operator needs a knob reachable from outside the pin.
 
-    WHY THE OVERRIDE BEATS A TASK'S OWN PIN. Deliberately identical to
-    ``_resolve_instance_type``, and for the same reason rather than merely for
-    symmetry: the task author sized a volume against the workload they could
-    see, while the operator is working around an INFRASTRUCTURE failure -- a
-    recorder filling the disk on a clock -- that the author never saw and
-    cannot fix from inside a hash-pinned file. An override a task pin could
-    veto would silently fail on exactly the tasks most likely to run long
-    enough to hit the wall. A single precedence rule across both knobs is also
-    the one an operator can predict without reading the source.
+    THE TASK'S OWN PIN WINS; THE OVERRIDE ONLY FILLS TASKS THAT DECLARE NONE.
+    This is upstream's precedence exactly, and it differs from
+    ``_resolve_instance_type`` on purpose. The pinned release (OSWorld-V2.1 @
+    3d778a3) resolves ``example.get("volume_size")`` first and falls back to
+    the run-level ``--volume_size`` only when that is None
+    (``scripts/python/run_multienv_gpt_response_api.py:430-432``; the flag's
+    help text is "Default root volume size in GB for tasks without their own
+    volume_size"), and since ``guest_disk`` now GROWS the filesystem into the
+    requested volume, the size is a resource the agent can use: an override
+    that beat a task's pin would hand that task a disk upstream never would
+    (task_033 declares 50 GiB; an override of 120 would have granted 120). An
+    earlier revision let the override win, reasoning that it worked around an
+    infrastructure failure; that reasoning held only while the volume was
+    inert (the filesystem never grew, so the size changed nothing the agent
+    could reach).
 
-    Absent, this returns the previous value unchanged (the task's pin, else
-    None so OSWorld's own launch-time resolution from the AMI's
-    BlockDeviceMappings runs), so omitting the knob reproduces today's
-    behaviour exactly.
+    THE FAITHFUL CONFIGURATION SETS NO OVERRIDE: upstream's documented run
+    passes no ``--volume_size`` (default None), so 18 of v2.1's 108 tasks get
+    their declared size and the other 90 the AMI default, ungrown. Setting the
+    override grants extra disk to the non-declaring tasks; ``run_episode.py``
+    stamps it as ``aws_root_volume_size_override`` and ``guest_disk`` records
+    the source per episode, and a run that sets it must disclose it as a
+    deviation.
+
+    The override is VALIDATED even when the task's pin wins: a malformed value
+    is something the operator typed and can fix, and accepting it silently
+    because this particular task happened not to read it would leave the
+    typo to surface on the next task that does.
     """
 
     override = _get(infra_values, "AWS_ROOT_VOLUME_SIZE")
-    if override is None:
-        return task.volume_size
+    size = _parse_root_volume_override(override) if override is not None else None
+    if task.volume_size is not None:
+        return task.volume_size, "task"
+    if size is not None:
+        return size, "override"
+    return None, None
+
+
+def _parse_root_volume_override(override: str) -> int:
+    """``AWS_ROOT_VOLUME_SIZE`` as a whole number of GiB, or ProvisioningError."""
 
     # Rejected, never ignored -- the same asymmetry with ``image`` that
     # _resolve_instance_type documents. Quietly discarding a malformed value

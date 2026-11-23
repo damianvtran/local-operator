@@ -177,3 +177,80 @@ group on GitHub, and controlled repeated labels are needed to demonstrate pendin
 replacement. No duplicate live suites are armed just to obtain this evidence;
 CI must still prove the unchanged full matrix and required aggregate on the
 final head. Never report a dispatch or local YAML assertion as that proof.
+
+## Cost gate: fast CI first, superseded main runs skipped (GH #4074)
+
+The `precondition` job in `full-suite.yml` runs `scripts/fast_gate_check.py`
+(stdlib only, fetched from the PR's **base** commit, never the PR checkout)
+before any heavy job. Every heavy job needs it and tests `outputs.ok == 'true'`.
+
+| Event | Rule |
+|---|---|
+| `pull_request` (label arm) | newest `ci.yml` `pull_request` run bound to this PR number, head SHA and head repo; latest attempt; exactly one `CI Gate` job `success`. Pending, red, missing, fork/unbound, API error: the check goes **red in seconds**, no test job starts. |
+| `workflow_dispatch` (`train/*`, WIDE route) | newest `ci.yml` **push/dispatch** run on the same SHA, branch and repo, `CI Gate` green. A carrier PR's run tests `refs/pull/<n>/merge`, a different tree, and never counts. Train route: `gh workflow run ci.yml --ref train/<t>` -> wait for `CI Gate` on that SHA -> `gh workflow run full-suite.yml --ref train/<t>`. Always the **full** suite. |
+| `push` to `main` | after a 300 s settle, if a newer non-release, untagged tip descends from this SHA and has its own live full-suite run, this run is skipped and `Merge gate (full suite)` shows grey with `SUPERSEDED by <tip>`. Anything unknown runs in full. |
+| `schedule` | never gated or coalesced; own concurrency group `full-suite-nightly`. |
+
+There is no bypass input. The runner never waits for CI; use
+`make fast-gate PR=<n>` (one-shot client check of the same helper via `--local`;
+exits immediately) or `gh pr checks <n> --watch`, then `make merge-gate PR=<n>`
+to arm the full suite.
+
+**`make merge-gate` checks first (GH #4194/#4215/#4145).** The ritual runs the
+same helper with `--local` before any label write and refuses to arm on exit 1
+(pending, red, absent): no label changes, and it prints the `FAST-CI` line and
+how to retry. Exit 3 (API or token unavailable locally) warns and arms, since
+the runner re-decides fail-closed. Before this, arming right after a push found
+`ci.yml` still `queued` (21 of 92 red gate runs, 2026-11-15..18), and the gate
+went red with no test run. A label added by hand still bypasses the client
+check; that run's `Merge gate (full suite)` now says `PRECONDITION NOT MET (not
+a test failure)` so it is not mistaken for a red suite. The runner deliberately
+does not poll: a waiting precondition would hold a runner from the same
+saturated pool the queued `ci.yml` run is waiting for (ci.yml `pull_request`
+runs, n=140, 2026-11-17..18: median 46, p90 137, max 210 min created->completed).
+
+**Trusted helper.** For a PR the helper is fetched from `gate_base`, the live
+main tip `changes` resolved and the heavy jobs test against, not from the
+event's stale base SHA. The step summary logs the full trusted commit and the
+helper's git blob id. A trusted tree without the helper fails the job red.
+
+**Rollout is two steps; do not change flags in between.** (1) A tests-only PR
+lands `scripts/fast_gate_check.py` (+ its tests) on main with no workflow
+change. (2) Only then can the PR carrying the `full-suite.yml` change pass its
+own gate. Until step 1 is on main that PR's required check is red by design.
+
+**Coverage claims.** Every labeled PR head, the final main tip of each burst,
+every release/tagged commit and the nightly still run every test. A tag on a
+commit is found whatever its name or age: every tag ref is listed
+(`git/matching-refs/tags/`, `Link` followed on the same API origin only) and
+annotated tag objects are peeled to their commit; any cap, cycle, timeout or API
+error means UNKNOWN, which runs in full.
+
+**Limits.** The 300 s settle adds ~5 runner-minutes to a main run even when it
+turns out to be the final tip. The settle was chosen from 99 commit gaps among
+the last 100 main commits (61 < 5 min, 78 < 10 min, median 2 min): a sample, not
+fleet statistics, and no savings figure is claimed. A run cancelled by hand or
+lost to a startup failure can leave a main commit without a full verdict until
+the nightly run, which is the backstop; no extra daemon or cancel API exists.
+A red tip verdict is a legitimate result for superseded commits, not a gap.
+
+## Matrix axes: PR merge gate vs `main` / nightly / `workflow_dispatch`
+
+`full-suite.yml` keeps the `shard` lists literal (`[0..5]` for `test`, `[0, 1]`
+for `tui-e2e`) and varies `python-version`, `os`, and `fail-fast` by
+`github.event_name`:
+
+| Job | `pull_request` (merge gate) | `push` (`main`), `schedule` (nightly), `workflow_dispatch` |
+|---|---|---|
+| `test` | Python `3.13` × 6 shards (`fail-fast: true`) | Python `3.12` + `3.13` × 6 shards (`fail-fast: false`) |
+| `coverage-report` | Python `3.13` (`fail-fast: true`, skipped on `affected` lane) | Python `3.12` + `3.13` (`fail-fast: false`) |
+| `tui-e2e` | `ubuntu-latest` × 2 shards (`fail-fast: true`) | `ubuntu-latest` + `macos-latest` × 2 shards (`fail-fast: false`) |
+
+Why this split: Python 3.12 compatibility is already verified on every PR push
+by `ci.yml` (`guards`, `install-smoke`, `pyright`) and before every release by
+`release-gate.yml`, while Python 3.13 is where strict upper-version regressions
+surface; dropping `macos-latest` from PR merge gates removes the 10× macOS cost
+multiplier and the 5-job account-wide macOS concurrency bottleneck while keeping
+the Darwin `#401` freeze guard active post-merge on `main`, nightly, and on
+demand via `workflow_dispatch` (including `WIDE:` branch dispatches).
+`tui-e2e` still runs on every non-inert PR (no `github.*` job `if:` condition).

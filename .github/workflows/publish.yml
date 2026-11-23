@@ -239,8 +239,8 @@ jobs:
             exit 1
           fi
 
-      # PYPI'S 10 GB PROJECT CAP. 0.90.17 cost ~59 MB on PyPI (two ~20 MB wheels
-      # plus a ~19 MB sdist) and v0.90.18/19 were refused with `400 Project size
+      # PYPI'S PROJECT CAP (10 GB then; 30 GiB since 2026-11-04, pypi/support#12882).
+      # 0.90.17 cost ~59 MB on PyPI (two ~20 MB wheels plus a ~19 MB sdist) and v0.90.18/19 were refused with `400 Project size
       # too large`. Two cuts, both here so every downstream job sees the final shape:
       # the wheel's comments are stripped (verified AST- and line-identical, fails
       # closed), and the sdist leaves the PyPI artifact for the GitHub Release —
@@ -255,7 +255,9 @@ jobs:
           python scripts/slim_wheel.py dist/local_operator-*-py3-none-any.whl
           mkdir -p sdist
           mv dist/*.tar.gz sdist/
-          python scripts/check_dist_size.py --wheels-only dist/
+          # --runway: fail under 21 days of PyPI cap runway (estimated from the
+          # pure wheel; keyagent-macos has not run yet); a PyPI outage only warns.
+          python scripts/check_dist_size.py --wheels-only dist/ --runway
 
       - name: Upload distributions
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
@@ -639,12 +641,70 @@ jobs:
           print(f"selftest: {len(report['checks'])} ownership checks agree")
           PY
 
+      # THE LAUNCHAGENT LAUNCHER, signed with the SAME organization identity from the
+      # SAME throwaway keychain as the key agent. Why it exists: Background Task
+      # Management (Login Items, and the "… can run in the background" banner) names
+      # a LaunchAgent after the code at its plist's `Program`. Unsigned, that read
+      # "python3"/"python3.12" with one banner per item; signed by Radient Inc. it
+      # reads "Local Operator", and once the "Radient Inc." group has been notified
+      # further items register silently (measured on macOS 27.2, 2026-11-14 —
+      # packaging/macos/lop-launcher/launcher.c). No profile and no entitlements:
+      # it only execs the `python3` shim beside it. Hardened runtime + a secure
+      # timestamp, read back by the script.
+      #
+      # NOT NOTARIZED, stated rather than implied: this repository holds no notary
+      # credentials (the key agent is not notarized either; see the timestamp note
+      # above). BTM attribution needs only the Developer ID signature (measured with
+      # a non-notarized signed image), and a wheel-installed file carries no
+      # quarantine attribute, so Gatekeeper does not assess it at exec.
+      - name: Assemble and sign the LaunchAgent launcher
+        run: |
+          set -euo pipefail
+          packaging/macos/assemble_launcher_bundle.sh \
+            --out "$RUNNER_TEMP/Local Operator.lopruntime" \
+            --identity "$IDENTITY_SHA"
+
+      # Asserted on the finished signature for the key agent's reason: the team id
+      # did not change when the account became an organization, so only the leaf
+      # name tells the retired individual certificate from the organization one —
+      # and that name is what the user's BTM banner prints. The identifier is pinned
+      # too: `update.launcher_verified` refuses any other, so a mismatch here would
+      # ship a launcher no machine ever selects.
+      - name: Assert the launcher signing identity
+        env:
+          EXPECTED_AUTHORITY: "Developer ID Application: Radient Inc. (SHA2U6KT7V)"
+          EXPECTED_TEAM: SHA2U6KT7V
+          EXPECTED_IDENTIFIER: com.local-operator.launcher
+        run: |
+          set -euo pipefail
+          codesign -dv --verbose=4 "$RUNNER_TEMP/Local Operator.lopruntime" > "$RUNNER_TEMP/launcher-dv.txt" 2>&1
+          grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp)=' "$RUNNER_TEMP/launcher-dv.txt"
+          python3 - "$RUNNER_TEMP/launcher-dv.txt" <<'PY'
+          import os, sys
+          lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+          def values(key):
+              return [line.split("=", 1)[1] for line in lines if line.startswith(f"{key}=")]
+          wanted = [
+              os.environ["EXPECTED_AUTHORITY"],
+              "Developer ID Certification Authority",
+              "Apple Root CA",
+          ]
+          if values("Authority") != wanted:
+              raise SystemExit(f"the launcher is signed by {values('Authority')}, not {wanted}")
+          if values("TeamIdentifier") != [os.environ["EXPECTED_TEAM"]]:
+              raise SystemExit(f"the launcher reports TeamIdentifier {values('TeamIdentifier')}")
+          if values("Identifier") != [os.environ["EXPECTED_IDENTIFIER"]]:
+              raise SystemExit(f"the launcher reports Identifier {values('Identifier')}")
+          print(f"launcher signing identity: {wanted[0]}")
+          PY
+
       - name: Build the macOS wheel
         run: |
           set -euo pipefail
           python3 packaging/macos/make_macos_wheel.py \
             --wheel "$(ls dist/local_operator-*-py3-none-any.whl)" \
             --app "$RUNNER_TEMP/lop-keyagent.app" \
+            --launcher "$RUNNER_TEMP/Local Operator.lopruntime" \
             --out-dir dist/ | tee "$RUNNER_TEMP/macos-wheel.txt"
           MACOS_WHEEL="$(cat "$RUNNER_TEMP/macos-wheel.txt")"
           # Two properties of the SHIPPING artefact, checked on the real wheel
@@ -659,13 +719,18 @@ jobs:
           with zipfile.ZipFile(path) as zf:
               helper = "local_operator/operator/macos/lop-keyagent.app/Contents/MacOS/lop-keyagent"
               profile = "local_operator/operator/macos/lop-keyagent.app/Contents/embedded.provisionprofile"
+              launcher = "local_operator/operator/macos/Local Operator.lopruntime/Contents/MacOS/Local Operator"
               names = zf.namelist()
-              for wanted in (helper, profile):
+              for wanted in (helper, profile, launcher):
                   if wanted not in names:
                       raise SystemExit(f"{wanted} is missing from {path}")
               mode = (zf.getinfo(helper).external_attr >> 16) & 0o777
               if mode != 0o755:
                   raise SystemExit(f"the helper installs mode {mode:o}, not 755")
+              # A LaunchAgent whose Program cannot execute never starts.
+              mode = (zf.getinfo(launcher).external_attr >> 16) & 0o777
+              if mode != 0o755:
+                  raise SystemExit(f"the launcher installs mode {mode:o}, not 755")
               # THE ARCHITECTURES, READ FROM THE MACH-O HEADERS OF THE SHIPPING FILE.
               # The wheel tag says macosx_11_0_universal2 and a tag is not a binary:
               # `assemble_keyagent_bundle.sh` asserts this on the staged binary, and this
@@ -800,7 +865,7 @@ jobs:
 
       # The last gate before an irreversible upload: exactly what PyPI will store
       # is two wheels (pure + macOS) and NO sdist — it lives on the GitHub Release
-      # (`sdist-release`), off the 10 GB project quota. Any non-dotfile that is not
+      # (`sdist-release`), off the PyPI project quota (30 GiB, pypi/support#12882). Any non-dotfile that is not
       # a wheel fails, not only *.tar.gz, matching check_dist_size.py --wheels-only.
       - name: Assert the upload is exactly two wheels
         run: |
@@ -847,8 +912,8 @@ jobs:
           # install-time guarantee — stated plainly rather than implied.
           attestations: true
 
-  # THE SDIST LIVES ON THE GITHUB RELEASE, NOT ON PYPI. PyPI's 10 GB project cap
-  # was reached at ~59 MB per release (v0.90.18/19 refused), and the ~19 MB sdist
+  # THE SDIST LIVES ON THE GITHUB RELEASE, NOT ON PYPI. PyPI's then 10 GB project cap
+  # (30 GiB since 2026-11-04, pypi/support#12882) was reached at ~59 MB per release (v0.90.18/19 refused), and the ~19 MB sdist
   # was a third of that while nothing installs it from PyPI: the updater, the
   # desktop app and scripts/install.{sh,ps1} take wheels, the Dockerfile builds
   # from the tree. Attaching it here keeps the full-source, comment-intact

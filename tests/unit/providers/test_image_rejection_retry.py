@@ -329,3 +329,35 @@ async def test_without_a_path_a_locally_damaged_png_is_the_culprit():
         client = OpenAICompatClient("https://api.deepseek.com/v1", http_client=http)
         await _run(client, ChatRequest(model=_spec(), messages=history))
     assert len(bodies) == 2 and _wire_images(bodies[1]) == [GOOD]
+
+
+@pytest.mark.asyncio
+async def test_required_images_refuse_retry_without_remembering_a_degradation():
+    server = _DeepSeek()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(server)) as http:
+        client = OpenAICompatClient("https://api.deepseek.com/v1", http_client=http)
+        model = _spec().model_copy(update={"supports_images_stated": True})
+        request = ChatRequest(model=model, messages=_history(), required_image_count=2)
+        with pytest.raises(ProviderError):
+            await _run(client, request)
+        assert len(server.bodies) == 1
+        assert _wire_images(server.bodies[0]) == [GOOD, BAD]
+        # Opting in must not write a rejection into the ordinary request cache.
+        await _run(client, request.model_copy(update={"required_image_count": 0}))
+    assert len(server.bodies) == 3
+    assert _wire_images(server.bodies[1]) == [GOOD, BAD]
+    assert _wire_images(server.bodies[2]) == [GOOD]
+
+
+@pytest.mark.asyncio
+async def test_required_images_cannot_inherit_a_cached_text_replacement():
+    server = _DeepSeek()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(server)) as http:
+        client = OpenAICompatClient("https://api.deepseek.com/v1", http_client=http)
+        model = _spec().model_copy(update={"supports_images_stated": True})
+        request = ChatRequest(model=model, messages=_history())
+        await _run(client, request)
+        with pytest.raises(ValueError, match="required image evidence"):
+            await _run(client, request.model_copy(update={"required_image_count": 2}))
+    # The cached omission is caught before another HTTP request can be sent.
+    assert len(server.bodies) == 2

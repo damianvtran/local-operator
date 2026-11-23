@@ -83,11 +83,25 @@ and `lop tunnel setup --json`, not mesh admission.
    `--device <device id>` with the id the joining device reports in
    `lop network identity show --json`; any other device redeeming it is refused
    and the invite is burned. That is the form to use after a compromise.
+   To pair **without any credential sharing**, pass `--no-credential-offers`:
+   the owner never enumerates its logins for that ceremony (not even literal-MCP
+   adoption runs at mint), the joining device is sent an explicitly EMPTY share
+   list (`No credentials were offered.`), and during this pairing no credential
+   is granted and no `broker_credential` capability is admitted (not even the
+   one the `admin` role normally carries). It governs this pairing only: a
+   later, explicit signed remote onboarding or credential grant to that
+   member is a separate operator act outside the policy. The policy is saved with the invite
+   on the owner and enforced from there; a token whose copy of the policy was
+   edited (added, dropped or changed) is refused and burned, and so is a joining
+   device whose lop predates the flag — update it and mint a fresh invite. It is
+   independent of `--role`: a `read` invite still offers by default, so **use
+   `--role read --no-credential-offers` for read-only rigs** (QA, demos, test
+   devices) that must never receive a login.
 4. On the other device, **the human** runs it in a terminal:
    `lop network join @<token-file>` (or with the token itself).
    The joining device prints the inviter, the network, the offered role, its
    derived `code` (`481 926`) and a `fingerprint`, then asks for the code, and
-   says how long the person has (up to 180 s, and it reports the time **left** on
+   says how long the person has (up to 600 s — the whole default invite life — and it reports the time **left** on
    the invite rather than the duration it was minted with, so a token that has
    been carried around for a while shows a smaller window). The inviter admits the device
    only if the typed value matches its **own** derivation. A mismatch refuses the
@@ -114,11 +128,32 @@ and `lop tunnel setup --json`, not mesh admission.
    it was before — the joiner's screen says the same, so an absence is never
    read as "nothing to share".
 
-   THE INVITER'S HALF, when its relay runs under a daemon and has no terminal to
-   ask at, is `lop network confirm`: `--list` shows the parked pairing with both
-   codes, and answering it records the person's decision for the waiting pairing
-   loop. It refuses without a TTY — a foreground `lop network serve` is the
-   alternative on that side.
+   **THE USER'S STEP IS THE APP: Mesh approvals.** When the desktop app is running,
+   each device in a pairing shows a card in its Mesh approvals: the card shows THIS
+   device's code (for the person to type on the other device) and a box for the code
+   the OTHER device shows. On the joining device the person types the inviter's code;
+   once the inviter's card has the joiner's transcription, the person there types the
+   joiner's code and approves (the share list can only be reduced). Nothing needs a
+   terminal. A wrong code keeps the card open and says how many attempts are left.
+   On the inviting device that is the invite's own budget of three, which wrong
+   transcriptions on the wire spend too; on the joining device it is the card's own
+   three strikes, which `lop network join --confirm` does not share and a restart of
+   `lop serve` resets. Once an answer has decided the pairing, or the attempts are
+   spent, every later answer is refused. The window is what is left of the invite, at
+   most ten minutes, counted once from when the pairing started: both stages of the
+   inviting card share that one deadline. Answering a card needs the signed app on
+   a Mac; on another host the card shows the code but cannot be answered there
+   (`answer_unavailable: "unsupported_host"`), and the terminal fallback below applies.
+   Signed onboarding (`lop network approvals run`) pre-approves its own pairing only
+   for a node whose mesh id it knows (from the card, or the node's identity before
+   the join). A brand-new host has none until its join mints one, so its pairing
+   parks a normal card here and the run says it is waiting in Mesh approvals.
+
+   WITHOUT THE APP (same-user terminal fallback), the inviter's half, when its relay
+   runs under a daemon and has no terminal to ask at, is `lop network confirm`:
+   `--list` shows the parked pairing with both codes, and answering it records the
+   person's decision for the waiting pairing loop. It refuses without a TTY — a
+   foreground `lop network serve` is the alternative on that side.
 
    THE TWO-PHASE PAIR, which is how you do this step WITHOUT a terminal. When the
    person is not sitting at the joining device's keyboard, start the ceremony and
@@ -149,8 +184,9 @@ and `lop tunnel setup --json`, not mesh admission.
    parked process, so leave it running: do not kill it, and do not start a second park
    for the same invite.
 
-   **You cannot do this step.** The second phase is the user's, run at their own
-   terminal:
+   **You cannot do this step.** The second phase is the user's: ask them to approve it
+   in the app's Mesh approvals by typing the code the other device shows. Without the
+   app, the person can answer it at their own terminal:
 
    ```bash
    lop network join --confirm <code> --json      # the code THEY read, never one you chose
@@ -162,11 +198,16 @@ and `lop tunnel setup --json`, not mesh admission.
    ("the other device chose not to share it"), while a grant that failed names
    the remedy.
 
-   Hand them that command and the code, and let them run it. There is deliberately no
-   flag on the `network` tool that completes a pairing: the digits both devices derive
-   are the SAME ones, so an agent able to answer with the code it just printed would
-   satisfy the very comparison that exists to catch a substitution — the interlock is
-   real only because the second phase is not the agent's to run. If the user cannot
+   Point them at the Mesh approvals card (or, without the app, hand them that command)
+   and let them answer it. There is deliberately no flag on the `network` tool that
+   completes a pairing: the digits both devices derive are the SAME ones, so an agent
+   able to answer with the code it just printed would satisfy the very comparison that
+   exists to catch a substitution. HOW STRONG THAT IS, honestly: an agent holding only
+   the desktop bearer cannot answer a pairing through the app — the desktop route
+   refuses any answer the signed app did not attest (403 `pairing_needs_app`, nothing
+   spent). The terminal fallback is a same-user path and stays available; the approval
+   is the person's, in the app, and there is no tool flag for it — never run the
+   fallback yourself. If the user cannot
    read the code, that is the interlock working, not a problem to route around. A wrong
    code is refused with `sas_mismatch` and leaves the ceremony open (the invite is not
    spent).
@@ -258,14 +299,13 @@ where the ordering matters:
    the user's own terminal. Never into a transcript and never printed here.
    `drive` is right for a device you will only drive; a device you will offload
    WORK to wants `--role admin`, or a narrower grant below.
-4. The human runs `lop network join @<token-file>` at the other device's own
-   terminal. When you park the ceremony instead
-   (`lop network join @<token-file> --park --json`), print the code YOU derive
-   and the `sentence` and hand the second command over.
-5. The human runs `lop network join --confirm <code> --json` with the code they
-   read off the OTHER screen. You cannot do this step, there is no flag that
-   does it for them, and a code you did not see on the other device is never
-   the one to pass.
+4. Park the ceremony (`lop network join @<token-file> --park --json`, or the
+   `network` tool's `join`), print the code YOU derive and the `sentence`.
+5. The human approves it in the app's Mesh approvals on both devices, typing the
+   code each OTHER screen shows. You cannot do this step and there is no flag that
+   does it for them. Without the app, the person's own terminal fallback is
+   `lop network join --confirm <code> --json` (joiner) and `lop network confirm`
+   (inviter) — theirs to run, never yours.
 6. Verify from both sides: `lop network peers --json` must show the new member
    with `reachable: true`, and `lop network ls --json` must agree on the epoch
    and the member count.
@@ -357,6 +397,17 @@ The MCP rows (`mcp_servers`, `mcp_credential`) and `tooling` are the other way
 round: they read `warn`, they are named, and they do NOT hold the verdict,
 because the thing that needs a server or a tool refuses at its OWN point of use
 rather than failing the device.
+
+- **browser** — would a session on the node get a `browser` tool? Same
+  non-gating shape as `tooling`. `warn` not installed: the remedy is `lop
+  browser setup --node --authorised-by '<who, when>'` ON the node, which
+  installs the node-managed headless browser and so needs the operator's
+  authorisation; `warn` installed but unusable (Chrome unit down, daemon down,
+  unpaired): `lop browser setup --node --repair --authorised-by '<who, when>'`;
+  `n/a` where a user's own browser host (desktop app or extension) serves the
+  device, or where the node-managed browser is unsupported (not Linux x86_64,
+  not dnf/rpm). Details: `guide://browser` "Headless nodes". Sessions started
+  before setup keep their old tool list.
 
 Bring the node's DEFINITIONS and MCP SERVERS across deliberately when a create
 will not: `lop network definitions push --peer <id>` (or `--all-peers`) and
@@ -458,7 +509,8 @@ never on an empty listing or a zero exit alone; the family's vocabulary is in
   a `lop network doctor --json` question, not a retry.
 - `session_unknown` — the device answered and holds no such conversation.
 - `session_unreachable` — the device accepted the act and its runtime then
-  stopped answering inside the time this verb allows; nothing here changed.
+  stopped answering inside the time this verb allows, or is running but too busy
+  to answer; nothing here changed, and the act was not delivered: retry.
 - `turn_not_running` — a `--steer` reached a session with no turn there to
   correct.
 - `stop_unreported` / `engage_unreported` / `create_unreported` /
@@ -476,6 +528,38 @@ And the one non-zero exit that is about a person rather than a fault: a parked
 pairing whose window closed with nobody answering exits `3` as
 `pairing_unanswered`, having joined nothing. Park a fresh ceremony rather than
 reusing the invite — the scope of every exit code is in "Reference".
+
+## Reading an artifact from a peer session
+
+A review/evidence citation must carry the source **peer + exact session id +
+`scratchpad://<relative-path>` or `attachment:<id>`**. Obtain that tuple from the
+source session's reply; a peer's absolute filesystem path is not portable, and
+reading its bare scratchpad reference locally would address your own session.
+Pull the authorized artifact through the existing CLI, then read the local copy:
+
+```bash
+lop network files pull <peer> <sid> scratchpad://review/report.md --json
+lop network files pull <peer> <sid> attachment:<id> --json
+```
+
+These are templates: substitute the actual peer, session and reported reference;
+an attachment id is 32 lowercase hex characters and must be referenced by that
+session. Omit `--out` for a verified copy in this device's attachment store. On a
+successful receipt (`verified: true`), read its top-level JSON `path` with
+`read(path="<returned path>")`; `landed.store` names the store copy too. Preserve
+the original peer, session and source reference in citations: the returned local
+path is this device's inspection location, not the artifact's origin.
+
+`--out` requests an optional additional copy. A resolved destination inside
+Local Operator's config/data directory—including your own session scratchpad
+under that directory—is refused as `out_invalid`, even with `--force`. Use the
+store-only form above; do not direct `--out` into session data.
+
+**No new authority or bypass.** This recipe does not grant access to arbitrary
+remote paths or other sessions' attachments. `BLOCKED by guardrail` remains
+final for the same effect on the same targets: report it. Never pull, copy or
+import the blocked material through another path, tool or peer to reroute the
+refusal.
 
 ## Who the session on the peer runs as
 
@@ -669,12 +753,23 @@ acting on one (QA round 5, Q-R5-1):
   there".
 - `session_unreachable` — the peer accepted the act and then its runtime stopped
   answering WITHIN THE TIME THIS VERB ALLOWS: a bind that ran out of its own budget
-  (that runtime may be starting, or wedged), or the act as a whole running out of
-  `PILOT_ACT_TIMEOUT_S`. The peer's own sentence is carried verbatim, and nothing on
-  this side changed. A dial that produced NO stream at all is `peer_unreachable` (or
-  `relay_unavailable` with no local relay) even when the rung that noticed was the
-  bind: the two codes answer "which side of the open died", not "which sentence did
-  I get", because a stopped device and a stopped runtime look identical from here.
+  (that runtime may be starting, or wedged), the act as a whole running out of
+  `PILOT_ACT_TIMEOUT_S`, or a runtime that is ALIVE and too busy to answer. The
+  sentence states that the act was not delivered before asking you to re-run the
+  command. An explicit connection refusal keeps the runtime's own reason, not an
+  invented timed load diagnosis. If the other device answers that it could not
+  reach or start this session's runtime, that is also `session_unreachable`:
+  the reason is shown and the next step is to re-run the command, not diagnose a
+  device that already answered.
+
+  A connection that goes quiet after it is accepted is different. The session's
+  initial state may have been lost in transit, or nothing may have answered after
+  it. Neither proves the runtime is busy. This is `peer_unreachable`; the sentence
+  says the act was not delivered and points to `lop network doctor --peer <peer>`
+  to distinguish a lost connection from a stopped runtime. It does not claim no
+  session was reached. A dial that produced NO stream at all remains
+  `peer_unreachable` (or `relay_unavailable` with no local relay), even when the
+  rung that noticed was the bind.
 - `session_ambiguous` — the named device ANSWERED and holds SEVERAL conversations
   the target matches (a conversation name is not unique by design): the sentence
   lists the candidate rows with the id each is retypeable as, and NOTHING was sent.
@@ -992,8 +1087,8 @@ trust unit: while the share stands, **any process or session on the borrowing
 device (same user) can use it**, because there is no per-session secret on a
 node for the design to bound.
 
-**The source ladder** (strongest first; resolved fresh on the owner at every
-command, so a re-login or a token rotation needs no gesture on the node):
+**The source ladder** (strongest first; checked on the owner for each new
+borrow, so a re-login or token rotation needs no gesture on the node):
 
 1. **A GitHub App**, if one is configured — the strongest route, and the only
    one GitHub-side narrowing and per-token revocation apply to (setup below).
@@ -1007,15 +1102,85 @@ command, so a re-login or a token rotation needs no gesture on the node):
    keychain — wherever that install keeps it); the owner is the trusted side,
    and the borrowing device never reads it.
 
-**Designate the repositories on the owner**:
-`network.credentials.github.repositories` (search it in `/settings`),
-`owner/repo` entries, e.g. `damianvtran/scratch`. This list is the git helper's
-allow-list, and it is the enforced bound on every route: empty is a refusal,
-never "everything" — an empty list reads like a bug but is the contract
-working: every push is refused until the owner designates at least one
-repository. The designation travels WITH the grant — the borrowing
-device writes the owner's list into its own config before the git child runs —
-so a node does not maintain one by hand.
+The owner's `gh` login read has a dedicated, single-flight worker: unrelated
+provider/MCP work cannot queue ahead of its keychain lookup. The raw login is
+cached **in memory for at most 30 seconds**; repository policy is still read for
+every flight. Ordinary `gh auth login/logout` hosts-file changes invalidate the
+cache on the next owner read, without waiting for the TTL. A keychain-only change is picked up by the next owner read
+after that 30-second bound. Revoke and panic invalidate the source cache; existing
+borrower permission leases are not extended by this cache.
+
+The whole source lookup is bounded at 12 seconds, above `gh`'s own 10-second
+subprocess timeout. This is a caller bound, including designation enumeration:
+a slow cold listing may outlast it, but the ONE worker finishes warming the
+existing enumeration cache; callers never spawn replacements or wait indefinitely.
+A GitHub lookup/budget timeout travels as `rate_limited` plus `reason: owner_busy`,
+so older borrowers keep their held grant. Upgraded borrowers show `owner_busy`
+and honest timeout copy, not a claim that too many requests arrived. Other
+families retain their existing codes. GitHub borrowing and explicit `credential
+refresh github` retry **once**, after 250 ms. Ordinary GitHub borrowing allows at
+least 14 seconds per control ask; explicit refresh retains its existing 75-second
+window because App minting is outside the bounded gh lane. An ordinary borrow
+may instead use its **still-current permission lease** during proactive refresh;
+an expired lease, answered deny, revoke, panic or forced refresh never gets that
+fallback. This is not a new offline lease or refresh authority.
+
+**Which repositories a share lends for — by default, every one the owner's
+login can push to.** Before a hand-picked list has been lent (or after the
+explicit return to the default below), the owner ENUMERATES: for a token or a
+`gh` login, every repository that login can push to (`GET /user/repos`, owned,
+collaborator and organization-member, keeping push access); for an App, every
+repository the installation covers. It is always an explicit list — shown on
+the share receipt, in readiness, and carried on every grant — never "all
+repositories":
+
+- `lop network credential github repos` prints every repository a share lends
+  for and says where the list came from — every repository this device's
+  GitHub login can push to (with how long ago it was listed), the list you
+  chose by hand, or, when GitHub can't be reached, the list fetched earlier
+  (with its age) — then the opted-out repositories by name. `--refresh` asks
+  GitHub again now; `--json` carries the same list with an `origin` field
+  (`enumerated`, `explicit`, `last_good`, `unavailable`).
+- **Opt one out:** `lop network credential github exclude <owner/repo>` (back
+  in: `… include <owner/repo>`). The reply names what changed and every
+  repository still opted out. A name that isn't in the current list is kept
+  anyway, with a "check the spelling" warning, so a repository the login gains
+  later arrives already opted out. It is stored as
+  `network.credentials.github.excluded` on the owner, and devices you share
+  with lose push to it the next time they fetch the credential — within the
+  grant window (`network.credentials.grant_ttl_s`, 15 min by default): the owner
+  re-reads the opt-outs on every grant and the grant carries the narrowed list.
+- **The list is cached for 6 hours** and fetched again at every `credential
+  share github`, on `repos --refresh`, and on the first borrow after the 6 h
+  bound. A repository the owner gains reaches borrowers within that bound (at
+  once with a refresh); one the owner loses push to is refused by GitHub
+  whatever the list says. If GitHub can't be reached, the list fetched earlier
+  keeps serving, and `repos` and readiness say how old it is; with no earlier
+  list, a borrow is refused by name. Nothing ever widens to "everything".
+- **A hand-picked list still wins:** set the GitHub repositories setting
+  (`network.credentials.github.repositories`; search it in `/settings`,
+  `owner/repo` entries) and only those are lent, minus any opt-outs; nothing is
+  fetched from GitHub.
+- **Clear means refuse-all, not return to the default.** After lending a
+  hand-picked list, clearing it in `/settings` (including deleting its config
+  key) keeps a device-local clear fence: borrowers receive an empty list and
+  cannot push. `repos --refresh` does not remove that fence. To explicitly
+  return to every pushable repository minus opt-outs, run
+  `lop network credential github repos --use-default` **on the owner**. It
+  unsets the hand-picked list and removes its clear marker in one locked
+  transaction, preserves opt-outs, asks GitHub again and prints the effective
+  list. The next ordinary fetch carries the new list and its order metadata;
+  already-cached GitHub credentials retain the existing grant window above.
+- **Limits:** one share carries at most 2000 repositories, and an App token at
+  most 500 (GitHub's own per-token limit). A larger list is refused by name —
+  pick the ones to lend with the GitHub repositories setting, or opt some out —
+  never cut to a prefix. The share receipt shows the first 10 names and points
+  at `repos` for the rest.
+
+This list is the git helper's allow-list and the enforced bound on every
+route; the App mint is also narrowed to it. The designation travels WITH the
+grant — the borrowing device writes the owner's list into its own config
+before the git child runs — so a node does not maintain one by hand.
 
 Once any source resolves, the flow is: `lop network credential share github
 --with <device>` (device scope; session scope for this key is refused by name),
@@ -1146,6 +1311,46 @@ device's own package-manager terms (`brew install …` on a Mac, `sudo apt-get
 install …` on a Debian node) rather than a description of one. The row reads
 `warn` on purpose: missing tooling does
 not make a device less onboarded — it makes lanes that need it fail there.
+
+### A browser does not travel
+
+A session offloaded to a node gets no `browser` tool from the device that sent
+it: the browser host is per device (the operator's desktop app or extension
+lives on their machine, with their logins, and nothing of it crosses the mesh).
+A node needs its own — the node-managed browser, `lop browser setup --node`,
+with the operator's authorisation (`guide://browser` "Headless nodes") — and
+`lop network ready`'s `browser` row says which state each node is in.
+
+### Team Bridge does not travel
+
+`lop team-bridge setup` never enrols a mesh node in Team Bridge (agent
+messages to teammates; an enrolment copied from the primary is left as it is),
+and a node does not send on the operator's behalf. Enrolment is consent, and
+consent cannot be given from a node: mesh device auth proves a device, not a
+person, and the desktop bearer and device key are readable from a shell there,
+so nothing a node does can prove the operator agreed. `lop team-bridge setup`
+on a joined node says so (`mesh_node_not_enrolled`) instead of pointing at the
+app.
+
+To reach a teammate or post to the bridge from a node, `send` the request to the
+operator's chief-of-staff session on their primary device, saying what to send
+and to whom; it relays the message and tells you what it did. Find it with
+`sessions` `list`, narrowed with `peer=<primary device>`: the row with team none
+whose title is your chief of staff's name (Aida unless renamed); if unsure, ask
+the operator which session that is. Then call `send` with `session=<that id>`
+and leave `peer` unset; an id held by exactly one paired device is routed there
+on its own (`guide://peer-messaging`). If `send` answers `no session found`
+(the node cannot list the primary's sessions right now), pass
+`peer=<primary device>` too, using the device name from
+`lop network show <network>`, which lists members even when the relay is down.
+
+The `lop send` shell command does not do this: it reaches sessions on this
+device only. A person at a node's shell can ask the chief of staff on the
+primary device directly, or deliver the request with:
+
+```sh
+lop network sessions --peer <primary device> --send <session id> --mailbox "<request>"
+```
 
 ### The build gates the machinery
 
@@ -1397,10 +1602,12 @@ lop network identity rotate --json    # for a suspected key compromise
 - Do not add a member by editing a member list. Membership changes through
   `invite`/`join`, `member rm`, and the epoch rotation they carry.
 - Do not force a full re-sync, and do not invent a `--force` on a verb that does
-  not take one: the only verb in this family with a `--force` is `network sessions
-  --stop`, and it means the owner's own `lop stop --force` — stop a target the
-  plain stop skipped (one already leaving, or mid-turn with a socket that will not
-  answer), accepting that the turn goes with it.
+  not take one. For session lifecycle operations, `network sessions --stop
+  --force` means the owner's own `lop stop --force` — stop a target the plain
+  stop skipped (one already leaving, or mid-turn with a socket that will not
+  answer), accepting that the turn goes with it. Separately, `network files pull
+  --force` permits replacing an existing `--out` file; it does not bypass the
+  config/data-directory restriction. Store-only pulls need neither flag.
 
 ## Reference
 
@@ -1438,6 +1645,8 @@ lop network rm <network> --json
 lop network invite --role drive --json
 lop network join @<token-file>      # a terminal: prompts for the code, then joins
 lop network join @<token-file> --park --json   # no terminal: park and print the code
+# answering a pairing: the person, in the app's Mesh approvals. Without the app
+# (same-user terminal fallback, the person's to run):
 lop network join --confirm <code> --json       # answer the parked ceremony
 lop network confirm --list          # a pairing parked on THIS device, with both codes
 lop network confirm <invite-id>     # answer it (--decline refuses; needs a TTY)
@@ -1487,6 +1696,29 @@ copies the audit log somewhere retention will not prune it — take that copy
 before an incident review, not after. `identity rotate` replaces the device key
 and announces the new device id to peers (the old id is stale from then on): it
 is for a suspected key compromise, and the previous id is gone for good.
+
+**Why an account was lent.** The owner's existing `credential.grant` audit record
+adds `account_label` and `ranked_reason`; inspect them with `lop network log --json`
+(or the normal text/export views). The label is owner-local display metadata,
+possibly an email, or null if unknown. It is not a new account identifier and is
+never attached to the peer's grant. Existing `credential_id`, `policy`, `scope`,
+`sub`, and latency fields are unchanged.
+
+`ranked_reason` is a bounded machine scalar `basis:ordinal`, not prose or a
+candidate list. The ordinal is the **actual served row's position in the final
+eligible ordering within its winning credential tier**, not a global best across
+OAuth, login keys, environment and fallback tiers. Bases are `reset_rank`,
+`headroom_rank`, `fair_hash`, `round_robin`, `affinity`, `request_pick`, and
+`demotion_preference` (an observed change in the final stable partition).
+`affinity_fallback` / `request_fallback` mean an earlier preferred row was not
+served: the sibling is not falsely called the anchor/request pick. For example,
+`reset_rank:2` is the second row in that ordering, not a claim it was the earliest
+reset overall. Eligibility filtering precedes ranking, so a sole remaining row
+is rank 1 even if excluded siblings exist. A path that does not rank says
+`unranked`, with no fabricated ordinal. This is a snapshot of the existing pick,
+not a second selector invocation, usage fetch or new routing policy; coalesced
+requests keep their own outcome's explanation. It uses normal audit retention
+and batching, not a separate journal or new power-loss durability promise.
 
 **What is not implemented in this build**, so nothing above should be promised as
 existing:

@@ -1,0 +1,90 @@
+{
+  "locale": "hi",
+  "namespace": "wire.session_status",
+  "audit_date": "2026-11-19",
+  "key_count": 17,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "terminal-status-hi-audit",
+    "session": "a7fd23e84898",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model field",
+    "fallback_used": false,
+    "independent_from_translator_session": "8c6e64f5562b",
+    "independent_from_translator": true,
+    "date": "2026-11-19",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/8c6e64f5562b/scratchpad/terminal-status-hi/wire.session_status.json",
+      "sha256": "bff9faa6c1eaf819f0aa8943d53add199288e4611c736a24bdb7ebb8bd340b81"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": {
+    "report.json": {
+      "path": "/Users/damian/.local-operator/sessions/a7fd23e84898/scratchpad/hi-first-audit/report.json",
+      "sha256": "e9305f39d227bebfd84e147167479521ccdb4594933c223786b81c36360d3f2f"
+    },
+    "checks.json": {
+      "path": "/Users/damian/.local-operator/sessions/a7fd23e84898/scratchpad/hi-first-audit/checks.json",
+      "sha256": "b6de54a52722f128f6b15ba794ceb548ce4993b10ee98a1dc064d730b2dac7e4"
+    },
+    "audit.log": {
+      "path": "/Users/damian/.local-operator/sessions/a7fd23e84898/scratchpad/hi-first-audit/audit.log",
+      "sha256": "2c1801b1197515b1e4b570b8daead063add7d543dcc54a6701555ec476ec7ce2"
+    },
+    "check_audit.py": {
+      "path": "/Users/damian/.local-operator/sessions/a7fd23e84898/scratchpad/hi-first-audit/check_audit.py",
+      "sha256": "c19402e390efce4f44fa06c1dbc5f10f28948b58fc950a3f00ab7d874832d816"
+    },
+    "receipt.json": {
+      "path": "/Users/damian/.local-operator/sessions/a7fd23e84898/scratchpad/hi-first-audit/receipt.json",
+      "sha256": "e4232f083067efc3bc91e9394d5237c4078f124766871e9bf62e3e562ed3e556"
+    },
+    "ledger-dry-run.log": {
+      "path": "/Users/damian/.local-operator/sessions/a7fd23e84898/scratchpad/hi-first-audit/ledger-dry-run.log",
+      "sha256": "71259dbb1f9a966bb2e7906926f26c6324d2aa95b31b6b6af6111c1b6625cae7"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "intended_canonical_path": "i18n/audits/evidence/hi/wire.session_status/hi-a1-a7fd/record.json",
+  "retention": "Scratch handoff; not tracked, applied, committed or merged. Manager must retain record and companions under canonical root.",
+  "execution_log": "audit.log",
+  "audit_notes_not_execution_log": [
+    "report.json"
+  ],
+  "independent_pass_number": 1,
+  "required_independent_passes": 2,
+  "ledger_validation": {
+    "mode": "append --dry-run",
+    "exit_code": 0,
+    "actual_output": "i18n/audit-history/hi/wire.session_status.json",
+    "history_applied": false,
+    "command": "PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python scripts/i18n/ledger.py append --receipt /Users/damian/.local-operator/sessions/a7fd23e84898/scratchpad/hi-first-audit/receipt.json --expected-history-sha <fresh history-sha hi/wire.session_status> --dry-run",
+    "log_record_reference": "record.json"
+  },
+  "validation_command": "PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/a7fd23e84898/scratchpad/hi-first-audit/check_audit.py"
+}

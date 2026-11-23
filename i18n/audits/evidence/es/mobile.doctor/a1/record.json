@@ -1,0 +1,209 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "es",
+ "namespace": "mobile.doctor",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "packaged_at_utc": "2026-11-14T01:38:35Z",
+ "verdict": "passed",
+ "status": "passed",
+ "scope": "complete NEW namespace, all 23 keys judged semantically",
+ "key_count": 23,
+ "keys_audited": 23,
+ "new_keys": [
+  "mobile.doctor.versions.ok",
+  "mobile.doctor.daemon.not_installed",
+  "mobile.doctor.daemon.not_running",
+  "mobile.doctor.daemon.ok",
+  "mobile.doctor.daemon.slow",
+  "mobile.doctor.daemon.gate_open",
+  "mobile.doctor.daemon.state_not_running",
+  "mobile.doctor.files.ok",
+  "mobile.doctor.files.near",
+  "mobile.doctor.files.unknown",
+  "mobile.doctor.files.status_line",
+  "mobile.doctor.logs.clean",
+  "mobile.doctor.logs.errors",
+  "mobile.doctor.tunnel.not_configured",
+  "mobile.doctor.tunnel.ok",
+  "mobile.doctor.tunnel.problem",
+  "mobile.doctor.tunnel.single",
+  "mobile.doctor.tunnel.duplicates",
+  "mobile.doctor.tunnel.list_unchecked",
+  "mobile.doctor.login.ok",
+  "mobile.doctor.login.missing",
+  "mobile.doctor.files.not_running",
+  "mobile.doctor.daemon.not_answering"
+ ],
+ "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+ "target_sha256": "f641372869137bcb1fa22d4134707c185ca1cb2cbabfe284939a960a688f3c89",
+ "source_audit_revision": "a3722be7dadacaf140a2587a0100bd3b26c2ab50",
+ "worktree": "~/local-operator/.worktrees/mobile-doctor",
+ "branch": "feat/mobile-doctor",
+ "node": "lop-remote-node-2",
+ "translator": {
+  "agent": "i18n-translator subagent, session 398cdb26808f (English drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent (C4 i18n-auditor es fr ru), session 5e5b8d070b27; did not translate or edit any value it judged",
+  "model": "anthropic/claude-opus-5-5 (served model reported by the session; no provider fallback observed)",
+  "date": "2026-11-14",
+  "independent_from_translator": true,
+  "independence": "Different session (5e5b8d070b27) from the translator (398cdb26808f) and the English drafter (b0300e2c2c7f); never edited a catalogue value. Translator and auditor ran the same model (anthropic/claude-opus-5-5) — disclosed; no native-speaker pass is claimed."
+ },
+ "input_hashes": {
+  "en": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+  "context": "c6baa99bc539ef2d2e03bf7b6b11e83edac37139eede8db82034f5fad98d4614",
+  "target": "f641372869137bcb1fa22d4134707c185ca1cb2cbabfe284939a960a688f3c89",
+  "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+  "style_guide": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/mobile.doctor.json",
+  "context": "local_operator/i18n/catalogues/en/mobile.doctor.context.json",
+  "target": "local_operator/i18n/catalogues/es/mobile.doctor.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/es.md"
+ },
+ "counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 1,
+  "nit": 2
+ },
+ "unresolved_blocker_major": 0,
+ "findings": [
+  {
+   "id": "ES-D1",
+   "severity": "minor",
+   "keys": [
+    "mobile.doctor.daemon.not_installed",
+    "mobile.doctor.daemon.not_running",
+    "mobile.doctor.daemon.ok",
+    "mobile.doctor.daemon.slow",
+    "mobile.doctor.daemon.gate_open",
+    "mobile.doctor.files.ok",
+    "mobile.doctor.files.near",
+    "mobile.doctor.files.unknown",
+    "mobile.doctor.logs.errors",
+    "mobile.doctor.tunnel.not_configured",
+    "mobile.doctor.files.not_running",
+    "mobile.doctor.daemon.not_answering"
+   ],
+   "issue": "Translator Q4: «acceso telefónico» is also the established Spanish UI term for dial-up access («conexión de acceso telefónico»), so «servicio de acceso telefónico» can read as a dial-up service. Meaning survives in context (phone app, Radient tunnel) and the wording matches the already-passed es mobile.setup namespace (24 keys), so changing only this namespace would split the term; cli.mobile_help meanwhile uses «acceso desde el teléfono».",
+   "suggested_fix": "Optional follow-up wave across mobile.setup + mobile.doctor: «acceso desde el teléfono» (servicio → «el servicio para el teléfono» or «el servicio de acceso desde el teléfono»). Not required for this gate.",
+   "status": "open (non-blocking)"
+  },
+  {
+   "id": "ES-D2",
+   "severity": "nit",
+   "keys": [
+    "mobile.doctor.daemon.not_running"
+   ],
+   "issue": "«muestra esta máquina en reposo hasta que se inicie»: «se inicie» can attach to «máquina» (suggesting a reboot); «como» is more idiomatic after «mostrar». The English «until it starts» carries the same latent ambiguity.",
+   "suggested_fix": "«…la aplicación móvil muestra esta máquina como en reposo hasta que el servicio se inicie.»",
+   "status": "open (non-blocking)"
+  },
+  {
+   "id": "ES-D3",
+   "severity": "nit",
+   "keys": [
+    "mobile.doctor.daemon.state_not_running"
+   ],
+   "issue": "Translator Q5: rendered after the English label «auth gate:» in `lop mobile status`; «no está en ejecución» is a predicate rather than a state label. Grammatical and correct in meaning.",
+   "suggested_fix": "Optional: «detenido» or «sin ejecutar».",
+   "status": "open (non-blocking)"
+  }
+ ],
+ "translator_questions": {
+  "Q4": {
+   "question": "es «acceso telefónico» vs «acceso desde el teléfono»",
+   "adjudication": "minor, recorded as ES-D1 (follow-up wave, not a gate blocker; mobile.setup already passed with the same term)."
+  },
+  "Q5": {
+   "question": "ru/es daemon.state_not_running fragment",
+   "adjudication": "nit ES-D3; acceptable."
+  },
+  "Q6": {
+   "question": "«asleep» renderings",
+   "adjudication": "«en reposo» natural for a sleeping device; not verified against the phone app's own label (separate repo)."
+  }
+ },
+ "per_key": {
+  "mobile.doctor.versions.ok": "ok",
+  "mobile.doctor.daemon.not_installed": "ES-D1",
+  "mobile.doctor.daemon.not_running": "ES-D1,ES-D2",
+  "mobile.doctor.daemon.ok": "ES-D1",
+  "mobile.doctor.daemon.slow": "ES-D1",
+  "mobile.doctor.daemon.gate_open": "ES-D1",
+  "mobile.doctor.daemon.state_not_running": "ES-D3",
+  "mobile.doctor.files.ok": "ES-D1",
+  "mobile.doctor.files.near": "ES-D1",
+  "mobile.doctor.files.unknown": "ES-D1",
+  "mobile.doctor.files.status_line": "ok",
+  "mobile.doctor.logs.clean": "ok",
+  "mobile.doctor.logs.errors": "ES-D1",
+  "mobile.doctor.tunnel.not_configured": "ES-D1",
+  "mobile.doctor.tunnel.ok": "ok",
+  "mobile.doctor.tunnel.problem": "ok",
+  "mobile.doctor.tunnel.single": "ok",
+  "mobile.doctor.tunnel.duplicates": "ok",
+  "mobile.doctor.tunnel.list_unchecked": "ok",
+  "mobile.doctor.login.ok": "ok",
+  "mobile.doctor.login.missing": "ok",
+  "mobile.doctor.files.not_running": "ES-D1",
+  "mobile.doctor.daemon.not_answering": "ES-D1"
+ },
+ "mechanical_checks": [
+  {
+   "check": "key parity (same set and order)",
+   "result": "pass"
+  },
+  {
+   "check": "ICU argument names identical",
+   "result": "pass"
+  },
+  {
+   "check": "select branch labels identical",
+   "result": "pass"
+  },
+  {
+   "check": "no command named that English does not name",
+   "result": "pass"
+  },
+  {
+   "check": "final period mirrors English",
+   "result": "pass"
+  },
+  {
+   "check": "rendered through Msg.envelope(locale=es) without error (23/23 keys present in render)",
+   "result": "pass"
+  },
+  {
+   "check": "no silent English fallback in render",
+   "result": "pass"
+  }
+ ],
+ "must_survive": {
+  "no command named": "verified (no added `lop …`/backticks)",
+  "calm factual tone": "verified by reading",
+  "placeholders verbatim": "verified (ICU argument names identical)"
+ },
+ "evidence_files": [
+  "record.json",
+  "report.md",
+  "rendered.txt",
+  "audit.log",
+  "dryrun.log",
+  "receipt.json"
+ ],
+ "not_verified": [
+  "native-speaker review",
+  "terminal/desktop rendered frame (text render only)",
+  "the phone app's own localized 'asleep'/'not answering' labels (separate repository)"
+ ]
+}

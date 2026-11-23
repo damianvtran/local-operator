@@ -1,0 +1,29 @@
+{
+  "record_reference": "i18n/audits/evidence/es/tui.provider_state/esa17/record.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/esa17/report.md",
+      "sha256": "ac51fb13cd3cbc4fbbfad169c2a32cc077c0caaabe65194006cd3f6575dafc59"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/esa17/script.py.txt",
+      "sha256": "1172c8a851c2cdc52160d16ea80e9de8703f6a5eeb151d36f82cb5227eb733db"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/esa17/audit.log",
+      "sha256": "b7f0d756949d4c5e00b9f700e9c90b0a8613f84c907ca7e8857e034090b6b646"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/esa17/ledger-receipt.json",
+      "sha256": "72ea35cfdc7a958d385a6f639f356faf93b473ab27fbd9d1d59fe120ac2566dc"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/esa17/harness-diagnostic-1.log",
+      "sha256": "f5ea4ba79c4dbc049ed1f950cc4369c7afb506a5eb598c75145de1f0c08482c8"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.provider_state/esa17/record.json",
+      "sha256": "6547b1f6c8bf59ba994e826af3ddba6697319c60038fa4359b836ed976f476a6"
+    }
+  ]
+}

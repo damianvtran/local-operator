@@ -142,7 +142,9 @@ def _image_parts(node: Mapping[str, Any]) -> list[Any]:
     if not isinstance(content, list):
         return []
     return [
-        part for part in content if isinstance(part, Mapping) and "image" in str(part.get("type"))
+        part
+        for part in content
+        if isinstance(part, Mapping) and ("image" in str(part.get("type")) or "image" in part)
     ]
 
 
@@ -153,12 +155,15 @@ def _payload_of(node: Any) -> str | None:
             return node.split(",", 1)[1]
         return None
     if isinstance(node, Mapping):
+        # Converse REST blobs are base64 already, not data URLs.
+        if isinstance(node.get("bytes"), str):
+            return node["bytes"]
         # Anthropic ``source.data`` is the bare base64, not a data URL.
         if isinstance(node.get("data"), str) and node.get("type") == "base64":
             return node["data"]
         # OpenAI chat ``image_url.url``, Responses ``image_url`` (a string),
         # Anthropic ``source``.
-        for key in ("image_url", "url", "source"):
+        for key in ("image_url", "url", "source", "image", "toolResult"):
             if key in node:
                 found = _payload_of(node[key])
                 if found is not None:
@@ -287,6 +292,9 @@ async def stream_with_rejected_image_retry(
     this cannot see, and the session's degrade is the right owner of it.
     """
     request = with_rejected_images_replaced(request)
+    # A cached ordinary-session refusal must not silently erase evidence in an
+    # opt-in required-media request. Validate after that projection as well.
+    request.validate_required_images()
     sent: dict[str, Any] = {}
     yielded = False
     try:
@@ -295,7 +303,10 @@ async def stream_with_rejected_image_retry(
             yield event
         return
     except ProviderError as error:
-        if yielded:
+        if yielded or request.required_image_count:
+            # Required-media verification cannot accept an answer to a retry
+            # that removed its evidence. Keep the original provider failure and
+            # do not poison the ordinary-session rejection cache for this run.
             raise
         retry = replace_rejected_image(request, error, sent.get("body"))
         if retry is None:

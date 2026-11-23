@@ -10,9 +10,9 @@ import logging
 import pathlib
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import aclosing, asynccontextmanager
-from typing import Annotated, Any, Callable, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, NamedTuple, cast
 
 from fastapi import (
     APIRouter,
@@ -31,6 +31,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictBool,
+    StrictInt,
     field_validator,
     model_serializer,
     model_validator,
@@ -38,6 +39,7 @@ from pydantic import (
 from starlette.background import BackgroundTask
 from starlette.types import Receive, Scope, Send
 
+from local_operator.asks import surfaces
 from local_operator.harness.types import ModelSpec
 from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import wire_errors_desktop as _wd
@@ -69,6 +71,7 @@ from local_operator.server.models.desktop_sessions import (
     DraftPreviewPayload,
     DraftReceipt,
     HistoryPage,
+    HistoryRowRange,
     InterruptReceipt,
     JobCancelReceipt,
     MessageAdmission,
@@ -83,11 +86,17 @@ from local_operator.server.models.desktop_sessions import (
     StoredFile,
     SupplementReceipt,
     TemporaryState,
+    ToolCallDiffPage,
     WarmReceipt,
     WatchReceipt,
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.retire import RETIRING_STATE_ATTR, DaemonRetiring
+from local_operator.server.utils.browser_owner_status import (
+    BrowserOwnerQuery,
+    BrowserOwnerStatus,
+    read_browser_owner_status,
+)
 from local_operator.server.utils.desktop_commands import OWNER_COMMANDS, native_action
 from local_operator.server.utils.desktop_feed import DesktopFeed
 from local_operator.server.utils.desktop_receipts import (
@@ -103,6 +112,9 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
     DraftAlreadyMaterialised,
     LegacySubscriberDuringMove,
+    PeerAttachmentFile,
+    PeerAttachmentOutdated,
+    PeerAttachmentRetryable,
     PeerAttachmentUnavailable,
     PeerSessionUnreachable,
     SessionDeletionRefused,
@@ -123,6 +135,7 @@ from local_operator.server.utils.store_failures import (
 from local_operator.session import open_trace, transcript_index
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import (
+    BULK_RECEIPT_SESSION_ID_PATTERN,
     SUPERSEDED_TOKEN_CODE,
     SupersededCompletionToken,
 )
@@ -146,6 +159,11 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.index_prewarm import start_session_warm
 from local_operator.session.remote_open import PeerSessionUnresolved
+from local_operator.session.row_clip import (
+    ROW_RANGE_MAX_BYTES,
+    RowRangeUnsatisfiable,
+    wire_json,
+)
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
     SESSION_COPY_FLAG,
@@ -157,6 +175,11 @@ from local_operator.supplements.contract import (
     STEER_TEXT_MAX_CHARS,
     supplement_read_options,
 )
+
+if TYPE_CHECKING:
+    # Type-only: the ``cast`` on each ``diff_bindings`` unpack names it as a string, so
+    # this route module keeps its lazy ``tools.diff_archive`` import at runtime.
+    from local_operator.tools.diff_archive import DiffBindingReadOptions
 
 logger = logging.getLogger(__name__)
 
@@ -854,6 +877,50 @@ class PresenceBeat(Input):
     #: "nothing is on screen".
     session_id: str = Field(default="", pattern=r"^$|^[a-f0-9]{12}$")
     window: PresenceWindow = Field(default_factory=PresenceWindow)
+    # -- ADR 0008 desk presence (slice 1) --------------------------------------
+    # "Is a PERSON at this computer", as opposed to the window state above,
+    # which answers "is this card on screen". All four are OPTIONAL so today's
+    # beat stays valid byte-for-byte; the model is still `extra="forbid"`,
+    # which is exactly why an app may only send them to a backend advertising
+    # `features.desk_presence` (an undeclared field is a 422 the app swallows,
+    # and the lease then lapses). Raw relative facts only: the receiver turns
+    # them into wall-clock deadlines on its own clock (`presence.DeskReport`).
+    #: Seconds since the last OS input, from Electron `getSystemIdleTime()`.
+    idle_s: StrictInt | None = Field(default=None, ge=0)
+    #: Screen locked (or a lock/suspend/resign event since the last unlock).
+    locked: StrictBool | None = None
+    #: False when the app cannot vouch for `idle_s` (e.g. Wayland, ADR R2).
+    idle_trusted: StrictBool | None = None
+    #: The operator's threshold, one of `presence.AWAY_AFTER_CHOICES_S`. A
+    #: Literal rather than a range so no receiver ever computes a deadline
+    #: from a value no settings surface can show.
+    away_after_s: Literal[60, 120, 300, 600] | None = None
+
+    @field_validator("away_after_s", mode="before")
+    @classmethod
+    def _strict_threshold(cls, value: Any) -> Any:
+        # `Literal[60, ...]` would accept `True`/`60.0` in lax mode; a
+        # threshold is an integer the app read from the setting, nothing else.
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError("away_after_s must be an integer")
+        return value
+
+    def desk_fields(self) -> dict[str, Any]:
+        """The desk fields as publisher kwargs, or ``{}`` for a legacy beat.
+
+        Empty when the app sent none of them, which is what keeps a legacy
+        beat's published record free of any `desk` entry (version skew row
+        "old app, new core" falls back to the focus rule).
+        """
+        fields = {
+            "idle_s": self.idle_s,
+            "locked": self.locked,
+            "idle_trusted": self.idle_trusted,
+            "away_after_s": self.away_after_s,
+        }
+        if all(value is None for value in fields.values()):
+            return {}
+        return fields
 
 
 class SessionTarget(Input):
@@ -2280,13 +2347,41 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         raise HTTPException(
             409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
         ) from None
+    except PeerAttachmentRetryable as error:
+        # 504, NEVER 503 OR 409 (remote files parity §1): the renderer reads an
+        # undeclared 503 under /v1/desktop/ as the plane closing, and a 409 as
+        # permanent; only the STATUS reaches it for a non-plane code, so the
+        # retryable answer has to differ by status. ``pending`` means the pull is
+        # still running and a retry after ``Retry-After`` joins it.
+        message = (
+            _wd.attachment_fetch_pending(device=error.device)
+            if error.pending
+            else _wd.attachment_owner_unreachable(device=error.device)
+        )
+        raise HTTPException(
+            504,
+            message.envelope(code=error.code),
+            headers={"Retry-After": "2"} if error.pending else None,
+        ) from None
+    except PeerAttachmentOutdated as error:
+        raise HTTPException(
+            409,
+            _wd.attachment_peer_outdated(device=error.device, peer=error.peer).envelope(
+                code=error.code
+            ),
+        ) from None
     except PeerAttachmentUnavailable as error:
         # The bytes are on the device that holds the conversation, and this
         # device's content-addressed store is what the route reads. 409 rather
         # than 404 for the same reason as above: the image exists, and the reader
-        # is told where it is instead of being told it does not.
+        # is told where it is instead of being told it does not. The sentence
+        # carries the OWNER's reason (#3872 Q1-1); the code stays, so the
+        # renderer's handling does not change.
         raise HTTPException(
-            409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            409,
+            _wd.attachment_owner_refused(reason=error.reason, device=error.device).envelope(
+                code=error.code
+            ),
         ) from None
     except SessionStoreUnavailable as error:
         # The catalogue refused to answer, most often because the store's
@@ -2336,7 +2431,21 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         ) from None
     except TemporaryRefusal as error:
         raise HTTPException(error.status, error.envelope()) from None
-    except KeyError:
+    except KeyError as error:
+        # AN UNRESOLVABLE LAUNCH TARGET (``desktop_profiles.UnresolvedTarget``)
+        # keeps the same 404 and the same catalogued sentence, and adds which
+        # team/slot/member failed as machine fields, plus a log line: a team
+        # whose roster names a row that is not a role used to surface only as a
+        # bare 404 that the desktop rendered as "model was not resolved", with
+        # nothing anywhere naming the member. Duck-typed so this ladder does not
+        # import the profile helpers at module load; the ``isinstance(dict)``
+        # check keeps that duck typing honest for the type checker and refuses
+        # to merge anything but a mapping into the catalogued envelope.
+        wire_fields = getattr(error, "wire_fields", None)
+        fields = wire_fields() if callable(wire_fields) else None
+        if isinstance(fields, dict):
+            logger.warning("desktop launch target refused: %s", error)
+            raise HTTPException(404, {**_wd.requested_not_found().envelope(), **fields}) from None
         # A DELETED TEMPORARY CHAT answers its own 404 code on every session
         # route (snapshot, history, events, message, pin, archive, temporary),
         # so a client can say "this temporary chat was deleted" rather than
@@ -2808,6 +2917,14 @@ async def ack_delegated_cleanup_notice(request: Request):
     async with errors(request):
         await asyncio.to_thread(acknowledge_delegated_notice, root / SESSIONS_DIRNAME)
     return reply({"acknowledged": True})
+
+
+@router.post("/v1/desktop/browser/owner-status", response_model=CRUDResponse[BrowserOwnerStatus])
+async def browser_owner_status(request: Request, body: BrowserOwnerQuery):
+    """Read generation-fenced owner evidence, independently of the sidebar roster."""
+    return reply(
+        await asyncio.to_thread(read_browser_owner_status, store_root(request), body.session_ids)
+    )
 
 
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
@@ -3691,6 +3808,9 @@ async def snapshot(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3745,6 +3865,7 @@ async def snapshot(
             **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
             peer_journal_source=bool(peer_journal_source),
             **supplement_read_options(bool(supplements)),
+            **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
         )
         # The temporary-chat object rides on the snapshot so an open chat shows
         # its pill and countdown without a list read. ``null`` for every other
@@ -3817,6 +3938,9 @@ async def history(
     source_read: Annotated[str | None, Query(max_length=32)] = None,
     expected_journal_generation: Annotated[str | None, Query(max_length=128)] = None,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3878,8 +4002,57 @@ async def history(
                 source_read=source_read,
                 expected_journal_generation=expected_journal_generation,
                 **supplement_read_options(bool(supplements)),
+                **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
             )
         )
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/history/rows/{ref}",
+    response_model=CRUDResponse[HistoryRowRange],
+)
+async def history_row(
+    session_id: str,
+    ref: str,
+    request: Request,
+    offset: int = Query(default=0, ge=0),
+    # No ``le``: an oversized limit is CLAMPED to ``ROW_RANGE_MAX_BYTES`` (1 MiB)
+    # and the answer's ``limit`` states the clamp, so a reader that asks for
+    # "the rest" in one call still makes progress instead of failing.
+    limit: int = Query(default=ROW_RANGE_MAX_BYTES, ge=1),
+):
+    """One byte range of the FULL content of a row ``/history`` served clipped.
+
+    A clipped row (``truncated`` on a history entry, ``docs/DESKTOP_API.md``
+    §"Clipped rows") names an opaque ``ref``; the reader pages this route with
+    ``offset``/``limit`` and concatenates the decoded ranges, which reassemble
+    to exactly ``truncated.bytes_total`` bytes of the row's wire JSON.
+
+    THE SAME DOOR AS ``/history``, deliberately: this router's bearer auth and
+    the identical ``host(request).session(session_id, read=True,
+    allow_draft=True)`` admission, so placement, the retiring latch, the
+    remote-owner refusal and the read-only engagement are whatever ``/history``
+    gets — a full row is never reachable where its clipped page is not.
+    ``/history`` writes no route-level audit record; neither does this (the
+    request log is the shared middleware's, identical for both).
+
+    THREAT MODEL: the ref is the only new input. It is an HMAC over
+    ``(session_id, row_id)`` under a per-process secret
+    (``session.row_clip.row_ref``), so a ref from another session, a forged
+    or guessed ref, and a ref from an earlier serve process all fail the same
+    constant-time check and answer the same 404 as a row that no longer
+    exists. ``limit`` is clamped so one request can never re-create the
+    oversized response the clip exists to prevent. An ``offset`` past the end
+    answers 416; ``offset == bytes_total`` is an empty, ``eof`` range.
+    """
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
+        try:
+            return reply(await bridge.history_row(ref=ref, offset=offset, limit=limit))
+        except RowRangeUnsatisfiable as error:
+            raise HTTPException(416, {"code": "row_offset_past_end", "error": str(error)}) from None
 
 
 @router.get(
@@ -4097,6 +4270,120 @@ async def child_trajectory_release(session_id: str, child_id: str, request: Requ
         return reply(await host(request).unload_child_trajectory(session_id, child_id))
 
 
+def _peer_file_response(result: PeerAttachmentFile, request: Request) -> Response:
+    """A peer session's blob, STREAMED from its open fd, with ``Range`` (206).
+
+    The local branch keeps its whole-body ``Response`` (unchanged bytes for local
+    sessions); a peer's file may be a 32 MiB video landed in the remote cache, so
+    it is never buffered (remote files parity §1, I1-3). Same mime allowlist and
+    ``nosniff`` as the local answer.
+    """
+    from local_operator.server.utils import byte_range
+
+    return byte_range.handle_response(
+        result.handle,
+        media_type=(
+            result.mime_type
+            if result.mime_type in ATTACHMENT_SERVABLE_MIME_TYPES
+            else ATTACHMENT_FALLBACK_MIME
+        ),
+        headers={"X-Content-Type-Options": "nosniff"},
+        range_header=request.headers.get("range"),
+    )
+
+
+#: Tool-call ids are provider-minted opaque strings; the bound keeps a crafted
+#: path segment from costing more than one transcript prefilter.
+_TOOL_CALL_ID_MAX = 256
+
+
+def _diff_reply(page: dict[str, Any]) -> JSONResponse:
+    """The CRUD envelope with the headers this evidence must carry.
+
+    ``no-store`` is also applied by ``managed_desktop_boundary``; stating it
+    here keeps the contract true for any host that mounts the router alone.
+    """
+    body = reply(ToolCallDiffPage.model_validate(page)).model_dump(mode="json")
+    return JSONResponse(
+        body, headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"}
+    )
+
+
+async def _diff_page_or_422(load: Any) -> dict[str, Any]:
+    from local_operator.tools.diff_archive import DiffPageRangeError
+
+    try:
+        return await load
+    except DiffPageRangeError:
+        # A start past the last row is the caller's request being wrong, not
+        # the resource being absent, so it is not folded into the uniform 404.
+        # The page is addressed by the server-issued (next_start, next_offset)
+        # cursor, so the audited paging-cursor refusal is the localized body.
+        raise HTTPException(422, _wd.session_files_bad_cursor().envelope()) from None
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/tool-calls/{call_id}/diff",
+    response_model=CRUDResponse[ToolCallDiffPage],
+)
+async def tool_call_diff(
+    session_id: str,
+    request: Request,
+    call_id: str = Path(min_length=1, max_length=_TOOL_CALL_ID_MAX),
+    start: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """One page of a write/edit call's COMPLETE, source-redacted diff.
+
+    The inline ``details['diff']`` keeps 200 rows; ``details['diff_full']``
+    names the archive that holds the rest (``tools/diff_archive``). The client
+    sends ids only -- never a digest: membership is proved server-side from
+    this session's own transcript row for ``call_id``. Unknown session,
+    foreign call or a non-write/edit call are one 404; bad paging is 422; a
+    captured-but-unservable diff (``oversized``/``withheld``/``unavailable``/
+    ``evicted``) and an old row (``not_recorded``) are 200 answers with no rows;
+    so is a call id that two distinct persisted rows share (``unavailable``:
+    serving either could be the wrong capture). ``offset`` is the opaque,
+    server-issued continuation into one row too large for a page (see
+    ``ToolCallDiffPage``); a client echoes ``next_offset`` and never computes it.
+    """
+    async with errors(request):
+        page = await _diff_page_or_422(
+            host(request).tool_call_diff(
+                session_id, call_id, start=start, limit=limit, offset=offset
+            )
+        )
+    return _diff_reply(page)
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/tool-calls/{call_id}/diff",
+    response_model=CRUDResponse[ToolCallDiffPage],
+)
+async def child_tool_call_diff(
+    session_id: str,
+    child_id: str,
+    request: Request,
+    call_id: str = Path(min_length=1, max_length=_TOOL_CALL_ID_MAX),
+    start: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """The child reader's twin of :func:`tool_call_diff`.
+
+    Same contract; the containment proof (``_contained_child_dir``) runs
+    before the child's transcript is read, and refusals are the same 404.
+    """
+    async with errors(request):
+        page = await _diff_page_or_422(
+            host(request).child_tool_call_diff(
+                session_id, child_id, call_id, start=start, limit=limit, offset=offset
+            )
+        )
+    return _diff_reply(page)
+
+
 @router.get(
     "/v1/desktop/sessions/{session_id}/children/{child_id}/attachments/{digest}",
     # Same declaration as the parent's route, and for the same reason: the
@@ -4124,7 +4411,10 @@ async def child_attachment(
     that is not the named session's, which ``_contained_child_dir`` refuses.
     """
     async with errors(request):
-        data, mime_type = await host(request).child_attachment(session_id, child_id, digest)
+        result = await host(request).child_attachment(session_id, child_id, digest)
+    if isinstance(result, PeerAttachmentFile):
+        return _peer_file_response(result, request)
+    data, mime_type = result
     return Response(
         content=data,
         media_type=(
@@ -4156,6 +4446,47 @@ async def child_attachment_waveform(
         payload,
         headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
     )
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/bridge-cards/{entry_id}/body",
+    response_model=CRUDResponse[Any],
+)
+async def bridge_card_body(
+    session_id: str,
+    request: Request,
+    response: Response,
+    entry_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")],
+):
+    """What one inbound Team Bridge card's messages are to THIS viewer.
+
+    ``{v:1, items:[{message_id, conversation_id, state, body?, source?, hold?,
+    reason?}], more, card?: {received_at?, thread_reply}}`` (bridge-body design
+    §4; feature key ``team_bridge_card_body``). ``card`` is additive within
+    ``v:1``: facts of the card's own journal row (``received_at`` ISO-8601 UTC,
+    ``thread_reply`` bool), present on every answer for a found card so a client
+    can show when and where beside the body (``card_body._card_facts``).
+    ``state`` is one of admitted, pending, held, refused, not_admitted,
+    unavailable; ``body`` is UNTRUSTED third-party markdown, present only when
+    admitted. A READ: keyed by the transcript row
+    the caller can already page, so it cannot be used to probe message ids.
+    The display store and the hub's admitted-only history read are the only
+    sources; the screener's classification fetch (``/messages/{id}/body``) is
+    never used. Caching, SET vs SERVED (the same split as the owner-audit and
+    owner-invitation routes in ``desktop_team_bridge.py``): the route SETS
+    ``private, no-store`` (design §4) so it carries the body's contract
+    wherever the router is mounted, but the running core's app-wide
+    ``managed_desktop_boundary`` (server/app.py) rewrites every
+    ``/v1/desktop/`` answer to plain ``no-store``, which is what is SERVED.
+    That is no weaker -- ``no-store`` keeps third-party text out of every
+    cache, shared or private. The boundary is deliberately not taught to keep
+    a route's own value: that would change the served header of every
+    existing route that sets ``private, no-store``.
+    """
+    async with errors(request):
+        answer = reply(await host(request).bridge_card_body(session_id, entry_id))
+    response.headers["Cache-Control"] = "private, no-store"
+    return answer
 
 
 @router.get(
@@ -4226,7 +4557,10 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
       but the two values are not a matched pair.
     """
     async with errors(request):
-        data, mime_type = await host(request).attachment(session_id, digest)
+        result = await host(request).attachment(session_id, digest)
+    if isinstance(result, PeerAttachmentFile):
+        return _peer_file_response(result, request)
+    data, mime_type = result
     return Response(
         content=data,
         media_type=(
@@ -4832,6 +5166,82 @@ def _dismissal_refusal(error: object) -> HTTPException:
     return HTTPException(409, sentence or _DISMISSAL_REFUSED)
 
 
+def _verified_decision_target(bridge: Any, body: Answer) -> tuple[str, str, str] | None:
+    """``(ask_id, question_id, word)`` when this answer decides a signed-door ask.
+
+    Read off the row the session's own frame publishes (``frontend_state.asks``)
+    with the SAME mapping the TUI uses (``asks.decision.bridge_decision_target``),
+    so the two surfaces cannot disagree on which word a tap means. ``None`` for
+    every ordinary ask, for a decline/revise (those are not decisions — the
+    plain door's own refusal stands), and when the row is not on the frame (the
+    plain door then answers or refuses as it always did).
+    """
+    if body.decline or body.revise or not body.answers or body.ask_id is None:
+        return None
+    from local_operator.asks.decision import bridge_decision_target
+
+    state = getattr(bridge.remote, "frontend_state", None)
+    for row in getattr(state, "asks", None) or ():
+        if str(getattr(row, "ask_id", "")) == str(body.ask_id):
+            return bridge_decision_target(row, body.answers)
+    return None
+
+
+async def _decide_card_without_prompt(
+    request: Request, bridge: Any, target: tuple[str, str, str]
+) -> str | None:
+    """Decide a Team Bridge request card with no OS prompt, or ``None`` to keep the runtime door.
+
+    WHY (decision a-856f; PR #4208 security round 1, S-1). The runtime door's
+    ``bridge_decide`` is signed by the attach client with the operator key — a
+    Touch ID sheet, and a refusal on hosts without a presence key — whenever
+    this backend did not start the session's runtime (a terminal-started
+    designated session). For a Team Bridge request that prompt guards nothing:
+    the bearer-only Approvals decide already reaches the same ask. So, only in
+    that case, the card is decided by
+    ``desktop_team_bridge.decide_request_from_card`` (same bearer, same intent
+    ledger and hub audit as the list).
+
+    ``None`` — the runtime door stays — for: a ``site:v1:`` card (a node's
+    browser extension re-verifies that signature; it is real authority there),
+    a peer's conversation (its ask lives on the other device), a holder with no
+    probe (the in-process serving handle, which never signs), and a facade
+    that reports the decision would go unsigned anyway (that path also injects
+    the answer into the agent's turn, which the bearer path does not). Once the
+    probe says the decision would be signed, a card whose ask is not one of
+    this machine's Team Bridge asks is REFUSED (``no_open_ask``) rather than
+    sent to the signing door (R2-1).
+    """
+    from local_operator.browser_bridge.site_approval import SITE_QUESTION_PREFIX
+
+    ask_id, question_id, word = target
+    if question_id.startswith(SITE_QUESTION_PREFIX):
+        return None
+    if getattr(bridge, "remote_row", None) is not None:
+        return None
+    probe = getattr(bridge.remote, "bridge_decide_signature_free", None)
+    if not callable(probe) or await cast(Callable[[], Awaitable[bool]], probe)():
+        return None
+    # Imported here: desktop_team_bridge imports this module (``reply``).
+    from local_operator.server.routes.desktop_team_bridge import (
+        _CARD_REFUSALS,
+        decide_request_from_card,
+    )
+
+    decided = await decide_request_from_card(
+        store_root(request), ask_id=ask_id, message_id=question_id, word=word
+    )
+    if decided is None:
+        # NEVER FALL THROUGH TO THE SIGNING DOOR HERE (PR #4208 review round 2,
+        # R2-1). The probe already said this backend would sign, and the
+        # runtime mints a ``decide`` challenge without checking the ask is
+        # pending, so a stale card (a lapsed ask beside a re-raised one, or an
+        # ask this machine no longer indexes) would raise Touch ID only to be
+        # refused. No matching ask means the card is not waiting: say so.
+        raise ValueError(_CARD_REFUSALS["no_open_ask"])
+    return decided
+
+
 async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, body: Answer) -> str:
     """Put a queued ask away from the desktop — the NO-BOOT door (SA-D5, §14).
 
@@ -4929,7 +5339,11 @@ async def answer(session_id: str, body: Answer, request: Request):
     # ``answer_gate`` is the only consumer; the queued-ask branch below answers
     # from the ask log and is not subject to it.
     deadline = time.monotonic() + DESKTOP_ANSWER_BUDGET_S
-    async with errors(request), host(request).session(session_id) as bridge:
+    # A queued ask is addressed by durable ID, not by the display epoch. Its
+    # control transport must remain usable when an older owner's canonical
+    # snapshot exceeds the line limit; the pool still owns lookup and retirement.
+    session_options = {"control_only": True} if body.ask_id is not None else {}
+    async with errors(request), host(request).session(session_id, **session_options) as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
             # A QUEUED ASK (design §2.4/§4). Answered by id, BEFORE the epoch
@@ -4960,6 +5374,32 @@ async def answer(session_id: str, body: Answer, request: Request):
                 image_kwargs: dict[str, Any] = (
                     {"images": [image.model_dump() for image in body.images]} if body.images else {}
                 )
+                target = _verified_decision_target(bridge, body)
+                if target is not None:
+                    # A question carrying a ``question_id`` (a Team Bridge
+                    # request, or a headless node's ``site:v1:`` browser
+                    # approval) is decided ONLY through the signed door: the
+                    # plain ``ask_respond`` refuses it by construction. The
+                    # facade's ``bridge_decide`` signs with the operator key on
+                    # the way out (``attach_client``), which is what a node's
+                    # browser extension re-verifies before approving a site.
+                    # Two holder shapes answer this: the attached facade returns
+                    # a ``{"ok", "error"}`` verdict, a serving handle raises
+                    # ``ValueError`` (caught below with the plain door's). Both
+                    # reach the user as the same 409 sentence.
+                    #
+                    # EXCEPT a Team Bridge request this backend would have to
+                    # SIGN for (decision a-856f; PR #4208 security round 1,
+                    # S-1): ordinary approve/deny never raises Touch ID, so it
+                    # is decided through the bearer-authorised single-item path
+                    # instead (``_decide_card_without_prompt``).
+                    decided = await _decide_card_without_prompt(request, bridge, target)
+                    if decided is not None:
+                        return reply({"detail": decided})
+                    verdict = await bridge.remote.bridge_decide(*target)
+                    if isinstance(verdict, Mapping) and not verdict.get("ok", True):
+                        raise ValueError(str(verdict.get("error") or "the decision was refused"))
+                    return reply({"detail": "decided"})
                 detail = await bridge.remote.ask_respond(
                     body.ask_id,
                     body.answers,
@@ -4981,7 +5421,41 @@ async def answer(session_id: str, body: Answer, request: Request):
                 # two shapes stay distinguishable.
                 message = str(error) or "the answer was refused"
                 raise HTTPException(409, message) from None
-            return reply({"detail": detail})
+            # ``consent_bearing`` (feature ``ask_consent_bearing``): whether
+            # the runtime stamped this answer with a guard-trusted surface.
+            # False means it stamped ``unverified`` (or ``remote``): recorded,
+            # but never delete/move consent (incident a-48e3, 2026-11-16).
+            # Computed from the runtime's reply, never from the body
+            # (``Answer`` is ``extra="forbid"``, so a body field of that name is
+            # a 422). A peer's conversation is always
+            # False: its answer is relayed and stamped ``remote`` whatever this
+            # process holds for a same-numbered local pid. Absent probe (an
+            # older facade or a test double) reads False: fail closed. A
+            # DECLINE reads null: a decline is never consent, so "this answer
+            # can authorise" must not be claimable for one, whatever proof the
+            # connection held (PR #4127 QA Q2).
+            #
+            # PR #4132 convergence: the flag is the runtime's STAMP, read off the
+            # ``StampedReceipt`` the client returns (``asks.surfaces``). After F2
+            # the cap probe disagrees with the stamp both ways: an app-signature
+            # attested answer is consent with no cap, and a cap answer to an ask
+            # this runtime did not mint (Part C) is stamped ``unverified``. The
+            # guard reads only the stamp, so the receipt must too. The cap probe
+            # survives ONLY as the fallback for a runtime that predates the ack's
+            # ``surface`` field (``surface is None``): such a runtime has neither
+            # attestation nor Part C, so its stamp is exactly the cap decision.
+            consent_bearing: bool | None
+            if body.decline:
+                consent_bearing = None
+            elif getattr(bridge, "remote_row", None) is not None:
+                consent_bearing = False
+            else:
+                stamped = surfaces.consent_bearing(getattr(detail, "surface", None))
+                if stamped is None:
+                    probe = getattr(bridge.remote, "ask_consent_bearing", None)
+                    stamped = bool(callable(probe) and probe())
+                consent_bearing = stamped
+            return reply({"detail": str(detail), "consent_bearing": consent_bearing})
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, _wd.answer_epoch_mismatch().envelope())
         if body.request_id.startswith("prv_"):
@@ -5107,7 +5581,7 @@ class SeenItem(Input):
     later, unseen result.
     """
 
-    session_id: Annotated[str, Field(pattern=r"^[a-f0-9]{12}$")]
+    session_id: Annotated[str, Field(pattern=BULK_RECEIPT_SESSION_ID_PATTERN)]
     completion_token: RequestID
 
 
@@ -5115,7 +5589,7 @@ class SeenMany(Input):
     #: 1..500, and the bound is the CATALOGUE's own maximum page
     #: (``GET /v1/desktop/sessions?limit=``, ``le=500``), so a client can always
     #: send every row it holds in one call and never has to chunk a single user
-    #: gesture. The worst-case body is ~30 KB against the 900 KB control-frame
+    #: gesture. The worst-case body is under 60 KB against the 900 KB control-frame
     #: limit.
     items: Annotated[list[SeenItem], Field(min_length=1, max_length=500)]
 
@@ -5418,7 +5892,34 @@ async def delete_session_route(session_id: str, body: ConfirmDeletion, request: 
         )
         if remote is not None:
             return reply(remote)
-        return reply(await host(request).delete(session_id))
+        result = await host(request).delete(session_id)
+    if result.get("deleted"):
+        await _release_voice_slot(request, session_id)
+    return reply(result)
+
+
+async def _release_voice_slot(request: Request, session_id: str) -> None:
+    """Clear the voice slot if the conversation just deleted held it.
+
+    Best effort, never the answer: the delete already happened, and the voice
+    routes treat a slot naming a missing directory as empty anyway. Clearing
+    the file is what moves the machine feed's ``voice`` frame, so other windows
+    learn voice is off without polling.
+    """
+    from local_operator.voice import slot as voice_slot
+
+    config_dir = request.app.state.config_manager.config_dir
+    # An unlocked read first, and the common answer ends here: on a machine that
+    # never used voice this creates no ``voice/`` directory or lock file, and a
+    # delete never waits on the slot lock (up to ``LOCK_WAIT_S``) for a session
+    # that does not hold it. ``disable`` re-reads under the lock, so a slot that
+    # moved after this read is left alone.
+    if not voice_slot.is_voice_session(config_dir, session_id):
+        return
+    try:
+        await asyncio.to_thread(voice_slot.disable, config_dir, session_id)
+    except Exception:  # noqa: BLE001 - a busy or unreadable slot must not fail a delete
+        logger.warning("voice slot not cleared after deleting %s", session_id, exc_info=True)
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])
@@ -6302,6 +6803,16 @@ async def move(session_id: str, body: MoveSession, request: Request):
         return reply(await _join_owned(operation))
 
 
+def _sse_data(frame: Any) -> str:
+    """One SSE ``data:`` record for ``frame``; synchronous so it can run in a thread.
+
+    ``wire_json`` is shared with ``session.row_clip`` on purpose: the row and
+    page budgets are counted in exactly this encoding, so the bound and the
+    record it bounds cannot drift apart.
+    """
+    return "data: " + wire_json(frame) + "\n\n"
+
+
 @router.get("/v1/desktop/sessions/{session_id}/events")
 async def events(
     session_id: str,
@@ -6318,6 +6829,9 @@ async def events(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -6370,6 +6884,7 @@ async def events(
                 sub = bridge.subscribe(
                     frontend_replace=bool(frontend_replace),
                     supplements=bool(supplements),
+                    diff_bindings=bool(diff_bindings),
                     journal_order=bool(journal_order),
                     peer_journal_source=bool(peer_journal_source),
                 )
@@ -6442,7 +6957,15 @@ async def events(
                 try:
                     async for frame in frames:
                         ser_at = time.monotonic() if open_trace.enabled() else 0.0
-                        text = "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                        if isinstance(frame, dict) and frame.get("type") == "snapshot":
+                            # The one frame proportional to the session (bounded
+                            # state + a history page): encode it in a thread so a
+                            # large session's open does not spend loop time here
+                            # (serve stall, 2026-11-15). Sequential with the
+                            # other yields, so frame order is unchanged.
+                            text = await asyncio.to_thread(_sse_data, frame)
+                        else:
+                            text = _sse_data(frame)
                         if ser_at:
                             open_trace.mark(
                                 "a.wire.frame",
@@ -6559,7 +7082,7 @@ async def desktop_events(request: Request):
     async def stream():
         try:
             async for frame in engine.events(subscription):
-                yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                yield _sse_data(frame)
         finally:
             await release_once()
 
@@ -6601,5 +7124,6 @@ async def desktop_presence(
         can_notify_kinds=list(body.can_notify_kinds),
         session_id=body.session_id,
         window=body.window.model_dump(),
+        **body.desk_fields(),
     )
     return reply(PresenceReceipt(lease_seconds=int(PRESENCE_TTL_S)))

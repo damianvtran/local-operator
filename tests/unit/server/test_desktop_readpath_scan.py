@@ -597,3 +597,228 @@ async def test_an_abandoned_proof_read_failure_is_logged_not_left_unretrieved(
         assert not [
             c for c in unretrieved if "never retrieved" in str(c.get("message", ""))
         ], "the abandoned read's exception must be retrieved, not left for GC"
+
+
+# --- The first frame's index-read-model hops are bounded by the same deadline ----
+#
+# WOULD-HAVE-FAILED-BEFORE. With no resident index but a published read model
+# (the SUMMARY PATH, 17 of the operator's 21 measured v0.102.2 sidebar opens),
+# ``_resolve_frame_source`` awaited ``index_read_model.frame_facts`` and
+# ``_frame_source`` awaited ``index_read_model.summary`` on worker hops with no
+# bound: ``a.hist.resolve`` measured median 88 ms / max 818 ms and
+# ``a.hist.frame_source.summary`` up to 1,178 ms against a 120 ms
+# ``OPEN_FRAME_SNAPSHOT_BUDGET_S``. The gated traps below never return until
+# released, so the old code hangs (the 5 s ``wait_for`` in ``_open_frame_page``
+# fails the test) while the bounded code answers the ``building`` frame.
+
+
+class _GatedRead:
+    """Wraps a real ``index_read_model`` read: blocks until released, and counts."""
+
+    def __init__(self, real: Any, *, release_after_s: float | None = None, fail: bool = False):
+        import threading
+
+        self.real = real
+        self.calls = 0
+        self.gate = threading.Event()
+        self.release_after_s = release_after_s
+        self.fail = fail
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        self.gate.wait(self.release_after_s if self.release_after_s is not None else 30)
+        if self.fail:
+            raise RuntimeError("read model read failed after the frame left")
+        return self.real(*args, **kwargs)
+
+
+async def _summary_path(harness: _Harness, rows: int = 400) -> None:
+    """Seed, build and PUBLISH the read model, then drop the resident index.
+
+    That is the state a sidebar click meets for a conversation not opened since
+    the server started: ``fresh_resident`` misses, ``summary`` answers ready, and
+    the frame's facts come from ``frame_facts``.
+    """
+    from local_operator.session import index_read_model as rm
+
+    harness.seed(rows=rows)
+    task, _started = ti.start_refresh(harness.root, harness.session_id)
+    index = await task
+    assert rm.publish(harness.root, harness.session_id, index) is not None
+    ti._reset_for_tests()
+    assert ti.fresh_resident(harness.root, harness.session_id) is None
+
+
+async def _cold_again(harness: _Harness) -> None:
+    """Return to the summary path after an open.
+
+    An open whose page owes proof starts the single-flight refresh
+    (``_with_peer_cycle_records``); if it lands after a bare reset it makes the
+    NEXT open resident, which is a different path. Drain it, then drop it.
+    """
+    for _loop, task in list(ti._IN_FLIGHT.values()):
+        await asyncio.wait({task}, timeout=5)
+    ti._reset_for_tests()
+    assert ti.fresh_resident(harness.root, harness.session_id) is None
+
+
+def _ids(page: dict[str, Any]) -> list[str]:
+    return [row["id"] for row in page["entries"]]
+
+
+@pytest.mark.asyncio
+async def test_the_first_frame_does_not_wait_past_its_deadline_for_frame_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from local_operator.session import index_read_model as rm
+
+    async with _Harness(tmp_path) as harness:
+        await _summary_path(harness)
+        control = await _open_frame_page(harness, None)
+        assert control["runs_state"] == "ready", "the fixture must take the summary path"
+        await _cold_again(harness)
+        trap = _GatedRead(rm.frame_facts)
+        monkeypatch.setattr(rm, "frame_facts", trap)
+        try:
+            # A generous budget so a loaded runner always reaches the hop; still
+            # discriminates against the old unbounded await (5 s vs a 30 s trap).
+            page = await _open_frame_page(harness, time.monotonic() + 1.0)
+        finally:
+            trap.gate.set()
+        assert trap.calls == 1, "the facts read should still have been attempted in budget"
+        assert page["runs_state"] == "building"
+        assert page["runs"] == []
+        # The rows are the page's, not the facts': a degraded frame paints the same.
+        assert _ids(page) == _ids(control)
+        assert page["has_more"] == control["has_more"]
+        assert page["head_cut"] == control["head_cut"]
+
+
+@pytest.mark.asyncio
+async def test_the_first_frame_does_not_wait_past_its_deadline_for_the_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from local_operator.session import index_read_model as rm
+
+    async with _Harness(tmp_path) as harness:
+        await _summary_path(harness)
+        summary = _GatedRead(rm.summary)
+        facts = _GatedRead(rm.frame_facts)
+        facts.gate.set()
+        monkeypatch.setattr(rm, "summary", summary)
+        monkeypatch.setattr(rm, "frame_facts", facts)
+        try:
+            page = await _open_frame_page(harness, time.monotonic() + 1.0)
+        finally:
+            summary.gate.set()
+        assert summary.calls >= 1
+        assert facts.calls == 0, "no summary in time means no facts hop to pay for"
+        assert page["runs_state"] == "building"
+        assert page["entries"], "a slow summary must not cost the page its rows"
+
+
+@pytest.mark.asyncio
+async def test_a_spent_deadline_does_not_start_the_read_model_hops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from local_operator.session import index_read_model as rm
+
+    async with _Harness(tmp_path) as harness:
+        await _summary_path(harness)
+        summary = _GatedRead(rm.summary)
+        facts = _GatedRead(rm.frame_facts)
+        summary.gate.set()
+        facts.gate.set()
+        monkeypatch.setattr(rm, "summary", summary)
+        monkeypatch.setattr(rm, "frame_facts", facts)
+        page = await _open_frame_page(harness, time.monotonic() - 1.0)
+        assert (summary.calls, facts.calls) == (0, 0), "a spent budget queues no worker hop"
+        assert page["runs_state"] == "building"
+        assert page["entries"]
+
+
+@pytest.mark.asyncio
+async def test_a_standalone_history_page_still_waits_for_frame_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/history`` (no caller deadline) is the read that carries the facts."""
+    from local_operator.session import index_read_model as rm
+
+    async with _Harness(tmp_path) as harness:
+        await _summary_path(harness)
+        # Slower than the open frame's whole budget, so a leaked default deadline
+        # would degrade this read too.
+        trap = _GatedRead(rm.frame_facts, release_after_s=0.4)
+        monkeypatch.setattr(rm, "frame_facts", trap)
+        page = await _open_frame_page(harness, None)
+        assert trap.calls == 1
+        assert page["runs_state"] == "ready"
+        assert page["runs"]
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_that_is_not_hit_serves_the_same_summary_path_frame(
+    tmp_path: Path,
+) -> None:
+    """Rows, order, runs, cursor fields and ``head_cut`` are byte-identical in budget."""
+    import time
+
+    async with _Harness(tmp_path) as harness:
+        await _summary_path(harness)
+        unbounded = await _open_frame_page(harness, None)
+        await _cold_again(harness)
+        bounded = await _open_frame_page(harness, time.monotonic() + 60)
+        assert bounded["runs_state"] == "ready"
+        assert json.dumps(bounded, sort_keys=True) == json.dumps(unbounded, sort_keys=True)
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_frame_facts_failure_is_logged_not_left_unretrieved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import gc
+    import logging
+    import time
+
+    from local_operator.server.utils import desktop_sessions
+    from local_operator.session import index_read_model as rm
+
+    async with _Harness(tmp_path) as harness:
+        await _summary_path(harness)
+        trap = _GatedRead(rm.frame_facts, fail=True)
+        monkeypatch.setattr(rm, "frame_facts", trap)
+        loop = asyncio.get_running_loop()
+        unretrieved: list[dict[str, Any]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+        caplog.set_level(logging.DEBUG, logger=desktop_sessions.logger.name)
+        try:
+            page = await _open_frame_page(harness, time.monotonic() + 1.0)
+            assert trap.calls == 1
+            assert page["runs_state"] == "building"
+            trap.gate.set()
+            for _ in range(200):
+                if any(r.exc_info for r in caplog.records):
+                    break
+                await asyncio.sleep(0.01)
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            trap.gate.set()
+            loop.set_exception_handler(previous_handler)
+        failures = [
+            r
+            for r in caplog.records
+            if r.name == desktop_sessions.logger.name
+            and r.exc_info
+            and isinstance(r.exc_info[1], RuntimeError)
+        ]
+        assert len(failures) == 1, "the abandoned read's failure must be logged exactly once"
+        assert failures[0].levelno == logging.DEBUG
+        assert not [c for c in unretrieved if "never retrieved" in str(c.get("message", ""))]

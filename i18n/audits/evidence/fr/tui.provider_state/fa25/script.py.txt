@@ -1,0 +1,52 @@
+"""Independent French A audit: scoped official checker; no application startup.
+Scope patches only enumeration, never validator decisions. Negative copies are
+in-memory and cannot alter source catalogues. Rich is plain-text evidence only.
+"""
+import hashlib, importlib.util, io, json, os, sys, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+from rich.console import Console
+from rich.text import Text
+from rich.cells import cell_len
+from local_operator.i18n import catalogues, runtime
+ROOT=Path.cwd(); NS='tui.provider_state'
+spec=importlib.util.spec_from_file_location('audit_check', ROOT/'scripts/i18n/check.py')
+check=importlib.util.module_from_spec(spec); sys.modules[spec.name]=check; spec.loader.exec_module(check)
+assert Path(catalogues.__file__).resolve().is_relative_to(ROOT)
+assert Path(runtime.__file__).resolve().is_relative_to(ROOT)
+print('MODULE_PATH', catalogues.__file__, runtime.__file__)
+print('ISOLATION', os.environ['HOME'], os.environ['LOCAL_OPERATOR_CONFIG_DIR'], 'CMUX=', [k for k in os.environ if k.startswith('CMUX_')])
+paths={'en':ROOT/'local_operator/i18n/catalogues/en/tui.provider_state.json','context':ROOT/'local_operator/i18n/catalogues/en/tui.provider_state.context.json','fr':ROOT/'local_operator/i18n/catalogues/fr/tui.provider_state.json'}
+expected={'en':'113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912','context':'67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be','fr':'87cf1654daed989e12d9f431395f4f731c07de5d3204aeb3f0cb0705e92719f8'}
+def hashes(): return {k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in paths.items()}
+assert hashes()==expected
+print('BEFORE_HASHES', json.dumps(hashes(),sort_keys=True))
+en=catalogues.load_catalogue('en',NS); fr=catalogues.load_catalogue('fr',NS); ctx=catalogues.context('en',NS)
+keys=[NS+'.'+s for s in ['logged_in','env_key','needs_login','local_ready','local_unconfigured']]
+assert list(en)==list(fr)==list(ctx)==keys
+original=catalogues.load_catalogue
+def scoped(override=None):
+    def load(loc,ns): return override if loc=='fr' and override is not None else original(loc,ns)
+    with patch.object(catalogues,'locales',return_value=('en','fr')), patch.object(catalogues,'namespaces',return_value=(NS,)), patch.object(catalogues,'load_catalogue',side_effect=load):
+        return check.check_catalogues()
+problems=scoped(); print('OFFICIAL_SCOPED_CATALOGUE_CONTEXT_ICU',problems); assert not problems
+missing=dict(fr); missing.pop(keys[0]); problems=scoped(missing); print('NEGATIVE_MISSING_KEY', problems); assert any('missing key' in x for x in problems)
+extra=dict(fr); extra[keys[0]] += ' {unexpected}'
+problems=scoped(extra); print('NEGATIVE_ADDED_ARGUMENT',problems); assert problems and any('argument' in x for x in problems)
+for loc,data in [('en',en),('fr',fr)]:
+    for key,value in data.items():
+        assert runtime.message_arguments(value)==() and runtime.plural_selectors(value)==()
+        assert unicodedata.is_normalized('NFC',value)
+        assert all(c not in value for c in '{}[]`<>')
+        assert not any(unicodedata.category(c)=='Cf' for c in value)
+        rendered=runtime.render_message(value,{},loc); assert rendered==value
+        out=io.StringIO(); console=Console(file=out,width=120,color_system=None,force_terminal=False)
+        console.print(Text(rendered),end=''); assert out.getvalue()==value
+        pseudo='［'+''.join(c*2 if c in 'aeiouéèê' else c for c in value)+'］'
+        pout=io.StringIO(); Console(file=pout,width=120,color_system=None,force_terminal=False).print(Text(pseudo),end='')
+        assert pout.getvalue()==pseudo
+        sample=Text(value); sample.truncate(17,overflow='ellipsis')
+        print('RENDER',loc,key,json.dumps(value,ensure_ascii=False),'chars',len(value),'cells',cell_len(value),'example_17',json.dumps(sample.plain,ensure_ascii=False),'pseudo_cells',cell_len(pseudo))
+print('ORDERED_KEYS=5 ZERO_ARGUMENTS=10 ZERO_PLURAL_SELECT=10 NFC=10 RICH_PLAIN=10 PSEUDO=10')
+assert hashes()==expected
+print('AFTER_HASHES',json.dumps(hashes(),sort_keys=True)); print('PASS: scoped mechanics; no styled/native/UI fit certification')

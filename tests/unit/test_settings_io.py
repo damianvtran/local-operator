@@ -72,6 +72,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_MODEL_CHOICE,
         DEFAULT_SLIM_CHILD_KNOWLEDGE,
     )
+    from local_operator.heavy_lease import HEAVY_JOBS_ENABLED_DEFAULT
     from local_operator.hook_forwarding import (
         FORWARD_CLAUDE_DEFAULT,
         FORWARD_CODEX_DEFAULT,
@@ -84,6 +85,10 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_CHECK_INTERVAL_MIN,
     )
     from local_operator.i18n.resolve import DEFAULT_LANGUAGE
+    from local_operator.install_defaults import (
+        DEFAULT_AUTO_PRUNE_GENERATIONS,
+        DEFAULT_KEEP_GENERATIONS,
+    )
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
         BASH_MEMORY_LIMIT_MB_DEFAULT,
@@ -116,7 +121,7 @@ def _consumer_defaults() -> dict[str, object]:
     # ``rollout_policy`` resolves an absent ``network.rollout_on_update`` against
     # ``DEFAULT_ROLLOUT_ON_UPDATE``, and the registry row's own default must be the
     # same value or the page would advertise a policy the driver does not apply.
-    from local_operator.network.credentials import GRANT_TTL_S
+    from local_operator.network.credentials import GRANT_TTL_S, OFFLINE_HOLD_S
     from local_operator.network.credentials.github import DEFAULT_REPOSITORIES
     from local_operator.network.relay import (
         DEFAULT_ADVERTISE_HOSTS,
@@ -129,7 +134,17 @@ def _consumer_defaults() -> dict[str, object]:
     # The mesh sync cadence, from the module whose watcher reads it
     # (``SyncSettings.from_config`` falls back to exactly these).
     from local_operator.network.sync import SYNC_DEBOUNCE_S, SYNC_TICK_S
+    from local_operator.network.workset import (
+        DEFAULT_CAP_BYTES as WORKSET_DEFAULT_CAP_BYTES,
+    )
+    from local_operator.network.workset import (
+        DEFAULT_RESTORE_ROOTS as WORKSET_DEFAULT_RESTORE_ROOTS,
+    )
     from local_operator.notifications import sound as notification_sound
+    from local_operator.providers.bedrock.connection import (
+        DEFAULT_BEDROCK_AUTH_SETTING,
+        DEFAULT_BEDROCK_REGION_SETTING,
+    )
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -137,6 +152,7 @@ def _consumer_defaults() -> dict[str, object]:
         RetrySettings,
     )
     from local_operator.remote_compute import DEFAULT_REMOTE_COMPUTE_ENABLED
+    from local_operator.remote_files.cache import REMOTE_FILES_CACHE_BYTES
     from local_operator.saver.gate import DEFAULT_MODE as SAVER_DEFAULT_MODE
     from local_operator.scratchpad import SCRATCHPAD_TOTAL_BUDGET_BYTES
     from local_operator.session.cleanup import (
@@ -159,6 +175,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_ENABLED as DEFAULT_COMPRESSION_ENABLED,
     )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
+    from local_operator.session.runtime.presence import DEFAULT_AWAY_AFTER_S
     from local_operator.session.runtime.process import (
         DEFAULT_KEEP_ALIVE_MAX,
         DEFAULT_KEEP_ALIVE_SECONDS,
@@ -184,6 +201,7 @@ def _consumer_defaults() -> dict[str, object]:
         QUERY_BUDGET_SECONDS_DEFAULT,
         QUERY_BUDGET_STOP_DEFAULT,
     )
+    from local_operator.tui import settings as tui_settings
     from local_operator.tui import status_command
     from local_operator.tui.busy_delivery import DEFAULT_BUSY_DELIVERY
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
@@ -193,6 +211,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_SIDEBAR_VISIBLE,
     )
     from local_operator.tui.theme import DEFAULT_THEME
+    from local_operator.tunnels.install import AUTO_SETUP_DEFAULT
     from local_operator.ui_console.policy import (
         DEFAULT_LIVE_LIMIT,
         DEFAULT_OWNER_LIMIT,
@@ -215,6 +234,11 @@ def _consumer_defaults() -> dict[str, object]:
         # user explicitly on `dark` as having changed the setting (round 1, M1).
         "tui.theme": DEFAULT_THEME,
         "display.time_format": DEFAULT_TIME_FORMAT,
+        # The transcript layout mode's own vocabulary, from the module the TUI
+        # reader lives in (``tui/settings.py:transcript_display_mode``). The
+        # registry restates "by-turn" because it must not import the TUI
+        # module's cache; THIS entry is what turns a drift into a red test.
+        "display.transcript_display": tui_settings.DEFAULT_TRANSCRIPT_DISPLAY,
         # The language resolver's own default, from the module that READS the
         # key (`i18n.resolve.resolve_language`). The registry restates "auto"
         # rather than importing it (settings_io stays off the resolver's import
@@ -261,6 +285,9 @@ def _consumer_defaults() -> dict[str, object]:
         "bash.memory.mode": BASH_MEMORY_MODE_DEFAULT,
         "bash.memory.limit_mb": BASH_MEMORY_LIMIT_MB_DEFAULT,
         "bash.memory.soft_fraction": BASH_MEMORY_SOFT_FRACTION_DEFAULT,
+        # The heavy-job queue switch; its consumer constant sits beside the
+        # reader in heavy_lease.py.
+        "bash.heavy_jobs.enabled": HEAVY_JOBS_ENABLED_DEFAULT,
         # The three search_interception keys. The consumer constants live next to
         # the reader in tools/builtin.py, so this mapping is what stops the
         # registry default and the code default drifting.
@@ -291,6 +318,7 @@ def _consumer_defaults() -> dict[str, object]:
         # one empty string), so THIS is what stops the two drifting — the same
         # guard `tui.theme` gets for the same reason.
         "desktop.launch_command": DESKTOP_LAUNCH_COMMAND_DEFAULT,
+        "desktop.remote_files_cache_bytes": REMOTE_FILES_CACHE_BYTES,
         "runtime.unattended_gate_timeout": DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
         "hub.auto_update.agents": DEFAULT_AUTO_UPDATE_AGENTS,
         "hub.auto_update.teams": DEFAULT_AUTO_UPDATE_TEAMS,
@@ -322,6 +350,10 @@ def _consumer_defaults() -> dict[str, object]:
         # default and the code default cannot drift.
         "subagents.slim_child_knowledge": DEFAULT_SLIM_CHILD_KNOWLEDGE,
         "subagents.max_team_depth": DEFAULT_MAX_TEAM_DEPTH,
+        # The post-update prune: ``update.auto_prune_policy`` falls back to these
+        # when the keys are absent; the registry carries literals.
+        "update.auto_prune": DEFAULT_AUTO_PRUNE_GENERATIONS,
+        "update.keep_generations": DEFAULT_KEEP_GENERATIONS,
         "network.audit.max_bytes": AUDIT_MAX_BYTES,
         "network.audit.generations": AUDIT_GENERATIONS,
         "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,
@@ -337,7 +369,15 @@ def _consumer_defaults() -> dict[str, object]:
         # (``rollouts.rollout_policy`` resolves an absent key against exactly
         # this constant — the reader's own fallback, not a restatement).
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
+        # Read at every move by ``workset.cap_bytes``, which falls back to exactly this.
+        "mesh.move.working_set_max_bytes": WORKSET_DEFAULT_CAP_BYTES,
+        # Read at every arrival by ``workset.restore_roots``: an absent key is exactly this.
+        "mesh.move.working_set_roots": list(WORKSET_DEFAULT_RESTORE_ROOTS),
         "memory.enabled": MEMORY_DEFAULT_ENABLED,
+        "tunnel.auto_setup_after_login": AUTO_SETUP_DEFAULT,
+        # ADR 0008: the reader's own default, which is also what a desk report
+        # omitting `away_after_s` is evaluated with.
+        "notifications.phone_away_after_s": DEFAULT_AWAY_AFTER_S,
         "memory.capture": MEMORY_DEFAULT_ENABLED,
         "memory.capture.locators": LOCATORS_DEFAULT_ENABLED,
         "memory.suggest": MEMORY_DEFAULT_ENABLED,
@@ -347,6 +387,7 @@ def _consumer_defaults() -> dict[str, object]:
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
         "network.credentials.grant_ttl_s": GRANT_TTL_S,
+        "network.credentials.offline_hold_s": OFFLINE_HOLD_S,
         # The github adapter's allow-list default: empty, and empty is a REFUSAL
         # at mint time — so the registry default and the reader's fallback must
         # stay the same "none designated" answer.
@@ -366,6 +407,9 @@ def _consumer_defaults() -> dict[str, object]:
         "providers.anthropic.subagent_cache_ttl_1h_min_context_tokens": (
             ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
         ),
+        # Bedrock's two inherit keys: the connection module's own defaults.
+        "providers.bedrock.region": DEFAULT_BEDROCK_REGION_SETTING,
+        "providers.bedrock.auth": DEFAULT_BEDROCK_AUTH_SETTING,
         # The openrouter routing rows are guarded against the shipped config
         # block itself: their consumer is the single-shot resolver
         # ``model.configure._openrouter_provider_preferences`` (no independent
@@ -557,7 +601,26 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.stt import cleanup as cleanup_policy
 
     consumers["speech.transcription.cleanup"] = cleanup_policy.DEFAULT_CLEANUP
+    # Voice mode's cap: the registry literal against ``/voice/text``'s own
+    # fallback (``voice.speakable``), imported here for the same reason.
+    from local_operator.voice import speakable as voice_speakable
+
+    consumers["voice.max_spoken_chars"] = voice_speakable.DEFAULT_MAX_SPOKEN_CHARS
+    # The chosen speech provider: the reader's own "nothing valid chosen" answer
+    # (``voice.provider``), asked of an empty directory.
+    from local_operator.voice import provider as voice_provider
+
+    consumers["speech.provider"] = voice_provider.configured_provider(Path("/nonexistent"))
     return consumers
+
+
+def test_the_voice_cap_bounds_match_the_reader_clamp() -> None:
+    """Every value the settings page accepts is applied as stored, no more and no less."""
+    from local_operator.voice import speakable
+
+    setting = settings_io.BY_KEY["voice.max_spoken_chars"]
+    assert setting.minimum == speakable.MIN_MAX_SPOKEN_CHARS
+    assert setting.maximum == speakable.MAX_MAX_SPOKEN_CHARS
 
 
 def _classification_consumer_defaults() -> dict[str, object]:
@@ -664,12 +727,16 @@ def _team_bridge_consumer_defaults() -> dict[str, object]:
     follows. Only the REGISTERED rows appear here: ``onboarding`` is internal
     state (no row), the allowlist's defaults are server truth surfaced as data
     by ``team_bridge.client.allowlist_view``, not config, and
-    ``hold_alert_after_minutes``/``hold_release`` are read keys with no row.
+    ``hold_alert_after_minutes`` is a read key with no row. ``hold_release``
+    is registered (BOOL, default ON) and its DEFAULT is pinned below to
+    DEFAULT_HOLD_RELEASE; agreement on PRESENT hand-edited values is a
+    separate claim, pinned by ``test_hold_release_page_and_every_consumer_read_one_value``.
     The four ``team_bridge.screening.*`` ceilings are here because a page that
     showed a ceiling the receiver does not read would be exactly this drift.
     """
 
     from local_operator.team_bridge.settings import (
+        DEFAULT_HOLD_RELEASE,
         DEFAULT_TEAM_BRIDGE_ENABLED,
         DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR,
         DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
@@ -681,6 +748,7 @@ def _team_bridge_consumer_defaults() -> dict[str, object]:
 
     return {
         "team_bridge.enabled": DEFAULT_TEAM_BRIDGE_ENABLED,
+        "team_bridge.hold_release": DEFAULT_HOLD_RELEASE,
         "team_bridge.screening.ambient_budget_per_hour": (
             DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR
         ),
@@ -1029,6 +1097,131 @@ def test_the_turn_answer_rail_flag_defaults_off_and_round_trips(
     assert settings_get("display.turn_answer_rail") is False
 
 
+def test_hold_release_row_round_trips_through_the_consumer(manager: ConfigManager) -> None:
+    """``team_bridge.hold_release``: listed, read, written, reset — and the receiver agrees.
+
+    The row is NESTED (``values.team_bridge.hold_release``), the only path
+    ``TeamBridgeSettings`` reads, so every state is asserted on the consumer,
+    not just on the file: an absent key reads ON (the shipped default), a
+    written ``false`` is the one value that turns release off, and reset
+    returns to ON by removing the key rather than writing a literal.
+    """
+    from local_operator.team_bridge.settings import TeamBridgeSettings
+
+    setting = settings_io.BY_KEY["team_bridge.hold_release"]
+    assert setting in settings_io.SETTINGS
+    assert setting.section == "team_bridge" and setting.kind is settings_io.Kind.BOOL
+    assert setting.path == ("team_bridge", "hold_release") and setting.default is True
+    assert setting.label and setting.help and "screen" not in setting.help.lower()
+
+    assert settings_io.read_setting(manager, setting) is True
+    assert TeamBridgeSettings.from_config(manager).hold_release is True
+
+    settings_io.write_setting(manager, setting, False)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["team_bridge"]["hold_release"] is False
+    assert settings_io.read_setting(manager, setting) is False
+    assert TeamBridgeSettings.from_config(manager).hold_release is False
+
+    settings_io.write_setting(manager, setting, True)
+    assert TeamBridgeSettings.from_config(manager).hold_release is True
+
+    settings_io.write_setting(manager, setting, False)
+    settings_io.reset_setting(manager, setting)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text()) or {}
+    assert "hold_release" not in ((stored.get("values") or {}).get("team_bridge") or {})
+    assert settings_io.read_setting(manager, setting) is True
+    assert TeamBridgeSettings.from_config(manager).hold_release is True
+
+
+def test_hold_release_copy_fits_the_settings_row_in_every_locale() -> None:
+    """Copy C3 + design D2 / QA Q2 (PR #4317), measured on rendered frames.
+
+    The label column is 30 cells (29 plus a gutter), so a longer label is cut
+    with an ellipsis, as fr/es/vi/ur were. Bridge rows paint help in a two-row
+    WRAP band 74 cells wide at 80 columns and 94 at 100; English stays under
+    140 cells so the hedged claims survive at 100 columns in translation, and
+    every space-delimited translation must take the two-row rung at 94.
+    zh-CN has no spaces for ``_wrap_cells`` to break on, so it can never take
+    that rung (pre-existing for every bridge row); it is held to the band's
+    total instead.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.i18n import catalogues
+    from local_operator.tui.widgets.settings_view import _wrap_cells
+
+    label_key = "wire.settings.team_bridge_hold_release.label"
+    help_key = "wire.settings.team_bridge_hold_release.help"
+    english = catalogues.load_catalogue("en", "wire.settings")
+    assert cell_len(english[help_key]) <= 140
+    assert _wrap_cells(english[help_key], 74, max_lines=2) is not None
+    for locale in catalogues.locales():
+        messages = catalogues.load_catalogue(locale, "wire.settings")
+        assert cell_len(messages[label_key]) <= 29, (locale, messages[label_key])
+        help_text = messages[help_key]
+        if locale == "zh-CN":
+            assert cell_len(help_text) <= 2 * 94, help_text
+        else:
+            assert _wrap_cells(help_text, 94, max_lines=2) is not None, (locale, help_text)
+
+
+_ABSENT = object()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (_ABSENT, True),
+        (True, True),
+        (False, False),
+        ("false", False),
+        ("off", False),
+        ("no", False),
+        ("0", False),
+        (0, False),
+        (1, True),
+        ("", True),
+        ("garbage", True),
+        (None, True),
+        ([], True),
+    ],
+)
+def test_hold_release_page_and_every_consumer_read_one_value(
+    tmp_path: Path, raw: object, expected: bool
+) -> None:
+    """S-1 (security round 1, PR #4317): a hand-edited value reads ONE way.
+
+    Before the fix the row (``strict_bool``) painted ``"false"``/``0`` as off
+    while the receiver (``is not False``) still converted new-work bounces and
+    opened the #4308 fallback-review entry. Every consumer of the flag is
+    asserted here against the page: the settings object, the release gate,
+    the per-code gate for a work-scope hold, and the fallback-review entry
+    (which needs this flag AND ``review_held``).
+    """
+    from local_operator.team_bridge import hold_release
+    from local_operator.team_bridge.settings import TeamBridgeSettings
+
+    section: dict[str, object] = {"enabled": True}
+    if raw is not _ABSENT:
+        section["hold_release"] = raw
+    (tmp_path / "config.yml").write_text(
+        yaml.safe_dump({"values": {"team_bridge": section}}), encoding="utf-8"
+    )
+    manager = ConfigManager(tmp_path)
+    setting = settings_io.BY_KEY["team_bridge.hold_release"]
+
+    page = settings_io.read_setting(manager, setting)
+    assert page is expected
+    assert TeamBridgeSettings.from_config(manager).hold_release is page
+    assert hold_release.enabled(tmp_path) is page
+    assert hold_release.enabled_for(tmp_path, hold_release.WORK_SCOPE_HOLD) is page
+    # The #4308 fallback-review entry: review_held is absent (ON), so the
+    # entry is open exactly when the page says release is on.
+    settings = TeamBridgeSettings.from_config(manager)
+    assert (settings.hold_release and settings.review_held) is page
+
+
 def test_the_narration_key_is_flat_dotted() -> None:
     """THE trap, named for this key so it fails BY NAME.
 
@@ -1332,6 +1525,23 @@ def test_query_budget_rows_share_the_consumer_paths(manager: ConfigManager) -> N
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         assert _query_budget_config().seconds == QUERY_BUDGET_SECONDS_DEFAULT + 5
+
+
+def test_heavy_jobs_row_shares_the_consumer_path(manager: ConfigManager) -> None:
+    """``bash.heavy_jobs.enabled`` writes exactly where ``heavy_lease`` reads.
+
+    A registry writing one path while the reader looked at another would leave
+    the kill switch painted but dead, so the path is pinned to the consumer's
+    constant and a stored ``false`` round-trips through the real reader.
+    """
+    from local_operator import heavy_lease
+
+    row = settings_io.BY_KEY["bash.heavy_jobs.enabled"]
+    assert row.path == heavy_lease.HEAVY_JOBS_ENABLED_PATH
+    settings_io.write_setting(manager, row, False)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        assert heavy_lease.configured_settings().enabled is False
 
 
 def test_memory_guard_rows_share_the_consumer_paths(manager: ConfigManager) -> None:
@@ -2190,19 +2400,41 @@ def test_the_write_boundary_refuses_a_key_another_hotkey_already_holds(tmp_path)
     succeeded and one action became unreachable.
     """
     manager = ConfigManager(tmp_path)
-    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], "ctrl+g")
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], "ctrl+y")
 
-    with pytest.raises(ValueError, match="already uses ctrl\\+g"):
-        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "ctrl+g")
+    with pytest.raises(ValueError, match="already uses ctrl\\+y"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "ctrl+y")
 
     # And through the ALTERNATES form, which is the shape `lop config edit`
     # reaches for a second key (design §H.1) and which bypassed the guard
     # entirely while it compared whole strings (review round 2, M4).
-    with pytest.raises(ValueError, match="already uses ctrl\\+g"):
-        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5,ctrl+g")
+    with pytest.raises(ValueError, match="already uses ctrl\\+y"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5,ctrl+y")
 
     # A free key still stores, and re-writing a row's own key is not a clash.
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
+
+
+def test_the_write_boundary_covers_every_newly_exposed_app_row(tmp_path) -> None:
+    """The rows this slice exposes are ordinary rows at the write boundary.
+
+    A newly exposed id that skipped the group check would let `lop config
+    edit keymap.aside ctrl+t` take the todo panel's shipped key with no
+    refusal anywhere — the exact silent disable §C.4 exists to prevent, now
+    with twelve more rows that can be the victim.
+    """
+    manager = ConfigManager(tmp_path)
+    with pytest.raises(ValueError, match="already uses ctrl\\+t"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.aside"], "ctrl+t")
+    with pytest.raises(ValueError, match="already uses ctrl\\+p"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.fork_aside"], "ctrl+p")
+    # The default of a NEW row is itself refused for an older row, because the
+    # defaults are live whether or not any value was written.
+    with pytest.raises(ValueError, match="already uses f9"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f9")
+    # A non-clearable app row cannot be cleared: `none` is not a terminal key.
+    with pytest.raises(ValueError):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.command_palette"], "none")
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
     assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "f5"
 
@@ -2210,17 +2442,17 @@ def test_the_write_boundary_refuses_a_key_another_hotkey_already_holds(tmp_path)
 @pytest.mark.parametrize(
     ("existing", "candidate"),
     [
-        ("f5,ctrl+g", "ctrl+g"),
-        ("ctrl+g", "f5,ctrl+g"),
-        ("ctrl+g", "ctrl+g,ctrl+g"),
-        ("f5,ctrl+g", "ctrl+t,ctrl+g"),
+        ("f5,ctrl+y", "ctrl+y"),
+        ("ctrl+y", "f5,ctrl+y"),
+        ("ctrl+y", "ctrl+y,ctrl+y"),
+        ("f5,ctrl+y", "ctrl+t,ctrl+y"),
     ],
 )
 def test_write_boundary_refuses_every_alternate_overlap(tmp_path, existing, candidate):
     """All documented alternate forms must reach the same refusal boundary."""
     manager = ConfigManager(tmp_path)
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], existing)
-    with pytest.raises(ValueError, match=r"already uses ctrl\+g"):
+    with pytest.raises(ValueError, match=r"already uses ctrl\+y"):
         settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], candidate)
     assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "ctrl+s"
 
@@ -2793,7 +3025,11 @@ class TestConfigEditQualifiesALoosening:
         code = config_edit_command(argparse.Namespace(key="tool_approval_mode", value="ask"))
         out = capsys.readouterr().out
         assert code == 0, out
-        assert "Successfully updated tool_approval_mode to ask" in out, out
+        # PR #4435 intentionally revised the reviewed English display label
+        # (also pinned in wire_settings_en_golden.json), not the machine token.
+        # Keep the golden's full slot guard; only those reviewed copy values move.
+        assert "Successfully updated tool_approval_mode to Ask" in out, out
+        assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "ask"
         assert "Running sessions are unchanged" not in out, out
 
 

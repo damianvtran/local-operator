@@ -337,8 +337,40 @@ MEASURED_TOKENS: dict[str, int] = {
     # now `int | list[int]` (an extra `array` arm in the schema) and the notes
     # drop the false "preselected" and say a multi-select may recommend several.
     # `recommended_all` is derived and hidden (SkipJsonSchema), so it costs 0.
-    "ask": 1112,
-    "ask_withdraw": 452,
+    # 1112 -> 1195 (+83, suggested terminal commands): each question gains the
+    # optional `command` (one-line shell command; "include cd") and
+    # `command_target` ("agent" | "user"; one-click run only on the right
+    # device). Field descriptions only, no sentence added to the ask
+    # description; same reading on both LOP_ASK_NONBLOCKING arms. The start
+    # budget (bench_context_budget.py) absorbs it with headroom on both arms, so
+    # that ceiling is unchanged.
+    # 1195 -> 1210 (+15, incident 2026-11-14 ask a-20fc): the queued tail now says a
+    # timeout is never consent to delete or overwrite ("only where it is
+    # reversible" already covers the rest; trimmed on the rebase over #3926 so
+    # bench_context_budget.py's start budget still passes). Measured by this test
+    # on the default (queued) arm; the blocking tail is unchanged.
+    # 1210 -> 1268 (+58, E2E 44ab2361d833 remote relay): one off-wire notes
+    # bullet saying a relay of a NODE session's forwarded card re-raises that
+    # card in the operator's inbox, its answer never comes back to the relaying
+    # session, and withdraw/the relay cap do not apply (manager requirement:
+    # documented where the model reads `relay`). Notes only — the wire schema
+    # and description are byte-identical, so the wire ledger above is unchanged.
+    # 1268 -> 1352 (+84, incident 2026-11-16 ask a-48e3): one off-wire notes
+    # bullet: a delete/move ask names every exact full path in the question or a
+    # label (a description approves nothing), and only an answer from a surface
+    # that started the runtime is consent. Notes only; the wire is unchanged.
+    # 1352 -> 1386 (+34, PR #4127 R1-M1/Q1): the recovery leads with handing the
+    # operator the command and re-asks at most once (a background-started
+    # runtime has no proving surface). Notes only; the wire is unchanged.
+    # RE-MEASURED (wave 2, perf/harness-cost-wave2, 2026-11-19): ask 1386 ->
+    # 1198 and ask_withdraw 452 -> 378. Both descriptions stop repeating
+    # system.md's "Deciding and asking" rules, which render exactly when ``ask``
+    # is held; limits, refusals and the secret path stay. Same printed table.
+    # ask_withdraw 378 -> 389 (+11, PR #4326 QA Q-F2): the two moot examples
+    # system.md does not carry ("you found the answer yourself or the work moved
+    # on") return to the description; same printed table, nothing else moved.
+    "ask": 1198,
+    "ask_withdraw": 389,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only
     # entry that moved. eval carries no pin (context budget; see supplements.pins).
@@ -452,7 +484,20 @@ MEASURED_TOKENS: dict[str, int] = {
     # on its own ("Peers, not gatekeepers", +7 chars). Re-measured on the
     # merged tree: 8,178 chars, 1993 tokens — 14 chars of headroom, so the
     # delay clause needs no further trim.
-    "bridge": 1993,
+    # 1993 -> 1999 (fix/bridge-emoji-shortcodes): the react blurb names the
+    # accepted forms ("✅ or shortcode `thumbsup`") and its tail was trimmed to
+    # fit; 8,188 chars.
+    # 1999 -> 1996 (same PR, review round 1 R1 / operator item 2): the operator
+    # asked for the schema itself to say shortcodes work, so ``emoji`` gains the
+    # wire description "Emoji or :shortcode:" (a few tokens, paid every turn by
+    # design). The doc renders that description too, so the react blurb drops
+    # its now-duplicate "(✅ or shortcode `thumbsup`)" to stay under the cap.
+    # Measured by this test's print.
+    # 1996 -> 1990 (same PR, CI context-budget fix): the wire description drops
+    # "teammates use bridge" (restated by the ONE-channel sentence) and the
+    # ``to`` hint's "or substring" (implied by WHOLE), paying for the emoji hint.
+    # File-read admission guidance, paid for by deduplicating existing prose.
+    "bridge": 1992,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -602,7 +647,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # 739 -> 725 (review round 1, M1): the "per generation ~200 credits" claim
     # was wrong for the request shape this tool always sends; the corrected
     # sentence (40 credits per second of requested duration) is shorter.
-    "generate_sound_effect": 725,
+    # RE-MEASURED (wave 2): 725 -> 741. "never both" moved from the params
+    # docstring (stripped from every schema's top level) into the description.
+    "generate_sound_effect": 741,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -659,6 +706,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # and ``to`` field blurbs that put the wire schema 3 tokens over CI's
     # budget (-). Re-measured.
     "hub": 875,
+    "integrations": 501,
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.
@@ -706,7 +754,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # form: the full rule, including the `no_reply` alternative, rides the
     # refusal message and the prompt clause, and the context-budget ratchet bills
     # this surface on every request. Measured by this test's print, never pasted.
-    "notify": 260,
+    # RE-MEASURED (wave 2): 260 -> 268. "metrics as a markdown table in body"
+    # moved from the stripped params docstring into the description.
+    "notify": 268,
     "patience": 330,
     # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
     # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now
@@ -768,7 +818,20 @@ MEASURED_TOKENS: dict[str, int] = {
     # -> `cwd`, UX round 1 U6) and pays for the own-session clause in the
     # opening sentence with it. Nothing else moved; the field schema did not
     # change, so `tool_schemas` and `scripts/bench_context_budget.py` stand.
-    "sessions": 867,
+    # RE-MEASURED for the explicit-peer listing fix (PR #3897): 867 -> 868.
+    # `peer` on `list` now SELECTS one remote device instead of narrowing the
+    # remote half of a federated listing, so the `peer`/`scope` descriptions
+    # and the reference's mesh sentence say "selects only that device" and the
+    # `include_stored` refusal names `peer` beside `scope='remote'`. Net +1
+    # token; well inside the soft cap. Nothing else moved.
+    # RE-MEASURED 2026-11-13 (session park op, PR #3850, merged over #3897):
+    # 868 -> 890. The delta is the `park` op's row and field copy in the
+    # sessions `tool://` reference — a new documented op, so the cost is
+    # deliberate and opt-in. Re-measured through this test's own printed table
+    # on the merged tree; it is the ONLY entry that moved, and the soft-cap
+    # assertion above it still holds. The schema-side cost of the same op is
+    # the context-budget bench's ledger, not this one.
+    "sessions": 890,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
@@ -1207,6 +1270,31 @@ def test_the_bridge_doc_explains_the_withheld_body_fields(
 
     for field in ("delay", "transient", "receiver_last_active_s"):
         assert field in doc, f"the bridge doc does not explain {field}"
+
+
+def test_the_bridge_doc_distinguishes_file_serving_from_read_admission(
+    default_surface: list[AgentTool],
+) -> None:
+    """Pin the served reference, not module comments or the every-turn wire cap."""
+
+    tool = next(tool for tool in default_surface if tool.name == "bridge")
+    resolver = make_tool_doc_resolver(lambda: default_surface)
+    doc = resolver("tool://bridge")
+    assert doc == render_tool_doc(tool)
+    assert doc is not None
+    for fact in (
+        "`download_only` is serving policy",
+        "`agent_read: true`",
+        "message's `files_hash`",
+        "`purpose=context`",
+        "No public download op is needed",
+        "BODY admission is separate",
+        "existing `body_state`",
+        "No URL, human credentials or human-only access-path bypass",
+        "not sender, incident or extension exemptions",
+    ):
+        assert fact in doc
+        assert fact not in tool.description, "guidance must not enlarge the every-turn wire"
 
 
 def test_the_tier_configured_arm_is_pinned_too(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

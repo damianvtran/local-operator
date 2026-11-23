@@ -1,0 +1,100 @@
+"""Author mechanical checks only; not an independent translation audit.
+Run with primary venv, PYTHONPATH=worktree, isolated HOME/config, env -i.
+The official catalogue checker is narrowed only in its enumeration APIs so
+parallel, intentionally partial locale additions are not inspected.
+"""
+from pathlib import Path
+import hashlib
+import json
+import os
+import unicodedata
+from unittest.mock import patch
+from rich.text import Text
+from rich.console import Console
+from rich.cells import cell_len
+from local_operator.i18n import catalogues, runtime, messages
+from scripts.i18n import check
+
+ROOT = Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+NS = 'tui.model_persistence'
+BASE = ROOT / 'local_operator/i18n/catalogues'
+EXPECTED = {
+ 'en/tui.model_persistence.json': '4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff',
+ 'en/tui.model_persistence.context.json': 'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc',
+}
+def frozen(phase):
+ for rel, want in EXPECTED.items():
+  actual = hashlib.sha256((BASE / rel).read_bytes()).hexdigest()
+  assert actual == want, (rel, actual)
+  print(f'{phase} {rel} sha256={actual}')
+frozen('BEFORE')
+for module in (catalogues, runtime, messages, check):
+ path = Path(module.__file__).resolve()
+ assert path.is_relative_to(ROOT), path
+ print(f'MODULE {module.__name__}={path}')
+assert not any(k.startswith('CMUX_') for k in os.environ)
+assert Path(os.environ['HOME']).is_relative_to(Path('/Users/damian/.local-operator/sessions/edc50a6f3d77/scratchpad'))
+print('ISOLATION HOME/config in author scratch; CMUX variables absent')
+en = catalogues.load_catalogue('en', NS)
+vi = catalogues.load_catalogue('vi', NS)
+context = catalogues.context('en', NS)
+assert len(en) == len(vi) == 4 and list(en) == list(vi) == list(context)
+assert not any('maxCells' in entry for entry in context.values())
+# Preserve all official validation logic; scope namespace/locale enumeration only.
+with patch.object(catalogues, 'namespaces', return_value=(NS,)), patch.object(catalogues, 'locales', return_value=('en', 'vi')):
+ problems = check.check_catalogues()
+print('OFFICIAL check.check_catalogues scoped(en,vi; tui.model_persistence):', problems)
+assert not problems
+for key in en:
+ want = runtime.message_arguments(en[key])
+ got = runtime.message_arguments(vi[key])
+ assert got == want
+ assert runtime.plural_selectors(en[key]) == runtime.plural_selectors(vi[key]) == ()
+ assert all(kind not in ('plural', 'select') for _, kind in got)
+ assert vi[key] == unicodedata.normalize('NFC', vi[key])
+ assert not any(unicodedata.bidirectional(c) in ('LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI') for c in vi[key])
+ print(f'KEY {key} args={got} plural/select=0 NFC=true bidi-controls=0 cells={cell_len(vi[key])}')
+for suffix, command in [('persist','/model default'), ('settings','/settings'), ('saved','/model saved')]:
+ source = vi[f'{NS}.{suffix}']
+ assert source.count(command) == 1
+ assert command.encode('ascii') in source.encode('utf-8')
+for name in ('label', 'routes'):
+ assert vi[f'{NS}.with_model'].count('{'+name+'}') == 1
+print('KEY ORDER / COMMAND BYTES / EXACT-ONCE SIMPLE ARGUMENTS: OK')
+labels = ['x', 'openai/gpt-6.1-sol', 'anthropic/claude-opus-5-5-20261122:thinking-high']
+for locale in ('en', 'vi'):
+ clauses = {suffix: messages.render(f'{NS}.{suffix}', {}, locale=locale) for suffix in ('persist','saved','settings')}
+ for suffix, value in clauses.items():
+  assert value == (en if locale == 'en' else vi)[f'{NS}.{suffix}']
+  print(f'API {locale}/{suffix}: {value}')
+ states = {'ordinary': ' · '.join(clauses[x] for x in ('persist','saved','settings')), 'missing-model': ' · '.join(clauses[x] for x in ('persist','settings')), 'absent-hosting': clauses['settings']}
+ for state, routes in states.items():
+  for label in labels:
+   value = messages.render(f'{NS}.with_model', {'label': label, 'routes': routes}, locale=locale)
+   assert value == runtime.render_message((en if locale == 'en' else vi)[f'{NS}.with_model'], {'label':label,'routes':routes}, locale)
+   assert value.count(label) == 1 and value.count(routes) == 1
+   print(f'API {locale}/{state}/{label}: {value}')
+   for width in (80,100,120):
+    console = Console(width=width, force_terminal=False)
+    lines = Text(value).wrap(console, width)
+    assert all(cell_len(line.plain) <= width for line in lines)
+    print(f'PLAIN_RICH_WRAP locale={locale} state={state} label={label} width={width} rows={len(lines)} widths={[cell_len(line.plain) for line in lines]}')
+ # No label: consumer must omit envelope, retain routes; do not synthesize model prefix.
+ assert '/model' not in states['absent-hosting']
+ print(f'NO_LABEL_CLAUSE_ONLY {locale}: {states["absent-hosting"]}')
+for missing in ('label', 'routes'):
+ params = {'label':'opaque/id', 'routes':'đã bản địa hóa'}
+ del params[missing]
+ try:
+  runtime.render_message(vi[f'{NS}.with_model'], params, 'vi')
+ except runtime.MessageFormatError as exc:
+  print(f'NEGATIVE missing-{missing}: {type(exc).__name__}: {exc}')
+ else:
+  raise AssertionError(f'missing {missing} was accepted')
+zero = runtime.render_message(vi[f'{NS}.with_model'], {'label':'0','routes':'/settings cũng sửa mô hình mặc định khi mở phiên'}, 'vi')
+assert 'mô hình: 0 — ' in zero
+print('ZERO_LABEL opaque string 0 retained:', zero)
+print('QUALIFICATION: plain Rich wrapping only, NOT styled NoticeBlock/native geometry or screenshots; English controls run first; no locale overflow claim; no max cap invented; no independent/self audit approval')
+frozen('AFTER')
+print('TARGET sha256='+hashlib.sha256((BASE/'vi/tui.model_persistence.json').read_bytes()).hexdigest())
+print('RESULT author mechanical validation OK; status translated only; independent A/B audits and consumer integration pending')

@@ -118,6 +118,9 @@ GUARD_TESTS: tuple[str, ...] = (
     # i18n catalogue snapshots, non-translatable-sink counts, ledger shards
     # (escapes: #3449, feat/i18n-relay-hi-catalogues).
     "tests/unit/i18n/test_catalogues.py",
+    # Admission checks every manifest locale, even absent namespace/locale files;
+    # runtime fallback is intentional, but must not defer debt to the full gate.
+    "tests/unit/i18n/test_language_manifest.py",
     "tests/unit/i18n/test_non_translatable_sinks.py",
     "tests/unit/i18n/test_ledger_shards.py",
     # Inventory NODES inside large behavioural files — the whole files are

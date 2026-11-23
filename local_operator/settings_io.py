@@ -70,12 +70,15 @@ from local_operator.i18n.keys import wire_guardrails as _gr
 from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_notification_sound as _ns
+from local_operator.i18n.keys import wire_phone_access as _pa
 from local_operator.i18n.keys import wire_radient_saver as _rsv
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
 from local_operator.i18n.keys import wire_settings_hub_org as _ho
 from local_operator.i18n.keys import wire_settings_keymap as _wk
+from local_operator.i18n.keys import wire_settings_transcript_display as _td
+from local_operator.i18n.keys import wire_voice as _wv
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import (
@@ -126,6 +129,10 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.settings.hub_defaults",
     "wire.settings.hub_org",
     "wire.settings.keymap",
+    # The transcript layout switch (`display.transcript_display`): its own child
+    # namespace so its six English keys never move the audited `wire.settings`
+    # source hash — the `hub_org` pattern.
+    "wire.settings.transcript_display",
     "wire.aida_cadence",
     "wire.host_speed",
     "wire.guardrails",
@@ -133,6 +140,12 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.memory",
     "wire.radient_saver",
     "wire.notification_sound",
+    # The Phone access section (`tunnel.auto_setup_after_login`). Missing here,
+    # `_t` fell back to the message codes and Settings printed raw keys in every
+    # locale (#3945 review round 1, D1/Q1); `test_no_registry_string_is_its_own_code`
+    # now fails for any child namespace left out of this tuple.
+    "wire.phone_access",
+    "wire.voice",
 )
 
 
@@ -221,6 +234,19 @@ _KEYMAP_COPY = {
     "keymap.quick_send": (_wk.quick_send_label, _wk.quick_send_help),
     "keymap.push_to_talk": (_wk.push_to_talk_label, _wk.push_to_talk_help),
     "keymap.start_recording": (_wk.start_recording_label, _wk.start_recording_help),
+    "keymap.command_palette": (_wk.command_palette_label, _wk.command_palette_help),
+    "keymap.toggle_sidebar": (_wk.toggle_sidebar_label, _wk.toggle_sidebar_help),
+    "keymap.focus_sidebar": (_wk.focus_sidebar_label, _wk.focus_sidebar_help),
+    "keymap.aside": (_wk.aside_label, _wk.aside_help),
+    "keymap.fork_aside": (_wk.fork_aside_label, _wk.fork_aside_help),
+    "keymap.toggle_todos": (_wk.toggle_todos_label, _wk.toggle_todos_help),
+    "keymap.toggle_subagents": (_wk.toggle_subagents_label, _wk.toggle_subagents_help),
+    "keymap.toggle_pin": (_wk.toggle_pin_label, _wk.toggle_pin_help),
+    "keymap.toggle_asks": (_wk.toggle_asks_label, _wk.toggle_asks_help),
+    "keymap.prev_session": (_wk.prev_session_label, _wk.prev_session_help),
+    "keymap.next_session": (_wk.next_session_label, _wk.next_session_help),
+    "keymap.cycle_effort": (_wk.cycle_effort_label, _wk.cycle_effort_help),
+    "keymap.clear_transcript": (_wk.clear_transcript_label, _wk.clear_transcript_help),
     "keymap.send_steer": (_wk.send_steer_label, _wk.send_steer_help),
     "keymap.send_queue": (_wk.send_queue_label, _wk.send_queue_help),
     "keymap.send_both": (_wk.send_both_label, _wk.send_both_help),
@@ -895,6 +921,17 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.memory_guard_description()),
     ),
+    # The machine-wide heavy-job queue (``local_operator/heavy_lease.py``). LIVE:
+    # the reader is a fresh ``ConfigManager`` per heavy ``bash`` call. Its own
+    # section, not ``memory_guard``: that section is the PER-COMMAND ceiling,
+    # this is a NODE-WIDE concurrency limit, and the 2026-11-16 node-2 OOM is
+    # exactly the case where the one held and the other did not exist.
+    Section(
+        "heavy_jobs",
+        _t(_ws.heavy_jobs_title()),
+        Scope.LIVE,
+        _t(_ws.heavy_jobs_description()),
+    ),
     # Its own section for the reason ``memory_guard`` has one, and LIVE for the
     # same reason: the reader is a fresh ``ConfigManager`` per ``bash`` call. It is
     # NOT in ``memory_guard`` because scope is uniform within a section and these
@@ -938,6 +975,9 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.desktop_description()),
     ),
+    # LIVE: the one key here is read by the credential-write hook at the moment
+    # a sign-in lands (`tunnels.install.auto_setup_enabled`), never cached.
+    Section("phone_access", _t(_pa.title()), Scope.LIVE, _t(_pa.description())),
     # The static file routes' served roots (``server/utils/static_roots.py``).
     # LIVE: the roots are rebuilt from the config on every request, so an edit
     # lands on the next thumbnail or preview with no restart.
@@ -977,6 +1017,27 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.mesh_updates_title()),
         Scope.LIVE,
         _t(_ws.mesh_updates_description()),
+    ),
+    # How a session MOVE carries its working set (design move-working-set.md §8.4).
+    # LIVE is honest: ``workset.cap_bytes`` re-reads config.yml at every move, on the
+    # owner (the manifest's cap, refusing ``working_set_over_cap`` before anything is
+    # retired) and on the destination (its own cap on what it accepts).
+    Section(
+        "mesh_moves",
+        _t(_ws.mesh_moves_title()),
+        Scope.LIVE,
+        _t(_ws.mesh_moves_description()),
+    ),
+    # What THIS device's update does with its older install generations
+    # (``update.auto_prune`` / ``update.keep_generations``). Its own section, not
+    # ``mesh_updates``: that one is about rolling OTHER members. LIVE is honest:
+    # ``update.auto_prune_policy`` re-reads config.yml at every promotion tail
+    # (PyPI, snapshot and mesh), and no ``Session`` holds either key.
+    Section(
+        "updates",
+        _t(_ws.updates_title()),
+        Scope.LIVE,
+        _t(_ws.updates_description()),
     ),
     # PREVIEW, and its own section, LIVE — all three are decisions, not defaults.
     #
@@ -1098,6 +1159,17 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.speech_title()),
         Scope.LIVE,
         _t(_ws.speech_description()),
+    ),
+    # Per-session voice mode (docs/design/qwen-voice.md). LIVE: ``/voice/text``
+    # reads its key per request, so an edit changes the next spoken reply. Its
+    # own section rather than rows under ``speech``: that section is about how
+    # the assistant SOUNDS on every surface, this one is about the hands-free
+    # conversation with one session.
+    Section(
+        "voice",
+        _t(_wv.title()),
+        Scope.LIVE,
+        _t(_wv.description()),
     ),
     # Agent messages (Team Bridge, RFC §5): the local half of a feature whose
     # eligibility, consent and endpoint state are SERVER state. LIVE because
@@ -1675,16 +1747,16 @@ def _validate_github_repositories(value: object) -> object:
     """
     if not isinstance(value, (list, tuple)):
         raise ValueError("GitHub repositories must be a list of owner/repo entries.")
-    # The SAME ceiling the mesh boundary carries (GitHub's App mint maximum): a
-    # longer designation could neither be minted nor delivered whole, so it is
-    # refused here, where a person can fix it, rather than truncated downstream.
+    # The SAME ceiling the mesh boundary carries, including token/gh lists.
+    # GitHub's separate 500-repository App mint limit stays owner-side; applying
+    # it here would reject valid token-arm lists that the wire can carry whole.
     # Lazy import: this module loads on every CLI start; the validator runs on write.
     from local_operator.network.credentials.types import MAX_NARROWING_LIST_ENTRIES
 
     if len(value) > MAX_NARROWING_LIST_ENTRIES:
         raise ValueError(
-            f"at most {MAX_NARROWING_LIST_ENTRIES} GitHub repositories can be designated "
-            f"(GitHub's limit for one App token); got {len(value)}"
+            f"a hand-picked list can contain at most {MAX_NARROWING_LIST_ENTRIES} "
+            f"GitHub repositories; got {len(value)}"
         )
     for entry in value:
         text = str(entry).strip()
@@ -2102,6 +2174,37 @@ SETTINGS: tuple[Setting, ...] = (
         help=(_t(_ws.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens_help())),
         minimum=0,
         maximum=10_000_000,
+    ),
+    # -- providers.bedrock: Amazon Bedrock Region and ambient-chain switch ---
+    #
+    # Both are free-text "unset means inherit" keys read by
+    # ``providers/bedrock/connection.py`` (defaults
+    # ``DEFAULT_BEDROCK_REGION_SETTING`` / ``DEFAULT_BEDROCK_AUTH_SETTING``).
+    # ``region`` applies only to connections that do not carry their own (env
+    # and ambient tiers; a stored connection keeps the Region chosen at
+    # login). ``auth: ambient`` lets a headless AWS worker use the default
+    # credential chain with no stored row — the deterministic alternative to
+    # compute-marker auto-detection (design D6). LIVE: both are read per
+    # request/census, so no relaunch is needed.
+    Setting(
+        key="providers.bedrock.region",
+        path=("providers", "bedrock", "region"),
+        section="providers",
+        label=_t(_ws.providers_bedrock_region_label()),
+        kind=Kind.TEXT,
+        default="",
+        help=_t(_ws.providers_bedrock_region_help()),
+        empty_unsets=True,
+    ),
+    Setting(
+        key="providers.bedrock.auth",
+        path=("providers", "bedrock", "auth"),
+        section="providers",
+        label=_t(_ws.providers_bedrock_auth_label()),
+        kind=Kind.TEXT,
+        default="",
+        help=_t(_ws.providers_bedrock_auth_help()),
+        empty_unsets=True,
     ),
     # -- providers.openrouter: chat-completions `provider` routing object ----
     #
@@ -2885,6 +2988,33 @@ SETTINGS: tuple[Setting, ...] = (
                 "24h",
                 _t(_ws.display_time_format_choice_24h_label()),
                 _t(_ws.display_time_format_choice_24h_description()),
+            ),
+        ),
+    ),
+    Setting(
+        key="display.transcript_display",
+        # FLAT-DOTTED like every other ``display.*`` key: the dot is part of a
+        # literal top-level key, which is what ``tui/settings.py`` reads. Written
+        # as a nested tuple this key would be stored where nothing looks for it.
+        path=("display.transcript_display",),
+        section="appearance",
+        label=_t(_td.label()),
+        kind=Kind.ENUM,
+        # A literal, not an import (this module must stay off the consumers'
+        # import path); ``tests/unit/test_settings_io.py``'s ``_consumer_defaults``
+        # pins it to ``tui.settings.DEFAULT_TRANSCRIPT_DISPLAY``.
+        default="by-turn",
+        help=_t(_td.help()),
+        choices=(
+            Choice(
+                "by-turn",
+                _t(_td.choice_by_turn_label()),
+                _t(_td.choice_by_turn_description()),
+            ),
+            Choice(
+                "by-response",
+                _t(_td.choice_by_response_label()),
+                _t(_td.choice_by_response_description()),
             ),
         ),
     ),
@@ -5135,6 +5265,25 @@ SETTINGS: tuple[Setting, ...] = (
         default=0.8,
         help=(_t(_ws.bash_memory_soft_fraction_help())),
     ),
+    # -- heavy_jobs ---------------------------------------------------------
+    # ``path`` mirrors ``heavy_lease.HEAVY_JOBS_ENABLED_PATH``; pinned by
+    # ``test_heavy_jobs_row_shares_the_consumer_path`` rather than imported, for
+    # the same cheap-CLI reason as the ``memory_guard`` rows above. ONE row: the
+    # slot count and the queue wait are env overrides (see heavy_lease), not
+    # config keys, so they need no row.
+    Setting(
+        key="bash.heavy_jobs.enabled",
+        path=("bash", "heavy_jobs", "enabled"),
+        section="heavy_jobs",
+        label=_t(_ws.bash_heavy_jobs_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=(_t(_ws.bash_heavy_jobs_enabled_help())),
+        choices=_bool_choices(
+            _t(_ws.bash_heavy_jobs_enabled_choice_true_description()),
+            _t(_ws.bash_heavy_jobs_enabled_choice_false_description()),
+        ),
+    ),
     # -- query_budget -------------------------------------------------------
     # ``path`` mirrors ``query_budget.QUERY_BUDGET_*_PATH`` in
     # ``tools/query_budget.py``; the three are pinned together by
@@ -5415,6 +5564,23 @@ SETTINGS: tuple[Setting, ...] = (
         validate_value=_validate_desktop_launch_command,
     ),
     Setting(
+        # The viewer's bounded cache of a PEER session's bytes
+        # (``remote_files/cache.py``, docs/design/remote-files-parity.md §4). LIVE:
+        # read from config.yml on every eviction pass, so an edit applies at the
+        # next landing. The literal mirrors ``remote_files.cache
+        # .REMOTE_FILES_CACHE_BYTES`` (settings_io stays off that import path);
+        # ``_consumer_defaults`` in tests/unit/test_settings_io.py guards the pair.
+        key="desktop.remote_files_cache_bytes",
+        path=("desktop", "remote_files_cache_bytes"),
+        section="desktop",
+        label=_t(_ws.desktop_remote_files_cache_bytes_label()),
+        kind=Kind.INT,
+        default=1024 * 1024 * 1024,
+        help=_t(_ws.desktop_remote_files_cache_bytes_help()),
+        minimum=0,
+        maximum=1024 * 1024 * 1024 * 1024,
+    ),
+    Setting(
         key="static.roots",
         path=("static", "roots"),
         section="static",
@@ -5557,6 +5723,41 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=3650.0,
         help=(_t(_ws.network_audit_max_age_days_help())),
     ),
+    # THE POST-UPDATE PRUNE (operator decision 2026-11-16, after a fleet node
+    # reached 113 generations / ~8.6 GB with automatic collection frozen). Both
+    # are read by ``update.auto_prune_policy`` and drive
+    # ``update.reclaim_after_promotion``, which is ``lop install prune``'s own
+    # guarded ``prune_generations``: the current build, the updater's running
+    # tree and every record-named root are never removed, whatever these say.
+    # Defaults are LITERALS mirroring ``install_defaults``
+    # (DEFAULT_AUTO_PRUNE_GENERATIONS / DEFAULT_KEEP_GENERATIONS);
+    # ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins the pair.
+    Setting(
+        key="update.auto_prune",
+        path=("update", "auto_prune"),
+        section="updates",
+        label=_t(_ws.update_auto_prune_label()),
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices(
+            _t(_ws.update_auto_prune_choice_true_description()),
+            _t(_ws.update_auto_prune_choice_false_description()),
+        ),
+        help=_t(_ws.update_auto_prune_help()),
+    ),
+    # 0 is legal (keep only what is current or in use); the ceiling is a sanity
+    # bound, not a policy — each generation is a whole venv (~80-140 MB).
+    Setting(
+        key="update.keep_generations",
+        path=("update", "keep_generations"),
+        section="updates",
+        label=_t(_ws.update_keep_generations_label()),
+        kind=Kind.INT,
+        default=2,
+        help=_t(_ws.update_keep_generations_help()),
+        minimum=0,
+        maximum=100,
+    ),
     # THE SWITCH (S3b; mesh-update-propagation.md §5): auto-roll is reachable
     # only when this reads ``auto``. A per-run ``lop update --no-roll``
     # overrides it; the manual verbs (``lop network update``) work under
@@ -5585,6 +5786,37 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.network_rollout_on_update_choice_off_description()),
             ),
         ),
+    ),
+    # The per-move working-set cap: 256 MiB, ~6x the measured max delta (43.1 MB over
+    # n=60 worktrees, median 0; design §8.4). The default mirrors
+    # ``workset.DEFAULT_CAP_BYTES``, which ``_consumer_defaults()`` pins.
+    Setting(
+        key="mesh.move.working_set_max_bytes",
+        path=("mesh", "move", "working_set_max_bytes"),
+        section="mesh_moves",
+        label=_t(_ws.mesh_move_working_set_max_bytes_label()),
+        kind=Kind.INT,
+        default=268_435_456,
+        minimum=1_048_576,
+        maximum=17_179_869_184,
+        help=_t(_ws.mesh_move_working_set_max_bytes_help()),
+    ),
+    # WHERE a move may create or restore a repository on THIS device (security review
+    # #4245 S1): the destination's own allowlist of ``~``-relative roots, applied to
+    # every path a source's offer names, on top of the fixed path rules (no hidden or
+    # system directories) in ``workset_transfer.primary_path_refusal``. Open list (the
+    # user's own folders). Clearing it restores the default, which ``workset.
+    # restore_roots`` falls back to for an absent key; an entry that is not ``~`` or
+    # ``~/...`` is ignored there, so a typo narrows the policy and never widens it.
+    Setting(
+        key="mesh.move.working_set_roots",
+        path=("mesh", "move", "working_set_roots"),
+        section="mesh_moves",
+        label=_t(_ws.mesh_move_working_set_roots_label()),
+        kind=Kind.LIST,
+        default=["~"],
+        help=_t(_ws.mesh_move_working_set_roots_help()),
+        empty_unsets=True,
     ),
     # THE RELAY'S OWN LIMIT, and the one an operator needs exactly when a peer
     # cannot connect: §2.1's cap on UNAUTHENTICATED connections in flight. The slot
@@ -5649,11 +5881,31 @@ SETTINGS: tuple[Setting, ...] = (
         help=(_t(_ws.network_credentials_grant_ttl_s_help())),
         synonyms=("auth", "expiry"),
     ),
-    # The github adapter's allow-list (github.py's ``REPOSITORIES_PATH``; the same
-    # key is read by the owner — the mint narrows to it and REFUSES when empty —
-    # and by the borrower's git helper as its use-time backstop). Empty is a
-    # refusal at mint time, never "no narrowing": a mint without ``repositories``
-    # would cover everything the App installation was granted.
+    # The offline hold (credentials/__init__.py ``OFFLINE_HOLD_S``; C5, approved by
+    # the operator 2026-11-13). Read on the owner (stated on each grant) and on the
+    # borrower (its own cap); the reader clamps to [grant_ttl_s, 24 h]. The minimum is
+    # the default grant TTL (900 s) rather than the TTL row's own 60 s floor (review
+    # R1-m3): a value below it was accepted and then silently read as the TTL, so the
+    # page offered a setting that did nothing. A TTL raised above 900 s still floors
+    # the hold at read time, which is the only side that can lengthen it.
+    Setting(
+        key="network.credentials.offline_hold_s",
+        path=("network", "credentials", "offline_hold_s"),
+        section="network",
+        label=_t(_ws.network_credentials_offline_hold_s_label()),
+        kind=Kind.FLOAT,
+        default=86400.0,
+        minimum=900.0,
+        maximum=86400.0,
+        help=(_t(_ws.network_credentials_offline_hold_s_help())),
+        synonyms=("auth", "expiry", "sleep", "lease"),
+    ),
+    # The github adapter's EXPLICIT allow-list (github.py's ``REPOSITORIES_PATH``;
+    # read by the owner as a hand-picked override and by the borrower's git
+    # helper as its use-time backstop). UNSET on an owner now means the
+    # enumerated default — every repository its login can push to, minus
+    # ``network.credentials.github.excluded`` (``github.designation``) — still an
+    # explicit list on the wire and the mint, never "no narrowing".
     Setting(
         key="network.credentials.github.repositories",
         path=("network", "credentials", "github", "repositories"),
@@ -5665,7 +5917,9 @@ SETTINGS: tuple[Setting, ...] = (
         placeholder=_t(_ws.network_credentials_github_repositories_placeholder()),
         empty_unsets=True,
         validate_value=_validate_github_repositories,
-        synonyms=("auth", "access", "permissions", "scopes"),
+        # No "access": the help copy now says "lend GitHub access", so the word
+        # already matches this row and a synonym repeating it is dead weight.
+        synonyms=("auth", "permissions", "scopes"),
     ),
     # -- hub ---------------------------------------------------------------
     # Defaults are LITERALS here for the same reason the aida ones are: this module
@@ -6256,6 +6510,57 @@ SETTINGS: tuple[Setting, ...] = (
         ),
         synonyms=("stt", "speech to text", "voice", "audio"),
     ),
+    # -- speech provider (the ONE provider hearing and speaking use) -----------
+    # Unset (``None``) means no provider chosen yet, the tri-state shape
+    # ``display.nerd_icons`` uses: the "not chosen" choice writes nothing and
+    # ``write_setting`` deletes the key. The values are literals here
+    # (``settings_io`` stays off ``local_operator.voice``'s import path);
+    # tests/unit/voice/test_speech_provider.py pins them against
+    # ``voice.provider.PROVIDERS``. OpenAI and Groq are deliberately absent.
+    Setting(
+        key="speech.provider",
+        path=("speech", "provider"),
+        section="speech",
+        label=_t(_wv.provider_label()),
+        kind=Kind.ENUM,
+        default=None,
+        help=_t(_wv.provider_help()),
+        choices=(
+            Choice(
+                None,
+                _t(_wv.provider_choice_none_label()),
+                _t(_wv.provider_choice_none_description()),
+            ),
+            Choice(
+                "radient",
+                _t(_wv.provider_choice_radient_label()),
+                _t(_wv.provider_choice_radient_description()),
+            ),
+            Choice(
+                "elevenlabs",
+                _t(_wv.provider_choice_elevenlabs_label()),
+                _t(_wv.provider_choice_elevenlabs_description()),
+            ),
+        ),
+        synonyms=("tts", "stt", "audio", "text to speech", "speech to text"),
+    ),
+    # -- voice mode (docs/design/qwen-voice.md) -------------------------------
+    # Literals, not imports: this module stays off ``local_operator.voice``'s
+    # import path, and ``_consumer_defaults()`` in tests/unit/test_settings_io.py
+    # pins the default and bounds against ``voice.speakable``'s constants.
+    Setting(
+        key="voice.max_spoken_chars",
+        path=("voice", "max_spoken_chars"),
+        section="voice",
+        label=_t(_wv.max_spoken_chars_label()),
+        kind=Kind.INT,
+        default=800,
+        minimum=100,
+        maximum=4000,
+        # No ``unit``: the help text already names characters, and
+        # test_desktop_controls pins that only the hours row declares a unit.
+        help=_t(_wv.max_spoken_chars_help()),
+    ),
     # -- team bridge (agent messages, RFC §5) ---------------------------------
     # Defaults are LITERALS here, not imports: this module stays off the import
     # path of the package that reads these keys (it is loaded on every CLI
@@ -6271,9 +6576,11 @@ SETTINGS: tuple[Setting, ...] = (
     # ``team_bridge.onboarding`` is internal UI bookkeeping (the one-time
     # dialog's shown-flag) and is NOT registered: a public row would dress
     # session-format state as a knob. ``hold_alert_after_minutes`` and
-    # ``hold_release`` are read keys with no row (their constants, and why, are
-    # in ``team_bridge/settings.py``). The allowlist's default state and cues
-    # are server truth (§9), surfaced as data by
+    # ``screening_hold_review_after_minutes`` are read keys with no row (their
+    # constants, and why, are in ``team_bridge/settings.py``); ``hold_release``
+    # has a row (below) whose copy ships through the per-locale audit ledger.
+    # The allowlist's default state and cues are server truth (§9), surfaced as
+    # data by
     # ``team_bridge.client.allowlist_view`` — never restated here, where an edit
     # would drift from the server silently.
     #
@@ -6336,6 +6643,28 @@ SETTINGS: tuple[Setting, ...] = (
         # badge-only and `_sync_designation` already maps it to SQL NULL.
         empty_unsets=False,
         help=_t(_ws.team_bridge_session_help()),
+    ),
+    # B4b owner release (``team_bridge/settings.py`` DEFAULT_HOLD_RELEASE):
+    # ON turns a valid new-work request the receiver would have bounced into a
+    # per-message hold the person Delivers or Discards; OFF restores the reject.
+    # A BOOL on purpose: ``read_setting``'s ``strict_bool`` is ALSO the
+    # receiver's reader (``team_bridge.settings._hold_release``, S-1 on PR
+    # #4317), so a hand-edited ``"false"``/``off``/``0`` is off on both sides;
+    # absent or unparseable reads ON (the outcome it opens is a HOLD, never an
+    # admit). The
+    # narrowing that decides WHICH answers convert lives in ``hold_release``,
+    # not here. The help deliberately avoids the word "screen": this row is not
+    # the admission gate and ``test_no_setting_can_disable_the_admission_gate``
+    # would rightly refuse a BOOL that claimed to be. The literal default is
+    # pinned to DEFAULT_HOLD_RELEASE by ``_team_bridge_consumer_defaults()``.
+    Setting(
+        key="team_bridge.hold_release",
+        path=("team_bridge", "hold_release"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_hold_release_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.team_bridge_hold_release_help()),
     ),
     Setting(
         key="team_bridge.screening.budget_per_hour",
@@ -6494,6 +6823,48 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.remote_compute_enabled_choice_true_description()),
             _t(_ws.remote_compute_enabled_choice_false_description()),
         ),
+    ),
+    Setting(
+        # The reversible switch for the post-sign-in no-spend setup run
+        # (`tunnels.install.auto_setup_after_login`). The literal mirrors
+        # `install.AUTO_SETUP_DEFAULT`; `test_every_default_matches_its_consumer`
+        # holds them equal (settings_io stays off the tunnels import path).
+        key="tunnel.auto_setup_after_login",
+        path=("tunnel", "auto_setup_after_login"),
+        section="phone_access",
+        label=_t(_pa.auto_setup_label()),
+        help=_t(_pa.auto_setup_help()),
+        kind=Kind.BOOL,
+        default=True,
+    ),
+    Setting(
+        # ADR 0008 desk presence: how long this computer may go without input
+        # before a completion it would banner here goes to the phone instead.
+        # A COMPUTER setting (it describes the desk), edited from desktop
+        # Settings through `PATCH /v1/settings/{key}` and from the phone through
+        # the relay's `GET/PATCH /api/settings/phone-away-after`. The desktop
+        # app reads it and sends it as the presence beat's `away_after_s`; the
+        # core's own reader (`presence.configured_away_after_s`) is for the
+        # TUI-only probe (slice 4), where no beat carries it. In the
+        # `phone_access` section because it decides what reaches the phone.
+        # An ENUM of the four presets every client offers (the same shape as
+        # `session.cleanup.temporary.idle_minutes`); the literal default mirrors
+        # `presence.DEFAULT_AWAY_AFTER_S`, held equal by
+        # `test_every_default_matches_its_consumer`.
+        key="notifications.phone_away_after_s",
+        path=("notifications", "phone_away_after_s"),
+        section="phone_access",
+        label=_t(_pa.away_after_label()),
+        help=_t(_pa.away_after_help()),
+        kind=Kind.ENUM,
+        default=120,
+        choices=(
+            Choice(60, _t(_pa.away_after_choice_1m_label())),
+            Choice(120, _t(_pa.away_after_choice_2m_label())),
+            Choice(300, _t(_pa.away_after_choice_5m_label())),
+            Choice(600, _t(_pa.away_after_choice_10m_label())),
+        ),
+        synonyms=("idle", "push", "mobile", "presence"),
     ),
 )
 

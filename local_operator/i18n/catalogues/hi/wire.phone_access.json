@@ -1,0 +1,12 @@
+{
+  "wire.phone_access.title": "फ़ोन एक्सेस",
+  "wire.phone_access.description": "यह कंप्यूटर फ़ोन ऐप के लिए अपने Radient टनल को कैसे चालू रखता है। बदलाव अगले साइन-इन पर लागू होते हैं।",
+  "wire.phone_access.auto_setup.label": "साइन-इन के बाद फ़ोन एक्सेस फिर से जोड़ना",
+  "wire.phone_access.auto_setup.help": "जब आप ऐसे कंप्यूटर पर Radient में साइन इन करते हैं जिस पर पहले से फ़ोन एक्सेस है, तो उसका टनल बैकग्राउंड में फिर से जोड़ा या ठीक किया जाता है। यह कभी बिलिंग सक्रिय नहीं करता और न ही क्रेडिट खर्च करता है; इसके बजाय कोई भी मूल्य या क्रेडिट की कमी आपको बताई जाती है।",
+  "wire.phone_access.away_after.label": "कंप्यूटर से इतनी देर दूर रहने पर फ़ोन पर भेजें",
+  "wire.phone_access.away_after.help": "यह कंप्यूटर कीबोर्ड या माउस इनपुट के बिना कितनी देर रह सकता है, उसके बाद पूरा हुआ कार्य, जो आपको यहाँ दिखाया जाता, आपके फ़ोन पर भेजा जाएगा। स्क्रीन लॉक करना तुरंत दूर होना माना जाता है। डेस्कटॉप ऐप आवश्यक है।",
+  "wire.phone_access.away_after.choice.1m.label": "1 मिनट",
+  "wire.phone_access.away_after.choice.2m.label": "2 मिनट",
+  "wire.phone_access.away_after.choice.5m.label": "5 मिनट",
+  "wire.phone_access.away_after.choice.10m.label": "10 मिनट"
+}

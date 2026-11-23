@@ -746,6 +746,8 @@ def create_on_peer(
 
     implied_yolo = saved_tool_approval_is_auto(root)
 
+    from local_operator.network.relay import CREATE_CLIENT_BOUND_S
+
     def _create(yolo: bool) -> dict[str, Any]:
         # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing but the
         # request itself. ``yolo`` is OMITTED when False — the attended body is
@@ -761,7 +763,9 @@ def create_on_peer(
             # PROMPTLESS create no longer waits for the spawn at all (the peer warms the
             # runtime in the background and answers with the id), so this budget is the
             # one that covers the prompt-ful case; see ``relay._op_session_create``.
-            timeout=120.0,
+            # ...plus the relay's confirm-by-key window after a lost reply
+            # (``relay.CREATE_CLIENT_BOUND_S``): giving up first loses the id.
+            timeout=CREATE_CLIENT_BOUND_S,
             **attempt,
         )
 
@@ -940,7 +944,15 @@ def resolve_network(root: Path | None, target: str) -> Any:
 
 
 def transfer(
-    session_id: str, *, to: str, keep: bool = False, wait_s: float = 0.0, root: Path | None = None
+    session_id: str,
+    *,
+    to: str,
+    keep: bool = False,
+    wait_s: float = 0.0,
+    root: Path | None = None,
+    confirm_working_set: str = "",
+    without_working_set: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Move (or ``keep``-copy) a conversation, through ``mobility.request_move``.
 
@@ -956,7 +968,22 @@ def transfer(
     """
     from local_operator.network import mobility
 
-    return dict(mobility.request_move(session_id, to=to, keep=keep, wait_s=wait_s, root=root))
+    return dict(
+        mobility.request_move(
+            session_id,
+            to=to,
+            keep=keep,
+            wait_s=wait_s,
+            root=root,
+            confirm_working_set=confirm_working_set,
+            without_working_set=without_working_set,
+            dry_run=dry_run,
+            # Attribution for the owner's consent audit row: the digest here is the
+            # one the desktop move card showed (its ``confirmedDigest``). A CLAIM, not
+            # proof: any local caller of this API is recorded as "desktop".
+            consent_surface="desktop",
+        )
+    )
 
 
 def transfer_receipt(
@@ -1004,4 +1031,19 @@ def transfer_receipt(
         "new_session_id": str(result.get("new_session_id") or session_id),
         "mode": "keep" if mode == "keep" else "move",
         "state": state,
+        # Verbatim and absent-as-None: the renderer reads it only when present.
+        "working_set": (
+            result.get("working_set") if isinstance(result.get("working_set"), dict) else None
+        ),
+        "engagement": (
+            result.get("engagement") if isinstance(result.get("engagement"), dict) else None
+        ),
+        # Verbatim too: an offload's request record (the outcome is the destination's
+        # and never returns), so the dialog says it was asked to resume, not that
+        # nothing runs there.
+        "resume_requested": (
+            result.get("resume_requested")
+            if isinstance(result.get("resume_requested"), dict)
+            else None
+        ),
     }

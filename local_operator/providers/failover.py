@@ -22,6 +22,7 @@ import errno
 import inspect
 import logging
 import random
+import re
 import ssl
 import time
 from collections.abc import (
@@ -833,6 +834,11 @@ class ProviderError(RenderedStreamError):
     the wait are composed in only on the way out.
     """
 
+    #: Set by ``clients.raise_for_status`` when the provider's JSON error fields
+    #: name a CONTENT verdict (PR #4212, S-7/S-12), read before ``message`` is
+    #: capped. Declared here so the stamp is a typed attribute, not a monkey-patch.
+    content_verdict_seen: bool = False
+
     def __init__(
         self,
         status: int | None,
@@ -846,6 +852,7 @@ class ProviderError(RenderedStreamError):
         transport: bool = False,
         transport_cause: BaseException | None = None,
         fail_closed: bool = False,
+        block_on_rotate: bool = True,
         provider: str = "",
         model: str = "",
         failover_from: str = "",
@@ -872,6 +879,18 @@ class ProviderError(RenderedStreamError):
         # resource refusals must stop the entire attempt chain, even before any
         # delta was forwarded (or when a host buffers the whole response).
         self.fail_closed = fail_closed
+        #: Whether ``AuthStore.rotate_sibling`` may write a credential BLOCK for
+        #: the failing row (default ``True``: every existing provider keeps its
+        #: behaviour). ``False`` means "rotate away, but the row itself is not
+        #: at fault": the store deprioritises instead, exactly as for a
+        #: server-side failure. Only Bedrock's ``_unresolved`` sets it -- a
+        #: botocore credential CHAIN that failed to resolve (expired SSO /
+        #: ``aws login`` cache, missing profile) is re-read on every attempt, so
+        #: a 60 s block would outlive the user's ``aws sso login`` and report
+        #: "rate limit or quota exceeded" (QA Q8), while NOT rotating would
+        #: strand a session sticky to that row away from a healthy sibling
+        #: connection (review R3-1). Deprioritising satisfies both.
+        self.block_on_rotate = block_on_rotate
         self.retry_after_ms = retry_after_ms
         self.auth_error = auth_error
         #: PROVENANCE, not classification: this error was built from a transport
@@ -1274,6 +1293,46 @@ _INPUT_REFUSAL_MARKERS = (
     "datainspectionfailed",
     "data_inspection_failed",
 )
+
+#: Wording by which providers report a CONTENT verdict (moderation, safety or
+#: guardrail refusal), on any status. ONE pattern for every consumer so they
+#: cannot drift (PR #4212, S-7): Team Bridge screening reads it to keep a
+#: content-verdict 5xx from failing over to another screener
+#: (``model_boundary._sender_cannot_cause``), and the HTTP client stamps
+#: ``ProviderError.content_verdict_seen`` from the JSON error FIELDS before the
+#: message is capped at ``clients.MAX_ERROR_MESSAGE_CHARS``.
+#:
+#: Round 3 (S-12 / m2): bare substrings over-matched ordinary outage wording
+#: ("harmony" output parsers, "blocked by egress policy", "violates unique
+#: constraint", "safety maintenance"), stopping a real outage at hop 0. Short
+#: stems are therefore word-bounded and must sit next to a verdict word; the
+#: distinctive phrases stay plain. Consumers use it ONE-WAY (a match only turns
+#: an advance into a hold), so a miss costs a fallback hop and a false match a
+#: held message — never a weaker screener on a verdict the regex DID see.
+_CONTENT_VERDICT_PATTERNS = (
+    *(re.escape(marker) for marker in _INPUT_REFUSAL_MARKERS),
+    r"inappropriate content",
+    r"\bmoderation\b",
+    r"\bflagged\b",
+    r"\bcontent[ _]polic",
+    r"\bcontent[ _]filter",
+    r"\bcontent exists risk\b",  # DeepSeek
+    r"\bguardrail",
+    r"\bprohibited[ _]content\b",  # Gemini PROHIBITED_CONTENT
+    r"\bsafety\b[^.\n]{0,40}\b(?:block|filter|flag|refus|violat|prohibit)",  # Gemini SAFETY
+    r"\b(?:block|filter|flag|refus)\w*\b[^.\n]{0,40}\bsafety\b",
+    r"\bviolat\w*\b[^.\n]{0,40}\b(?:usage|content|acceptable|safety)?[ _]?polic",
+    r"\bharm(?:ful)?\b",
+    r"\bblocked\b[^.\n]{0,20}\b(?:content|safety|moderation)\b",
+)
+CONTENT_VERDICT_RE = re.compile("|".join(_CONTENT_VERDICT_PATTERNS), re.IGNORECASE)
+
+
+def names_content_verdict(text: str) -> bool:
+    """Whether ``text`` reports a provider CONTENT verdict (see the pattern above)."""
+
+    return bool(text) and CONTENT_VERDICT_RE.search(text) is not None
+
 
 #: The INPUT-side sentences the guardrail publishes, matched as whole PHRASES
 #: rather than as loose words. The loose form ("inappropriate content" and
@@ -1722,6 +1781,11 @@ def is_auth_error(error: BaseException) -> bool:
     return False
 
 
+#: Providers whose auth failures are not fixed by replacing a single API key
+#: (multi-method connections whose errors name their own remedy).
+_NO_CREDENTIAL_UPDATE_HINT = frozenset({"bedrock"})
+
+
 def auth_recovery_hint(provider: str | None) -> str:
     """The local remedies for an authentication failure, as one clause.
 
@@ -1732,6 +1796,16 @@ def auth_recovery_hint(provider: str | None) -> str:
     copy-pasteable), generic otherwise. The ``/login`` form is the TUI's; the
     shell forms work anywhere.
     """
+    if provider in _NO_CREDENTIAL_UPDATE_HINT:
+        # Bedrock auth errors already carry the method-specific remedy (`aws
+        # sso login`, IAM permission, ...) and no `<PROVIDER>_API_KEY` exists
+        # for it: offering `credential update <BEDROCK_API_KEY>` names a
+        # variable nothing reads and is wrong advice for SSO/IAM failures.
+        # The login flow is the one remedy that applies to every method.
+        return (
+            f"To fix: `/login {provider}` in the TUI, `local-operator login "
+            f"{provider}` from a shell."
+        )
     if provider:
         return (
             f"To fix: `/login {provider}` in the TUI, `local-operator login "
@@ -2304,6 +2378,15 @@ def is_rotation_eligible(error: BaseException) -> bool:
     """
     if not isinstance(error, ProviderError):
         return False
+    if error.kind == "request" and not error.auth_error and not error.retryable:
+        # A raiser that EXPLICITLY classified a 403 as a request refusal
+        # (Bedrock's per-model access denial: console model access, or an IAM
+        # policy scoped to one model/inference-profile ARN) is saying the
+        # credential is fine for other models. The bare-403 clause below must
+        # not override that: rotating would block the whole credential for
+        # every model. A 403 constructed without an explicit kind derives
+        # ``kind="auth"`` in ``_classify_fields``, so first-party paths are unchanged.
+        return False
     return error.retryable or error.auth_error or error.status in (401, 403)
 
 
@@ -2755,6 +2838,11 @@ CONNECTIVITY_MAX_RETRIES = 15
 # on one credential before a sibling or fallback is tried.
 MAX_USAGE_RETRY_AFTER_MS = 30_000
 MAX_SAME_CREDENTIAL_USAGE_RETRIES = 2
+
+# Google's retry strategy starts at approximately one second before jitter.
+# The general 500 ms default is tuned for transport faults; on a shared Vertex
+# capacity burst it can spend both 429 retries before demand has time to ease.
+VERTEX_429_BASE_DELAY_MS = 1_000
 
 # The same-credential re-ask cap for a PINNED route (``FailoverRouteState.
 # launch_pin``). A child launched on a resolved model may afford one bounded
@@ -4473,6 +4561,13 @@ async def _stream_with_failover_events(
         ]
     walked: set[tuple[str, str | None]] = set()
     recoverable: set[tuple[str, str | None]] = set()
+    # PR-D (Root 0): targets whose credential owner was SILENT after this device's
+    # lease from it ran out, each with the store's keyless waiter. Non-empty, the
+    # loop-back below waits for the owner (bounded, abortable, no dials) instead of
+    # sweeping at once; ``owner_waited_s`` is how long it waited, for the sentence a
+    # still-absent owner's revisit reports. See ``_await_owner_return``.
+    owner_waits: dict[tuple[str, str | None], Any] = {}
+    owner_waited_s: float | None = None
     # Server-fault spend per target, carried ACROSS the sweeps: the per-turn
     # ceiling is about what one provider receives, and a loop-back that reset
     # the counter would quietly double it.
@@ -4758,6 +4853,16 @@ async def _stream_with_failover_events(
                     # could promise a hop that has since failed. The walk's
                     # end adds it once, from the final state.
                     missing = _no_credential_error(auth, provider)
+                    waiter = owner_waits.get(route_key)
+                    if (
+                        waiter is not None
+                        and owner_waited_s is not None
+                        and _owner_wait_hint(auth, provider) is not None
+                    ):
+                        # The sweep after a wait found the owner STILL away: say so,
+                        # with how long this turn waited (PR-D). Same class and the
+                        # same pre-wire stamp as the sentence it replaces.
+                        missing = _owner_wait_expired_error(waiter, owner_waited_s) or missing
                     record(missing, primary=is_primary, target=target)
                     # A borrowed quota refusal states the owner's reset; a fallback
                     # hop that is benched below waits it out like a local 429's
@@ -4771,6 +4876,10 @@ async def _stream_with_failover_events(
                         # serviceable again. A genuinely unconfigured provider
                         # is not retryable and gets no second visit.
                         recoverable.add(route_key)
+                        if retry.enabled and not looped_back:
+                            hint = _owner_wait_hint(auth, provider)
+                            if hint is not None:
+                                owner_waits[route_key] = hint
                     break
                 error = None
             retry_same_key = False
@@ -4826,6 +4935,9 @@ async def _stream_with_failover_events(
             sent_monotonic = time.monotonic()
             successful_terminal = False
             failed_terminal = False
+            # A violated caller invariant is not a provider outage: do not
+            # rotate credentials, silently change models, or retry it.
+            current_request.validate_required_images()
             try:
                 turn_state = current_request._codex_turn_state
                 if turn_state is not None:
@@ -5189,8 +5301,13 @@ async def _stream_with_failover_events(
                 if is_server_side_failure(exc):
                     server_fault_requests += 1
                     server_faults_by_target[route_key] = server_fault_requests
+                vertex_429 = provider == "google-vertex" and exc.status == 429
                 if (
                     exc.kind == "quota"
+                    # Vertex's in-place retries already honor the hint with a
+                    # bounded budget. Don't schedule a second retry wave (or
+                    # a wait on a credential the walk just exhausted).
+                    and not vertex_429
                     and exc.retry_after_ms
                     and exc.retry_after_ms <= LOOPBACK_MAX_WAIT_MS
                 ):
@@ -5289,7 +5406,12 @@ async def _stream_with_failover_events(
                     if pinned and pin_selector is not None:
                         raise _pinned_fallback_disabled_error(pin_selector, exc) from exc
                     raise exc
-                if _same_credential_retry_allowed(
+                # If Vertex names a delay longer than even the pinned budget,
+                # move on instead of waiting a minute only to retry too early.
+                vertex_wait_fits = (
+                    not vertex_429 or (exc.retry_after_ms or 0) <= PINNED_USAGE_RETRY_AFTER_CAP_MS
+                )
+                if vertex_wait_fits and _same_credential_retry_allowed(
                     exc,
                     transport_retries,
                     retry,
@@ -5308,19 +5430,15 @@ async def _stream_with_failover_events(
                     # re-ask is what keeps a single refusal from silently
                     # descending onto another vendor's model.
                     transport_retries += 1
+                    base = retry.base_delay_ms
+                    if vertex_429:
+                        base = max(base, VERTEX_429_BASE_DELAY_MS)
+                    advertised = exc.retry_after_ms or 0
                     if pinned:
-                        # Bounded even when the advertised reset is longer: a
-                        # background child may afford a wait an interactive
-                        # turn may not, but never an unbounded one.
-                        delay = max(
-                            min(exc.retry_after_ms or 0, PINNED_USAGE_RETRY_AFTER_CAP_MS),
-                            backoff_delay_ms(retry.base_delay_ms, transport_retries, rng=rng),
-                        )
-                    else:
-                        delay = max(
-                            exc.retry_after_ms or 0,
-                            backoff_delay_ms(retry.base_delay_ms, transport_retries, rng=rng),
-                        )
+                        # A pinned child may afford a longer wait, never an
+                        # unbounded one. For Vertex the hint already fits.
+                        advertised = min(advertised, PINNED_USAGE_RETRY_AFTER_CAP_MS)
+                    delay = max(advertised, backoff_delay_ms(base, transport_retries, rng=rng))
                     await _abortable_sleep(delay, signal)
                     retry_same_key = True
                     continue
@@ -5359,6 +5477,13 @@ async def _stream_with_failover_events(
                 # frame the reported slot holds. Gate strictly on kind=="request"
                 # (not "unknown": a bare-status gateway failure may be transient
                 # and a fallback can survive it).
+                #
+                # Accepted consequence (PR #4266 review R2-2): Bedrock's per-model
+                # refusals -- ResourceNotFound and an AccessDenied scoped to one
+                # model ARN -- are also kind=="request", so on the primary they
+                # stop the turn here rather than walking the fallback chain,
+                # although another model might serve. The user gets the error
+                # for the model they chose; docs/providers/BEDROCK.md says so.
                 if exc.kind == "request" and is_primary:
                     raise exc
                 break  # non-retryable for this provider
@@ -5507,7 +5632,27 @@ async def _stream_with_failover_events(
             delay_ms = min(shortest_retry_after_ms, LOOPBACK_MAX_WAIT_MS)
         else:
             delay_ms = backoff_delay_ms(retry.base_delay_ms, 1, rng=rng)
-        await _abortable_sleep(delay_ms, signal)
+        if owner_waits and all(
+            (candidate.selector, candidate.effort) in owner_waits for candidate in revisit
+        ):
+            # PR-D (Root 0): EVERY revisited target is owner-away with its lease from
+            # that owner ended, so nothing else could serve sooner. Wait for the owner
+            # HERE, after every configured fallback was already walked and before
+            # anything was sent. The wait replaces the backoff and makes no asks, so
+            # the sweep below is the same single re-ask as before, only later: served
+            # once if the owner came back, the real answer otherwise. Not C5: no grant
+            # is served, refreshed or extended while it runs.
+            #
+            # ONLY when every one is (#3722 review R1-1): ``revisit`` also carries
+            # targets the walk could not finish for their own reasons (a fallback's
+            # 429 with its own retry-after, a primary the route pin excluded). Waiting
+            # for an absent owner in front of those delayed a turn they would have
+            # served in seconds by up to the whole bound. A mixed revisit keeps
+            # today's backoff, and ``owner_waited_s`` stays ``None``, so its sweep
+            # reports a still-absent owner with today's plain sentence.
+            owner_waited_s = await _await_owner_return(list(owner_waits.values()), signal)
+        else:
+            await _abortable_sleep(delay_ms, signal)
         pending = revisit
 
     fallback_off = (
@@ -6147,6 +6292,58 @@ def _borrowed_refresh_refusal(auth: FailoverAuthStore, provider: str) -> Provide
     return refused
 
 
+def _owner_wait_hint(auth: FailoverAuthStore, provider: str) -> Any | None:
+    """The mesh-aware store's waiter for an absent credential owner, or ``None``.
+
+    Duck-typed for the reason :func:`_no_credential_error` states: this module must
+    not import the network package, and every other store lacks the method.
+    """
+    hint_for = getattr(auth, "owner_wait_hint", None)
+    if not callable(hint_for):
+        return None
+    try:
+        hint = hint_for(provider)
+    except Exception:  # noqa: BLE001 - a hint that fails is no hint; fail fast as before
+        return None
+    return hint if callable(getattr(hint, "poll", None)) else None
+
+
+async def _await_owner_return(hints: list[Any], signal: AbortSignal | None) -> float:
+    """Wait for an absent owner, bounded and abortable; return the seconds waited.
+
+    Ends at the first waiter that is no longer ``waiting`` (the owner's link was
+    admitted again, or the share/membership/policy changed, so the sweep must ask
+    now), at the bound, or on abort (``ProviderError(kind="aborted")``). Each poll is
+    the waiter's file reads, off the event loop; nothing here dials, so N waiting
+    turns cost N reads per poll interval and no storm. WALL TIME, not monotonic:
+    the bound is stated against the owner's lease clock, and this module may not
+    import the network package's clock helpers.
+    """
+    started = time.time()
+    deadline = started + max(float(getattr(hint, "bound_s", 0.0)) for hint in hints)
+    interval_s = min(float(getattr(hint, "poll_s", 1.0)) for hint in hints)
+    while True:
+        states = await asyncio.to_thread(lambda: [hint.poll() for hint in hints])
+        if any(state != "waiting" for state in states):
+            break
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        await _abortable_sleep(max(1, int(min(interval_s, remaining) * 1000)), signal)
+    return time.time() - started
+
+
+def _owner_wait_expired_error(waiter: Any, waited_s: float) -> ProviderError | None:
+    """The still-away owner's sentence, naming the wait, classed like the one it replaces."""
+    try:
+        reason = waiter.expired_reason(waited_s)
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return None
+    if not isinstance(reason, str) or not reason:
+        return None
+    return _mark_prewire_refusal(ProviderError(None, reason, retryable=True, kind="unknown"))
+
+
 def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:
     """Say WHY no bearer could be resolved, distinguishing two opposite causes.
 
@@ -6216,6 +6413,12 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
         return _mark_prewire_refusal(
             ProviderError(None, f"No API key configured for provider '{provider}'", retryable=False)
         )
+    dead = _dead_grant_error(auth, provider)
+    if dead is not None:
+        return dead
+    misconfigured = _refresh_configuration_error(auth, rows)
+    if misconfigured is not None:
+        return misconfigured
     kinds = {row.credential_type for row in rows}
     what = "OAuth sign-in" if "oauth" in kinds else "API key"
     count = len(rows)
@@ -6245,6 +6448,171 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
             ),
             retryable=True,
             kind="quota",
+            request_sent=False,
+        )
+    )
+
+
+def dead_grant_reason(auth: Any, provider: str) -> tuple[bool, str | None]:
+    """``(dead, reason)`` for a provider whose every usable row is a dead grant.
+
+    ``dead`` is True only when at least one row is configured and EVERY enabled
+    row carries the store's dead-grant tombstone: one live sibling means the
+    provider can still serve, and naming a sign-in there would be wrong.
+    ``reason`` is the recorded cause when the rows agree on one (today only
+    Google Cloud session control's ``session_policy``), else ``None``.
+
+    Duck-typed on ``grant_is_dead`` / ``grant_dead_reason`` like
+    :func:`_no_credential_error`'s other probes: the structural store protocol
+    promises neither, and a store without them simply answers "not dead". Any
+    error reading them also answers "not dead" -- diagnosis must never mask the
+    real failure, and the generic sentence is still true.
+    """
+    is_dead = getattr(auth, "grant_is_dead", None)
+    if not callable(is_dead) or not isinstance(auth, CredentialLister):
+        return False, None
+    try:
+        rows = [row for row in auth.list_credentials(provider) if row.disabled_cause is None]
+        if not rows or not all(row.credential_type == "oauth" and is_dead(row.id) for row in rows):
+            return False, None
+        reason_of = getattr(auth, "grant_dead_reason", None)
+        reasons: set[str | None] = {None}
+        if callable(reason_of):
+            reasons = {
+                value if isinstance(value, str) else None
+                for value in (reason_of(row.id) for row in rows)
+            }
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return False, None
+    return True, (reasons.pop() if len(reasons) == 1 else None)
+
+
+def sign_in_required_text(
+    provider: str, reason: str | None, *, locale: str, display: bool = False
+) -> str:
+    """The keyed "sign in again" sentence for ``provider``, rendered in ``locale``.
+
+    One rendering for the failover error (English: it is persisted and can reach
+    the model) and the session's one-shot notice (the user's active locale), so
+    the two cannot drift. ``reason`` selects the Google Workspace session-policy
+    wording, which is the only cause worth naming: it explains why a sign-in that
+    worked this morning stopped working with nothing revoked.
+
+    ``display=True`` is for the notice a person reads, never the error text.
+    That notice reaches every host as finished prose that is painted as-is
+    (the TUI's ``NoticeBlock`` applies no bidi projection of its own), so in an
+    Urdu paragraph the leading ``/`` of ``/login`` -- a neutral character --
+    resolved to the RTL side and displayed detached from ``login`` (translation
+    audit, 2026-11-20). The two remedies are therefore declared as WHOLE
+    technical islands, the way the welcome screen's ``/login {provider}`` is;
+    one island per command, because separate word islands re-order against each
+    other. :func:`isolated_status_text` is a no-op unless the copy actually
+    rendered in Urdu (an English fallback stays byte-identical), and the error
+    path keeps ``display=False`` so no isolate control reaches the model.
+    """
+    from local_operator.i18n.display import TechnicalSpan, isolated_status_text
+    from local_operator.i18n.keys import wire_providers_reauth
+    from local_operator.i18n.messages import render_record
+    from local_operator.providers.login_catalog import picker_label
+    from local_operator.providers.oauth.callback_server import (
+        REAUTH_REASON_SESSION_POLICY,
+    )
+
+    # The short product name the login picker shows ("Vertex AI"), not the
+    # registry's long descriptive name, so the sentence reads naturally.
+    label = picker_label(provider, provider)
+    # The key is SELECTED by reference and rendered here, in-process: the
+    # namespace is deferred from the eager client bundle (catalogues.
+    # DEFERRED_NAMESPACES), so only finished text may leave this function.
+    key = (
+        wire_providers_reauth.session_policy
+        if reason == REAUTH_REASON_SESSION_POLICY
+        else wire_providers_reauth.sign_in_expired
+    )
+    message = key(label=label, provider=provider)
+    record = render_record(message.code, dict(message.params), locale=locale)
+    # Only Urdu-source copy is projected. The span validator also runs for
+    # other locales and refuses a command glued to prose, which is correct
+    # Chinese typography (`使用/login …，`), so it must not see that copy.
+    if not display or record.source_locale != "ur":
+        return record.text
+    spans: list[TechnicalSpan] = []
+    for command in (f"/login {provider}", f"lop login {provider}"):
+        start = record.text.find(command)
+        # A translation that dropped a command is the auditor's to catch; the
+        # notice must still paint, so a missing one is simply not isolated.
+        if start >= 0:
+            spans.append(TechnicalSpan(start, start + len(command), command))
+    return isolated_status_text(record, spans)
+
+
+def _dead_grant_error(auth: Any, provider: str) -> ProviderError | None:
+    """An ``auth``-kind refusal when every row is a grant the IdP refused for good.
+
+    WHY: without this a Google Vertex sign-in that its Workspace's Google Cloud
+    session control had forced to expire (``invalid_grant`` / ``invalid_rapt``)
+    resolved to no bearer and fell through to the generic sentence below, which
+    is ``kind="quota"`` -- so the fallback notice read ``provider failure:
+    quota`` and sent the user to wait out a limit that did not exist, when the
+    only remedy is a fresh sign-in. The tombstone is the store's own recorded
+    verdict, so this is a statement of fact, not a guess from wording.
+
+    Retryable and pre-wire exactly like the quota sentence it replaces, so the
+    walk still advances to the fallback and revisits on the loop-back sweep
+    (which finds a sign-in made in another window meanwhile). The ``auth`` kind
+    is a deliberate, provider-wide change for EVERY OAuth provider whose rows
+    are all dead (anthropic, openai, ... not just Vertex): the route pin becomes
+    the 60 s auth cooldown instead of a quota pin re-probed every message, Team
+    Bridge records ``auth_unusable`` instead of ``quota``, and the session shows
+    the sign-in notice and ``login-status`` shows ``sign-in required``. Each is
+    the truthful reading of a grant only a sign-in can fix.
+    """
+    dead, reason = dead_grant_reason(auth, provider)
+    if not dead:
+        return None
+    return _mark_prewire_refusal(
+        ProviderError(
+            None,
+            sign_in_required_text(provider, reason, locale="en"),
+            retryable=True,
+            kind="auth",
+            request_sent=False,
+        )
+    )
+
+
+def _refresh_configuration_error(auth: Any, rows: list["StoredCredential"]) -> ProviderError | None:
+    """An ``auth``-kind refusal when every row's refresh was refused as misconfigured.
+
+    WHY: a Vertex sign-in made with an organisation's own OAuth client, on a
+    machine where that client's secret is missing, is refused locally before
+    any request (nothing is sent, nothing is tombstoned). Without this the walk
+    fell through to the generic quota sentence -- "retry once the limit
+    resets" -- which can never come true and hides the one remedy, storing the
+    secret. The provider's own sentence (``vertex._client_secret``) names the
+    missing variable and the ``lop credential update`` command, so it is used
+    as is. ``auth`` rather than ``quota`` because the user must act on the
+    credential configuration; it is not a dead grant, so no sign-in notice
+    follows (``dead_grant_reason`` answers not-dead for these rows).
+
+    Only when EVERY row agrees: one row that merely rested means the generic
+    sentence is still the truthful one. Duck-typed like the other probes.
+    """
+    reason_of = getattr(auth, "refresh_configuration_error", None)
+    if not callable(reason_of) or not rows:
+        return None
+    try:
+        reasons = [reason_of(row.id) for row in rows]
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return None
+    if not all(isinstance(reason, str) and reason for reason in reasons):
+        return None
+    return _mark_prewire_refusal(
+        ProviderError(
+            None,
+            str(reasons[0]),
+            retryable=True,
+            kind="auth",
             request_sent=False,
         )
     )

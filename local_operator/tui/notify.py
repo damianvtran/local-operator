@@ -535,6 +535,22 @@ def remote_session_location(device: str) -> str:
     return _t_park(_rp.ask_hint_floor(device=device))
 
 
+def remote_agent_ask_location(agent_device: str, device: str) -> str:
+    """ "runs on <device> · started by an agent on <agent_device>".
+
+    The body of a FORWARDED ASK from a session an AGENT started on ``device``
+    (``remote_attention.signed_card_target``'s leg). "runs on <device>" alone
+    left the operator unable to tell an agent's worker from a session they
+    opened themselves, so the label is that plain body plus a suffix (the
+    prefix stays identical, so both bodies scan alike). The agent is named by
+    its DEVICE only: a peer create
+    carries no starter session id or agent name (``relay`` stamps
+    ``source_session_id: ""``), and the device label is resolved by the
+    receiving device from its own catalogue, never from peer-supplied text.
+    """
+    return _t_park(_rp.ask_agent_started(agent_device=agent_device, device=device))
+
+
 def background_digest_title(total: int) -> str:
     """``total`` sessions finished, as the DIGEST banner's title.
 
@@ -953,6 +969,48 @@ def sanitize_text(value: str | None, limit: int = MAX_TITLE_CHARS) -> str:
         return ""
     cleaned = " ".join(_CONTROL_CHARS.sub(" ", value).split())
     return cleaned[:limit]
+
+
+#: Bidi overrides/isolates and zero-width characters (security review r1, S-3).
+#: ``sanitize_text`` strips only C0/C1 controls, so a model-written session name
+#: carrying U+202E could render reversed or spoofed text on a lock screen. Kept
+#: OUT of ``sanitize_text``: that helper also feeds terminal titles and argv on
+#: the desktop, whose behaviour the banner work does not own.
+#: U+200C (ZWNJ) and U+200D (ZWJ) are deliberately KEPT, narrowing the review's
+#: suggested ``\u200b-\u200f``: ZWNJ is orthographic in Urdu, Hindi and Persian
+#: text (two of this product's locales), and ZWJ glues emoji sequences — a
+#: family emoji stripped of it renders as four people. Neither reorders text,
+#: which is the spoofing this guards; LRM/RLM (U+200E/F) can, and go. So does
+#: U+061C ARABIC LETTER MARK (security review r2, S-7): bidi class AL, a strong
+#: right-to-left implicit mark of the same kind as RLM. The tag block
+#: (U+E0000-E007F) is deliberately NOT stripped: subdivision-flag emoji are
+#: built from it.
+INVISIBLE_FORMAT_CHARS = re.compile("[\u061c\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def scrub_banner_text(value: str) -> str:
+    """``value`` with invisible format characters stripped, THEN credentials redacted.
+
+    The ONE place the order lives, shared by ``notifications.compose`` (every
+    banner surface) and ``mobile.push_payload`` (text leaving the machine), so
+    the two cannot drift apart again.
+
+    WHY STRIP FIRST (security review r3, S-8): a credential split by an
+    invisible character — ``ghp_<18 chars>\\u200b<18 chars>``, from a pasted
+    web page or a provider error echoing pasted input — reads to the scrubber as
+    two short non-matches. Stripping AFTER the scrub glued the pieces back into
+    the exact valid token, which then went to the cloud verbatim. Stripping
+    first hands the scrubber the token whole. ZWNJ/ZWJ stay (see
+    :data:`INVISIBLE_FORMAT_CHARS`), so a token split by one of them is simply
+    not recognised and is never rejoined either.
+
+    Raises whatever ``scrub_secrets`` raises: callers choose their own
+    fail-closed fallback. Imported lazily because ``redaction_shapes`` is a large
+    regex module and most importers of this one never compose a banner.
+    """
+    from local_operator.redaction_shapes import scrub_secrets
+
+    return scrub_secrets(INVISIBLE_FORMAT_CHARS.sub("", value or ""))
 
 
 def detect_protocol(env: EnvMap | None = None) -> NotifyProtocol:

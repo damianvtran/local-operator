@@ -26,6 +26,7 @@ refusal, 503 for a store that cannot answer), so a client parses one shape.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 from pathlib import Path
 from typing import Any, Final
@@ -340,9 +341,23 @@ def clear_chat_payload(config_dir: str | Path, asset_id: str) -> dict[str, Any]:
         raise _unavailable(error) from error
 
 
+def _as_served(ref: library_service.ContentRef) -> library_service.ContentRef:
+    """``ref`` with the type this route may answer with.
+
+    A peer's cached file (``remote``) carries the OWNER's declared type, so it gets
+    the desktop remote routes' allowlist: anything not passive is opaque bytes
+    (#3872 R3-1). The daemon adds the sandbox for every ``remote`` ref.
+    """
+    if not ref.remote:
+        return ref
+    from local_operator.server.utils.remote_session_files import servable_type
+
+    return dataclasses.replace(ref, content_type=servable_type(ref.content_type))
+
+
 def content_ref(config_dir: str | Path, asset_id: str) -> library_service.ContentRef:
     try:
-        return library_service.resolve_content(config_dir, asset_id)
+        return _as_served(library_service.resolve_content(config_dir, asset_id))
     except library_service.LibraryUnavailable as error:
         raise _unavailable(error) from error
     except library_service.AssetNotFound as error:
@@ -355,7 +370,7 @@ def content_ref(config_dir: str | Path, asset_id: str) -> library_service.Conten
 
 def thumb_ref(config_dir: str | Path, asset_id: str, width: int) -> library_service.ContentRef:
     try:
-        return library_service.thumbnail(config_dir, asset_id, width)
+        return _as_served(library_service.thumbnail(config_dir, asset_id, width))
     except library_service.LibraryUnavailable as error:
         raise _unavailable(error) from error
     except library_service.AssetNotFound as error:

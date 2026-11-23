@@ -12,9 +12,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
@@ -26,6 +28,7 @@ import httpx
 from local_operator import supervisors
 from local_operator.config_writer import nonblocking_file_claim
 from local_operator.i18n.keys import mobile_setup as ms
+from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import tr
 from local_operator.mobile import install as mobile_install
 from local_operator.network.credentials.offers import mask_label
@@ -35,7 +38,7 @@ from local_operator.providers.auth_store import (
     AuthStoreError,
     credential_identity,
 )
-from local_operator.tunnels import api, config, install, report
+from local_operator.tunnels import api, autosetup, config, install, report
 from local_operator.tunnels.api import (
     RadientTunnels,
     credential_id,
@@ -104,8 +107,35 @@ async def apply(
     accepted: str | None = None,
     *,
     progress: Callable[[str], None] | None = None,
+    on_claim: Callable[[], None] | None = None,
+    resume_stopped: bool = False,
 ) -> dict[str, Any]:
-    plan = await observe(selected)
+    """Observe, then perform the next ready step under `setup.lock`.
+
+    ``on_claim`` runs once `setup.lock` is HELD and before any mutation: it is
+    how the unattended run journals ``running`` only while it really owns the
+    lock (#3945 round 1, R1), so a run that loses the claim never claims to be
+    the one reconnecting.
+
+    ``resume_stopped`` is THE ONLY signal that may bring back a tunnel the
+    operator deliberately stopped (`lop tunnel stop`, `/mobile stop`). It means
+    "a person just pressed the button": exactly two callers set it, the desktop
+    route's POST (a click on the setup card; the renderer's polls are GETs that
+    never apply) and the TUI's typed `/mobile enable`. `command` — the CLI and
+    the post-sign-in `--no-spend` auto-hook it serves — never does, and
+    `test_auto_hook_never_resumes_a_stopped_tunnel` pins that. Without it a
+    stopped tunnel is reported (step ``stopped``) and nothing is written.
+
+    Resuming spends nothing by itself: the plan beneath the stop goes through
+    the same `_unaccepted_price` gate as every run, so a tunnel that needs a
+    price accepted or credit added answers that step (``accept_quote`` /
+    ``add_credit``) and the stop stays in place until a run can really proceed.
+    """
+    plan = await observe(selected, resume_stopped=resume_stopped)
+    if plan["step"] == "stopped":
+        # Ready on the surfaces (the button is the fix), never advanced without
+        # the person's signal: no claim, no lease file, no write.
+        return plan
     if (
         plan["verified"]
         or not plan["ready"]
@@ -121,7 +151,16 @@ async def apply(
         with nonblocking_file_claim(config.directory() / "setup.lock") as acquired:
             if not acquired:
                 raise SetupInProgress(_t(ms.in_progress()))
-            operation = asyncio.create_task(_apply(selected, accepted, progress=progress))
+            # A setup run may change the very state the connector's cached
+            # inactive cause describes (R3 invariant: invalidated on a run).
+            from local_operator.tunnels.service import invalidate_refinement
+
+            invalidate_refinement()
+            if on_claim is not None:
+                on_claim()
+            operation = asyncio.create_task(
+                _apply(selected, accepted, progress=progress, resume_stopped=resume_stopped)
+            )
             # Reobserve under the claim, and drain even a repeatedly cancelled
             # response before its lease can be released around blocking install.
             return await join_owned(operation)
@@ -156,6 +195,18 @@ def _price(value: object) -> str | None:
 def _same_price(accepted: object, current: object) -> bool:
     left, right = _price(accepted), _price(current)
     return left is not None and right is not None and Decimal(left) == Decimal(right)
+
+
+def _lift_deliberate_stop() -> None:
+    """Clear `stopped` in the tunnel configuration, keeping every other key.
+
+    Called only under `setup.lock` by a run that carries the person's
+    ``resume_stopped`` signal. Re-read just before the save, like every writer
+    of this file: a configuration that is no longer stopped is left alone.
+    """
+    current = config.load()
+    if current.get("stopped"):
+        config.save({**current, "stopped": False})
 
 
 def _unaccepted_price(plan: dict[str, Any], accepted: str | None) -> dict[str, Any] | None:
@@ -333,8 +384,10 @@ async def observe_local(selected: int | None = None) -> dict[str, Any]:
         # `install._repoint_pin` declines a stopped tunnel on purpose, so the
         # plan must not offer an action the repair would refuse: the connector's
         # own start-time heal moves the pin when the operator resumes, and the
-        # identity line still names the live successor.
-        return _plan("stopped", _t(ms.stopped()), **fields)
+        # identity line still names the live successor. READY: the fix is the
+        # surface's own "turn it back on" button, whose click (and only that)
+        # `apply(resume_stopped=True)` honours.
+        return _plan("stopped", _t(ms.stopped()), ready=True, **fields)
     if value and successor is not None:
         return _plan(
             "repoint",
@@ -347,11 +400,20 @@ async def observe_local(selected: int | None = None) -> dict[str, Any]:
         # do not interpolate an unchecked authority/userinfo string into a URL.
         value = {**value, "gateway_port": config.port(value.get("gateway_port"))}
         fields["connector"] = await report.connector_state(value)
+        blocked = _client_update_plan(fields["connector"], fields)
+        if blocked is not None:
+            return blocked
     return _plan("quote_unread", _t(ms.quote_unread()), **fields)
 
 
-async def observe(selected: int | None = None) -> dict[str, Any]:
-    """Read fresh owner/billing/route and local health without service writes."""
+async def observe(selected: int | None = None, *, resume_stopped: bool = False) -> dict[str, Any]:
+    """Read fresh owner/billing/route and local health without service writes.
+
+    ``resume_stopped`` (see `apply`) reads a deliberately stopped tunnel as the
+    tunnel beneath the stop — its login, quote and billing — and marks the plan
+    ``resuming`` so `_apply` lifts the stop under its claim before anything
+    else runs. Still read-only here.
+    """
     from local_operator.tunnels.cli import _positive_balance
 
     value: dict[str, Any] = {}
@@ -406,8 +468,11 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
         # declines it on purpose and the connector's own start-time heal moves the
         # pin when it is resumed, so offering a re-point here would promise an
         # action the repair refuses. The successor still names the identity line,
-        # because that is the row a resumed connector will use.
-        return _plan("stopped", _t(ms.stopped()), **fields)
+        # because that is the row a resumed connector will use. Ready, as in
+        # `observe_local`: the click that resumes it is the remedy.
+        if not resume_stopped:
+            return _plan("stopped", _t(ms.stopped()), ready=True, **fields)
+        fields["resuming"] = True
     if value and usable is not None and usable != pin:
         # A provable successor, an existing configuration and a tunnel in use:
         # the re-point is a READY step, so the desktop renders its primary
@@ -430,8 +495,8 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
             account = await api.account_id()
             quote = await api.request("GET", "/billing")
             record = await api.request("GET", tunnel_path(value)) if value else {}
-    except (ValueError, OSError, httpx.HTTPError):
-        return _plan("account", _t(ms.account_failed()), **fields)
+    except (ValueError, OSError, httpx.HTTPError) as failure:
+        return _plan(*_unreadable_step(failure), **fields)
     if not account or not isinstance(quote, dict) or not isinstance(record, dict):
         return _plan("account", _t(ms.invalid_response()), **fields)
     old_record = value.get("record")
@@ -455,6 +520,10 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
     # alone is insufficient: the closed origin gate and actual connector matter.
     if value:
         connector = await report.connector_state(value)
+        if fields["cloud_active"]:
+            blocked = _client_update_plan(connector, fields)
+            if blocked is not None:
+                return blocked
         harness = next(
             (
                 h
@@ -483,6 +552,25 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
             return _plan(
                 "complete", _t(ms.complete()), ready=True, verified=True, url=url, **fields
             )
+        if record.get("enabled") is False:
+            # Switched off in the Radient console. NOT a ready step: setup's
+            # `configure --enable` could flip it back, but the owner turned it off
+            # where they manage it, and an automatic run (the post-sign-in hook)
+            # must never override that choice. The console is the remedy.
+            return _plan("disabled", _t(_disabled_copy(fields)), url=None, **fields)
+    if (
+        fields["activation_required"]
+        and quote.get("active") is True
+        and not fields["positive_balance"]
+    ):
+        # LAPSED, not never-activated (the split of `activation_required`): the
+        # quote was accepted once and the balance no longer covers it. Accepting
+        # the price again is not the fix and would ask for a second purchase
+        # decision; adding credit is, and the connector resumes by itself.
+        # Active-but-ineligible WITH credit (a re-acceptance after a price change)
+        # is not lapsed: it falls through to the quote step below (#3945 round 1,
+        # R4), the same rule `service.refine_inactive` applies.
+        return _plan("billing_lapsed", _t(_billing_lapsed_copy(fields)), **fields)
     # An interrupted create reuses its reservation rather than treating renewal
     # as a new enrollment. It still needs a fresh valid account and quote.
     if not fields["positive_balance"] and not pending:
@@ -509,7 +597,78 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
         )
         return _plan("quote", _t(ms.quote()), ready=True, apply_command=command, **fields)
     command = f"lop tunnel setup apply --credential-id {selected}"
+    if value and not fields["cloud_active"]:
+        # Suspended with billing in order: the ordinary run (`configure
+        # --enable`, install, verify) reconnects it and spends nothing. Its own
+        # step so the surfaces can say "Reconnect" rather than "Set up".
+        return _plan("reconnect", _t(ms.reconnect()), ready=True, apply_command=command, **fields)
     return _plan("apply", _t(ms.apply(command=command)), ready=True, **fields)
+
+
+def _billing_lapsed_copy(plan: dict[str, Any]) -> Msg:
+    """Lapsed-credit copy that stays true for a blocked resume.
+
+    The ordinary sentence promises phone access "reconnects by itself": true for
+    a running tunnel, whose connector retries once credit lands. A resume
+    (``resuming``: a click or `/mobile enable` on a deliberately STOPPED tunnel)
+    that billing blocks keeps the stop on purpose (`_apply` never lifts it for a
+    plan that is not ready), so nothing reconnects until the person turns phone
+    access back on again (#3958 QA round 1, Q1). Shared by the CLI/TUI sentence
+    and the desktop's `_PLAIN_REMEDY`, so the surfaces cannot disagree.
+    """
+    return ms.billing_lapsed_resume() if plan.get("resuming") else ms.billing_lapsed()
+
+
+def _disabled_copy(plan: dict[str, Any]) -> Msg:
+    """Console-switch copy that stays true for a blocked resume.
+
+    Same reason as `_billing_lapsed_copy`: a stopped tunnel stays stopped after
+    the console switch is turned back on, so the copy must not promise that it
+    reconnects by itself.
+    """
+    return ms.disabled_resume() if plan.get("resuming") else ms.disabled()
+
+
+def _client_update_plan(connector: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any] | None:
+    from local_operator.tunnels import gateway
+
+    # GET polling does not negotiate bootstrap. Preserve a known 426 while the
+    # explicit override still forbids the relay, rather than calling it a login
+    # failure or offering setup that cannot succeed. After it is cleared, this
+    # capability-advertising build may reobserve/reconnect on an explicit action.
+    if (
+        connector.get("reason") == gateway.CLIENT_UPGRADE_REQUIRED
+        and config.transport_override() == config.TRANSPORT_CLOUDFLARE
+    ):
+        return _plan(
+            "client_update", gateway.terminal_detail(gateway.CLIENT_UPGRADE_REQUIRED, ""), **fields
+        )
+    return None
+
+
+def _unreadable_step(failure: BaseException) -> tuple[str, str]:
+    """The ``(step, remedy)`` for a fresh read that did not complete.
+
+    It used to be one `account` step for every cause, which told a person whose
+    laptop had just changed networks to check their Radient account. The
+    connector's own classifier already separates "never reached Radient" and
+    "Radient answered with its own error" from a real account problem, so the
+    same function decides here and the two surfaces cannot disagree. Both new
+    steps are waits (`wait_network`, `wait_radient`): no button, because the
+    relay's backoff and the supervisor already reconnect once the network or
+    Radient is back.
+    """
+    from local_operator.tunnels import gateway
+    from local_operator.tunnels.service import authorization_failure_reason
+
+    reason = authorization_failure_reason(failure)
+    if reason == gateway.CLIENT_UPGRADE_REQUIRED:
+        return "client_update", gateway.terminal_detail(reason, "")
+    if reason in (gateway.UNREACHABLE, gateway.CONTROL_PLANE_TIMEOUT):
+        return "network", _t(ms.network())
+    if reason == gateway.SERVER_UNAVAILABLE:
+        return "radient_unavailable", _t(ms.radient_unavailable())
+    return "account", _t(ms.account_failed())
 
 
 async def _apply(
@@ -518,17 +677,29 @@ async def _apply(
     *,
     progress: Callable[[str], None] | None = None,
     initial_plan: dict[str, Any] | None = None,
+    resume_stopped: bool = False,
 ) -> dict[str, Any]:
     """Advance under an owned claim; blocked observations never take a claim."""
     from local_operator.tunnels.arguments import add_parser
     from local_operator.tunnels.cli import dispatch
 
-    plan = initial_plan if initial_plan is not None else await observe(selected)
-    if plan["verified"] or not plan["ready"]:
+    plan = (
+        initial_plan
+        if initial_plan is not None
+        else await observe(selected, resume_stopped=resume_stopped)
+    )
+    if plan["verified"] or not plan["ready"] or plan["step"] == "stopped":
         return plan
     gated = _unaccepted_price(plan, accepted)
     if gated is not None:
         return gated
+    if plan.get("resuming"):
+        # The person asked for phone access back and the plan beneath the stop
+        # can proceed without a purchase decision (the gate above): lift the
+        # deliberate stop FIRST, because every stage below honours it —
+        # `_repoint_pin` declines a stopped tunnel, and the connector's own
+        # start-time heal only runs once it is started again.
+        await asyncio.to_thread(_lift_deliberate_stop)
     selected = plan["credential_id"]
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
@@ -672,7 +843,7 @@ async def _apply(
                 await asyncio.sleep(1)
         if not plan["verified"]:
             plan = {**plan, "step": "verification", "ready": False, "remedy": _t(ms.verification())}
-    except (ValueError, OSError, httpx.HTTPError, KeyError, TypeError):
+    except (ValueError, OSError, httpx.HTTPError, KeyError, TypeError) as failure:
         # Error bodies, saved records and connector tokens never enter a receipt.
         # Earlier successes remain visible so retry is not mistaken for rollback.
         # A lost activation response is NOT proof that billing rolled back.
@@ -715,6 +886,11 @@ async def _apply(
                 else _t(ms.failed())
             ),
         }
+        # A rejected create/connect is a permanent bootstrap prerequisite, not
+        # a failed sign-in or an automatic setup retry. Keep prior receipts.
+        step, remedy = _unreadable_step(failure)
+        if step == "client_update":
+            plan = {**plan, "step": step, "remedy": remedy}
     return {
         **plan,
         "receipts": receipts,
@@ -734,8 +910,137 @@ def _apply_command(plan: dict[str, Any], surface: str) -> str:
     return command
 
 
+#: The `remedy.kind` each step offers, for the TEXT surfaces (`lop tunnel setup`,
+#: the TUI's `/mobile status`). The desktop route derives the same kinds from its
+#: own step -> blocker -> kind tables; `test_setup_text_kinds_match_the_route`
+#: holds the two equal so a terminal and a button can never name different
+#: fixes for one step. Only the steps whose action line is chosen by kind are
+#: listed: every other step keeps its existing copy unchanged.
+STEP_REMEDY_KIND = {
+    "reconnect": "run",
+    "repoint": "run",
+    # Turning a deliberately stopped tunnel back on is the surface's own button
+    # (`apply(resume_stopped=True)`), never a terminal command.
+    "stopped": "run",
+    # The desktop renders `restore_owner` as its sign-in control; the TUI's
+    # action line is `/login radient`, its spelling of the same fix.
+    "owner_missing": "restore_owner",
+    "quote": "accept_quote",
+    "billing_lapsed": "add_credit",
+    "disabled": "open_console",
+    "network": "wait_network",
+    "radient_unavailable": "wait_radient",
+    "client_update": "update_client",
+    "reconnecting": "wait_reconnect",
+}
+
+
+def _kind_action(plan: dict[str, Any], surface: str) -> str | None:
+    """The one action line a step's KIND calls for, or ``None`` for no line.
+
+    Keyed on the kind, never on the reason or the remedy sentence (#3945 round
+    1, Q2/D4): before this the six new steps printed under "could not finish
+    setup" with nothing to do, because the action line was hard-wired to three
+    steps. The rules, matching the buttons the desktop renders for each kind:
+
+    - ``run`` names the setup run in the surface's own spelling (`/mobile enable`
+      in the TUI, `lop tunnel setup apply` only on the CLI);
+    - ``accept_quote`` keeps the existing price/consent/command lines in
+      `text`, which show the price before the command;
+    - ``add_credit`` / ``open_console`` name the Radient console and its URL and
+      NO setup command — setup cannot add credit, and it deliberately never
+      overrides a console switch-off;
+    - the waits (``wait_*``) print nothing: they clear by themselves.
+    """
+    from local_operator.tunnels import gateway
+
+    kind = STEP_REMEDY_KIND.get(plan["step"])
+    if plan["step"] == "stopped" and surface != "tui":
+        # `lop tunnel setup apply` does not resume a deliberate stop (only a
+        # click or a typed `/mobile enable` does), so the CLI keeps its own
+        # `lop tunnel start` sentence and gets no action line that would fail.
+        return None
+    if kind == "run":
+        return _t(ms.apply(command=_apply_command(plan, surface)))
+    if kind == "restore_owner":
+        return _t(ms.login_tui()) if surface == "tui" else None
+    if kind == "add_credit":
+        return _t(ms.action_add_credit(url=gateway.CONSOLE_URL))
+    if kind == "open_console":
+        return _t(ms.action_open_console(url=gateway.CONSOLE_URL))
+    return None
+
+
+#: The sentence each step shows where nobody has a terminal: the desktop's
+#: `remedy.text` (rendered verbatim by local-operator-ui) and the TUI's fallback.
+#: TOTAL BY CONSTRUCTION, and built from the plan's step and fields, never from
+#: ``plan["remedy"]``: that is the CLI's sentence, and it names commands
+#: (`lop tunnel start`, `lop login-status`, ...) a person without a terminal
+#: cannot run — two of which a desktop rendered as the whole fix (#3945 U1).
+#: The action itself is the remedy KIND's button, so these say what the state is
+#: and what the button does, in plain words. An unknown step (another build's
+#: vocabulary) reads as `failed`, the same fallback the route's blocker table
+#: takes. `test_no_remedy_text_on_a_graphical_surface_names_a_command` feeds
+#: every step a command-laden CLI sentence and checks none of it survives.
+_PLAIN_REMEDY: dict[str, Callable[[dict[str, Any]], Msg]] = {
+    "complete": lambda _p: ms.complete_plain(),
+    "apply": lambda _p: ms.apply_plain(),
+    "owner_choice": lambda _p: ms.choose_account_plain(),
+    "owner_missing": lambda _p: ms.owner_missing_plain(),
+    "repoint": lambda _p: ms.repoint(),
+    "login": lambda _p: ms.login_plain(),
+    "quote": lambda p: (
+        ms.quote() if p.get("monthly_price_usd") is not None else ms.price_unavailable()
+    ),
+    "quote_changed": lambda p: ms.quote_changed(
+        accepted=str(p.get("accepted_price_usd")), current=str(p.get("monthly_price_usd"))
+    ),
+    "quote_unread": lambda _p: ms.quote_unread(),
+    "account": lambda _p: ms.account_plain(),
+    "cloudflared": lambda _p: ms.cloudflared_plain(),
+    "mobile_bundle": lambda _p: ms.mobile_bundle_plain(),
+    "supervisor": lambda _p: ms.supervisor_plain(),
+    "balance": lambda _p: ms.balance(),
+    "stopped": lambda _p: ms.stopped_plain(),
+    "verification": lambda _p: ms.verification_plain(),
+    "failed": lambda _p: ms.failed_plain(),
+    "reconnect": lambda _p: ms.reconnect(),
+    "billing_lapsed": _billing_lapsed_copy,
+    "disabled": _disabled_copy,
+    "network": lambda _p: ms.network(),
+    "radient_unavailable": lambda _p: ms.radient_unavailable(),
+    "reconnecting": lambda _p: ms.reconnecting(),
+}
+
+#: A shell command in a sentence: the `lop` CLI by name, or anything quoted as
+#: code. Slash commands (`/mobile enable`) are the TUI's own input, not a shell.
+#: Deliberately narrow: other shell shapes (`brew install cloudflared`, the
+#: supervisor's hand-run connector) are kept off the TUI by the `specific`
+#: overrides in `text`, not by this pattern, so a new step whose CLI sentence
+#: names such a command needs its own plain entry there (#3958 review, R4).
+_SHELL_COMMAND = re.compile(r"(?<![\w/.-])lop\s+[a-z]|`")
+
+
+def plain_remedy(plan: dict[str, Any]) -> str:
+    """The command-free remedy sentence for ``plan`` (see `_PLAIN_REMEDY`)."""
+    if plan.get("step") == "client_update":
+        from local_operator.tunnels.upgrade import plain
+
+        return plain()
+    build = _PLAIN_REMEDY.get(str(plan.get("step")), _PLAIN_REMEDY["failed"])
+    return _t(build(plan))
+
+
 def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool = True) -> str:
     titles = {
+        # Each of these is a state, not a setup failure: titled by what it is so
+        # a paused or waiting tunnel does not read "could not finish setup".
+        "reconnect": ms.title_reconnect,
+        "billing_lapsed": ms.title_billing_lapsed,
+        "disabled": ms.title_disabled,
+        "network": ms.title_network,
+        "radient_unavailable": ms.title_radient_unavailable,
+        "reconnecting": ms.title_reconnecting,
         "login": ms.title_login,
         "owner_choice": ms.title_owner_choice,
         "owner_missing": ms.title_owner_missing,
@@ -753,7 +1058,12 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
         "failed": ms.title_failed,
         "stopped": ms.title_stopped,
     }
-    lines = [_t(titles.get(plan["step"], ms.title_failed)())]
+    if plan["step"] == "client_update":
+        from local_operator.tunnels.upgrade import label
+
+        lines = [label()]
+    else:
+        lines = [_t(titles.get(plan["step"], ms.title_failed)())]
     if plan.get("credential_id") is not None:
         lines.append(
             _t(
@@ -797,6 +1107,10 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
     if plan.get("reservation_outcome") in reservation:
         lines.append(_t(reservation[plan["reservation_outcome"]]()))
     remedy = plan["remedy"]
+    if plan["step"] == "client_update":
+        from local_operator.tunnels.upgrade import detail
+
+        remedy = detail(surface)
     if plan["step"] == "quote_changed":
         remedy = _t(
             ms.quote_changed(
@@ -808,9 +1122,15 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
         specific = {
             "supervisor": ms.supervisor_tui,
             "cloudflared": ms.cloudflared_tui,
-            "mobile_bundle": ms.mobile_bundle_tui,
             "verification": ms.verification_tui,
             "complete": ms.complete_tui,
+            # Plain copy where the CLI sentence's command has no slash twin that
+            # does the same thing: `/mobile start` would bypass setup's checks,
+            # and the bundle install is the agent's job. The action line below
+            # (`/mobile enable`, `/login radient`) carries the step.
+            "stopped": ms.stopped_plain,
+            "owner_missing": ms.owner_missing_plain,
+            "mobile_bundle": ms.mobile_bundle_plain,
         }
         if plan["step"] in specific:
             remedy = _t(specific[plan["step"]]())
@@ -827,14 +1147,19 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
         remedy = remedy.replace("lop login-status", "/login status")
         remedy = remedy.replace("lop login radient", "/login radient")
         remedy = remedy.replace("lop tunnel start", "/mobile start")
+        if _SHELL_COMMAND.search(remedy):
+            # A CLI sentence the rewrites above do not cover (new copy, or a
+            # translation that moved a token) must never reach the TUI as a
+            # shell command: the step's plain sentence stands in.
+            remedy = plain_remedy(plan)
     lines.append(remedy)
-    if plan["step"] == "repoint":
-        # The remedy says what the state IS; the command is the one that performs
-        # it, on its own labelled line (`mobile.setup.apply`, exactly as the apply
-        # step does) so it does not read as the remedy's last sentence.
-        # Surface-aware (`/mobile enable` for the TUI) and appended AFTER the token
-        # rewrites above, which do not know this plan's copy.
-        lines.append(_t(ms.apply(command=_apply_command(plan, surface))))
+    # The remedy says what the state IS; the action is on its own labelled line
+    # (`mobile.setup.apply`, exactly as the apply step does) so it does not read
+    # as the remedy's last sentence. Surface-aware (`/mobile enable` for the TUI)
+    # and appended AFTER the token rewrites above, which do not know this copy.
+    action = _kind_action(plan, surface)
+    if action is not None:
+        lines.append(action)
     if plan.get("activation_required") and plan["step"] in {"quote", "quote_changed"}:
         lines.append(_apply_command(plan, surface))
     if plan.get("credential_choices"):
@@ -865,10 +1190,74 @@ def parse_mobile(arg: str) -> tuple[str, str | None, int | None]:
     return action, accepted, selected
 
 
+#: Re-exported for the routes and tests that already import `setup`.
+auto_reconnecting = autosetup.auto_reconnecting
+
+
+def reconnecting_plan(**fields: Any) -> dict[str, Any]:
+    """The plan a surface shows while the background reconnect is running."""
+    return _plan("reconnecting", _t(ms.reconnecting()), **fields)
+
+
+def unknown_credential_plan(choices: list[Any]) -> dict[str, Any]:
+    """`observe`'s answer for a credential id this device does not hold.
+
+    The same `owner_choice` step and sentence `observe` returns for an id that
+    is neither the pin nor its successor, with NO ``credential_id``: a surface
+    must never restate an unverified client id as the plan's own (Q4).
+    """
+    return _plan("owner_choice", _t(ms.owner_mismatch()), credential_choices=choices)
+
+
 async def command(args: argparse.Namespace) -> str:
-    plan = await (
-        apply(args.credential_id, args.accept_monthly_price)
-        if args.setup_action == "apply"
-        else observe(args.credential_id)
-    )
+    # `--no-spend` pins `accepted` to None, and that is the whole guarantee: every
+    # billing write `apply` can reach is gated on `_same_price(accepted, quote)`
+    # (`apply`'s claim test, `_unaccepted_price`, and `cli._ensure_billing` for
+    # create/configure), which is False for None. The flag exists so the
+    # unattended post-sign-in run says so in its argv rather than relying on an
+    # omitted option.
+    no_spend = bool(getattr(args, "no_spend", False))
+    accepted = None if no_spend else args.accept_monthly_price
+    unattended = no_spend and args.setup_action == "apply"
+    claimed = False
+
+    def journal_running() -> None:
+        # Written only once `setup.lock` is HELD (R1): `running` then means
+        # "this pid owns the lock", which `autosetup.auto_reconnecting` checks
+        # with the pid's liveness too, so a SIGKILLed run reads as not running.
+        nonlocal claimed
+        claimed = True
+        autosetup.write_journal(
+            {"state": "running", "pid": os.getpid(), "started_at": int(time.time())}
+        )
+
+    try:
+        plan = await (
+            apply(args.credential_id, accepted, on_claim=journal_running if unattended else None)
+            if args.setup_action == "apply"
+            else observe(args.credential_id)
+        )
+    except SetupInProgress:
+        # Lost the claim to another run: that run's journal is the truth, and
+        # writing `failed` here wiped a live winner's `running` (R1a).
+        raise
+    except BaseException:
+        if unattended and claimed:
+            autosetup.write_journal({"state": "failed", "finished_at": int(time.time())})
+        raise
+    if unattended:
+        # Where it stopped (quote, balance, login, owner choice, a prerequisite)
+        # is recorded as the step and its kind only — never the remedy text or
+        # any provider field — so a later surface can say why the background
+        # run did not finish without this file becoming a second plan store.
+        # A run that never claimed must not overwrite a live claimant's record.
+        autosetup.write_journal(
+            {
+                "state": "finished",
+                "finished_at": int(time.time()),
+                "step": str(plan.get("step")),
+                "verified": bool(plan.get("verified")),
+            },
+            unless_live_other=not claimed,
+        )
     return json.dumps(plan, allow_nan=False) if args.json else text(plan)

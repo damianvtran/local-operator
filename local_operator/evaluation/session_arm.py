@@ -122,12 +122,21 @@ from local_operator.evaluation.adapters.supervisor import (
     persist_rescue,
     run_rescue,
 )
+from local_operator.evaluation.completion_verifier import (
+    RUN_COMMAND_SLACK_S,
+    verdict_disposition,
+)
 from local_operator.evaluation.lifecycle import (
     CleanupAction,
     CleanupPlan,
     aggregate_cleanup,
 )
-from local_operator.evaluation.protocol import ActionBatch, AskUserAction, Observation
+from local_operator.evaluation.protocol import (
+    ActionBatch,
+    AskUserAction,
+    FinishAction,
+    Observation,
+)
 from local_operator.evaluation.receipts import BudgetAuthorization
 from local_operator.evaluation.record_sink import RecordSink, RecordSinkError
 from local_operator.evaluation.runner.action_tool import (
@@ -725,7 +734,9 @@ class SessionArmError(RuntimeError):
 #: fires first and tears the channel down -- losing the episode the probe exists
 #: to keep. Named, not inline, because the action server's MCP request timeout
 #: is derived from it (:func:`action_server_mcp_timeout_s`).
-COMMAND_RPC_MARGIN_S = 20.0
+# Keep the action server's nested deadlines and the verifier's guest-read
+# envelope on one margin: both use the same adapter RPC path.
+COMMAND_RPC_MARGIN_S = RUN_COMMAND_SLACK_S
 
 #: Slack between the ``run_command`` RPC deadline and the MCP client's request
 #: timeout for the episode action server. It covers what can still happen
@@ -1327,6 +1338,24 @@ class ActionBridge:
     #: Kept apart from ``end_requested`` so the driver maps a guard stop to
     #: ``truncated`` without hard-coding the guard vocabulary.
     progress_stop_code: str | None = None
+    #: THE COMPLETION VERIFIER (``evaluation/completion_verifier.py``): called
+    #: with ``(claim, observation, round)`` on a ``done`` claim while rounds
+    #: remain, and returns a ``VerifierVerdict``. ``None`` -- the default, and
+    #: what ``rounds=0`` leaves -- is today's finish branch exactly. Injected by
+    #: the driver after the session opens (the verifier is a child of that
+    #: session), so the bridge never holds a session reference itself.
+    verifier: Callable[[FinishAction, Observation, int], Awaitable[Any]] | None = None
+    verifier_rounds: int = 0
+    #: The verifier's worst-case envelope (``completion_verifier
+    #: .verifier_envelope_s``: probe + wall cap + cancel join, review M2): the
+    #: claim is only verified when the episode's remaining wall
+    #: (``wall_remaining``) can hold ALL of it, because a check that outlives
+    #: the episode would cost the finish it is checking.
+    verifier_envelope_s: float = 0.0
+    wall_remaining: Callable[[], float | None] | None = None
+    #: Unprefixed record writer for the ``verifier_*`` rows (the ``record``
+    #: seam above prefixes ``action_``); ``None`` records nothing.
+    record_event: Callable[[str, dict[str, Any]], None] | None = None
 
     def __post_init__(self) -> None:
         # The token is armed with observation zero, which only exists once the
@@ -1368,6 +1397,26 @@ class ActionBridge:
         #: ``PREMATURE_TERMINAL_CHALLENGES`` and kept apart from
         #: ``_completion_fired`` so it never spends the ``done`` budget.
         self._premature_fired = 0
+        #: Verifications started (bounded by ``verifier_rounds``), and the round
+        #: currently running -- the window ``inspect_command`` is gated on. Set
+        #: only while ``call`` holds ``_lock`` awaiting the verdict, so the
+        #: worker's turn is parked and nothing else drives the guest.
+        self._verifier_fired = 0
+        self._verifying: int | None = None
+        #: Requirements a verifier challenge named UNMET that no later check
+        #: has passed. The accepting ``finish`` row carries them as
+        #: ``unverified_unmet`` -- 'a check named these and nothing re-verified
+        #: them', NOT 'not done': the worker may well have fixed them in a
+        #: round the verifier never got to see. REPLACED only by a later
+        #: verdict that names its own ``UNMET:`` lines (a FAIL that narrows the
+        #: list narrows it); a capped or line-less INCONCLUSIVE keeps it (QA
+        #: Q1: main33 had 18 of 19 verdicts hit a cap, and wiping the list there
+        #: made an unchecked re-finish look clean). CLEARED only by a PASS.
+        self._verifier_unmet: list[str] = []
+        #: Why the most recent ``done`` claim got no verdict, written next to
+        #: ``unverified_unmet`` so a reader can tell 'rounds spent' from a
+        #: check skipped for budget, wall, error or refusal.
+        self._verifier_not_run: str | None = None
         #: Non-terminal batches dispatched to the adapter -- the runner's
         #: ``_steps_taken`` analogue (see the increment for why at dispatch).
         #: ``_steps`` cannot serve: it counts admitted output epochs, which a
@@ -1513,6 +1562,155 @@ class ActionBridge:
         """
 
         return self._steps + 2 <= self.max_steps and self._attempted_groups + 1 <= self.max_steps
+
+    @property
+    def verification_round(self) -> int | None:
+        """The verifier round running now, else ``None`` -- ``inspect_command``'s gate."""
+
+        return None if self._closed or self.end_requested is not None else self._verifying
+
+    def _record_verifier(self, kind: str, payload: dict[str, Any]) -> None:
+        if self.record_event is not None:
+            self.record_event(kind, payload)
+
+    async def _maybe_verify(self, claim: FinishAction, pending: Observation) -> Any:
+        """Run the completion verifier on this claim, or return ``None``.
+
+        ``None`` means "today's finish path": no verifier, a non-``done`` claim
+        (premature/failed/infeasible keep their own rules), rounds spent, a
+        budget that cannot hold the exchange, or a verifier that never ran.
+        Every case but the first two is RECORDED (``verifier_skipped``): a
+        silently skipped check reads exactly like one that was never armed.
+
+        The fit test is the premature gate's (``_challenge_epoch_pair_fits``:
+        a FAIL must be able to pay for its challenge AND the worker's next
+        finish) plus the episode wall, which must hold the verifier's whole
+        envelope (probe + wall cap + cancel join) -- no extra margin is
+        invented here; what remains after the check is the worker's.
+
+        Runs with ``_lock`` HELD (from ``call``): that is what parks the worker
+        and keeps the guest quiescent, and why the verifier's guest reads go
+        through the lock-free ``inspect_command`` instead of ``call_command``.
+        """
+
+        if self.verifier is None:
+            return None
+        if claim.status != "done":
+            self._verifier_not_run = f"claim-{claim.status}"
+            return None
+        if self._verifier_fired >= self.verifier_rounds:
+            self._verifier_not_run = "rounds-spent"
+            return None
+        round_ = self._verifier_fired + 1
+        reason: str | None = None
+        if not self._challenge_epoch_pair_fits():
+            reason = "step-budget"
+        elif self.wall_remaining is not None:
+            remaining = self.wall_remaining()
+            if remaining is not None and remaining <= self.verifier_envelope_s:
+                reason = "wall"
+        if reason is not None:
+            self._verifier_not_run = reason
+            self._record_verifier(
+                "verifier_skipped",
+                {
+                    "round": round_,
+                    "reason": reason,
+                    "steps": self._steps,
+                    "max_steps": self.max_steps,
+                },
+            )
+            return None
+        self._verifier_fired = round_
+        self._verifying = round_
+        try:
+            verdict = await self.verifier(claim, pending, round_)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 -- a broken check must not cost the finish
+            self._verifier_not_run = "error"
+            self._record_verifier(
+                "verifier_skipped",
+                {"round": round_, "reason": "error", "detail": f"{type(error).__name__}: {error}"},
+            )
+            return None
+        finally:
+            self._verifying = None
+        if verdict.ended_by == "refused":
+            self._verifier_not_run = "refused"
+            self._record_verifier(
+                "verifier_skipped",
+                {"round": round_, "reason": "refused", "detail": verdict.findings},
+            )
+            return None
+        self._record_verifier(
+            "verifier_verdict",
+            {
+                "round": round_,
+                **verdict.as_record(),
+                "disposition": verdict_disposition(verdict.status),
+            },
+        )
+        self._verifier_not_run = None
+        if verdict.status == "PASS":
+            # The only thing that clears the list: an independent read agreed.
+            self._verifier_unmet = []
+        return verdict
+
+    def _verifier_challenge(
+        self, claim: FinishAction, pending: Observation, verdict: Any
+    ) -> dict[str, Any]:
+        """A FAIL/INCONCLUSIVE verdict, delivered as this claim's challenge.
+
+        Accounted EXACTLY as the self-check challenge (one admitted epoch, one
+        ``completion_challenges`` unit, the same group kind and terminal
+        detail), so the clocks and the outcome's challenge count cannot tell
+        the two apart except by the row's ``trigger``. The findings ride AHEAD
+        of the standard challenge text, so the challenge's own wording (and
+        its closing reply sentence) stays the shared builder's.
+        """
+
+        self._consume_output_epoch("finish-challenged")
+        self._mark_group_kind("finish-challenged")
+        self._completion_fired += 1
+        challenge = build_completion_challenge(
+            claim=claim,
+            instruction=self.instruction,
+            observation=pending,
+            reply_guidance=self.reply_guidance,
+        )
+        from local_operator.harness.verifier import (
+            build_verdict_challenge,
+            unmet_requirements,
+        )
+
+        # The verdict's own section is the generic builder's (it lists each
+        # UNMET requirement and says an unchanged re-finish is recorded with
+        # them as unverified-unmet unless a later check passes); remembering
+        # the list is what makes that sentence true. Replace, never wipe: a
+        # verdict naming no lines (a cap, a bare INCONCLUSIVE) says nothing
+        # about the earlier ones (QA Q1).
+        named = unmet_requirements(verdict.findings)
+        if named:
+            self._verifier_unmet = named
+        challenge = f"{build_verdict_challenge(verdict.status, verdict.findings)}\n\n{challenge}"
+        if self.record is not None:
+            self.record(
+                "completion_challenged",
+                {
+                    "status": claim.status,
+                    "reason": claim.reason,
+                    "challenge": challenge,
+                    "observation_id": pending.observation_id,
+                    "trigger": "verifier",
+                    "verdict": verdict.status,
+                },
+            )
+        return {
+            "content": [TextContent(text=challenge), *self._shown_blocks(pending)],
+            "is_error": False,
+            "details": {"terminal": "completion-challenged"},
+        }
 
     def _group_key(self) -> str:
         """The canonical key of the output group being served.
@@ -2512,6 +2710,15 @@ class ActionBridge:
             terminal = _terminal_kind(batch)
             if terminal == "finish":
                 claim = finish_claim(batch)
+                # The completion verifier runs FIRST, on a ``done`` claim only
+                # (``_maybe_verify``): a FAIL/INCONCLUSIVE becomes this call's
+                # challenge, a PASS falls through to the accept path below with
+                # the self-check challenge suppressed -- an independent read of
+                # the deliverable already agreed, so re-asking the worker adds
+                # nothing. ``None`` (off, rounds spent, skipped) is today's path.
+                check = await self._maybe_verify(claim, pending)
+                if check is not None and verdict_disposition(check.status) == "challenged":
+                    return self._verifier_challenge(claim, pending, check)
                 # The rule is the runner's (``runner.completion.challenge_kind``);
                 # only the counters are this bridge's.
                 kind = challenge_kind(
@@ -2525,6 +2732,8 @@ class ActionBridge:
                         and self._premature_fired < PREMATURE_TERMINAL_CHALLENGES
                     ),
                 )
+                if check is not None:
+                    kind = None
                 if kind == "premature-terminal" and not self._challenge_epoch_pair_fits():
                     # A challenge the budget cannot see through is worse than no
                     # challenge: it would spend the last epoch and lose the very
@@ -2620,6 +2829,22 @@ class ActionBridge:
                             "reason": claim.reason,
                             "actions": len(batch.actions),
                             "completion_challenged": self._completion_fired > 0,
+                            # Present only when a verifier passed this claim,
+                            # so an arm without one writes today's row.
+                            **({"verified": check.status} if check is not None else {}),
+                            # The verdict binds: requirements a challenge named
+                            # UNMET and no later check passed, whatever the
+                            # worker's status says, plus why this claim got no
+                            # verdict. A PASS clears the list in ``_maybe_verify``.
+                            **(
+                                {
+                                    "unverified_unmet": list(self._verifier_unmet),
+                                    "unverified_reason": self._verifier_not_run,
+                                }
+                                if self._verifier_unmet
+                                and (check is None or check.status != "PASS")
+                                else {}
+                            ),
                         },
                     )
                 return {
@@ -3303,6 +3528,16 @@ class EpisodeSession:
     #: loop).
     request_rows: list[dict[str, Any]] = field(default_factory=list, repr=False)
     request_usages: list[Any] = field(default_factory=list, repr=False)
+    #: Job ids of the harness completion verifier's children, added at
+    #: ``verifier_started`` (``_arm_completion_verifier``): the ONLY selector
+    #: for the cost row's ``verifier`` share. Empty when the verifier is off.
+    verifier_job_ids: set[str] = field(default_factory=set, repr=False)
+    #: Whether the harness completion verifier was ARMED for this episode
+    #: (``_arm_completion_verifier`` ran). It is what lets the accounting
+    #: snapshot tell "a verifier existed and made N requests (possibly 0)"
+    #: from "this arm had no verifier": ``verifier_job_ids`` alone cannot,
+    #: because it is empty in both until a round starts.
+    verifier_armed: bool = False
 
     @property
     def tool_names(self) -> tuple[str, ...]:
@@ -3743,8 +3978,54 @@ def _session_accounting(
         legacy_screen_epochs=bridge.steps if bridge is not None else None,
         command_attempts=bridge.command_attempts if bridge is not None else None,
         logical_requests=len(handle.request_rows) if handle is not None else None,
+        verifier_requests=_verifier_request_count(handle),
         requests_complete=close_joined,
     )
+
+
+def _verifier_request_rows(handle: EpisodeSession) -> list[dict[str, Any]]:
+    """The harness completion verifier's request-final rows: ONE selector.
+
+    Shared by the ``requests`` cost row and the ``accounting`` snapshot so the
+    two can never disagree again (measured on a v0.107.2 episode: the cost row
+    counted 7 verifier requests while ``accounting.verifier_requests`` was
+    ``null``, because the snapshot never read the subset at all).
+
+    Selected by the job ids the arm recorded at ``verifier_started``
+    (``handle.verifier_job_ids``), NOT by ``actor_role == "verifier"`` (review
+    round 2, m3): the worker has ``task`` and may launch its own
+    ``task(agent="verifier")``, whose rows carry the same role name. Those are
+    the worker's spend, in both readers.
+    """
+
+    verifier_ids = frozenset(getattr(handle, "verifier_job_ids", ()) or ())
+    return [row for row in handle.request_rows if row.get("job_id") in verifier_ids]
+
+
+def _verifier_request_count(handle: EpisodeSession | None) -> int | None:
+    """``accounting.verifier_requests``: a count when ARMED, else unknown.
+
+    WHY ``None`` AND NOT ``0`` FOR AN ARM WITHOUT A VERIFIER. Every reader of
+    this field already treats ``null`` as "no separately identified verifier
+    subset exists" -- the class docstring above, the published contract in
+    ``docs/benchmarks/osworld_2/BUDGETS_AND_LATENCY.md`` ("do not ... invent
+    zero"), and the ``requests`` row, which omits its ``verifier`` key so a
+    verifier-off record stays byte-identical. A ``0`` there would make a
+    verifier-off run indistinguishable from a verifier-on run whose verifier
+    never issued a request, which is exactly the pooling an ablation must not
+    be able to make by accident. Once the verifier IS armed the subset is
+    identified, so the count is a measurement -- including a measured ``0``
+    (armed but never fired, or a target without the command capability).
+
+    Like ``logical_requests`` this is a snapshot of observed request finals
+    and is provisional until ``requests_complete`` is true. It is a SUBSET of
+    ``logical_requests``, never an addition to it, and it does not touch the
+    worker's decision-group clocks (#3887), which are read from the bridge.
+    """
+
+    if handle is None or not getattr(handle, "verifier_armed", False):
+        return None
+    return len(_verifier_request_rows(handle))
 
 
 @dataclass(frozen=True)
@@ -3794,6 +4075,9 @@ class SessionArmOutcome:
     record_incomplete: bool = False
     record_diagnostic: str | None = None
     duration_ms: int = 0
+    #: The completion verifier's summary (``_verifier_summary``), or ``None``
+    #: for an arm that ran without one -- the outcome then carries no key.
+    completion_verifier: Mapping[str, Any] | None = None
 
 
 async def run_session_episode(
@@ -3827,6 +4111,8 @@ async def run_session_episode(
     stamp reaches only the reply arm: without the row here, an on-policy and an
     off-policy session run of the same task are evidence-identical and get
     pooled, which is the one thing the opt-in is not allowed to cause.
+    The disclosed infra overrides get the same treatment for the same reason:
+    the ``reset`` row carries ``disclosed_infra`` (:func:`_disclosed_infra_stamp`).
 
     The order of calls mirrors ``EpisodeRunner`` deliberately, comment for
     comment where the two could drift: prepare is allocation-free, the rescue
@@ -3993,7 +4279,17 @@ async def run_session_episode(
                 timeout=config.reset_timeout,
             )
         ).observation
-        record.write("reset", {"observation_id": observation.observation_id})
+        # THE INFRA DISCLOSURE rides the reset row because ``reset_start`` is
+        # the call that built the environment from these values: a row exists
+        # exactly when an environment was provisioned under them. See
+        # ``_disclosed_infra_stamp`` for why this arm has to say it itself.
+        record.write(
+            "reset",
+            {
+                "observation_id": observation.observation_id,
+                "disclosed_infra": _disclosed_infra_stamp(spec),
+            },
+        )
 
         # --- the action server, declared inside the episode scratch ---------
         # A SHORT, session-unique name, deliberately: ``sun_path`` is bounded
@@ -4100,6 +4396,12 @@ async def run_session_episode(
         #: fact -- the abort reason never rides the end event -- and the
         #: terminal-reason classifier reads it after the turn.
         wall_fired = False
+        #: The completion verifier's per-episode state (``None`` when the arm
+        #: runs without one, which keeps every record byte-identical), and the
+        #: loop time the wall bound started at, which the verifier's fit check
+        #: reads (``ActionBridge.wall_remaining``).
+        verifier_state: dict[str, Any] | None = None
+        wall_started: list[float] = []
         #: The LAST ``agent_end`` the sink saw: the shared statement of why the
         #: episode's final turn ended, captured outside the record path so a
         #: torn record cannot cost the outcome its reason.
@@ -4260,6 +4562,23 @@ async def run_session_episode(
                 )
             tool_names = handle.tool_names
             record.write("tools", {"names": list(tool_names)})
+            if config.completion_verifier.enabled:
+                verifier_state = _arm_completion_verifier(
+                    bridge=bridge,
+                    handle=handle,
+                    record=record,
+                    config=config.completion_verifier,
+                    artifact_root=config.artifact_root,
+                    wall_remaining=(
+                        None
+                        if max_wall_s is None
+                        else lambda: (
+                            max_wall_s - (asyncio.get_running_loop().time() - wall_started[0])
+                            if wall_started
+                            else float(max_wall_s)
+                        )
+                    ),
+                )
             # The first screen's blocks come from the bridge: ``arm`` rendered
             # it once and the completion challenge re-attaches the same blocks,
             # so rendering again here would append a duplicate turn to the
@@ -4292,6 +4611,7 @@ async def run_session_episode(
                 # so the record keeps the shape every other end has. The timer
                 # is cancelled the moment the turn ends on its own.
                 wall_timer = asyncio.get_running_loop().call_later(max_wall_s, _on_wall)
+                wall_started.append(asyncio.get_running_loop().time())
             try:
                 await handle.session.prompt(prompt, images=images or None)
                 # THE PROTOCOL'S ASK_USER CONTINUATION. Upstream OSWorld
@@ -4409,6 +4729,10 @@ async def run_session_episode(
             except BaseException as error:  # noqa: BLE001 - a close-out must complete
                 if not record_errors:
                     record_errors.append(error)
+            if verifier_state is not None:
+                # After the close: the verifier children are disposed by now,
+                # so their transcripts are complete on disk.
+                _copy_verifier_transcripts(record_root, verifier_state, record)
 
         steps = bridge.steps
         terminal_reason = bridge.end_requested
@@ -4542,23 +4866,48 @@ async def run_session_episode(
                 "error",
                 {"scope": "cleanup", "diagnostic": f"{type(error).__name__}: {error}"},
             )
-            # A dead worker cannot produce evidence, and "attempted" alone is
-            # never evidence of cleanup -- ``aggregate_cleanup`` is the one
-            # statement of that rule (exactly one receipt per declared action;
-            # only ``succeeded`` and ``not_needed`` aggregate clean).
-            rescue_required = rescue_required or _cleanup_forces_rescue(plan, receipts)
-            if rescue_required and descriptor is not None:
-                rescue_complete = await _attempt_rescue(
-                    descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
-                )
-            elif descriptor is not None:
-                _discard_descriptor(config)
+        # DECIDED ON THE RECEIPTS, OUTSIDE THE ``except`` (the reply arm's
+        # ``EpisodeRunner._close_out`` shape). This decision used to live inside
+        # the handler above, so it ran ONLY when cleanup raised: a CLEAN
+        # cleanup -- the ordinary ending -- never discarded ``rescue.json``
+        # (every finished episode left a descriptor telling the sweep it might
+        # still own a worker), and a cleanup that RETURNED a failed or missing
+        # receipt was never routed to rescue at all. A raise leaves
+        # ``receipts`` empty, which the aggregate reads as "unconfirmed", so
+        # the raising path is unchanged: a dead worker cannot produce evidence,
+        # and "attempted" alone is never evidence of cleanup --
+        # ``aggregate_cleanup`` is the one statement of that rule (exactly one
+        # receipt per declared action; only ``succeeded`` and ``not_needed``
+        # aggregate clean).
+        rescue_required = rescue_required or _cleanup_forces_rescue(plan, receipts)
+        rescue_complete = await _settle_descriptor_after_cleanup(
+            rescue_required=rescue_required,
+            descriptor=descriptor,
+            config=config,
+            secrets=secrets,
+            rescue=rescue,
+        )
         cleanup_done = True
         # A score failure on a run that already ended wedged is a CONSEQUENCE
         # of the wedge (a failed re-read poisons the session, and a poisoned
         # session cannot score), so the wedge stays the reported diagnostic --
         # the root cause, not its sequel. Everywhere else a score failure is
         # the outcome's reason, exactly as before.
+        #
+        # WHY THERE IS NO "RESCUE, THEN SCORE" ATTEMPT. The poison message says
+        # "rescue is required", but rescue (``_attempt_rescue``) is the
+        # descriptor-driven RELEASE of the episode's resources, not a way back
+        # into the episode: poisoning already terminated the adapter worker
+        # (``VerifiedAdapterSession._poison_after_ambiguous_mutation`` ->
+        # ``supervisor.terminate()``), and the environment handle the scorer
+        # needs -- the task's evaluator and its setup state -- lived only in
+        # that worker's memory. The adapter protocol has no "attach to a live
+        # target without resetting it" method, so a fresh worker could only
+        # ``reset_start``, which destroys the very state that would be scored.
+        # The way to keep a reached state scorable is therefore to not poison a
+        # live target in the first place (the run_command lost-reply probe
+        # window, sealed run ``t32v-t054-20261112-050615``); a target that is
+        # genuinely gone has nothing left to score.
         diagnostic = bridge.end_diagnostic or stop_diagnostic
         if score_error is not None:
             if terminal_reason != BRIDGE_WEDGED_TERMINAL:
@@ -4593,6 +4942,7 @@ async def run_session_episode(
             tool_names=tool_names,
             resolved_sources=resolved_sources,
             duration_ms=int(time.time() * 1000) - started_ms,
+            completion_verifier=_verifier_summary(verifier_state),
         )
     except BaseException as error:
         # Every failure still tears the worker down; a leaked cloud resource is
@@ -4656,10 +5006,44 @@ async def run_session_episode(
                     rescue_required = rescue_required or _cleanup_forces_rescue(plan, receipts)
                 except BaseException:
                     rescue_required = True
-        if rescue_required and descriptor is not None and not exc_retain:
+                # The exception path ran the SAME cleanup, so it owes the same
+                # decision on its receipts: a turn that raised says nothing
+                # about whether the worker was released. Clean receipts retire
+                # the descriptor here exactly as they do on the normal path;
+                # anything else goes to rescue.
+                rescue_complete = await _settle_descriptor_after_cleanup(
+                    rescue_required=rescue_required,
+                    descriptor=descriptor,
+                    config=config,
+                    secrets=secrets,
+                    rescue=rescue,
+                )
+        elif rescue_required and descriptor is not None and not cleanup_done and not exc_retain:
+            # NO CLEANUP COULD RUN, and the descriptor is still owed a
+            # decision. The provisional descriptor is persisted BEFORE
+            # ``prepare`` and ``plan`` is bound only after it returns, so an
+            # ambiguous ``prepare`` (the worker may have allocated before the
+            # reply was lost) arrives here with ``rescue_required`` set by the
+            # supervisor's poison callback and ``plan is None``. There are no
+            # receipts to settle on, so rescue is the only release available:
+            # exactly one attempt, and ``_attempt_rescue`` retires the
+            # descriptor only when that rescue reports complete. Without this
+            # branch the descriptor sat in the inbox with nothing ever tried
+            # (PR #4236 review M1). ``not exc_retain`` is the guard the
+            # pre-#4236 unconditional rescue carried: unverified owned work
+            # retains the worker, so nothing here may release it. (Today it is
+            # always false on this path -- retention needs a session handle,
+            # which is opened after ``prepare`` -- but the rule is stated
+            # rather than left to that ordering.)
             rescue_complete = await _attempt_rescue(
                 descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
             )
+        # NO SECOND RESCUE BELOW. When the normal path already ran cleanup
+        # (``cleanup_done``) and an exception arrived afterwards -- a re-raised
+        # score failure is the common one -- that cleanup's receipts were
+        # settled where it ran, and ``rescue_complete`` already carries the
+        # answer. Rescuing again from here would re-release a worker a complete
+        # rescue had just retired the descriptor for.
         # The terminal error line comes FIRST: it is itself a sink write the
         # full volume may refuse, and a record failure it raises belongs in the
         # outcome below rather than after it was computed.
@@ -5030,9 +5414,37 @@ def _flush_request_observation(
         coverage_counts[coverage] = coverage_counts.get(coverage, 0) + 1
         if row.get("usage") is None:
             missing_usage_request_ids.append(str(row.get("request_id") or ""))
+    # The completion verifier's share, beside the whole-tree totals it is
+    # already part of (its rows are this tree's; nothing is excluded above).
+    # Present only when a verifier made requests, so an arm without one
+    # writes today's row byte for byte.
+    #
+    # The subset comes from ``_verifier_request_rows`` -- the same selector the
+    # ``accounting`` snapshot counts, so the two figures are one reading. With
+    # the verifier off it selects nothing and no ``verifier`` key is added to a
+    # record that is otherwise byte-identical.
+    verifier_share: dict[str, Any] = {}
+    verifier_rows = _verifier_request_rows(handle)
+    if verifier_rows:
+        from local_operator.harness.types import Usage
+
+        verifier_usages = [
+            Usage.model_validate(row["usage"]) for row in verifier_rows if row.get("usage")
+        ]
+        v_recorded, v_recorded_unknown = cost_summary(verifier_usages, recorded_only=True)
+        v_estimated, v_estimated_unknown = cost_summary(verifier_usages, recorded_only=False)
+        verifier_share["verifier"] = {
+            "count": len(verifier_rows),
+            "job_ids": sorted({str(row.get("job_id")) for row in verifier_rows}),
+            "recorded_usd": v_recorded,
+            "recorded_unknown": v_recorded_unknown,
+            "estimated_usd": v_estimated,
+            "estimated_unknown": v_estimated_unknown,
+        }
     record.write(
         "requests",
         {
+            **verifier_share,
             "count": len(rows),
             "purpose_counts": purposes,
             "usage_coverage_counts": coverage_counts,
@@ -5060,6 +5472,212 @@ def _on_event(record: RecordSink, bridge: ActionBridge, event: AgentEvent) -> No
     record.write("agent_event", {"event": printable_event(event)})
 
 
+def _arm_completion_verifier(
+    *,
+    bridge: ActionBridge,
+    handle: EpisodeSession,
+    record: RecordSink,
+    config: Any,
+    wall_remaining: Callable[[], float | None] | None,
+    artifact_root: Path | None = None,
+) -> dict[str, Any]:
+    """Wire the completion verifier into this episode; return its state.
+
+    Called once, after the session opened (the verifier is that session's
+    child, launched through ``Session.verify_completion`` -- the generic
+    primitive, not an OSWorld hook) and before the first prompt. The ONLY
+    episode-specific piece is the host tool: a lock-free ``inspect_command``
+    (``evaluation/completion_verifier.py``) gated on the bridge's verification
+    window. The verifier is told the reset instruction the worker saw
+    (``bridge.instruction``), the worker's claim and the last observation's
+    text -- never adapter or evaluator fields, which the bridge does not hold.
+
+    A target without the command capability gets NO verifier: the check could
+    not see a remote deliverable, so it would be a cost with no reach. That is
+    recorded once as ``verifier_skipped`` rather than left implicit.
+    """
+
+    from local_operator.evaluation.completion_verifier import (
+        VerifierInspector,
+        verifier_envelope_s,
+    )
+    from local_operator.harness.verifier import CANCEL_JOIN_S
+
+    state: dict[str, Any] = {
+        "config": config.stamp(),
+        "verdicts": [],
+        "transcripts": {},
+        "readonly_enforcement": None,
+        "skipped": [],
+    }
+    record.write("completion_verifier", config.stamp())
+    # Armed from here on, including the no-capability early return below: the
+    # verifier subset is now IDENTIFIED (possibly empty), which is what turns
+    # ``accounting.verifier_requests`` from unknown into a count.
+    handle.verifier_armed = True
+    run_command = bridge.run_command
+    if run_command is None:
+        record.write("verifier_skipped", {"round": None, "reason": "no-command-capability"})
+        state["skipped"].append({"round": None, "reason": "no-command-capability"})
+        return state
+
+    current_job: dict[str, str | None] = {"id": None}
+    inspector = VerifierInspector(
+        run_command=run_command,
+        window=lambda: bridge.verification_round,
+        record_event=record.write,
+        job_id=lambda: current_job["id"],
+    )
+
+    def record_event(kind: str, payload: dict[str, Any]) -> None:
+        if kind == "verifier_skipped":
+            state["skipped"].append(
+                {"round": payload.get("round"), "reason": payload.get("reason")}
+            )
+        record.write(kind, payload)
+
+    async def verify(claim: FinishAction, pending: Observation, round_: int) -> Any:
+        mode = await inspector.ensure_mode()
+        state["readonly_enforcement"] = mode
+        current_job["id"] = None
+
+        def started(info: dict[str, Any]) -> None:
+            current_job["id"] = info.get("job_id")
+            if info.get("job_id"):
+                # The cost share's selector (``_flush_request_observation``).
+                handle.verifier_job_ids.add(str(info["job_id"]))
+            record.write(
+                "verifier_started", {"round": round_, **info, "readonly_enforcement": mode}
+            )
+
+        observation_text = (
+            pending.text if pending.text and pending.text != bridge.instruction else None
+        )
+        # The verification's hard deadline: ``verify_completion`` returns by
+        # its own start + wall + cancel join, and every guest read is clipped
+        # to settle by this one (taken earlier, so no later than that).
+        inspector.begin(time.monotonic() + float(config.wall_s) + CANCEL_JOIN_S)
+        try:
+            from local_operator.evaluation.evidence.projection import frame_images
+            from local_operator.harness.verifier_evidence import (
+                VerifierEvidence,
+                VerifierEvidenceItem,
+            )
+
+            # Use the published observation only: no task/evaluator metadata and
+            # no remote file reader. A missing root cannot silently lose frames.
+            typed = None
+            if artifact_root is not None:
+                try:
+                    images = frame_images(artifact_root, pending.frames)
+                    typed = VerifierEvidence(
+                        items=tuple(
+                            VerifierEvidenceItem(f"frame:{frame.frame_id}", image)
+                            for frame, image in zip(pending.frames, images, strict=True)
+                        )
+                        + (
+                            (
+                                VerifierEvidenceItem(
+                                    "observation:text", TextContent(text=observation_text)
+                                ),
+                            )
+                            if observation_text
+                            else ()
+                        ),
+                        required_modalities=frozenset({"image"}) if pending.frames else frozenset(),
+                    )
+                except Exception as error:  # unreadable evidence is not task success
+                    record.write(
+                        "verifier_evidence_unavailable",
+                        {"round": round_, "error": type(error).__name__},
+                    )
+                    # The generic missing-required-media refusal still flows
+                    # through the normal verdict/state recording below.
+                    typed = VerifierEvidence(required_modalities=frozenset({"image"}))
+            inspector.evidence = typed
+            verdict = await handle.session.verify_completion(
+                request=bridge.instruction,
+                claim=f"status: {claim.status}\nreason: {claim.reason}",
+                observation=observation_text,
+                **({"typed_evidence": typed} if typed is not None else {}),
+                host_tools=[inspector.tool()],
+                limits=config.limits(),
+                on_started=started,
+            )
+        finally:
+            # Before the worker resumes (the bridge still holds its lock): a
+            # read the cap abandoned is still running on the guest, and is
+            # awaited, never cancelled -- a cancelled adapter RPC poisons the
+            # session (live ``t31v-t003``: the worker's next command failed).
+            await inspector.drain()
+        state["verdicts"].append(
+            {
+                "round": round_,
+                "status": verdict.status,
+                "ended_by": verdict.ended_by,
+                "job_id": verdict.job_id,
+                "requests": verdict.requests,
+                "commands": verdict.commands,
+                "disposition": verdict_disposition(verdict.status),
+            }
+        )
+        if verdict.job_id and verdict.transcript_dir:
+            state["transcripts"][verdict.job_id] = verdict.transcript_dir
+        return verdict
+
+    bridge.verifier = verify
+    bridge.verifier_rounds = config.rounds
+    bridge.verifier_envelope_s = verifier_envelope_s(config.wall_s)
+    bridge.wall_remaining = wall_remaining
+    bridge.record_event = record_event
+    return state
+
+
+def _copy_verifier_transcripts(
+    record_root: Path, state: dict[str, Any], record: RecordSink
+) -> None:
+    """Copy each verifier child's transcript into the bundle as ``verifier/<job>.jsonl``.
+
+    The child's session directory lives in the episode's config store, which
+    is scratch; the bundle is what a reader keeps, and a verdict without the
+    reasoning behind it cannot be audited. A failed copy is recorded, never
+    raised: the episode's own outcome must not depend on it.
+    """
+
+    import shutil
+
+    copied: dict[str, str] = {}
+    for job_id, directory in sorted(state.get("transcripts", {}).items()):
+        source = Path(directory) / "transcript.jsonl"
+        target = record_root / "verifier" / f"{job_id}.jsonl"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            copied[job_id] = str(target.relative_to(record_root))
+        except OSError as error:
+            record.write(
+                "error",
+                {
+                    "scope": "verifier_transcript",
+                    "job_id": job_id,
+                    "diagnostic": f"{type(error).__name__}: {error}",
+                },
+            )
+    state["bundle_transcripts"] = copied
+
+
+def _verifier_summary(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    return {
+        "config": state.get("config"),
+        "readonly_enforcement": state.get("readonly_enforcement"),
+        "verdicts": list(state.get("verdicts", ())),
+        "skipped": list(state.get("skipped", ())),
+        "transcripts": dict(state.get("bundle_transcripts", {})),
+    }
+
+
 def _make_run_command(
     adapter_session: Any, episode_id: str
 ) -> Callable[[str, float], Awaitable[Any]]:
@@ -5077,9 +5695,12 @@ def _make_run_command(
             ),
             # Leave the target time to stop the child and serialize its result,
             # AND to answer a lost reply. The OSWorld adapter bounds its own
-            # wait at ``timeout_s + 10`` wall-clock and then takes one liveness
-            # probe (worst case ~4 s) before deciding between an unknown-outcome
-            # answer and the poisoning error; at ``+ 15`` that answer would
+            # wait at ``timeout_s + 10`` wall-clock and then probes liveness
+            # before deciding between an unknown-outcome answer and the
+            # poisoning error. A reply lost EARLY (a dropped connection) may
+            # probe until that same ``+ 10`` instant, and one lost AT it gets a
+            # single probe window, so either way the call ends within
+            # ``+ 10`` plus one probe (worst case ~4 s); at ``+ 15`` that answer would
             # land within ~1 s of this deadline, and a deadline that fires first
             # tears the RPC channel down -- losing the episode the probe exists
             # to keep. ``+ 20`` leaves ~6 s of scheduling margin. Named
@@ -5250,6 +5871,44 @@ def _refuse_undeclared_disclosed_infra(
         )
 
 
+def _disclosed_infra_stamp(spec: EpisodeSpec) -> dict[str, str]:
+    """The disclosed infra overrides this episode ran under, for its own record.
+
+    WHY THIS ARM STAMPS THEM ITSELF. The launcher discloses these overrides in
+    ``EpisodeSpec.metadata``, and the only thing that ever sealed that mapping
+    is the reply arm's ``EvidenceManifest``. This arm builds no manifest, so a
+    session record could not show that, say, a declared ``EVALUATOR_TOOL_PATH``
+    was in effect: two session runs of one task, one scored with the
+    evaluator's host tools reachable and one without, were evidence-identical
+    (found reading a real session-arm record on PR #4236). That is the same
+    pooling hazard the ``progress_guards`` row closes for the guard policy.
+
+    Derived from ``spec.infra_values`` -- the tuple ``prepare`` was actually
+    handed and ``_refuse_undeclared_disclosed_infra`` actually gated -- rather
+    than from ``spec.metadata``, so a direct caller that never stamped metadata
+    is still recorded truthfully. Keyed through
+    ``DISCLOSED_INFRA_METADATA_KEYS``, the ONE table the gate and the reply
+    arm's manifest stamp both derive from, so a session record and a reply
+    bundle name the same override identically and a value added to that table
+    is disclosed here without a second list to forget.
+
+    Only supplied overrides appear, as in the manifest: an absent key means the
+    hash-pinned task file plus the documented default decided the value. The
+    mapping is written even when empty, so "no override" is a stated fact and
+    not a missing field a reader has to interpret. As with the manifest, this
+    is what was REQUESTED; it is honest because the gate refuses any of these
+    values an adapter build does not declare, before ``prepare``.
+    """
+
+    from local_operator.evaluation.runner.episode import DISCLOSED_INFRA_METADATA_KEYS
+
+    return {
+        DISCLOSED_INFRA_METADATA_KEYS[value.name]: value.value
+        for value in spec.infra_values
+        if value.name in DISCLOSED_INFRA_METADATA_KEYS
+    }
+
+
 def _persist_descriptor(
     *,
     config: EpisodeConfig,
@@ -5272,6 +5931,41 @@ def _persist_descriptor(
     )
     persist_rescue(config.rescue_root, descriptor)
     return descriptor
+
+
+async def _settle_descriptor_after_cleanup(
+    *,
+    rescue_required: bool,
+    descriptor: RescueDescriptor | None,
+    config: EpisodeConfig,
+    secrets: Sequence[ResolvedSecret],
+    rescue: Any,
+) -> bool | None:
+    """Rescue or retire the descriptor once cleanup's receipts are known.
+
+    The ONE statement of the session arm's post-cleanup rule, mirroring the
+    reply arm's ``EpisodeRunner._close_out``:
+
+    - cleanup left anything unconfirmed -> the descriptor is KEPT and handed to
+      rescue, which retires it only on a complete aggregate (an incomplete
+      rescue leaves it in the inbox for ``rescue_sweep``);
+    - every declared action confirmed on the live session -> this episode owns
+      nothing any more, so the descriptor leaves the inbox. Only this branch
+      holds that confirmation; nothing is discarded on hope.
+
+    Returns ``rescue_complete`` (``None`` when no rescue ran). Callers must
+    reach this ONLY after cleanup actually ran: a retained (unverified) join
+    releases nothing and keeps its descriptor without consulting this.
+    """
+
+    if descriptor is None:
+        return None
+    if rescue_required:
+        return await _attempt_rescue(
+            descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
+        )
+    _discard_descriptor(config)
+    return None
 
 
 def _discard_descriptor(config: EpisodeConfig) -> None:
@@ -5367,4 +6061,11 @@ def _outcome_json(outcome: SessionArmOutcome) -> dict[str, Any]:
         "tool_names": list(outcome.tool_names),
         "resolved_sources": {name: str(path) for name, path in outcome.resolved_sources.items()},
         "duration_ms": outcome.duration_ms,
+        # Only an arm that ran with a verifier carries the key (rounds=0 is
+        # today's outcome, byte for byte).
+        **(
+            {"completion_verifier": dict(outcome.completion_verifier)}
+            if outcome.completion_verifier is not None
+            else {}
+        ),
     }

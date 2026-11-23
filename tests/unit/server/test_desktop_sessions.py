@@ -655,6 +655,107 @@ async def test_the_read_only_probe_never_clips_the_truncated_path(tmp_path, sigi
 
 
 @pytest.mark.asyncio
+async def test_the_fingerprint_read_creates_nothing_and_names_the_claimed_fingerprint(tmp_path):
+    """The fingerprint lookup is a READ, on the same terms as the probe itself.
+
+    The voice route calls it before every utterance, so a lookup that opened
+    through ``_db`` would mkdir, chmod, adopt WAL and ``CREATE TABLE`` on a path
+    whose docstring promises it creates nothing (review round 2, MINOR 1). Both
+    halves are asserted because the defect answered correctly while writing: only
+    the absent file proves the read.
+    """
+    receipts = DesktopReceipts(tmp_path)
+    assert receipts.recorded_fingerprint("s:id") is None, "an absent store names no fingerprint"
+    assert not receipts.path.exists(), "the lookup created the store it only reads"
+
+    async def op():
+        return {"result": "real receipt"}
+
+    body = {"op": "create"}
+    assert await receipts.run("s:id", body, op) == {"result": "real receipt"}
+    assert receipts.recorded_fingerprint("s:id") == DesktopReceipts.fingerprint(body)
+    assert receipts.recorded_fingerprint("other:id") is None
+
+
+def test_a_store_without_the_receipts_table_answers_none_and_writes_nothing(tmp_path):
+    """A file that opens but carries no schema is still no answer, and no write.
+
+    The store half-created by an older or interrupted process must not be upgraded
+    by a mere lookup either: the bytes and the directory listing are compared,
+    because ``_db``'s WAL adoption and DDL would both show up there.
+    """
+    import sqlite3
+
+    receipts = DesktopReceipts(tmp_path)
+    sqlite3.connect(receipts.path).close()  # a real, empty database file: no schema
+    listing = sorted(entry.name for entry in tmp_path.iterdir())
+    before = receipts.path.read_bytes()
+
+    assert receipts.recorded_fingerprint("s:id") is None
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == listing
+    assert receipts.path.read_bytes() == before, "the lookup wrote to the store"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sigil", ["?", "#"])
+async def test_the_fingerprint_lookup_never_clips_the_truncated_path(tmp_path, sigil):
+    """``recorded``'s R11 lesson applies here too: the path is a ``file:`` URI.
+
+    Raw interpolation truncates at the sigil, so the open CREATES a 0-byte file at
+    the truncated path and then answers ``None`` for a key the store does hold.
+    The recorded key is what separates the escaped read from the broken one.
+    """
+    root = tmp_path / f"root{sigil}odd"
+    receipts = DesktopReceipts(root)
+
+    async def op():
+        return {"result": "real receipt"}
+
+    assert receipts.recorded_fingerprint("s:id") is None, "an absent store records nothing"
+    assert not receipts.path.exists(), "the lookup created the store it only reads"
+
+    body = {"op": "create"}
+    await receipts.run("s:id", body, op)
+    assert receipts.recorded_fingerprint("s:id") == DesktopReceipts.fingerprint(body)
+    assert receipts.recorded_fingerprint("other:id") is None
+    assert not (tmp_path / "root").exists(), "the lookup wrote at a truncated path"
+
+
+@pytest.mark.slow
+def test_a_held_write_lock_answers_none_instead_of_raising(tmp_path):
+    """REAL contention, on a store that stayed in rollback mode.
+
+    ``_adopt_wal`` is optional -- a filesystem that cannot host WAL leaves the
+    store in ``delete`` mode, and there another connection's EXCLUSIVE lock blocks
+    readers. Before the lookup shared ``recorded``'s read-only door it raised
+    ``sqlite3.OperationalError`` after the store's own busy window, which the
+    route would have answered as a 500; the contract is "nothing recorded, the
+    caller runs its admissions", which is ``None``.
+
+    ``slow``: the wait is the store's own 10 s busy timeout, not a sleep.
+    """
+    import sqlite3
+
+    receipts = DesktopReceipts(tmp_path)
+    with contextlib.closing(sqlite3.connect(receipts.path)) as seed:
+        seed.execute(
+            "CREATE TABLE receipts (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT)"
+        )
+        seed.execute("INSERT INTO receipts VALUES ('s:id', 'fp', NULL)")
+        seed.commit()
+
+    holder = sqlite3.connect(receipts.path, timeout=5)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        assert receipts.recorded_fingerprint("s:id") is None, "a lock is no answer, never a raise"
+    finally:
+        holder.rollback()
+        holder.close()
+    # The store still reads afterwards, and the lock changed nothing in it.
+    assert receipts.recorded_fingerprint("s:id") == "fp"
+
+
+@pytest.mark.asyncio
 async def test_a_waiting_control_does_not_block_another_sessions_admission(tmp_path):
     receipts = DesktopReceipts(tmp_path)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -780,6 +881,14 @@ def test_route_response_models_publish_the_real_canonical_contract():
             "/v1/desktop/sessions/{session_id}/children/{child_id}/transcript",
             "get",
         ): "ChildTranscriptPage",
+        (
+            "/v1/desktop/sessions/{session_id}/tool-calls/{call_id}/diff",
+            "get",
+        ): "ToolCallDiffPage",
+        (
+            "/v1/desktop/sessions/{session_id}/children/{child_id}/tool-calls/{call_id}/diff",
+            "get",
+        ): "ToolCallDiffPage",
         ("/v1/desktop/sessions/{session_id}/history", "get"): "HistoryPage",
         ("/v1/desktop/sessions/{session_id}/messages", "post"): "MessageAdmission",
         ("/v1/desktop/sessions/{session_id}/commands", "post"): "CommandReceipt",
@@ -1120,7 +1229,10 @@ async def test_durable_attachment_is_readable_without_starting_an_owner(tmp_path
     (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
 
     pool = DesktopSessions(tmp_path)
-    data, mime_type = await pool.attachment("0123456789ab", ref.digest)
+    attachment = await pool.attachment("0123456789ab", ref.digest)
+    # This cold local-store fixture must return bytes, not a peer streaming handle.
+    assert isinstance(attachment, tuple)
+    data, mime_type = attachment
     assert data == raw and mime_type == "image/png"
     assert pool.bridges == {}
 
@@ -1206,7 +1318,9 @@ async def test_attachment_refuses_a_subagent_origin_session(tmp_path):
     pool = DesktopSessions(tmp_path)
 
     # The marker is the only difference, so the user session must still serve.
-    data, _ = await pool.attachment("0123456789ab", ref.digest)
+    attachment = await pool.attachment("0123456789ab", ref.digest)
+    assert isinstance(attachment, tuple)
+    data, _ = attachment
     assert data == raw and users.is_dir()
     with pytest.raises(KeyError):
         await pool.attachment("abcdef012345", ref.digest)
@@ -3996,9 +4110,9 @@ async def test_child_attachment_serves_bytes_for_a_contained_child(tmp_path):
     )
     assert ref is not None
 
-    data, mime_type = await DesktopSessions(tmp_path).child_attachment(
-        PARENT_ID, CHILD_ID, ref.digest
-    )
+    attachment = await DesktopSessions(tmp_path).child_attachment(PARENT_ID, CHILD_ID, ref.digest)
+    assert isinstance(attachment, tuple)
+    data, mime_type = attachment
 
     assert data == raw and mime_type == "image/png"
     with pytest.raises(KeyError):
@@ -7165,7 +7279,7 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
     # Recorded as the PAIR each call carried: the route builds the subscription
     # from both additive flags, and a spy that watched only ``frontend_replace``
     # would let the supplements half be dropped without a failure.
-    negotiated: list[tuple[bool, bool, bool, bool]] = []
+    negotiated: list[tuple[bool, bool, bool, bool, bool]] = []
     real_subscribe = module.DesktopSessionBridge.subscribe
 
     def spy(
@@ -7173,6 +7287,7 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         *,
         frontend_replace: bool = False,
         supplements: bool = False,
+        diff_bindings: bool = False,
         journal_order: bool = False,
         peer_journal_source: bool = False,
     ):  # noqa: ANN001
@@ -7180,12 +7295,18 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         # complete declaration's flag with the peer-source contract: a spy
         # frozen at the old signature fails on a keyword the real method
         # takes, and one that silently swallowed it would let the route drop
-        # the declaration unnoticed. Four flags, four hand-offs asserted.
-        negotiated.append((frontend_replace, supplements, journal_order, peer_journal_source))
+        # the declaration unnoticed. ``diff_bindings`` joined the signature
+        # with the diff-bindings contract (the route forwards ``?diff_bindings=1``
+        # into the subscription), so it is recorded in tuple order of the real
+        # keyword list rather than swallowed. Five flags, five hand-offs asserted.
+        negotiated.append(
+            (frontend_replace, supplements, diff_bindings, journal_order, peer_journal_source)
+        )
         return real_subscribe(
             self,
             frontend_replace=frontend_replace,
             supplements=supplements,
+            diff_bindings=diff_bindings,
             journal_order=journal_order,
             peer_journal_source=peer_journal_source,
         )
@@ -7204,13 +7325,13 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         assert legacy.status_code == 409, legacy.text
         assert "Update the desktop app" in legacy.json()["detail"]
         assert negotiated == [
-            (False, False, False, False)
+            (False, False, False, False, False)
         ], "the legacy mount did not present itself as legacy"
         admitted = await client.get(url, params={"frontend_replace": 1})
         assert admitted.status_code == 200, admitted.text
         assert negotiated == [
-            (False, False, False, False),
-            (True, False, False, False),
+            (False, False, False, False, False),
+            (True, False, False, False, False),
         ], "the route dropped the negotiated flag"
         bridge.move_in_progress = False
         # The supplements declaration is the same hand-off on its own parameter
@@ -7219,14 +7340,33 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         declared = await client.get(url, params={"supplements": 1})
         assert declared.status_code == 200, declared.text
         assert negotiated == [
-            (False, False, False, False),
-            (True, False, False, False),
-            (False, True, False, False),
+            (False, False, False, False, False),
+            (True, False, False, False, False),
+            (False, True, False, False, False),
         ], "the route dropped the supplements declaration"
 
         ordered = await client.get(url, params={"journal_order": 1})
         assert ordered.status_code == 200, ordered.text
-        assert negotiated[-1] == (False, False, True, False), "source order opt-in was dropped"
+        assert negotiated[-1] == (
+            False,
+            False,
+            False,
+            True,
+            False,
+        ), "source order opt-in was dropped"
+
+        # The diff-bindings declaration rides the same seam: ``?diff_bindings=1``
+        # must arrive as True, and every request above that omitted it must
+        # have carried the route's default (False) -- asserted by the tuples.
+        bound = await client.get(url, params={"diff_bindings": 1})
+        assert bound.status_code == 200, bound.text
+        assert negotiated[-1] == (
+            False,
+            False,
+            True,
+            False,
+            False,
+        ), "the diff-bindings declaration was dropped"
 
         # The complete contract's declaration is the fourth hand-off on the
         # same seam (peer-source contract): ``?peer_journal_source=1`` must
@@ -7234,6 +7374,7 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         declared_complete = await client.get(url, params={"peer_journal_source": 1})
         assert declared_complete.status_code == 200, declared_complete.text
         assert negotiated[-1] == (
+            False,
             False,
             False,
             False,
@@ -9520,7 +9661,14 @@ def _install_ask_remote(app: FastAPI, remote: Any, *, remote_row: Any = None) ->
 
     class _Pool:
         @contextlib.asynccontextmanager
-        async def session(self, session_id: str, *, read: bool = False, allow_draft: bool = False):
+        async def session(
+            self,
+            session_id: str,
+            *,
+            read: bool = False,
+            allow_draft: bool = False,
+            control_only: bool = False,
+        ):
             del session_id, read, allow_draft
             yield bridge
 
@@ -9632,8 +9780,201 @@ async def test_a_queued_ask_answer_is_accepted_without_an_epoch(answers_api) -> 
         json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
     )
     assert result.status_code == 200, result.text
-    assert result.json()["result"] == {"detail": "answered"}
+    assert result.json()["result"] == {"detail": "answered", "consent_bearing": False}
     assert remote.calls == [("a-1", {"q0": ["yes"]}, False, False)]
+
+
+class _ProvingAskRemote(_AskRemote):
+    """A facade whose bound client holds (or not) the runtime's operator proof.
+
+    ``ask_consent_bearing`` is ``AttachedSession``'s probe of its own handshake
+    state; ``probes`` records that the route read it AFTER the answer went out
+    (a cold bind this process just engaged must count).
+    """
+
+    def __init__(self, *, bearing: bool) -> None:
+        super().__init__()
+        self.bearing = bearing
+        self.probes: list[int] = []
+
+    def ask_consent_bearing(self) -> bool:
+        self.probes.append(len(self.calls))
+        return self.bearing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bearing", [True, False])
+async def test_the_answer_receipt_reports_consent_bearing_from_the_facade(
+    answers_api, bearing: bool
+) -> None:
+    """Incident a-48e3 (2026-11-16): a card answer to a runtime this backend did
+    not start is stamped ``unverified`` and can never authorise a delete. The
+    receipt says so, from server-side state only."""
+    client, app = answers_api
+    remote = _ProvingAskRemote(bearing=bearing)
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "answered", "consent_bearing": bearing}
+    assert remote.probes == [1]  # read once, after the answer was sent
+
+
+@pytest.mark.asyncio
+async def test_a_body_supplied_consent_bearing_is_never_accepted(answers_api) -> None:
+    """Negative control: the client cannot assert the flag. ``Answer`` forbids
+    unknown fields, so the request is refused and nothing reaches the runtime."""
+    client, app = answers_api
+    remote = _ProvingAskRemote(bearing=False)
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}, "consent_bearing": True},
+    )
+    assert result.status_code == 422, result.text
+    assert remote.calls == [] and remote.probes == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_conversation_answer_is_never_consent_bearing(answers_api) -> None:
+    """Negative control: a peer's conversation is answered over the mesh and
+    stamped ``remote``; whatever this process holds for a same-numbered local
+    pid, the receipt reads False and the probe is not even consulted."""
+    client, app = answers_api
+    remote = _ProvingAskRemote(bearing=True)
+    _install_ask_remote(app, remote, remote_row=SimpleNamespace(device_id="dev-peer"))
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["consent_bearing"] is False
+    assert remote.probes == []  # R1-n1: short-circuited before the probe
+
+
+@pytest.mark.asyncio
+async def test_a_decline_receipt_never_reports_consent_bearing(answers_api) -> None:
+    """PR #4127 QA Q2: a decline is never consent, so even a connection that held
+    the operator proof must not let a card read "this answer can authorise"."""
+    client, app = answers_api
+    remote = _ProvingAskRemote(bearing=True)
+    remote.detail = "declined"
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "decline": True}
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "declined", "consent_bearing": None}
+    assert remote.calls == [("a-1", None, True, False)]
+
+
+class _StampingAskRemote(_ProvingAskRemote):
+    """A facade whose client returns the runtime's STAMPED surface (PR #4132).
+
+    ``AttachClient.ask_respond``/``ask_revise`` return a ``StampedReceipt``: the
+    sentence plus the label the runtime recorded. ``bearing`` is the cap probe,
+    set to DISAGREE with the stamp in the convergence cells, so a route still
+    reading the probe fails them.
+    """
+
+    def __init__(self, *, surface: str | None, bearing: bool) -> None:
+        super().__init__(bearing=bearing)
+        self.surface = surface
+
+    async def ask_respond(
+        self,
+        ask_id: str,
+        answers: Any = None,
+        *,
+        decline: bool = False,
+        revise: bool = False,
+        images: Any = None,
+    ) -> str:
+        from local_operator.asks.surfaces import StampedReceipt
+
+        detail = await super().ask_respond(ask_id, answers, decline=decline, revise=revise)
+        return StampedReceipt(detail, self.surface)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "bearing", "expected", "revise"),
+    [
+        # (a) F2: the app-signature attestation stamps ``desktop`` with no cap.
+        ("desktop", False, True, False),
+        ("desktop", False, True, True),
+        # (b) Part C: a cap answer to an INHERITED ask is stamped ``unverified``.
+        ("unverified", True, False, False),
+        ("unverified", True, False, True),
+        # (c) a cap answer to an ask minted here still stamps ``desktop``.
+        ("desktop", True, True, False),
+        # A relayed hop is never consent, whatever the probe says.
+        ("remote", True, False, False),
+    ],
+)
+async def test_consent_bearing_is_the_runtime_stamp_not_the_cap_probe(
+    answers_api, surface: str, bearing: bool, expected: bool, revise: bool
+) -> None:
+    """#4127 convergence: the receipt reports what the runtime RECORDED.
+
+    After F2 the cap probe and the stamp disagree both ways, and the guard reads
+    only the stamp, so a receipt derived from the probe would tell the operator
+    an attested answer cannot authorise a delete (it can) and an inherited-ask
+    cap answer can (it cannot). The probe is not even consulted once a stamp is
+    present.
+    """
+    client, app = answers_api
+    remote = _StampingAskRemote(surface=surface, bearing=bearing)
+    remote.detail = "revised" if revise else "answered"
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}, "revise": revise},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": remote.detail, "consent_bearing": expected}
+    assert remote.probes == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_answer_stamped_desktop_is_still_not_consent_bearing(answers_api) -> None:
+    """Negative control: the peer short-circuit stays ahead of the stamp."""
+    client, app = answers_api
+    remote = _StampingAskRemote(surface="desktop", bearing=True)
+    _install_ask_remote(app, remote, remote_row=SimpleNamespace(device_id="dev-peer"))
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["consent_bearing"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_attested_decline_still_reports_no_consent(answers_api) -> None:
+    """PR #4127 QA Q2 survives the convergence: a decline reads null even when
+    the runtime stamped it ``desktop``."""
+    client, app = answers_api
+    remote = _StampingAskRemote(surface="desktop", bearing=True)
+    remote.detail = "declined"
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "decline": True}
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "declined", "consent_bearing": None}
+
+
+@pytest.mark.asyncio
+async def test_the_ask_consent_bearing_feature_is_published_desktop_only(answers_api) -> None:
+    from local_operator.server.features import DESKTOP_ONLY_FEATURES
+
+    client, _app = answers_api
+    features = (await client.get("/v1/capabilities")).json()["result"]["features"]
+    assert features["ask_consent_bearing"] == 1
+    assert "ask_consent_bearing" in DESKTOP_ONLY_FEATURES
 
 
 @pytest.mark.asyncio
@@ -9748,7 +10089,7 @@ async def test_a_cold_open_ask_is_dismissed_without_dialling_anything(answers_ap
         json={"ask_id": "a-1", "dismiss": True, "reason": "answered_in_chat"},
     )
     assert result.status_code == 200, result.text
-    assert result.json()["result"] == {"detail": "dismissed"}
+    assert result.json()["result"] == {"detail": "dismissed", "consent_bearing": None}
     assert remote.dismissals == [], "a cold dismissal must not dial (a bind BOOTS)"
     assert remote.calls == []
     events = store.read_events(directory)
@@ -9770,7 +10111,7 @@ async def test_a_live_owner_gets_the_live_dismiss_op(answers_api, monkeypatch) -
         json={"ask_id": "a-1", "dismiss": True, "reason": "moot"},
     )
     assert result.status_code == 200, result.text
-    assert result.json()["result"] == {"detail": "dismissed"}
+    assert result.json()["result"] == {"detail": "dismissed", "consent_bearing": None}
     assert remote.dismissals == [("a-1", "desktop", "moot")]
     assert remote.calls == []
 
@@ -9895,7 +10236,7 @@ async def test_a_revision_reaches_the_runtime_as_its_own_op(answers_api) -> None
         json={"ask_id": "a-1", "answers": {"q0": ["yes"]}, "revise": True},
     )
     assert result.status_code == 200, result.text
-    assert result.json()["result"] == {"detail": "revised"}
+    assert result.json()["result"] == {"detail": "revised", "consent_bearing": False}
     assert remote.calls == [("a-1", {"q0": ["yes"]}, False, True)]
 
 
@@ -10797,3 +11138,443 @@ async def test_a_local_row_carries_its_agents_picture_identity(draft_api) -> Non
     Image.new("RGB", (32, 32), (1, 2, 3)).save(image, "PNG")
     meta = registry.set_agent_avatar(agent.id, image.getvalue())
     assert (await rows())["chat0000001"]["avatar_sha256"] == meta.sha256
+
+
+class _DecideRemote(_AskRemote):
+    """A viewer facade whose frame carries one signed-door ask (PR-B).
+
+    ``bridge_decide`` answers in the REAL facade's verdict shape
+    (``AttachedSession.bridge_decide`` → ``{"ok": …}``), so a route that read
+    the wrong contract would pass a refusal off as success.
+    """
+
+    def __init__(self, *, question_id: str, verdict: dict[str, Any] | None = None) -> None:
+        super().__init__()
+        self.decisions: list[tuple[str, str, str]] = []
+        self.verdict = verdict or {"ok": True}
+        self.frontend_state = SimpleNamespace(
+            epoch="epoch-current",
+            asks=[
+                SimpleNamespace(
+                    ask_id="a-site",
+                    questions=[
+                        {
+                            "id": "site-access",
+                            "question": "Allow http://127.0.0.1:8765 in the browser on node-a?",
+                            "options": [
+                                {"id": "approve", "label": "Approve"},
+                                {"id": "deny", "label": "Deny"},
+                            ],
+                            "human_required": True,
+                            "question_id": question_id,
+                        }
+                    ],
+                )
+            ],
+        )
+
+    async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
+        self.decisions.append((ask_id, question_id, word))
+        return self.verdict
+
+
+@pytest.mark.asyncio
+async def test_a_signed_door_ask_is_decided_through_bridge_decide(answers_api) -> None:
+    """The desktop dock answers a site:v1: (or Team Bridge) ask through the signed
+    door — the plain ask_respond refuses such an ask by construction, so before
+    this route branch the operator's Approve could never land."""
+    client, app = answers_api
+    # A Team Bridge id: a ``site:v1:`` card also has to rebuild from its
+    # ``site`` block, which ``test_the_desktop_route_signs_only_a_card_it_can_rebuild``
+    # covers; this test is about the route branch itself.
+    remote = _DecideRemote(question_id="bmsg_" + "ab" * 16)
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "decided", "consent_bearing": None}
+    assert remote.decisions == [("a-site", "bmsg_" + "ab" * 16, "approve")]
+    assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_signed_decision_answers_409_with_its_sentence(answers_api) -> None:
+    client, app = answers_api
+    sentence = "The node's browser refused this answer: it was not signed by your operator key."
+    remote = _DecideRemote(question_id="bmsg_cd", verdict={"ok": False, "error": sentence})
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["deny"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == sentence
+    assert remote.decisions == [("a-site", "bmsg_cd", "deny")]
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_ask_beside_a_signed_one_keeps_the_plain_door(answers_api) -> None:
+    client, app = answers_api
+    remote = _DecideRemote(question_id="site:v1:ef")
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-other", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.decisions == []
+    assert remote.calls == [("a-other", {"q0": ["yes"]}, False, False)]
+
+
+class _UnsignedCapableRemote(_DecideRemote):
+    """A facade that reports whether ``bridge_decide`` would go out UNSIGNED.
+
+    ``signature_free=False`` is the terminal-started designated session: this
+    backend did not start the runtime, so the real attach client would sign the
+    decision with the operator key (Touch ID). PR #4208 security round 1, S-1.
+    """
+
+    def __init__(self, *, signature_free: bool, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.signature_free = signature_free
+        self.probed = 0
+
+    async def bridge_decide_signature_free(self) -> bool:
+        self.probed += 1
+        return self.signature_free
+
+
+def _card_recorder(monkeypatch: pytest.MonkeyPatch, outcome: str | None = "decided"):
+    from local_operator.server.routes import desktop_team_bridge
+
+    calls: list[dict[str, Any]] = []
+
+    async def record(config_dir: Any, **kwargs: Any) -> str | None:
+        calls.append(kwargs)
+        return outcome
+
+    monkeypatch.setattr(desktop_team_bridge, "decide_request_from_card", record)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_team_bridge_card_that_would_be_signed_takes_the_no_prompt_path(
+    answers_api, monkeypatch
+) -> None:
+    """a-856f / S-1: no signed runtime door, so no Touch ID, for a Team Bridge card."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_" + "cd" * 16)
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["detail"] == "decided"
+    assert calls == [{"ask_id": "a-site", "message_id": "bmsg_" + "cd" * 16, "word": "approve"}]
+    assert remote.decisions == []  # the signing door was never reached
+    assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_no_prompt_card_refusal_is_a_409_sentence(answers_api, monkeypatch) -> None:
+    from local_operator.server.routes import desktop_team_bridge
+
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_ef")
+    _install_ask_remote(app, remote)
+
+    async def refuse(config_dir: Any, **kwargs: Any) -> str | None:
+        raise ValueError("this request was already decided")
+
+    monkeypatch.setattr(desktop_team_bridge, "decide_request_from_card", refuse)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Deny"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == "this request was already decided"
+    assert remote.decisions == []
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_door_stays_when_no_prompt_is_needed(answers_api, monkeypatch) -> None:
+    """A capability-bearing backend keeps the runtime door: no prompt there,
+    and the answer reaches the agent's turn."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=True, question_id="bmsg_ab")
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.decisions == [("a-site", "bmsg_ab", "approve")]
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_stale_team_bridge_card_that_would_be_signed_is_refused_not_signed(
+    answers_api, monkeypatch
+) -> None:
+    """R2-1 (a-856f): no matching local ask on a would-sign backend is the
+    "no longer waiting" refusal, never a fall-through to the signing door."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_ab")
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch, None)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == "this request is no longer waiting for a decision"
+    assert len(calls) == 1
+    assert remote.decisions == []  # the signing door was never reached
+
+
+@pytest.mark.asyncio
+async def test_a_card_answer_that_is_not_approve_or_deny_is_refused_before_anything_is_saved(
+    answers_api, tmp_path, monkeypatch
+) -> None:
+    """S-4 at the route: ``Maybe`` reaches the REAL ``decide_request_from_card``
+    (lower-cased by ``bridge_decision_target``) and is refused with the runtime
+    door's sentence before any store read or intent write."""
+    from local_operator.team_bridge import approvals
+
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_ab")
+    _install_ask_remote(app, remote)
+    looked_up: list[Any] = []
+    monkeypatch.setattr(
+        approvals, "bridge_asks_by_message", lambda root: looked_up.append(root) or {}
+    )
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Maybe"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == (
+        "that is not an answer this request accepts — choose Approve or Deny."
+    )
+    assert looked_up == []  # refused before the first store read
+    assert remote.decisions == [] and remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_site_card_keeps_the_signed_door_even_when_it_would_be_signed(
+    answers_api, monkeypatch
+) -> None:
+    """S-1's boundary: a ``site:v1:`` browser approval is real authority (the
+    node's extension re-verifies the signature), so it is never rerouted."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="")
+    card = _site_card(shown_origin="https://docs.example", bound_origin="https://docs.example")
+    remote.frontend_state.asks[0].questions = [card]
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.decisions == [("a-site", card["question_id"], "approve")]
+    assert calls == [] and remote.probed == 0
+
+
+def _site_card(*, shown_origin: str, bound_origin: str) -> dict[str, Any]:
+    """A node's site card as its frame publishes it: ``site_ask_question``'s
+    own output, bound to ``bound_origin``. Only the forged variant's sentence
+    is swapped for one naming ``shown_origin``.
+
+    Built from the real builder, not by hand: the signer compares the WHOLE
+    question (review R2-1: option order, labels, ``recommended``, ``multi``),
+    so a hand-drawn copy drifts the moment the card's shape moves and the
+    genuine case is refused as a mismatch for the wrong reason.
+    """
+    from local_operator.browser_bridge.site_approval import site_ask_question
+    from local_operator.i18n.messages import render
+
+    card = site_ask_question(
+        origin=bound_origin, node_name="node-a", node_device_id="d_node", entry_id="entry-1"
+    )
+    if shown_origin != bound_origin:
+        card["question"] = render(
+            "browser.site_approval.question",
+            {"origin": shown_origin, "node": "node-a"},
+            locale="en",
+        )
+    return card
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shown", ["http://127.0.0.1:8765", "https://evil.example"])
+async def test_the_desktop_route_signs_only_a_card_it_can_rebuild(answers_api, shown) -> None:
+    """R1-1: the card text is drawn on the node, where the agent can append an
+    ask whose words name origin A and whose digest binds origin B. The route
+    rebuilds both from the structured ``site`` block before it reaches the
+    signing door, and a mislabeled card is refused (409, typed sentence) with
+    nothing signed."""
+    client, app = answers_api
+    remote = _DecideRemote(question_id="")
+    card = _site_card(shown_origin=shown, bound_origin="https://evil.example")
+    remote.frontend_state.asks[0].questions = [card]
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    if shown == "https://evil.example":
+        assert result.status_code == 200, result.text
+        assert remote.decisions == [("a-site", card["question_id"], "approve")]
+    else:
+        assert result.status_code == 409, result.text
+        assert "did not sign" in result.json()["detail"]
+        assert remote.decisions == []
+    assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_bridge_keeps_adr_0009_routing_facts_off_its_frames(
+    tmp_path, monkeypatch
+) -> None:
+    """A local session's attention frame and snapshot omit ``origin``/``needs_user``.
+
+    Review round 3, R3-2: the bridge publishes raw ``AttentionStore.state`` for a
+    local session and installs it on the snapshot with ``model_copy``, which
+    skips the model validator. The bridge's own copy keeps the full state, since
+    its notification edge reads the store's facts.
+    """
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    raw = {"unseen": True, "completion_token": "t2", "origin": "o" * 4000, "needs_user": True}
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    bridge.attention = {"unseen": False, "completion_token": "t1"}
+
+    async def read() -> dict[str, Any]:
+        return dict(raw)
+
+    monkeypatch.setattr(bridge, "_read_attention", read)
+    await bridge.refresh_attention()
+
+    frames = [frame["payload"] for frame, _ in bridge.replay if frame.get("type") == "attention"]
+    assert frames, "the bridge published no attention frame"
+    assert not {"origin", "needs_user"} & set(frames[-1])
+    assert frames[-1]["completion_token"] == "t2"
+    assert bridge.attention["origin"] == "o" * 4000
+
+    bridge.remote = cast(
+        Any, SimpleNamespace(frontend_state=FrontendSessionState(session_id="s1", epoch="e1"))
+    )
+    capture = bridge._capture_wire_state()
+    assert not {"origin", "needs_user"} & set(capture.attention)
+    snapshot = module._wire_state_of(capture)["snapshot"]
+    assert not {"origin", "needs_user"} & set(snapshot["attention"])
+
+
+# --- team targets whose roster names hub-pulled roles ------------------------
+#
+# Operator report: a new chat on a hub-pulled team showed "This conversation's
+# model was not resolved". ``sessions.preview`` ran ``validate_target``, which
+# raised a bare ``KeyError('iac-engineer')`` because the pulled roster role
+# carried only hub provenance tags. Both halves are pinned here: the member now
+# resolves, and a member that genuinely does not resolve is NAMED in the 404.
+
+
+def _seed_hub_team(root: Path, *, member_tags: list[str]) -> None:
+    from local_operator.agents import AgentRegistry
+    from local_operator.teams import TeamEditFields, TeamRegistry, parse_members
+    from tests.unit.test_agent_avatar import _edit_fields
+
+    agents = AgentRegistry(root)
+    for name, tags in (("hub-manager", ["role"]), ("iac-engineer", member_tags)):
+        row = agents.create_agent(_edit_fields(name=name, description="d", tags=tags))
+        agents.set_agent_system_prompt(row.id, f"{name} body")
+    TeamRegistry(root).create_team(
+        TeamEditFields(
+            name="pergamondev",
+            description=None,
+            manager="hub-manager",
+            members=parse_members(["iac-engineer"]),
+            instructions=None,
+            project=None,
+        )
+    )
+
+
+HUB_MEMBER_TAGS = ["hub:f5580f4a-0000-4000-8000-000000000001", "hub_sha256:" + "0" * 64]
+
+
+@pytest.mark.asyncio
+async def test_a_team_whose_member_is_a_hub_pulled_role_previews(draft_api) -> None:
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    _seed_hub_team(root, member_tags=HUB_MEMBER_TAGS)
+
+    pane = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(root),
+            "target": {"kind": "team", "name": "pergamondev"},
+        },
+    )
+
+    assert pane.status_code == 200, pane.text
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_team_member_is_named_in_the_404(draft_api) -> None:
+    """Same 404 and sentence as before; the failing team/slot/member ride as data."""
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    # A private chat agent: no role tag, no specialist category, no provenance.
+    _seed_hub_team(root, member_tags=[])
+    body = {
+        "request_id": str(uuid.uuid4()),
+        "cwd": str(root),
+        "target": {"kind": "team", "name": "pergamondev"},
+    }
+
+    pane = await client.post("/v1/desktop/sessions/preview", json=body)
+    created = await client.post("/v1/desktop/sessions", json=body)
+
+    assert pane.status_code == 404, pane.text
+    detail = pane.json()["detail"]
+    assert detail["code"] == "wire.errors.desktop.requested_not_found"
+    assert detail["unresolved"] == {
+        "team": "pergamondev",
+        "slot": "member",
+        "member": "iac-engineer",
+    }
+    assert created.status_code == 404, created.text
+    assert created.json()["detail"] == detail
+
+
+def test_validate_target_names_the_unresolved_member(tmp_path) -> None:
+    from local_operator.agents import AgentRegistry
+    from local_operator.server.utils.desktop_profiles import (
+        UnresolvedTarget,
+        validate_target,
+    )
+    from local_operator.teams import TeamRegistry
+
+    _seed_hub_team(tmp_path, member_tags=[])
+    with pytest.raises(UnresolvedTarget) as raised:
+        validate_target(AgentRegistry(tmp_path), TeamRegistry(tmp_path), "team", "pergamondev")
+
+    assert isinstance(raised.value, KeyError), "the 404 contract keys on KeyError"
+    assert str(raised.value) == (
+        "team 'pergamondev' member 'iac-engineer' is not an installed role, specialist or team"
+    )
+    with pytest.raises(UnresolvedTarget) as missing:
+        validate_target(AgentRegistry(tmp_path), TeamRegistry(tmp_path), "team", "nope")
+    assert missing.value.wire_fields()["unresolved"] == {
+        "team": None,
+        "slot": "team",
+        "member": "nope",
+    }

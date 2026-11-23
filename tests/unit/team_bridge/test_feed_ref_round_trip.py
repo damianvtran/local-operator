@@ -192,3 +192,124 @@ def test_record_feed_batch_quarantines_a_malformed_ref(tmp_path):
     )
     assert store.sync_state(OWNER)["feed_seq"] == 5
     assert store.hold_count_readonly(OWNER, FEED_REF_QUARANTINE_CODE) == 1
+
+
+# -- passive (agent-server #402: non-waking thread-reply rows) -----------------
+
+
+def _events_ref(**ids) -> ConversationFeedRef:
+    _cursor, refs, _resync = project_events_batch(
+        {
+            "cursor": "5",
+            "events": [
+                {
+                    "type": "message_available",
+                    "ids": {
+                        "conversation_id": CONVERSATION_ID,
+                        "message_id": MESSAGE_ID,
+                        "conversation_seq": 1,
+                        "sender_kind": "agent",
+                        "thread_root_id": THREAD_ROOT,
+                        **ids,
+                    },
+                    "at": "2026-11-17T00:00:00Z",
+                }
+            ],
+        }
+    )
+    parsed = parse_conversation_ref_value(refs[0][len(PREFIX) :])
+    assert parsed is not None and parsed.encode() == refs[0]
+    return parsed
+
+
+@pytest.mark.parametrize(
+    ("ids", "passive"),
+    [
+        pytest.param({"passive": True}, True, id="true"),
+        pytest.param({}, False, id="absent-older-hub"),
+        pytest.param({"passive": False}, False, id="false"),
+        # A wrong type is DROPPED (fails toward waking), never a refused page.
+        pytest.param({"passive": "yes"}, False, id="wrong-type"),
+        # A mention is never passive.
+        pytest.param({"passive": True, "mention": True}, False, id="mention-wins"),
+    ],
+)
+def test_events_passive_bit_reaches_the_durable_ref(ids, passive):
+    assert _events_ref(**ids).passive is passive
+
+
+def test_the_longest_passive_ref_round_trips_through_the_store(tmp_path):
+    """Every tag at once (9 parts) survives ``record_feed_batch`` canonicalisation."""
+
+    ref = ConversationFeedRef(
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        conversation_seq=1,
+        mention=False,
+        sender_kind="human",
+        thread_root_id=THREAD_ROOT,
+        addressed="ambient",
+        sender_relation="member",
+        passive=True,
+    ).validated()
+    full_ref = ref.encode()
+    assert full_ref.endswith("/passive=1")
+    assert len(full_ref[len(PREFIX) :].split("/")) == 9
+    store = Store(tmp_path)
+    store.commit_enrollment(OWNER, OwnerReceipt("bridge_consent_v1", "receipt"))
+    store.record_feed_batch(OWNER, feed_seq(5), [full_ref], resync_required=False)
+    assert store.drain_feed_refs(OWNER, 5) == [full_ref]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"{CONVERSATION_ID}/{MESSAGE_ID}/1/0/agent/thread_root={THREAD_ROOT}/passive=0",
+        f"{CONVERSATION_ID}/{MESSAGE_ID}/1/0/agent/passive=",
+        # Passive beside a mention, or a migration alias: no writer produces it.
+        f"{CONVERSATION_ID}/{MESSAGE_ID}/1/1/agent/passive=1",
+        f"{CONVERSATION_ID}/{MESSAGE_ID}/1/0/agent/legacy_alias={'a' * 64}/passive=1",
+    ],
+)
+def test_a_damaged_passive_tag_is_refused(value):
+    assert parse_conversation_ref_value(value) is None
+
+
+def test_an_older_reader_ignores_the_passive_tag_and_wakes():
+    """Rollback safety: an unknown tag is ignored, so a pre-#402 build wakes as today.
+
+    Simulated by the grammar's own rule for an unknown tag name.
+    """
+
+    value = f"{CONVERSATION_ID}/{MESSAGE_ID}/1/0/agent/thread_root={THREAD_ROOT}/some_future=1"
+    parsed = parse_conversation_ref_value(value)
+    assert parsed is not None and parsed.passive is False
+
+
+@pytest.mark.parametrize(
+    ("sender_kind", "tier_name"),
+    [("human", "SCREENING_TIER_HUMAN"), ("agent", "SCREENING_TIER_AMBIENT")],
+)
+def test_a_passive_reply_ranks_with_channel_traffic_on_catch_up(sender_kind, tier_name):
+    """Operator order (2026-10-26): DMs > mentions > threads > channel traffic.
+
+    A passive reply is screened (and retried after an outage) in the SAME tier as
+    an unaddressed channel line from that sender kind — never the addressed tiers
+    that DMs and mentions use.
+    """
+
+    from local_operator.team_bridge.connector.batch_screen import allocation_for
+    from local_operator.team_bridge.connector.conversation import screening_addressed
+
+    ref = _events_ref(passive=True, sender_kind=sender_kind)
+    display = {"sender_kind": sender_kind, "conversation_kind": "channel", "thread_follower": False}
+    channel_line = ConversationFeedRef(
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        conversation_seq=1,
+        mention=False,
+        sender_kind=sender_kind,
+    )
+    assert allocation_for(ref, display) == allocation_for(channel_line, display)
+    assert allocation_for(ref, display)["tier"] == getattr(Store, tier_name)
+    assert screening_addressed(ref, display) == "ambient"

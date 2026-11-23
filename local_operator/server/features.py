@@ -39,7 +39,29 @@ from local_operator.supplements.contract import (
 #: checking ``notification_bulk_selection``; the relay's ``extra="ignore"`` query
 #: drops ``include_ask_reads`` and answers the same plain first page.
 DESKTOP_ONLY_FEATURES = frozenset(
-    {"notification_bulk_selection", "notification_bulk_ask_read", "profile_proposals"}
+    {
+        "notification_bulk_selection",
+        "notification_bulk_ask_read",
+        "profile_proposals",
+        # The phone relay serves no `/v1/desktop/mobile/password`; a phone
+        # client must not be told it can read the portal password it signs in
+        # with (routes/desktop_mobile_password.py).
+        "mobile_password_read",
+        # Same class: the phone relay serves no `/v1/desktop/mobile/doctor`, so
+        # advertising the key from the relay would point a phone client at a
+        # route that 404s. The doctor is the DESKTOP's "Copy diagnostics" button
+        # (routes/desktop_mobile_doctor.py); a phone reads `lop mobile doctor`
+        # output through the operator, never through the relay.
+        "mobile_doctor",
+        "operator_setup",
+        # Same class: the relay's `/api/projects*` surface has no per-session
+        # reverse lookup (`GET /v1/desktop/sessions/{id}/projects` lives only in
+        # routes/desktop_projects.py), so a phone told it may ask would 404.
+        "projects_by_session",
+        # The relay answers asks on its own route, which carries no
+        # `consent_bearing` receipt (a phone answer is stamped `remote` anyway).
+        "ask_consent_bearing",
+    }
 )
 
 
@@ -72,6 +94,11 @@ def static_feature_flags() -> dict[str, Any]:
     """
     return {
         "auth": 1,
+        # Amazon Bedrock's AWS panel routes (``routes/auth.py``: context,
+        # connection, sso-login, check; bedrock design §7). The desktop shows
+        # the AWS panel only when this is present; older backends answer the
+        # generic API-key path only.
+        "bedrock_auth": 1,
         "settings": 1,
         # 2 narrows the messages endpoint's slash policy: it now accepts a
         # message that merely BEGINS with a command word (`/mcp logout
@@ -470,6 +497,20 @@ def static_feature_flags() -> dict[str, Any]:
         # alone, because the UI's reaction hold was lifted on exactly that
         # condition. A renderer that does not see it shows no reaction controls.
         "team_bridge_reactions": 1,
+        # RENAME: `POST .../conversations/{id}/rename` with body `{name}` plus
+        # the optional captured-owner receipt (`expected_account_id` +
+        # `tenant_id`) in the BODY, under the same rules as create/send. It
+        # gates the conversation menu's Rename item: a renderer that does not
+        # see this key offers no Rename, because on an older daemon the call
+        # would 404 (or 405) instead of renaming. The upstream decides authority
+        # (the same as archive) and every rule, and its refusals
+        # (`conversation_name_taken` with `details`, `conversation_archived`,
+        # `invalid_transition` with `rule`, 403, 404, 503) pass through as-is.
+        "team_bridge_conversation_rename": 1,
+        # Atomic metadata PATCH, including explicit empty-topic clear. This is
+        # a daemon-route capability, not upstream version negotiation: deploy
+        # and verify the additive hub endpoint BEFORE releasing this runtime.
+        "team_bridge_conversation_update": 1,
         # TYPING INDICATORS (typing-indicators design §5): `GET|PUT|DELETE
         # .../conversations/{id}/typing` for the signed-in HUMAN only (no actor
         # endpoint on this plane). Both writes REQUIRE the captured-owner
@@ -742,6 +783,21 @@ def static_feature_flags() -> dict[str, Any]:
         # condition gets re-checked rather than rediscovered.
         "desktop_feed": 1,
         "desktop_presence": 1,
+        # ADR 0008 desk presence (slice 1): `POST /v1/desktop/presence`
+        # accepts the optional `idle_s`, `locked`, `idle_trusted` and
+        # `away_after_s` fields, and the phone push worker holds/releases on
+        # "a person is at this computer" rather than on window focus.
+        #
+        # A KEY, NOT "ADDITIVE OPTIONAL", and that is forced: `PresenceBeat`
+        # is `extra="forbid"`, so a beat carrying a field an older core does
+        # not declare is a 422. The app swallows that error, the lease then
+        # lapses after 45 s, the banner gate stops suppressing the on-screen
+        # conversation and the phone gets everything. So an app adds the
+        # fields ONLY to a backend advertising this key (read on every feed
+        # connect, local or remote), and sends today's beat byte-for-byte to
+        # one without it. The `notifications.phone_away_after_s` setting and
+        # its relay route ship under the same release.
+        "desk_presence": 1,
         # Stopping a session's CURRENT WORK without ending the session:
         # POST /v1/desktop/sessions/{id}/interrupt.
         #
@@ -887,6 +943,33 @@ def static_feature_flags() -> dict[str, Any]:
         # retain health/sign-in behavior; only this key admits the new account-
         # pinned quote/run affordance, never an automatic poll-side mutation.
         "tunnel_setup": 1,
+        # `GET /v1/desktop/mobile/password`: the desktop's "Show phone
+        # password" under "Using your own tunnel?". Its own key because the
+        # route is new and additive: an older backend has no way to answer,
+        # so ABSENT ⇒ the renderer keeps pointing at `lop mobile password` in
+        # a terminal rather than showing a button that 404s. The read is on
+        # click only, never cached or prefetched (see the route's module doc
+        # for why the desktop bearer may read this secret at all).
+        "mobile_password_read": 1,
+        # `GET /v1/desktop/mobile/doctor`: the read-only, redacted phone-access
+        # diagnosis (`mobile/doctor.py`) behind the desktop's "Copy
+        # diagnostics" button. ABSENT => the renderer hides the button; an older
+        # backend has no route to call.
+        "mobile_doctor": 1,
+        # Turning on phone approvals (operator authority) without a terminal
+        # (design v2 §6, C3): `GET/POST /v1/desktop/operator/setup`. Its own
+        # key so a renderer shows [Turn on phone approvals] only against a
+        # backend that has the gesture-only route; an older backend keeps the
+        # renderer's existing copy. Desktop-only (DESKTOP_ONLY_FEATURES): the
+        # phone relay serves no such route.
+        "operator_setup": 1,
+        # `remedy.kind` on `GET /v1/desktop/tunnel`, the setup route's new kinds
+        # (`open_console`, `wait_network`, `wait_radient`) and the reconnect /
+        # lapsed-billing steps, plus `kind` on the gateway's 503 body. ABSENT ⇒
+        # the renderer keeps its command/url-only remedy handling: an older
+        # backend sends no `kind` there, and a renderer that guessed one from a
+        # sentence would offer a button the backend never promised.
+        "tunnel_remedy_kinds": 1,
         # THE MESH, and both keys gate AFFORDANCES rather than shapes.
         #
         # `peers` is the peer catalogue's key (mesh-session-mobility.md
@@ -915,6 +998,21 @@ def static_feature_flags() -> dict[str, Any]:
         # nothing.
         "peers": 1,
         "session_transfer": 1,
+        # The move's WORKING-SET GATE (docs/design/move-working-set.md §11.1):
+        # ``POST /v1/desktop/sessions/{id}/transfer/preflight`` and the
+        # ``confirm_working_set``/``without_working_set`` transfer fields. Its own
+        # key, per this file's rule: the old dialog keeps working byte for byte and
+        # meets an honest ``working_set_unconfirmed`` refusal (with the manifest)
+        # only for a session that has git worktrees to account for.
+        "session_transfer_working_set": 1,
+        # The preflight's DESTINATION PROBE (move-working-set.md §11.1): each
+        # ``working_set.worktrees[]`` row carries the destination's own
+        # ``clone_check`` answer (``ok``/``destination_cannot_fetch``/``_push``/
+        # ``_clone``/``unknown_destination``/``no_remote``), optional
+        # ``https_rewrite``/``remedy``/``missing_tools``, and the block carries
+        # ``destination_probe``. Additive members of the same mapping; a renderer
+        # without this key simply does not show them.
+        "session_transfer_working_set_probe": 1,
         # The PROJECT primitive (`/v1/desktop/projects*`, the ``project``
         # tool and ``/project``). ONE key gating both the affordance and
         # the reads: the Projects tab, its CRUD dialogs and the
@@ -980,6 +1078,18 @@ def static_feature_flags() -> dict[str, Any]:
         # without it keeps the CLI-remedy card (`can_approve_here: False`) and never
         # POSTs a body this backend would not understand.
         "credential_approvals": 1,
+        # PHONE PAIRING BY APPROVAL (pairing design v2 §1-§2): the `pairing` block on a
+        # `pair_phone` row, `POST /v1/desktop/approvals/{id}/pair-ack` (typed code or,
+        # on an edge-attested request, "codes match"), `GET`/`DELETE
+        # /v1/desktop/devices`, and the feed's `approvals.pair_request`. Its own key so
+        # a renderer that lacks it never posts a pair-ack body an older backend 404s.
+        "phone_pairing": 1,
+        # MESH PAIRING FROM THE MESH APPROVALS (design mesh-pairing-approvals §3.3):
+        # `GET /v1/desktop/mesh/pairings`, `POST .../{side}/{invite_id}/answer` (app
+        # attestation required; 403 `pairing_needs_app` otherwise), and the feed's
+        # `approvals.pairing_id`. Its own key so a renderer without it never shows a
+        # card an older backend cannot serve.
+        "mesh_pairing": 1,
         # Signed profile continuations disclose/apply through the same inbox.
         "profile_approvals": 1,
         "profile_proposals": 1,
@@ -1007,6 +1117,16 @@ def static_feature_flags() -> dict[str, Any]:
         # the body would be rejected as an unknown field. Absent ⇒ no
         # "close anyway" affordance anywhere.
         "projects_force_done": 1,
+        # THE REVERSE LOOKUP on the projects surface: `GET
+        # /v1/desktop/sessions/{id}/projects`, the projects one chat is linked
+        # to (work OR coordination membership, `projects_for_session`), as
+        # listing rows in the listing's order — what the chat view's "Linked
+        # projects" canvas tab paints. ITS OWN KEY, not a bump of `projects`,
+        # by the rule above: an older renderer is untouched, and a newer one
+        # against an older backend sees the key absent and hides the tab
+        # rather than calling a route that 404s. Desktop-only
+        # (DESKTOP_ONLY_FEATURES): the phone relay serves no such route.
+        "projects_by_session": 1,
         # TEMPORARY CHATS (``session/temporary.py``): `temporary` on
         # `POST /v1/desktop/sessions` and `POST /api/sessions/start`,
         # `include_temporary` on the session lists, the
@@ -1080,6 +1200,19 @@ def static_feature_flags() -> dict[str, Any]:
         # door on this device, or the live op on the owner -- and an older owner
         # simply refuses in the queue's own words, which the card shows inline.
         "ask_dismiss": 1,
+        # WHETHER A QUEUED-ASK ANSWER CAN AUTHORISE A DELETE: the boolean
+        # ``consent_bearing`` on the answer receipt of
+        # `POST /v1/desktop/sessions/{id}/answers` (answer, revise, decline).
+        # True only when this backend holds the operator capability of the
+        # runtime it answered (it started that runtime) and presented the proof;
+        # False means the runtime stamped the answer `unverified`, which the
+        # dangerous-delete guard never reads as consent (incident a-48e3,
+        # 2026-11-16: a runtime started by the wake supervisor, answered from the
+        # desktop card). WHY A KEY: the field is additive, so a renderer must
+        # tell "older backend, unknown" (key absent) from "this answer is not
+        # consent-bearing" (key present, field False) before it shows a caveat.
+        # Computed server-side only; a hint for the card, never consent itself.
+        "ask_consent_bearing": 1,
         # THE SPEECH SURFACE: `GET /v1/stt/paths` (the ordered cascade report)
         # and `POST /v1/stt/transcriptions` (the executor, with its 409
         # `stt_unavailable` structured refusal), plus the audio-accepting
@@ -1164,6 +1297,14 @@ def static_feature_flags() -> dict[str, Any]:
         # `1` is the feature's first contract revision; new row fields are additive and do not
         # bump it.
         "session_files": 1,
+        # REMOTE FILES PARITY (docs/design/remote-files-parity.md §6): a PEER's conversation
+        # answers like a local one — transcript attachments/waveforms/supplements fetched on
+        # miss (504 retryable, 409 permanent), `…/files` and `…/user-attachments` listed by the
+        # owner with `remote`/`origin_device`/`remote_read`/`remote_unreadable` on each row, and
+        # the peer-only `…/files/{id}/content` and `POST …/files/{id}/download` routes.
+        # ABSENT MEANS a peer's Files panel is still `state: "unsupported"` and the renderer
+        # keeps today's message. `1` is the first contract revision.
+        "remote_files": 1,
         # THE USER-ATTACHMENT INVENTORY: `GET /v1/desktop/sessions/{id}/user-attachments`,
         # every document and picture the PERSON attached to the conversation, scanned from the
         # whole journal (`session/user_attachments.py`). Its OWN key rather than a bump of
@@ -1246,6 +1387,13 @@ def static_feature_flags() -> dict[str, Any]:
         # and on/off are NOT on these routes: they stay on `PATCH
         # /v1/settings/{key}`, the one write funnel.
         "notification_sounds": 1,
+        # TEAM BRIDGE CARD BODIES (bridge-body design §4): `GET
+        # /v1/desktop/sessions/{id}/bridge-cards/{entry_id}/body` and the relay's
+        # `/api/sessions/{id}/bridge-cards/{entry_id}/body` answer the admitted
+        # body (or held/refused/pending state) behind one inbound bridge card.
+        # Shared by desktop and relay because both serve the route. Absent, a
+        # client keeps today's "body unavailable" copy.
+        "team_bridge_card_body": 1,
         # REMOTE COMPUTE (preview): the affordance that offers to run work on
         # Radient-hosted compute. CONDITIONAL, because unlike every build fact
         # above this one must not be advertised while it is switched off: the
@@ -1275,10 +1423,19 @@ def live_feature_flags() -> dict[str, Any]:
     # precedents the guard names are ``routes.desktop_profiles`` (imports
     # ``tools.agent_tool`` per profile write) and ``routes.auth`` (imports
     # ``tunnels.report`` per request).
+    from local_operator.community import community_enabled
     from local_operator.references import at_references_enabled
     from local_operator.remote_compute import is_enabled as remote_compute_enabled
 
     return {
+        # LOCAL OPERATOR COMMUNITY (RFC v2.4 §7.2): the `/v1/desktop/community/*`
+        # member door. CONDITIONAL, a live fact like ``remote_compute``: the
+        # routes answer `community_disabled` while ``LOCAL_OPERATOR_COMMUNITY``
+        # is off (``community.community_enabled`` is the one reader, called here
+        # so this map and the routes cannot disagree), and a renderer that saw
+        # the key on a dark install would paint a surface that only refuses.
+        # Absent ⇒ no community surface, the pre-feature state.
+        **({"community": 1} if community_enabled() else {}),
         # REMOTE COMPUTE (preview): the affordance that offers to run work on
         # Radient-hosted compute. CONDITIONAL, because unlike every build fact
         # above this one must not be advertised while it is switched off: the
@@ -1291,6 +1448,16 @@ def live_feature_flags() -> dict[str, Any]:
         # Absent ⇒ no remote destination and no request to build — the
         # pre-feature state, not a degraded one.
         **({"remote_compute": 1} if remote_compute_enabled() else {}),
+        # PER-SESSION VOICE MODE (docs/design/qwen-voice.md): the three
+        # `/v1/desktop/voice*` routes and the `type: "voice"` frame on
+        # `/v1/desktop/events`. Its own key for the rule `code_requests` states:
+        # the routes are additive, and this is how a renderer learns they exist
+        # before it mounts the voice toggle. Absent, the renderer shows no
+        # voice affordance and makes no voice request.
+        # 2 (session-voice-groq D3): `/voice/text` returns `segments`, `/voice/speech`
+        # returns one WAV segment by `(source, segment)`, and 429s carry
+        # `voice_rate_limited`. A renderer on 1 has no speech route.
+        "voice": 2,
         # ``@path`` in an ordinary submitted message, which
         # :meth:`Session.prompt` expands into an
         # ``<operator-references>`` block before the model sees the turn

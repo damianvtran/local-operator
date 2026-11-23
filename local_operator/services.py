@@ -1220,8 +1220,16 @@ def reload_serve_daemons(
     monotonic: Callable[[], float] = time.monotonic,
     stuck: Callable[[], list[ServeDaemonReport]] = serve_daemon_reports,
     rolling: bool = False,
+    schedule_retry: Callable[..., bool] | None = None,
 ) -> list[ServiceRefresh]:
     """Ask every stale ``serve`` daemon to move itself onto the current build.
+
+    ``schedule_retry`` (fix B, 2026-11-17) is called as ``schedule_retry(rolling=
+    ...)`` when a daemon misses the wait, and answers whether a bounded
+    background retry is now running. ``None`` — ``lop services restart``, and the
+    retry worker itself, which must not schedule another — keeps the old "try
+    again by hand" sentence. ``lop update`` passes
+    ``update.schedule_serve_move_retry``.
 
     ONE REQUEST PER DAEMON, THEN ONE WAIT — not request/wait/request/wait. The
     daemons move in parallel by construction (each is an independent process), so
@@ -1414,7 +1422,15 @@ def reload_serve_daemons(
 
     if pending:
         refreshes.extend(
-            _await_relocations(pending, wait_s=wait_s, sleep=sleep, scan=scan, monotonic=monotonic)
+            _await_relocations(
+                pending,
+                wait_s=wait_s,
+                sleep=sleep,
+                scan=scan,
+                monotonic=monotonic,
+                retry=schedule_retry,
+                rolling=rolling,
+            )
         )
     return refreshes
 
@@ -1426,6 +1442,8 @@ def _await_relocations(
     sleep: Callable[[float], None],
     scan: Callable[[], list[Any]],
     monotonic: Callable[[], float],
+    retry: Callable[..., bool] | None = None,
+    rolling: bool = False,
 ) -> list[ServiceRefresh]:
     """Wait for the asked daemons to republish under a NEW ``instance_id``.
 
@@ -1454,6 +1472,17 @@ def _await_relocations(
             break
         sleep(RELOAD_POLL_S)
 
+    # ONE RETRY FOR THE WHOLE FLEET, scheduled at most once per call: the worker
+    # re-asks every stale daemon, so a second miss must not start a second one.
+    missed = any(record.pid not in settled for record in pending)
+    retrying = False
+    if missed and retry is not None:
+        try:
+            retrying = bool(retry(rolling=rolling))
+        except Exception:  # noqa: BLE001 — a failed schedule falls back to the old sentence
+            logger.warning("could not schedule the serve move retry", exc_info=True)
+    from local_operator.update import DaemonStatus
+
     out: list[ServiceRefresh] = []
     for record in pending:
         name = _serve_name(record)
@@ -1463,6 +1492,20 @@ def _await_relocations(
                 ServiceRefresh(
                     name,
                     lines=(f"{name} is now serving {moved.version or 'the current build'}",),
+                )
+            )
+        elif retrying:
+            out.append(
+                ServiceRefresh(
+                    name,
+                    warnings=(
+                        f"warning: {name} did not come back on the current build within "
+                        f"{_seconds_label(wait_s)}; move pending, retrying in the background "
+                        "(`lop services status` shows progress)",
+                    ),
+                    statuses=(
+                        DaemonStatus(name, "pending", "move pending, retrying in the background"),
+                    ),
                 )
             )
         else:
@@ -1480,7 +1523,11 @@ def _await_relocations(
 
 
 def restart_services(
-    *, wait_s: float = RELOAD_WAIT_S, rolling: bool = False, supervised: bool = True
+    *,
+    wait_s: float = RELOAD_WAIT_S,
+    rolling: bool = False,
+    supervised: bool = True,
+    schedule_retry: Callable[..., bool] | None = None,
 ) -> list[ServiceRefresh]:
     """Bring EVERY non-runtime service onto the current build.
 
@@ -1512,8 +1559,13 @@ def restart_services(
     from local_operator import update
 
     refreshes: list[ServiceRefresh] = []
+    # Passed on only when set, so a caller (or a test double) of the reload that
+    # predates the retry keeps its exact call shape.
+    retry_options: dict[str, Any] = (
+        {} if schedule_retry is None else {"schedule_retry": schedule_retry}
+    )
     if not supervised:
-        return reload_serve_daemons(wait_s=wait_s, rolling=rolling)
+        return reload_serve_daemons(wait_s=wait_s, rolling=rolling, **retry_options)
     try:
         for refresh in update.refresh_daemons_after_upgrade():
             refreshes.append(
@@ -1535,7 +1587,7 @@ def restart_services(
                 ),
             )
         )
-    refreshes.extend(reload_serve_daemons(wait_s=wait_s, rolling=rolling))
+    refreshes.extend(reload_serve_daemons(wait_s=wait_s, rolling=rolling, **retry_options))
     return refreshes
 
 
@@ -1766,6 +1818,17 @@ def status_lines() -> list[str]:
     for report in stuck:
         lines.extend(not_serving_lines(report))
     lines.extend(_fleet_action_lines(daemons, stamp))
+    # A restart the update handed to a background worker (it was slow, not
+    # failed) reports how it ENDED here, since the update had already exited.
+    try:
+        from local_operator import update
+
+        lines.extend(update.background_refresh_lines())
+    except Exception:  # noqa: BLE001 - an unreadable record must not break status
+        logger.debug("background refresh records unreadable", exc_info=True)
+    # The PROCESSES, not the unit files (fix A, 2026-11-17): a daemon on an old
+    # generation is listed here with why it was left and how to move it.
+    lines.extend(stale_daemon_lines())
     supervised = _supervised_daemon_plists()
     for path in supervised:
         lines.append(f"supervised daemon: {path.stem}")
@@ -1796,7 +1859,63 @@ def status_lines() -> list[str]:
             # something the tool no longer keeps. See `_install_may_repoint_daemons`.
             lines.append("      `lop services restart` repoints them only from the")
             lines.append("      install that owns them")
+    lines.extend(_heavy_job_lines())
     return lines
+
+
+def _heavy_job_lines() -> list[str]:
+    """Who holds the machine-wide heavy-job slots (``local_operator/heavy_lease.py``).
+
+    An operator whose build says "queued behind …" comes here to see the holder
+    and how long it has run. Cheap by design: it reads the JSON holder records
+    and checks each pid's liveness (a dead pid is a stale record and is
+    skipped); it never probes the flocks, so a status read can never take or
+    disturb a slot. Off or unsupported (Windows) prints that instead of a count,
+    and any failure drops the line rather than the whole status report.
+    """
+    try:
+        from local_operator import heavy_lease
+
+        if not heavy_lease.supported():
+            return ["heavy jobs: queue unavailable on this platform"]
+        settings = heavy_lease.configured_settings()
+        if not settings.enabled:
+            return ["heavy jobs: queue off (bash.heavy_jobs.enabled=false)"]
+        directory = heavy_lease.lease_dir()
+        return [heavy_lease.status_line(directory, settings.slots), *_heavy_audit_row(directory)]
+    except Exception:  # noqa: BLE001 - a status nicety must never fail the report
+        logger.debug("heavy-job status unreadable", exc_info=True)
+        return []
+
+
+def _heavy_audit_row(directory: Path) -> list[str]:
+    """One line: the heavy-lease audit trail's last event and where the trail is.
+
+    The readiness half of the audit trail (``local_operator/heavy_audit.py``):
+    it tells an operator the trail exists and is being written, and points at
+    the file that proves serialization. One line by contract — the event tail
+    lives in ``lop services heavy status``. No line before the first heavy job
+    ever ran (no file yet): an empty trail is not news on a fresh install.
+    """
+    from local_operator import heavy_audit
+    from local_operator.i18n.keys import cli_services_heavy as copy
+    from local_operator.i18n.text import tr
+
+    entry = heavy_audit.last_event(directory)
+    if entry is None:
+        return []
+    try:
+        age = max(0, int(time.time() - float(entry.get("ts") or 0)))
+    except (TypeError, ValueError):
+        age = 0
+    from local_operator.heavy_cli import _age
+
+    row = copy.audit_row(
+        record=heavy_audit.describe(entry),
+        age=_age(age),
+        path=str(heavy_audit.audit_path(directory)),
+    )
+    return [tr("cli.services_heavy")(row)]
 
 
 def _fleet_action_lines(daemons: Sequence[Any], stamp: Any) -> list[str]:
@@ -2070,3 +2189,324 @@ def print_refreshes(refreshes: Sequence[ServiceRefresh]) -> None:
     for refresh in refreshes:
         for warning in refresh.warnings:
             print(warning, file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# STALE BACKGROUND DAEMONS, READ OFF THE PROCESSES THEMSELVES (2026-11-17, fix A)
+#
+# THE MEASURED GAP: after node2 updated to 0.106.7, ``ps`` showed the wakes
+# supervisor and the secret broker on 0.102.2 and the browser bridge on 0.105.3,
+# while the update report said ``central_services_complete: true`` and this
+# module's ``status`` listed none of them. Both surfaces read UNIT FILES (which
+# name the stable shim, so they are byte-identical across generations) or the
+# refresh child's own verdicts — never the running processes. This inventory is
+# the ground truth both now share: it asks each daemon process which generation
+# it was exec'd from (``update.generation_staleness_of_process``, the same
+# argv-under-``generations/`` reading the macOS repair already acts on).
+# ---------------------------------------------------------------------------
+
+#: ``-m <module>`` → (daemon name, why an update may leave it, recovery).
+#: The names are the refresh child's own (``update._LINUX_RESTART_UNITS``,
+#: ``update._refresh_steps``) so a stale row and that daemon's refresh status
+#: reconcile by name. The reason is what ``lop services status`` and the
+#: update report print when the process is still on an older build.
+#:
+#: THE SECRET BROKER IS ROLLED, NOT RESTARTED (2026-11-21): the refresh child's
+#: "secret broker" step (``update._refresh_secret_broker`` →
+#: ``secrets.roll.roll_broker``) replaces it with no credential gap when nothing
+#: would need the passphrase again and every registered session can
+#: re-register. It used to be report-only with "it moves when it idles out",
+#: which is false while any session is registered (``_should_idle_out``) — node2
+#: sat on 0.102.2 for 7+ days. When the roll defers, the step's own reason (the
+#: pids that must restart, or the unlocked passphrase tier) rides on the status
+#: and ``update._reconcile_with_processes`` keeps it; this text is the fallback
+#: ``lop services status`` prints for a stale broker process.
+_DAEMON_MODULES: dict[str, tuple[str, str]] = {
+    "local_operator.wakes.supervisor": (
+        "wakes supervisor",
+        "run `lop wake install`, then `lop services restart`",
+    ),
+    "local_operator.browser_bridge.daemon": (
+        "browser bridge",
+        "run `lop browser restart`",
+    ),
+    "local_operator.network.relay": ("network relay", "run `lop network restart`"),
+    "local_operator.tunnels.service": ("tunnel", "run `lop tunnel restart`"),
+    "local_operator.mobile.service": ("mobile", "run `lop mobile restart`"),
+    "local_operator.team_bridge.connector": (
+        "bridge connector",
+        "run `lop team-bridge receiver install`",
+    ),
+    "local_operator.secrets.brokerd": (
+        "secret broker",
+        "rolled by `lop update` only without a credential gap: it stays while the "
+        "hardened store is unlocked or while registered sessions run a build that "
+        "cannot re-register (the update report names them); `lop secret broker "
+        "restart` rolls it, or says why it cannot",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class StaleDaemon:
+    """One background daemon process provably on a superseded generation."""
+
+    name: str
+    pid: int
+    generation: str
+    reason: str
+
+
+def _own_process_table() -> list[tuple[int, str]]:
+    """``[(pid, argv)]`` for this user's processes; ``[]`` when unreadable.
+
+    ``-ww`` because a generation path is long and a truncated argv would lose
+    the module name this inventory keys on (``update.py`` measured the same
+    truncation at 145 columns).
+    """
+    import subprocess
+
+    try:
+        done = subprocess.run(
+            ["ps", "-ww", "-U", str(os.getuid()), "-o", "pid=,args="],
+            capture_output=True,
+            text=True,
+            timeout=HEALTH_TIMEOUT_S * 5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, AttributeError):
+        return []
+    rows: list[tuple[int, str]] = []
+    for line in done.stdout.splitlines():
+        head, _, args = line.strip().partition(" ")
+        if head.isdigit():
+            rows.append((int(head), args.strip()))
+    return rows
+
+
+def _daemon_module(args: str) -> str | None:
+    """The ``-m`` module of a daemon argv this inventory knows, else ``None``."""
+    words = args.split()
+    for index, word in enumerate(words[:-1]):
+        if word == "-m" and words[index + 1] in _DAEMON_MODULES:
+            return words[index + 1]
+    return None
+
+
+def stale_background_daemons(
+    *,
+    table: Callable[[], list[tuple[int, str]]] | None = None,
+    staleness: Callable[[int], bool | None] | None = None,
+    generation: Callable[[int], Path | None] | None = None,
+    wake_census: Callable[[], int | None] | None = None,
+    wake_kill_mode: Callable[[], str | None] | None = None,
+) -> list[StaleDaemon]:
+    """Every known background daemon whose RUNNING process is on an old build.
+
+    Only a PROVEN ``True`` counts (the F10 tri-state): a process whose
+    generation or pointer cannot be read is not reported, because "stale" is a
+    claim. Never raises — both readers are reports, not gates.
+    """
+    from local_operator import update
+
+    stale_of = staleness or update.generation_staleness_of_process
+    generation_of = generation or update.generation_of_process
+    found: list[StaleDaemon] = []
+    try:
+        # NO LAYOUT, NO QUESTION: without a readable ``current`` pointer no
+        # process can be proven stale, so the ``ps`` scan is not even run (a
+        # pip/pipx install, a redirected test HOME). Only the default reader is
+        # gated; an injected one answers for itself.
+        if staleness is None and update.current_generation() is None:
+            return found
+        for pid, args in (table or _own_process_table)():
+            module = _daemon_module(args)
+            if module is None or stale_of(pid) is not True:
+                continue
+            name, reason = _DAEMON_MODULES[module]
+            if module == "local_operator.wakes.supervisor":
+                reason = _wakes_left_reason(
+                    wake_census or update._wake_owned_runtime_count, wake_kill_mode
+                )
+            running = generation_of(pid)
+            found.append(
+                StaleDaemon(
+                    name=name,
+                    pid=pid,
+                    generation=running.name if running is not None else "an older generation",
+                    reason=reason,
+                )
+            )
+    except Exception:  # noqa: BLE001 — a report must never fail its command
+        logger.debug("background daemon inventory failed", exc_info=True)
+    return found
+
+
+def _wakes_left_reason(
+    census: Callable[[], int | None],
+    kill_mode: Callable[[], str | None] | None = None,
+) -> str:
+    """Why a stale wakes supervisor is still running, read NOW (review R1-3).
+
+    The common reason on a ``KillMode=process`` unit is not the unit file at
+    all: the update defers the restart while wake-started conversations run,
+    because the supervisor's stop SIGTERMs them (``update._UNIT_CHILD_CENSUS``).
+    So status asks the same census the refresher gates on and prints the same
+    sentence (``update.wake_children_deferral``); with none running it names
+    the move that now works, plus the unit rewrite an older install still needs.
+
+    THE KILLMODE GATE COMES FIRST, as in the refresher (#4175 QA Q2,
+    2026-11-18). A Linux unit still LOADED with ``KillMode=control-group`` is
+    refused before the census is even taken, so its real reason is the unit
+    rewrite, and the census sentence ("moves when they end") is false for it.
+    ``kill_mode`` reads the same loaded value (``update.wakes_unit_kill_mode``);
+    ``None`` (macOS, no unit, not addressable) skips the gate exactly as the
+    refresher does.
+    """
+    from local_operator import update
+
+    loaded = (kill_mode or update.wakes_unit_kill_mode)()
+    if loaded is not None and loaded != "process":
+        recovery = next(
+            r for _, unit, r, _ in update._LINUX_RESTART_UNITS if unit == update._WAKES_UNIT
+        )
+        return update.kill_mode_deferral(update._WAKES_UNIT, loaded, recovery)
+    running = census()
+    if running != 0:
+        return update.wake_children_deferral(running)
+    return (
+        "no wake-started conversations are running, so `lop services restart` moves it "
+        "now (run `lop wake install` first if its unit predates KillMode=process)"
+    )
+
+
+def stale_daemon_lines(daemons: Sequence[StaleDaemon] | None = None) -> list[str]:
+    """``lop services status`` rows for :func:`stale_background_daemons`."""
+    rows = stale_background_daemons() if daemons is None else daemons
+    return [
+        f"STALE daemon: {d.name} (pid {d.pid}) runs {d.generation}, not current — {d.reason}"
+        for d in rows
+    ]
+
+
+def stale_daemon_status_line(
+    name: str, command: str, *, daemons: Sequence[StaleDaemon] | None = None
+) -> str:
+    """One daemon's "running an older build" status line, or ``""``.
+
+    For ``lop mobile status`` / ``lop tunnel status`` (field finding,
+    2026-11-18: an upgraded machine kept both on the old build and neither
+    status said so). :func:`stale_background_daemons` filtered to ``name`` — one
+    census, so this cannot disagree with ``lop services status`` — and, like it,
+    silent unless the staleness is PROVEN.
+    """
+    rows = stale_background_daemons() if daemons is None else daemons
+    found = next((d for d in rows if d.name == name), None)
+    if found is None:
+        return ""
+    from local_operator.i18n.keys import cli_daemon_build as _k
+    from local_operator.i18n.text import tr
+
+    return tr("cli.daemon_build")(_k.status_stale(generation=found.generation, command=command))
+
+
+# ---------------------------------------------------------------------------
+# A MISSED SERVE MOVE IS RETRIED, NOT ABANDONED (2026-11-17, fix B)
+#
+# THE MEASURED FAILURE: on the operator's Mac at load average ~60, ``lop update``
+# to 0.106.7 asked serve to move and waited :data:`RELOAD_WAIT_S` (45 s); the
+# daemon did not republish in time, the update printed "the next `lop services
+# restart` will try again", and serve stayed on the old build until a person ran
+# exactly that. The reload request itself was fine — a manual restart moved it —
+# the machine was just slower than the budget.
+#
+# WHAT RUNS THE RETRY: the update's existing watched background worker
+# (``update._start_watched_worker``, the slow-restart hand-off's watchdog), so no
+# new LONG-LIVED process exists: the worker is bounded
+# (``update._SERVE_RETRY_BACKGROUND_BOUND_S``), runs this module's
+# ``--retry-serve-move`` entry from the build the pointer names, and exits when
+# serve is current or the attempts are spent. Its run directory is what ``lop
+# services status`` reads to say "move pending, retrying" — and how it ended.
+#
+# THE ROLLING-NO-KILL CONTRACT IS UNCHANGED: each attempt is
+# :func:`reload_serve_daemons` — the same SIGUSR1 request, the same rolling flag
+# the update used — and a repeated request is idempotent (``ReloadWatch.request``
+# only sets an Event), so a retry never kills a conversation and never doubles a
+# drain already under way.
+# ---------------------------------------------------------------------------
+
+#: Seconds slept before each retry attempt. NOT A MEASURED DISTRIBUTION — the one
+#: datum is n=1 (the 2026-11-17 Mac at load ~60 missed 45 s; a manual restart
+#: some minutes later succeeded). The schedule is sized to outlast a load episode
+#: of ~15 min (30+60+120+240+480 = 930 s of sleeps, plus up to 45 s of waiting per
+#: attempt) while keeping the worker bounded; a machine still unable to move serve
+#: after that has a problem a retry will not fix, and status says so.
+SERVE_MOVE_RETRY_DELAYS_S: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0, 480.0)
+
+
+def retry_serve_move(
+    *,
+    rolling: bool = False,
+    delays: Sequence[float] = SERVE_MOVE_RETRY_DELAYS_S,
+    sleep: Callable[[float], None] = time.sleep,
+    stale: Callable[[], list[Any] | None] = stale_serve_daemons,
+    reload: Callable[..., list[ServiceRefresh]] | None = None,
+    out: Callable[[str], None] = print,
+    err: Callable[[str], None] | None = None,
+) -> int:
+    """Re-ask stale ``serve`` daemons to move until none is stale; 0 on success.
+
+    The two STOP sentences go to ``err`` (stderr by default) because the
+    worker's last stderr line is what ``lop services status`` quotes beside a
+    failed background run — on stdout the operator read a bare "exit 1".
+
+    Checks BEFORE each attempt, so a move that landed late (the daemon was only
+    slow) or another actor's ``lop services restart`` ends the retry without a
+    redundant request — "a later success clears it". ``None`` from ``stale``
+    (no build stamp to compare against) is a stop, not a success: without a
+    predicate there is nothing to move onto (``reload_serve_daemons`` refuses on
+    the same reading).
+    """
+    request = reload or reload_serve_daemons
+    fail = err or (lambda message: print(message, file=sys.stderr))
+    attempts = len(delays)
+    for attempt, delay in enumerate(delays, start=1):
+        sleep(delay)
+        pending = stale()
+        if pending is None:
+            fail("serve move: no current build to compare against; stopped retrying")
+            return 1
+        if not pending:
+            out("serve move: every serve daemon is on the current build")
+            return 0
+        out(f"serve move: attempt {attempt} of {attempts}")
+        print_refreshes(request(rolling=rolling))
+    pending = stale()
+    if pending == []:
+        out("serve move: every serve daemon is on the current build")
+        return 0
+    fail(
+        f"serve move: still on the old build after {attempts} attempts; "
+        "run `lop services restart`"
+    )
+    return 1
+
+
+def _main(argv: Sequence[str] | None = None) -> int:
+    """``python -m local_operator.services --retry-serve-move [--rolling]``.
+
+    A module entry rather than a ``lop`` verb: it is an internal worker the
+    update starts, never something an operator types, and a hidden CLI verb
+    would still surface in ``lop services``'s usage line.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="local_operator.services")
+    parser.add_argument("--retry-serve-move", action="store_true", required=True)
+    parser.add_argument("--rolling", action="store_true")
+    args = parser.parse_args(argv)
+    return retry_serve_move(rolling=args.rolling)
+
+
+if __name__ == "__main__":
+    sys.exit(_main())

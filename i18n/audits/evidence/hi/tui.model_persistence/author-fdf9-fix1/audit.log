@@ -1,0 +1,20 @@
+MODULE local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+ISOLATION PASS scratch HOME/config; CMUX absent
+UNCHANGED OTHER THREE VALUES PASS ['tui.model_persistence.persist', 'tui.model_persistence.settings', 'tui.model_persistence.with_model']
+OFFICIAL SCOPED CHECK []
+NEGATIVE CHECK PASS missing-key ["hi/tui.model_persistence: missing key 'tui.model_persistence.saved'"]
+NEGATIVE CHECK PASS missing-arg ["hi/tui.model_persistence: tui.model_persistence.with_model: arguments (('label', 'simple'),) != en's (('label', 'simple'), ('routes', 'simple')): en has 2 argument(s), translation has 1"]
+KEY PASS tui.model_persistence.persist NFC, commands, args, zero plural/select arms
+KEY PASS tui.model_persistence.settings NFC, commands, args, zero plural/select arms
+KEY PASS tui.model_persistence.saved NFC, commands, args, zero plural/select arms
+KEY PASS tui.model_persistence.with_model NFC, commands, args, zero plural/select arms
+RENDER en 'model: openai/gpt-6 — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too'
+RENDER en 'model: provider/opaque-model-20261122-{not_a_placeholder}[flag]--long-0123456789 — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too'
+RENDER hi 'मॉडल: openai/gpt-6 — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /model saved से इस सत्र का मॉडल सहेजे गए डिफ़ॉल्ट पर बदलें · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+RENDER hi 'मॉडल: provider/opaque-model-20261122-{not_a_placeholder}[flag]--long-0123456789 — /model default से इस मॉडल को नए सत्रों के डिफ़ॉल्ट के रूप में सहेजें · /model saved से इस सत्र का मॉडल सहेजे गए डिफ़ॉल्ट पर बदलें · /settings से भी नए सत्रों का डिफ़ॉल्ट बदलें'
+NEGATIVE RENDER PASS label message argument 'label' was not supplied (have: routes)
+NEGATIVE RENDER PASS routes message argument 'routes' was not supplied (have: label)
+HISTORY AND ORIGINAL EVIDENCE IMMUTABLE PASS 17 files
+HASHES BEFORE-AFTER {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "hi": "fe5174ef5f6cd8ea96d751c6722707d58a6a9108d17922d9b411b9a6b6799967"}
+PASS translated-remediation mechanical checks only; no self-audit/native/UI/release clearance

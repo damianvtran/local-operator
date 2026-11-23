@@ -78,8 +78,49 @@ class RequestFailed(ValueError):
     push worker's refusal record (``push_worker.EmitRefused``) carries the
     status as the whole of what its one drop line can say after the third try,
     and parsing it back out of a sentence would couple that log to prose.
+
+    ``retry_after`` is the wait, in seconds, Radient asked for — its
+    ``Retry-After`` header, or else the edge WAF body's
+    ``details.retry_after_seconds`` (radient-infra #138) or its older "retry in
+    N seconds" sentence — or ``None`` when it named none. It is a
+    NUMBER read out of the answer, never the body itself, so the redaction rule
+    above still holds. The connector's poller backs off by it (see
+    ``service.transient_poll_delay``): re-asking inside a WAF block only keeps
+    the source IP over the limit, and the WAF counts blocked requests too.
     """
 
-    def __init__(self, message: str, *, status: int) -> None:
+    def __init__(self, message: str, *, status: int, retry_after: float | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
+
+
+class ClientUpgradeRequired(RequestFailed):
+    """A fixed HTTP 426 mapping: retry/login/billing cannot add a capability."""
+
+    def __init__(self) -> None:
+        from local_operator.tunnels.upgrade import detail
+
+        super().__init__(detail(), status=426)
+
+
+class TunnelInactive(ValueError):
+    """Radient declined to serve this tunnel, refined to the cause that blocks it.
+
+    Raised by the connector's cold start when `/connect` answers 402/403 or an
+    inactive record, AFTER it has read `/billing` (and the tunnel record) to tell
+    the four causes apart — see `gateway.TUNNEL_INACTIVE` and its siblings. The
+    refinement happens where an async client and the owner-pinned login are
+    already open, so the classifier that reads this (`service.classify_failure`,
+    which is synchronous and does no I/O) only has to read ``reason`` off the
+    chain.
+
+    The sentence stays a fixed literal (never a provider body), and the type stays
+    a ``ValueError`` so `service.main`'s existing retrying arm handles it: every
+    one of these causes clears from outside this process, so the connector keeps
+    its 10-second retry floor rather than parking.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("Radient is not serving this tunnel.")
+        self.reason = reason

@@ -627,3 +627,240 @@ def test_cli_typed_disclosure_and_explicit_empty_grant_do_not_use_generic_approv
     for key in ("key_id", "spki_fp", "statement_digest"):
         assert r["what"]["anchor"][key] in captured.err
     assert "fixture-ssh-reference" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("skills_ok", [True, False], ids=["skills_ok", "skills_missing"])
+def test_verify_accepts_the_non_gating_skills_row(skills_ok):
+    """PR #3839 regression: the mesh skill sync added a per-peer ``skills`` row.
+
+    ``ready_evidence`` keeps a closed capability allowlist, so before ``skills``
+    joined it every enrollment from that build ended ``failed`` ("The network
+    enrollment authority is invalid"). The failing row must also survive
+    ``public_report``, whose code allowlist is the ``readiness.CODE_*`` set.
+    """
+    skills_row = {
+        "check": "readiness",
+        "class": "equipment",
+        "device_id": "d_target",
+        "ok": skills_ok,
+        "capability": "skills",
+        "source": "peer",
+    }
+    if not skills_ok:
+        # The wire value skills_row emits; a literal so the pre-fix build fails
+        # on the refusal itself rather than on a missing constant.
+        skills_row["code"] = "skills_not_synced"
+    report = {
+        "ok": skills_ok,
+        "identity_present": True,
+        "checks": [
+            {
+                "check": "reachability",
+                "class": "admission",
+                "device_id": "d_target",
+                "ok": True,
+                "observed": {"outcome": "connected"},
+            },
+            {
+                "check": "readiness",
+                "class": "admission",
+                "device_id": "d_target",
+                "ok": True,
+                "capability": "build",
+                "source": "peer",
+            },
+            {
+                "check": "readiness",
+                "class": "equipment",
+                "device_id": "d_target",
+                "ok": True,
+                "capability": "operator_authority",
+                "source": "peer",
+            },
+            skills_row,
+        ],
+    }
+    rows = e.ready_evidence(report, device_id="d_target", network_id="n_target")
+    expected = [] if skills_ok else [{"capability": "skills", "code": "skills_not_synced"}]
+    assert rows == expected
+    terminal = e.public_report(
+        {
+            "enrollment_verified": True,
+            "ready_ok": skills_ok,
+            "task_ready": False,
+            "equipment_warnings": rows,
+        }
+    )
+    assert terminal["equipment_warnings"] == expected
+
+
+def _verify_report(*extra: dict[str, Any]) -> dict[str, Any]:
+    """The minimal report verify accepts (reachability + build + operator) plus ``extra``."""
+    return {
+        "ok": False,
+        "identity_present": True,
+        "checks": [
+            {
+                "check": "reachability",
+                "class": "admission",
+                "device_id": "d_target",
+                "ok": True,
+                "observed": {"outcome": "connected"},
+            },
+            {
+                "check": "readiness",
+                "class": "admission",
+                "device_id": "d_target",
+                "ok": True,
+                "capability": "build",
+                "source": "peer",
+            },
+            {
+                "check": "readiness",
+                "class": "equipment",
+                "device_id": "d_target",
+                "ok": True,
+                "capability": "operator_authority",
+                "source": "peer",
+            },
+            *extra,
+        ],
+    }
+
+
+def _row(capability: str, *, ok: bool, code: str = "", device: str = "d_target") -> dict[str, Any]:
+    return {
+        "check": "readiness",
+        "class": "equipment",
+        "device_id": device,
+        "ok": ok,
+        "capability": capability,
+        "source": "peer",
+        "code": code,
+    }
+
+
+#: Rows readiness gained after the hand-kept enrollment allowlist was written,
+#: with the code each emits when it fails. Any peer reporting one used to fail
+#: verify with "The network enrollment authority is invalid".
+_LATER_ROWS = (
+    ("custom_instructions", "kept_own"),
+    ("model_switch", "session_scoped_share"),
+    ("subagent_tiers", "kept_own"),
+    # #3951's role-pin row: admitted by the derived set (no hand entry), and its
+    # failure code is a named ``CODE_*`` the receipt accepts.
+    ("subagent_tier_pins", "tier_unavailable"),
+)
+
+
+def test_verify_and_receipt_accept_every_later_readiness_row():
+    from local_operator.network import readiness
+
+    extra = []
+    for capability, code in _LATER_ROWS:
+        extra += [
+            _row(capability, ok=True),
+            _row(capability, ok=False, code=code),
+            # ``ready`` reports every peer, not only the one enrolling.
+            _row(capability, ok=False, code=code, device="d_other_peer"),
+        ]
+    warnings = e.ready_evidence(_verify_report(*extra), device_id="d_target", network_id="n")
+    # Only the TARGET's failed rows are warnings; none of them is evidence.
+    assert warnings == [{"capability": c, "code": code} for c, code in _LATER_ROWS]
+    terminal = e.public_report(
+        {
+            "enrollment_verified": True,
+            "ready_ok": False,
+            "task_ready": False,
+            "equipment_warnings": warnings,
+        }
+    )
+    assert terminal["equipment_warnings"] == warnings
+    # Every code those rows emit is a named readiness constant (the receipt's rule).
+    codes = {v for k, v in vars(readiness).items() if k.startswith("CODE_")}
+    assert {code for _, code in _LATER_ROWS} <= codes
+
+
+def test_every_readiness_capability_is_admitted_by_enrollment():
+    """Guard: a new readiness row must never break enrollment verify again."""
+    from pathlib import Path
+
+    from local_operator.network import readiness
+
+    constants = {
+        value
+        for key, value in vars(readiness).items()
+        if key.startswith("CAPABILITY_") and isinstance(value, str)
+    }
+    assert constants <= e.enrollment_capabilities()
+    assert readiness.NON_GATING_EQUIPMENT <= e.enrollment_capabilities()
+    assert set(readiness.PEER_SIDE_CHECKS) <= e.enrollment_capabilities()
+    assert e.EVIDENCE_CAPABILITIES <= e.enrollment_capabilities()
+    # The derivation only sees constants, so a row spelled as a literal would
+    # slip past it (``selected_model_credential`` was one): none may remain.
+    source = Path(readiness.__file__).read_text(encoding="utf-8")
+    assert 'capability="' not in source
+    # Likewise the receipt admits only ``CODE_*`` values: no literal failure code.
+    import re
+
+    assert re.findall(r'\bcode="[a-z_]+"', source) == []
+
+
+def test_a_held_mcp_login_row_is_admitted_and_its_code_is_named():
+    """#3947: a peer riding a held MCP sign-in reports ``mcp_credential`` ok with
+    ``CODE_HELD_OFFLINE``. Verify admits it (an ok row is not a warning), and the
+    code is a named constant, so the receipt would admit it too if a row ever
+    failed with it — the train-t7 guard failure was a literal ``code="held_offline"``.
+    """
+    from local_operator.network import readiness
+
+    held = _row(readiness.CAPABILITY_MCP_CREDENTIAL, ok=True, code=readiness.CODE_HELD_OFFLINE)
+    assert e.ready_evidence(_verify_report(held), device_id="d_target", network_id="n") == []
+    warning = {"capability": readiness.CAPABILITY_MCP_CREDENTIAL, "code": "held_offline"}
+    terminal = e.public_report(
+        {
+            "enrollment_verified": True,
+            "ready_ok": False,
+            "task_ready": False,
+            "equipment_warnings": [warning],
+        }
+    )
+    assert terminal["equipment_warnings"] == [warning]
+
+
+def test_an_unknown_capability_is_still_refused():
+    unknown = _row("not_a_readiness_row", ok=False, code="")
+    with pytest.raises(MeshRefusal):
+        e.ready_evidence(_verify_report(unknown), device_id="d_target", network_id="n")
+    for capability in ("not_a_readiness_row", "build", "operator_authority"):
+        with pytest.raises(MeshRefusal):
+            e.public_report(
+                {
+                    "enrollment_verified": True,
+                    "ready_ok": False,
+                    "task_ready": False,
+                    "equipment_warnings": [{"capability": capability, "code": ""}],
+                }
+            )
+
+
+def test_every_peer_side_readiness_row_is_accepted_by_enrollment_verification() -> None:
+    """Every row a peer's ready report carries must be accepted by
+    ``ready_evidence`` and publishable by ``public_report``: the enrollment
+    sets are CLOSED, so a new ``readiness.PEER_SIDE_CHECKS`` capability missing
+    from them rejects every report. The node-managed ``browser`` row did exactly
+    that (signed desktop onboarding failed with "enrollment authority is
+    invalid"). Both lists are now derived (:func:`e.enrollment_capabilities`
+    minus the evidence pair); this pins the browser row through that derivation.
+    ``operator_authority`` is the one positive (admission-side) capability,
+    read outside the warning set."""
+    from local_operator.network import readiness
+
+    warning_capabilities = e.enrollment_capabilities() - e.EVIDENCE_CAPABILITIES
+    missing = set(readiness.PEER_SIDE_CHECKS) - warning_capabilities - {"operator_authority"}
+    assert missing == set()
+    assert readiness.CAPABILITY_BROWSER in warning_capabilities
+    # ``skills`` (PR #3839) rides every peer report but is appended by
+    # ``_peer_checks`` outside ``PEER_SIDE_CHECKS``, so the set difference above
+    # cannot see it; pin it by name.
+    assert readiness.CAPABILITY_SKILLS in warning_capabilities

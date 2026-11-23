@@ -1,0 +1,121 @@
+$ python3 -B i18n/audits/evidence/fr/cli.serve_readiness/sd4/catalogue-audit.py.txt
+cwd=/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade
+python=3.9.25 (main, Jul 15 2026, 00:00:00) 
+[GCC 11.5.0 20240719 (Red Hat 11.5.0-5)]
+date=2026-11-16T05:18:32.631978+00:00
+HEAD=1fc11dab96954dcc4c31abcc695c696baf2ead8c
+Scope: 11 changed/new + 4 byte-identical carried keys per locale; no tests/services; catalogue-only parser/render assertions.
+PASS fr/cli.serve_readiness.unproven: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.not_reporting: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.not_this_daemon: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.unknown_state: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.install_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.cgroup_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.recorded_gap: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.stale: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.other_unit: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.identity_restart: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.pid_reason: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.and_more: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.identity_no_action: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr/cli.serve_readiness.identity_restart_manual: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS fr: 15 keys, 11 changed/new, 4 exact retained; ordinary=87, opaque=87, composed=4; CLDR=['many', 'one', 'other']; original sd2r target SHA matched HEAD
+PASS es/cli.serve_readiness.unproven: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.not_reporting: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.not_this_daemon: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.unknown_state: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.install_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.cgroup_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.recorded_gap: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.stale: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.other_unit: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.identity_restart: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.pid_reason: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.and_more: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.identity_no_action: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es/cli.serve_readiness.identity_restart_manual: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS es: 15 keys, 11 changed/new, 4 exact retained; ordinary=87, opaque=87, composed=4; CLDR=['many', 'one', 'other']; original sd2r target SHA matched HEAD
+PASS ru/cli.serve_readiness.unproven: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.not_reporting: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.not_this_daemon: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.unknown_state: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.install_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.cgroup_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.recorded_gap: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.stale: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.other_unit: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.identity_restart: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.pid_reason: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.and_more: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.identity_no_action: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru/cli.serve_readiness.identity_restart_manual: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ru: 15 keys, 11 changed/new, 4 exact retained; ordinary=87, opaque=87, composed=4; CLDR=['few', 'many', 'one', 'other']; original sd2r target SHA matched HEAD
+PASS vi/cli.serve_readiness.unproven: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.not_reporting: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.not_this_daemon: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.unknown_state: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.install_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.cgroup_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.recorded_gap: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.stale: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.other_unit: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.identity_restart: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.pid_reason: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.and_more: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.identity_no_action: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi/cli.serve_readiness.identity_restart_manual: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS vi: 15 keys, 11 changed/new, 4 exact retained; ordinary=87, opaque=87, composed=4; CLDR=['other']; original sd2r target SHA matched HEAD
+PASS hi/cli.serve_readiness.unproven: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.not_reporting: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.not_this_daemon: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.unknown_state: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.install_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.cgroup_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.recorded_gap: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.stale: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.other_unit: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.identity_restart: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.pid_reason: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.and_more: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.identity_no_action: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi/cli.serve_readiness.identity_restart_manual: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS hi: 15 keys, 11 changed/new, 4 exact retained; ordinary=87, opaque=87, composed=4; CLDR=['one', 'other']; original sd2r target SHA matched HEAD
+PASS ur/cli.serve_readiness.unproven: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.not_reporting: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.not_this_daemon: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.unknown_state: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.install_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.cgroup_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.recorded_gap: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.stale: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.other_unit: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.identity_restart: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.pid_reason: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.and_more: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.identity_no_action: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur/cli.serve_readiness.identity_restart_manual: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS ur: 15 keys, 11 changed/new, 4 exact retained; ordinary=87, opaque=87, composed=4; CLDR=['one', 'other']; original sd2r target SHA matched HEAD
+PASS zh-CN/cli.serve_readiness.unproven: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.not_reporting: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.not_this_daemon: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.unknown_state: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.install_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.cgroup_unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.recorded_gap: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.unknown: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.stale: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.other_unit: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.identity_restart: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.pid_reason: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.and_more: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.identity_no_action: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN/cli.serve_readiness.identity_restart_manual: ICU argument order/kinds, per-branch placeholders/literals, Unicode, renders
+PASS zh-CN: 15 keys, 11 changed/new, 4 exact retained; ordinary=87, opaque=87, composed=4; CLDR=['other']; original sd2r target SHA matched HEAD
+PASS 7 locales, 105 total key coverage, 77 changed/new fresh + 28 retained exact; source/current inputs stable; all prior sd2/sd2r bytes preserved.
+EXIT_CODE=0

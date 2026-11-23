@@ -512,3 +512,82 @@ async def test_a_refused_delta_heals_by_rebinding_to_a_fresh_snapshot(
         if remote is not None:
             await remote.dispose()
         registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_of_a_deferred_cold_facade_replays_no_already_painted_rows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Recovering a never-hydrated cold facade must not replay the whole journal.
+
+    QA Q2 on #4012: a prompt sent while a cold big desktop session warmed got
+    ``503 runtime_unreachable``, the facade entered ``_recover_runtime``, and the
+    non-windowed recovery branch measured its "gap" against a DEFERRED facade's
+    empty painted-id set. Every durable row looked unpainted, so one
+    ``history_delta`` carried the whole journal (19,200 rows, ~37 MB) and every
+    desktop viewer overflowed its 8 MiB queue. The viewers had painted those rows
+    from snapshot pages already, exactly as an eager cold open records them, so
+    the gap is EMPTY here and recovery must emit no history delta at all.
+    """
+    from local_operator.harness.types import HistoryDeltaEvent, Message, TextContent
+    from local_operator.session.runtime import launch as launch_mod
+    from local_operator.session.transcript import Transcript
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    session_dir = tmp_path / "sessions" / "s1"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    transcript = Transcript(session_dir)
+    for turn in range(6):
+        await transcript.append_message(
+            Message(id=f"u{turn}", role="user", content=[TextContent(text=f"q{turn}")])
+        )
+        await transcript.append_message(
+            Message(id=f"a{turn}", role="assistant", content=[TextContent(text=f"a{turn}")])
+        )
+    transcript.flush()
+    transcript.close()
+    (session_dir / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+    handle = FakeHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        await _record(tmp_path)
+
+        async def _no_engage(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            return None
+
+        monkeypatch.setattr(launch_mod, "engage_runtime", _no_engage)
+        remote = await AttachedSession.cold(
+            "s1",
+            config_dir=tmp_path,
+            cwd=str(tmp_path),
+            takeover_factory=_never,
+            surface="desktop",
+            deferred_history=True,
+        )
+        assert remote._deferred_history is not None, "the facade under test must be deferred"
+        deltas: list[HistoryDeltaEvent] = []
+        remote.subscribe(
+            lambda event: deltas.append(event) if isinstance(event, HistoryDeltaEvent) else None
+        )
+
+        await remote._recover_runtime()
+
+        assert not remote.is_cold, "recovery must bind to the live record"
+        assert [
+            len(delta.messages) for delta in deltas
+        ] == [], "recovery replayed rows the viewers already painted from the cold open"
+        assert [m.id for m in remote.history()] == [
+            id_ for turn in range(6) for id_ in (f"u{turn}", f"a{turn}")
+        ]
+        # #4023 R1-m1: the hydrate seeds the cold painted-id set for a replay
+        # this branch never runs. Left set (12 ids here before the fix), a later
+        # ``_load_frontend_history`` would re-emit rows painted live after this.
+        assert (
+            remote._cold_painted_ids is None
+        ), "recovery left the hydrate's cold painted-id set behind"
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()

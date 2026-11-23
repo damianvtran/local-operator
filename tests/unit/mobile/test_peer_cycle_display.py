@@ -95,9 +95,13 @@ async def test_actual_frontend_late_publication_bumps_idle_phone_without_final_o
     notifications = []
     events = []
     unlisten = session.subscribe(events.append)
-    unsubscribe = bind_owner_peer_cycles(
-        fold, session, lambda: notifications.append(projection.version), asyncio.get_running_loop()
-    )
+    landed = asyncio.Event()
+
+    def _notify() -> None:
+        notifications.append(projection.version)
+        landed.set()
+
+    unsubscribe = bind_owner_peer_cycles(fold, session, _notify, asyncio.get_running_loop())
     try:
         fold.fold_history(history)
         assert not any("peer_cycle" in row.details for row in projection.transcript)
@@ -107,6 +111,11 @@ async def test_actual_frontend_late_publication_bumps_idle_phone_without_final_o
             peer_cycle_display={"refs": [record["id"]], "records": [record]}
         )
         await asyncio.sleep(0)
+        # The indexed validator never builds on the loop: the append left the
+        # index stale, so the first apply may only arm the shared refresh; the
+        # binder re-applies once that refresh lands -- still with no final/user
+        # event. Wait on the notification (the event), bounded.
+        await asyncio.wait_for(landed.wait(), timeout=10)
         assert projection.version > before and notifications
         assert any("peer_cycle" in row.details for row in projection.transcript)
         assert not events and not stream.requests
@@ -292,12 +301,15 @@ def test_live_phone_keeps_a_nonpeer_delivery_visible_and_uncertified(custom_type
     rows = projection.transcript
     assert not any("peer_cycle" in row.details for row in rows), [r.kind for r in rows]
     assert not any(row.kind == "peer_message" and row.text == body for row in rows)
-    assert any(row.text == body for row in rows), "the typed delivery must stay visible"
+    # A Team Bridge delivery shows its one-line receipt (here the keyed generic
+    # sender: this event carries no receipt), never the card body it was sent with.
+    shown = "a teammate" if custom_type == "team_bridge_message" else body
+    assert any(row.text == shown for row in rows), "the typed delivery must stay visible"
     # The notice documents that it carries the ORIGINAL custom kind, so the
     # reader can tell a bridge card from a future kind. It rides as a display
     # key only: an extra detail key must never certify the row (the absence
     # assertion above is the guard), and the phone tolerates keys it ignores.
-    boundary = next(row for row in rows if row.text == body)
+    boundary = next(row for row in rows if row.id == "qa-boundary")
     assert boundary.details.get("custom_kind") == custom_type
     assert "peer_cycle" not in boundary.details
 

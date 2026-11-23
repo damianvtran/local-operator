@@ -1,0 +1,30 @@
+{
+  "locale": "hi",
+  "namespace": "wire.providers.connect",
+  "source_sha256": "6277c0656675f9e4cfe3704cd2d62035b49f11e717aab2bd8c8e392438fd7959",
+  "target_sha256": "851391b5bae38f480050904cd1f6785a3aa446a4a2b634a3430bec0d97f05009",
+  "context_sha256": "c4dbbb698f0cc7c17f5f19434146b46de2376c93e5c89b8dc2368cc38dd2ab38",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "provenance": "Identity/model supplied by delegation brief; translator execution not independently observed."
+  },
+  "auditor": {
+    "agent": "translation-auditor (conn-audit-hi)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "fallback_used": false,
+    "independent_from_translator": true,
+    "actual_model_source": "Session host model declaration"
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "keys_read": 5,
+  "findings": [],
+  "worktree_head": "b5bb56079c5067fd2efc81d6d223ac0283171142",
+  "note": "Independent read-only English/Hindi audit of all 5 keys plus context, Hindi style/glossary, shipped wire.errors.auth (12 keys), wire.errors.bedrock (25 keys), and wire.settings reference copy. Accurate refusal versus saved-unverified distinction; polite imperatives, danda, API/HTTP preservation, कुंजी/जाँच/सत्यापन terminology and adjectival स्वचालित consistent. No plurals or RTL surface. Consumers inspected: providers/key_check.py, model/defaults.py, server/routes/auth.py and models.py; desktop provider-grid.tsx concatenates suggested name. scripts/i18n/check.py --catalogues-only: 0 problems. Direct message_arguments tuple parity including order and render_message passed 5/5. Rich cell lengths en→hi with OpenAI / HTTP 429: 78→67, 53→52, 78→65, 90→68, 9→5; no expansion flagged. Cell measurements are not browser typography/rendered-frame evidence; no UI screenshot or native-speaker certification claimed. Actual auditor model differs from translator; no fallback occurred in this audit."
+}

@@ -55,6 +55,7 @@ import re
 import stat
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -108,6 +109,11 @@ NETWORK_DIRNAME = "network"
 REPLICA_DIRNAME = "replicas"
 REPLICA_CURSOR_NAME = "sync.json"
 STAGING_DIRNAME = "staging"
+#: Where a REFUSED replica recovery is moved (mesh-origin-stamp, security review
+#: S-1). Outside ``sessions/`` for the reason ``staging_dir`` is: nothing that
+#: lists, resumes or sweeps sessions looks here, so a copy whose origin stamps
+#: could not be lowered never appears as a conversation, yet nothing is deleted.
+QUARANTINE_DIRNAME = "quarantine"
 
 #: ``attachments/<ref>.bin`` — the store-relative spelling blobs travel under, so
 #: the two sides cannot disagree about where a blob lives.
@@ -377,6 +383,11 @@ ATTACHMENT_SIDECAR_SUFFIX = ".json"
 #: ``tests/unit/network/test_sync_copy_set.py``, which also proves that every
 #: entry the retention module calls bookkeeping is on one list or the other.
 EXCLUDED_ENTRIES: dict[str, str] = {
+    # Authority is local routing policy, not portable session content. Even a
+    # same-id replica must not inherit permission to interrupt on another host.
+    "notification-authority.json": "operator notification grant applies only on the issuing device",
+    ".file-provenance": "owner-local witnesses; replicas/imports cannot issue proofs",
+    ".file-provenance.initialized.json": "origin-local incarnation; never copied/rebuilt",
     "profile-backups": "origin-local before-images; never portable approval or action authority",
     # THE INBOX'S TWO TRANSPORT LOCKS (``session/runtime/inbox``): empty
     # coordination files whose only meaning is "a writer/reader on THIS device is
@@ -386,6 +397,11 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # them lazily, so they are never copied.
     ".inbox-write.lock": "a transport lock owned by this device's spool writers",
     ".inbox-reader.lock": "a transport lock owned by this device's spool reader",
+    # ``mobility.ARRIVAL_NOTE_MARKER``: "this device already spooled the arrival
+    # note for move <epoch>". A fact about THIS device's inbox, keyed by one move's
+    # lease epoch; carried on, it would only be a stale epoch the next device's own
+    # delivery ignores, so it never travels.
+    "move-arrival-note.json": "this device's once-per-move arrival-note fence",
     # Session-scoped role definitions (``profile_scope.SESSION_ROLES_DIRNAME``).
     # v1 deliberately does not carry them: S3's move path refuses by default and
     # names the roles, with ``--drop-session-roles`` as the explicit escape. S1
@@ -428,6 +444,13 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     "runtime-run.json": (
         "this device's latest-run marker; the destination writes its own at the next boot"
     ),
+    # THE RUNTIME'S BIND-FAILURE RECORD (``journal.BIND_FAILURES_NAME``): the last
+    # few times THIS device's runtime could not bind a viewer. Unlike the exit
+    # record it does not travel: it describes this device's process failing this
+    # device's binds (pids, tracebacks from this install), and on a destination it
+    # would read as the new owner's own failures, sending a reader after a fault
+    # that never happened there. The destination records its own if it fails.
+    "bind-failures.json": ("this device's runtime bind failures; the destination records its own"),
     # THE OWN-CWD MOVE INTENT (``session.cwd_move.MOVE_MARKER_NAME``): a request for
     # THIS device's runtime to relocate its own session, naming an absolute path on
     # this device and the pid that asked. Neither means anything on a peer, and
@@ -587,7 +610,31 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # that used the approvals feature refused with `unlisted_content` and told
     # the user to delete the record (round-4 review, blocker).
     OVERRIDE_FILENAME: "the conversation's own approval choice; a copy must start without it",
+    # OPERATING-SYSTEM FOLDER METADATA (``OS_METADATA_NAMES`` below). Finder writes
+    # ``.DS_Store`` into every folder a user opens, so before this entry a deleting move
+    # of any Mac session someone had browsed refused with ``unlisted_content`` and told
+    # the user to remove it (2026-11-13: ``lop sessions move d5aaf8ba6ba5 --to
+    # lop-remote-node-2 --queue`` refused for ``.DS_Store``; 18 session directories on
+    # the operator's Mac held one at depth <= 2). They are view state the shell rebuilds
+    # (icon positions, window size, thumbnail cache), never session content, so they
+    # are DROPPED rather than carried or refused. Windows Explorer's ``Thumbs.db`` and
+    # ``desktop.ini`` are the same class and exact names, so they ride the same rule;
+    # AppleDouble ``._*`` files are a prefix pattern, not a name, and stay unlisted.
+    ".DS_Store": "Finder's per-folder view state, rebuilt by the destination's shell",
+    "Thumbs.db": "Windows Explorer's thumbnail cache, rebuilt by the destination's shell",
+    "desktop.ini": "Windows Explorer's per-folder view settings, not session content",
 }
+
+#: The ``EXCLUDED_ENTRIES`` rows that are OS folder metadata. Kept as their own tuple
+#: because their exclusion is conditional on SHAPE, unlike the store files above (whose
+#: reason is whose state the file is, so a symlinked one keeps its exclusion —
+#: ``test_a_symlinked_store_file_keeps_its_exclusion``): the shell only ever writes a
+#: REGULAR file under these names, so a symlink or a directory wearing one is not
+#: metadata and ``unlisted_entries`` refuses it rather than dropping it unseen. Only the
+#: session ROOT is affected: inside a content tree (``scratchpad/.DS_Store``) the tree
+#: travels byte for byte as it always has — harmless, and it keeps the tree walk and its
+#: digest identical on builds before and after this rule, so mixed-version peers agree.
+OS_METADATA_NAMES: tuple[str, ...] = (".DS_Store", "Thumbs.db", "desktop.ini")
 
 #: The tuple the code branches on. Kept as a tuple (rather than reading
 #: ``EXCLUDED_ENTRIES`` everywhere) because these are the names a fan-out of
@@ -952,6 +999,10 @@ def unlisted_entries(directory: Path) -> list[str]:
     found: list[str] = []
     for child in children:
         name = child.name
+        # Dropped only as the regular file the OS writes (see ``OS_METADATA_NAMES``).
+        if name in OS_METADATA_NAMES and (child.is_symlink() or not child.is_file()):
+            found.append(name)
+            continue
         if child.is_symlink() and name in listed and name not in NEVER_COPIED:
             found.append(name)
             continue
@@ -1125,10 +1176,59 @@ def referenced_attachments_in(directory: Path) -> list[str]:
         resolved = compression.transcript_for_read(Path(directory))
         if resolved is None:
             return []
-        payload = resolved.read_bytes()
+        info = resolved.stat()
     except (OSError, compression.ArchiveError):
         return []
-    return sorted({match.decode("ascii") for match in _ATTACHMENT_REF.findall(payload)})
+    # MEMOISED ON THE FILE'S IDENTITY (docs/design/remote-files-parity.md §4, C1): the
+    # owner authorises EVERY phase of a pull by this set, and a 32 MiB pull has 65
+    # phases — rescanning a 64 MiB transcript each time cost 58 ms and 64 MiB of
+    # transient allocation per 512 KiB chunk. Any append moves size/mtime_ns, a
+    # rewrite-and-rename moves the inode, so a stale set is never served.
+    key = (str(resolved), info.st_size, info.st_mtime_ns, info.st_ino)
+    with _REFERENCE_MEMO_LOCK:
+        cached = _REFERENCE_MEMO.get(key)
+        if cached is not None:
+            _REFERENCE_MEMO.move_to_end(key)
+            return list(cached)
+    try:
+        found = _scan_references(resolved)
+    except OSError:
+        return []
+    with _REFERENCE_MEMO_LOCK:
+        _REFERENCE_MEMO[key] = found
+        _REFERENCE_MEMO.move_to_end(key)
+        while len(_REFERENCE_MEMO) > _REFERENCE_MEMO_SIZE:
+            _REFERENCE_MEMO.popitem(last=False)
+    return list(found)
+
+
+#: Entries kept by ``referenced_attachments_in``'s memo. Eight covers a family a
+#: precache pass walks (the parent plus a few children) without holding stale sets
+#: for every session a long-lived relay ever served; each entry is a tuple of digests.
+_REFERENCE_MEMO_SIZE = 8
+_REFERENCE_MEMO: OrderedDict[tuple[str, int, int, int], tuple[str, ...]] = OrderedDict()
+_REFERENCE_MEMO_LOCK = threading.Lock()
+#: The scan's window and overlap. A reference row is at most ~50 bytes as the
+#: harness writes it (``"attachment": "<32 hex>"``), so a 64-byte overlap carried
+#: into the next window finds one that straddles a boundary; RAM stays ~4 MiB however
+#: long the transcript is.
+_SCAN_WINDOW = 4 * 1024 * 1024
+_SCAN_OVERLAP = 64
+
+
+def _scan_references(path: Path) -> tuple[str, ...]:
+    """Every digest ``path`` references, read in bounded windows (never whole)."""
+    found: set[str] = set()
+    tail = b""
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(_SCAN_WINDOW)
+            if not chunk:
+                break
+            window = tail + chunk
+            found.update(match.decode("ascii") for match in _ATTACHMENT_REF.findall(window))
+            tail = window[-_SCAN_OVERLAP:]
+    return tuple(sorted(found))
 
 
 def referenced_attachments(root: Path, session_id: str) -> list[str]:
@@ -1935,6 +2035,22 @@ def _cached_served_bytes(root: Path, session_id: str, plan: str, name: str) -> i
     return stamp.served_bytes if stamp is not None else None
 
 
+def read_open_span(handle: Any, *, offset: int, limit: int, size: int) -> tuple[bytes, int, bool]:
+    """``(span, size, eof)`` of ``[offset, offset + limit)`` from an ALREADY-OPENED file.
+
+    THE ONE SHARED FRAMING PRIMITIVE (mesh-lane ruling, 2026-11-18, for the session
+    move's working-set transfer in ``workset_move``). Deliberately over an open handle
+    and a caller-measured ``size``, never a path: a caller must have authorised and
+    opened the exact file it serves (``O_NOFOLLOW``, regular, contained) before any
+    byte is read, so there is no public "serve this path" helper to misuse.
+    ``_served_span`` uses it for its regular-member branch with the size it always
+    measured (``stat`` before ``open``), so ``net_sync`` serves byte-identical spans.
+    """
+    handle.seek(offset)
+    span = handle.read(limit)
+    return span, size, offset + len(span) >= size
+
+
 def _served_span(
     path: Path,
     name: str,
@@ -1958,9 +2074,7 @@ def _served_span(
     if name != TRANSCRIPT_NAME or whole_transcript:
         size = path.stat().st_size
         with path.open("rb") as handle:
-            handle.seek(offset)
-            span = handle.read(limit)
-        return span, size, offset + len(span) >= size
+            return read_open_span(handle, offset=offset, limit=limit, size=size)
     if served_len is not None:
         # The safe region is a PREFIX of the file, so the region's bytes in
         # ``[offset, offset + limit)`` are the file's — read at the offset, not by
@@ -3786,6 +3900,52 @@ def _verify_replica_against_cursor(root: Path, session_id: str, source: Path) ->
             )
 
 
+def _quarantine_refused_recovery(
+    root: Path, target: Path, new_id: str, created: tuple[int, int] | None
+) -> bool:
+    """Move a refused recovery's partial copy out of ``sessions/`` (S-1).
+
+    Before the origin-stamp work a refused copy was simply left un-promoted under
+    ``sessions/<new_id>`` (deliberately: this layer never deletes). That copy is
+    now a hazard, not just clutter: if the copy or the downgrade stopped partway,
+    it can hold stamps that still read ``verified: true``, and anything that lists
+    sessions would offer it as a conversation. A rename keeps the no-delete rule
+    and takes it out of every session reader's view in one step.
+
+    ``target`` was created by this call (``promote_replica`` refuses an existing
+    one before claiming), so only this call's own bytes move. Best-effort: a
+    rename that fails is logged and the original refusal still propagates.
+
+    CALLED WHILE THE COPY IS STILL CLAIMED (review R2-2), and it carries its
+    ``.session.pid`` out with it. Returns True once nothing is left at ``target``
+    (moved, or never there), having dropped that claim at the landing; False when
+    the rename failed, with the claim KEPT, so the copy left under ``sessions/``
+    still reads as owned to listings and sweeps for as long as this process lives.
+    """
+    # Routed through the session-cleanup module (tests/unit/session/
+    # test_no_session_deletion.py): this is a rename OUT of ``sessions/``, and
+    # every such call lives behind cleanup.py's guards. The guard proves the tree
+    # is the one this call created (``created`` is its st_dev/st_ino, recorded
+    # right after the claim) and that the claim still names this pid. It renames
+    # it to network/quarantine/<new_id> without replacing anything, deletes
+    # nothing, and drops the claim only at the landing.
+    from local_operator.session.cleanup import quarantine_claimed_session_dir
+
+    landing = quarantine_claimed_session_dir(
+        target,
+        config_dir=Path(root),
+        created=created,
+        reason=f"refused recovery of {new_id}",
+        actor="sync.promote_replica",
+    )
+    if landing is None:
+        logger.error("sync: a refused recovery of %s could not be moved out of sessions/", new_id)
+        return False
+    if landing != target:
+        logger.warning("sync: the refused recovery of %s was moved to %s", new_id, landing)
+    return True
+
+
 def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[str, Any]:
     """Turn a replica into a LOCAL session under a freshly minted id.
 
@@ -3843,8 +4003,13 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
 
     claim_session(target)
     copied: list[str] = []
+    # The created directory's identity, so a refused copy can be quarantined by
+    # proof of "this call made it" (inode), not by its name alone.
+    created: tuple[int, int] | None = None
     try:
         target.mkdir(parents=True, exist_ok=True)
+        made = os.lstat(target)
+        created = (made.st_dev, made.st_ino)
         # The replica is peer-authored too. Validate its links as one graph against
         # the NEW session root before copying files or publishing shared attachments.
         carried_links = [{"name": name, "link": link} for name, link in tree_link_entries(source)]
@@ -3948,8 +4113,28 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         except BaseException:
             _unlink_at(target, staged_boundary.name, target_scope)
             raise
-    except (OSError, SyncRefused) as exc:
-        release_session(target)
+        # IMPORTED STAMPS ARE EVIDENCE ONLY (mesh-origin-stamp M-4, R2-1): every
+        # mesh origin stamp in the recovered copy is lowered to ``verified: false``
+        # whoever minted it, while the new id is still claimed and before anything
+        # can run it. ANY failure, here or in the copy above, refuses the recovery
+        # (the handler below), which moves the copy out of ``sessions/`` rather
+        # than leave one whose stamps may still read verified.
+        from local_operator.network.origin import downgrade_stamps
+
+        downgrade_stamps(target)
+    except Exception as exc:  # noqa: BLE001 — every failure here is a refusal, not a crash
+        # ``Exception``, not ``(OSError, SyncRefused)`` (security review S-1): the
+        # replica is peer-authored, so the downgrade can fail in ways no file API
+        # predicts (``ImportStampsRefused`` for a compressed journal, a row crafted
+        # to break the parser). The old handler let those escape, skipping the
+        # claim release and leaving the copy in place with its stamps verified.
+        #
+        # MOVE FIRST, THEN RELEASE (review R2-2): releasing first left an
+        # UNCLAIMED copy under ``sessions/`` (whose stamps may still read
+        # verified) for listings and sweeps to pick up, briefly, or for good if
+        # the move then failed. The quarantine drops the claim at the landing; a
+        # failed move keeps it, and the refusal below still propagates.
+        _quarantine_refused_recovery(Path(root), target, new_id, created)
         if isinstance(exc, SyncRefused):
             raise
         raise SyncRefused(
@@ -4055,7 +4240,7 @@ class SyncWatcher(threading.Thread):
         # METHOD that CPython 3.12's ``join()``/``is_alive()`` call once the thread
         # has ended (``_wait_for_tstate_lock``). An Event under that name made both
         # raise ``TypeError: 'Event' object is not callable`` for a finished
-        # thread, so no stop could ever be joined or confirmed (3.14 no longer
+        # thread, so no stop could ever be joined or confirmed (3.13+ no longer
         # calls it; 3.12 is the floor and CI's interpreter).
         self._halt = threading.Event()
 
@@ -4063,11 +4248,14 @@ class SyncWatcher(threading.Thread):
         self._halt.set()
 
     def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._halt.wait(self._settings.tick_s):
-            try:
-                self.tick(now=time.time())
-            except Exception:  # noqa: BLE001 — a watcher must never kill the relay
-                logger.debug("sync: watcher tick failed", exc_info=True)
+        try:
+            while not self._halt.wait(self._settings.tick_s):
+                try:
+                    self.tick(now=time.time())
+                except Exception:  # noqa: BLE001 — a watcher must never kill the relay
+                    logger.debug("sync: watcher tick failed", exc_info=True)
+        finally:
+            _release_registration("watcher", self._server, self)
 
     def tick(self, *, now: float) -> list[tuple[str, str]]:
         """One pass. Returns ``(session_id, reason)`` per push, so cadence is testable.
@@ -4233,11 +4421,14 @@ class ReplicaRefresher(threading.Thread):
                 self._marked[session_id] = reason
 
     def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._halt.wait(self._settings.tick_s):
-            try:
-                self.tick()
-            except Exception:  # noqa: BLE001 — a refresher must never kill the relay
-                logger.debug("sync: replica refresh tick failed", exc_info=True)
+        try:
+            while not self._halt.wait(self._settings.tick_s):
+                try:
+                    self.tick()
+                except Exception:  # noqa: BLE001 — a refresher must never kill the relay
+                    logger.debug("sync: replica refresh tick failed", exc_info=True)
+        finally:
+            _release_registration("refresher", self._server, self)
 
     def tick(self) -> list[tuple[str, str]]:
         """One pass. Returns ``(session_id, outcome)`` per attempt, so it is testable.
@@ -4309,7 +4500,9 @@ def ensure_refresher(server: "RelayServer") -> ReplicaRefresher:
             # not start a fresh thread afterwards: that thread would be the leak
             # this module's ``on_stop`` closes, re-opened. An unstarted, UNREGISTERED
             # instance keeps the caller's ``.mark()`` harmless and holds nothing.
-            return ReplicaRefresher(server)
+            # Defaults, not ``from_config``: it never ticks, so reading
+            # ``config.yml`` for it was disk I/O on every late push.
+            return ReplicaRefresher(server, settings=SyncSettings())
         existing = _refreshers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -4340,7 +4533,8 @@ def ensure_watcher(server: "RelayServer") -> SyncWatcher:
             # not start a fresh thread afterwards: that thread would be the leak
             # this module's ``on_stop`` closes, re-opened. An unstarted, UNREGISTERED
             # instance keeps the caller's ``.mark()`` harmless and holds nothing.
-            return SyncWatcher(server)
+            # Defaults, not ``from_config``, for the refresher's reason.
+            return SyncWatcher(server, settings=SyncSettings())
         existing = _watchers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -4416,6 +4610,31 @@ def stop_threads(server: "RelayServer", *, timeout: float = SYNC_THREAD_STOP_JOI
             if table.get(key) is thread:
                 del table[key]
             _survivor_warned.pop((kind, key), None)
+
+
+def _release_registration(kind: str, server: "RelayServer", thread: threading.Thread) -> None:
+    """A sync thread's exit drops its OWN registry entry (and its warning row).
+
+    WHY (#3719 review R1-1): :func:`stop_threads` keeps a survivor's entry so a later
+    stop can retry it, but on the normal path no later stop comes — and a tick can
+    legitimately outlive the join (a ``_push`` to a wedged peer: links close only
+    after the stop hooks run). When that tick finally returned, the exited thread
+    stayed in the registry, holding its ``_server``, and the stopped relay was
+    pinned for the life of the process: the leak ``on_stop`` exists to close.
+
+    IDENTITY-MATCHED UNDER THE LOCK: an entry that is no longer this thread (a
+    restart registered a successor) is not this thread's to drop. Runs from
+    ``run``'s ``finally``, so an unstarted stand-in never reaches it.
+    """
+    lock, table = (
+        (_watcher_lock, _watchers) if kind == "watcher" else (_refresher_lock, _refreshers)
+    )
+    key = id(server)
+    with lock:
+        if table.get(key) is thread:
+            del table[key]
+        if _survivor_warned.get((kind, key)) is thread:
+            del _survivor_warned[(kind, key)]
 
 
 # ---------------------------------------------------------------------------

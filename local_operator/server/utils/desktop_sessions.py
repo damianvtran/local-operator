@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import contextlib
+import copy
 import functools
 import json
 import logging
@@ -31,7 +33,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Final, Literal, cast
 
 from anyio import CancelScope
 from fastapi import HTTPException
@@ -53,12 +55,12 @@ from local_operator.resume import (
     ORIGIN_AGENT_CONFIG,
     ORIGIN_SUBAGENT,
     SessionRow,
+    bind_session_attachment,
     is_user_session,
     mark_session_origin,
     read_session_attachment,
     session_origin,
     session_preview,
-    write_session_attachment,
 )
 from local_operator.server.models.desktop_sessions import AdmissionStatus, MoveReceipt
 from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
@@ -94,7 +96,11 @@ from local_operator.session.attached import (
     AttachedSession,
 )
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
-from local_operator.session.attention import AttentionStore, acknowledge_session_receipt
+from local_operator.session.attention import (
+    BULK_RECEIPT_SESSION_ID_RE,
+    AttentionStore,
+    acknowledge_session_receipt,
+)
 from local_operator.session.catalog import (
     DECORATION_ATTENTION,
     CatalogueScope,
@@ -116,6 +122,7 @@ from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
+    attach_frame_attention,
     bound_ask_snapshot_in_place,
     bound_delta_rows_in_place,
     job_trajectory_wire_value,
@@ -144,12 +151,18 @@ from local_operator.session.page_cache import load_transcript_page
 # mesh's placement fields, and imported at module level because this module
 # already carries the whole desktop bridge (mesh-session-mobility.md §9.2).
 from local_operator.session.placement import local_placement, read_stamp
-from local_operator.session.restored_rows import record_field, roster_records
+from local_operator.session.restored_rows import record_field
 from local_operator.session.retention import (
     DESKTOP_MARKER_NAME,
     DESKTOP_PURPOSE_KEY,
     read_desktop_purpose,
     session_activity,
+)
+from local_operator.session.row_clip import (
+    bound_history_entries,
+    canonical_row_bytes,
+    resolve_ref,
+    row_range,
 )
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
@@ -159,7 +172,6 @@ from local_operator.session.transcript import (
     custom_type_proven_absent,
     read_entry_by_id,
     read_latest_custom,
-    read_latest_custom_entry,
     validate_page_request,
 )
 from local_operator.supplements.contract import supplement_read_options
@@ -187,6 +199,7 @@ if TYPE_CHECKING:
     # (see ``DesktopSessionBridge._owner_connection``), and ``AttachedSession``
     # already reaches this module's graph through ``session.attached``.
     from local_operator.mobile.attach_client import AttachClient
+    from local_operator.tools.diff_archive import DiffBindingReadOptions
 
 #: The page ceiling one child read may ask for, in ONE place. The route declares
 #: it on the wire (FastAPI answers a bigger ``limit`` with 422 before the
@@ -212,6 +225,28 @@ JOB_ID = SESSION_ID
 SUBAGENT_JOB_TYPE = "task"
 REPLAY_COUNT = 256
 REPLAY_BYTES = 8 * 1024 * 1024
+
+#: The internal frame type ``publish`` queues IN PLACE OF a frame no subscriber
+#: queue can carry (wire size above :data:`REPLAY_BYTES`). Never sent as such:
+#: ``events`` turns it into an in-band ``gap`` followed by a fresh ``snapshot``
+#: on the SAME connection.
+#:
+#: WHY A RESYNC AND NOT THE FRAME. A frame larger than the whole per-subscriber
+#: budget can never be queued, so the old path disconnected EVERY opened viewer
+#: at once (QA Q2 on #4012: one ~37 MB ``history_delta`` cut all three streams
+#: with ``subscriber overflow``), and the desktop relay would cut the stream on it anyway
+#: (``MAX_FRAME_BYTES``, 8 MiB, ``local-operator-ui`` ``src/main/desktop-stream.ts``).
+#: The snapshot already restates the state such a frame carries -- the bounded
+#: history page plus ``frontend`` -- and the paged history route serves the rest.
+#:
+#: WHY THE CURRENT APP NEEDS NO CHANGE: the renderer's ``gap`` arm
+#: (``use-canonical-session.ts``) clears the receipt mark and the painted frontend
+#: and shows "reconnecting" while keeping the transcript's rows; the ``snapshot``
+#: that follows is then accepted on the cleared mark and sets the pane ``live``.
+#: That is exactly the pair a reconnect after an overflow delivers, minus the
+#: ``open`` frame (which only re-states the subscription id this connection still
+#: holds) -- and without dropping presence, the dwell or the connection.
+RESYNC_MARKER = "resync"
 
 #: The largest frame a subscriber-queue fold may produce. A MERGE THAT WOULD
 #: NOT FIT IS REFUSED (both frames stay, in order), because a frame
@@ -393,6 +428,276 @@ _LEASE_WARM_POLL_S = 1.0
 #: refresh keeps going and publishes an ``attention`` frame when it lands.
 ATTENTION_SNAPSHOT_WAIT_S = 0.05
 
+#: Worker threads that build desktop snapshot frames (the canonical-state clone
+#: plus ``sync_wire_payload``) OFF the serving event loop.
+#:
+#: WHY A DEDICATED, SMALL POOL rather than ``asyncio.to_thread``: the build is
+#: proportional to the session (seconds for a 30 MB history with a large frozen
+#: roster), and N viewers opening one huge session would otherwise park N of the
+#: default executor's threads behind it -- the same pool every other route's
+#: short ``to_thread`` read (attention, asks, store reads) queues on. Two
+#: workers keep two different sessions' opens independent while bounding the
+#: GIL share a burst of opens can take from the loop; opens of the SAME state
+#: coalesce onto one build (``DesktopSessionBridge._wire_state_off_loop``).
+SNAPSHOT_BUILD_WORKERS: Final = 2
+_snapshot_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _snapshot_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """The process-wide snapshot build pool, created on first use.
+
+    Lazy so importing this module (every ``lop`` command that touches the
+    desktop plane) starts no threads. The workers are NOT daemon threads: the
+    interpreter joins them at exit after any queued work, so the serve's own
+    stop calls :func:`shutdown_snapshot_pool`, which drops queued builds and
+    lets only a running one finish (review round 1, R1-n1).
+    """
+    global _snapshot_executor
+    if _snapshot_executor is None:
+        _snapshot_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=SNAPSHOT_BUILD_WORKERS, thread_name_prefix="lop-desktop-snapshot"
+        )
+    return _snapshot_executor
+
+
+def shutdown_snapshot_pool(*, wait: bool = False) -> None:
+    """Stop the snapshot pool, dropping builds still queued on it.
+
+    Called when the desktop session host closes (``lop serve`` stopping), so
+    builds nobody will read do not delay the exit; ``wait=True`` also joins the
+    workers (tests use it so no pool thread outlives them). A later
+    :func:`_snapshot_pool` call starts a fresh pool.
+    """
+    global _snapshot_executor
+    executor, _snapshot_executor = _snapshot_executor, None
+    if executor is not None:
+        executor.shutdown(wait=wait, cancel_futures=True)
+
+
+@dataclass(slots=True)
+class _WireBuild:
+    """One in-flight snapshot build and how many opens are awaiting it.
+
+    ``work`` is the pool's own future (cancellable only while queued);
+    ``future`` is its loop-side wrapper the waiters shield. ``waiters`` is only
+    touched on the serving loop, so it needs no lock.
+    """
+
+    capture: "_WireCapture"
+    work: concurrent.futures.Future[dict[str, Any]]
+    future: asyncio.Future[dict[str, Any]]
+    waiters: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _WireCapture:
+    """Everything a snapshot frame's ``frontend`` is built from, read on the loop.
+
+    ``reference`` is the store's canonical (never-mutated) state object; a test
+    double without a store hands over its already caller-owned
+    ``frontend_state``. ``attention`` is a private copy, so a receipt landing on
+    the loop mid-build cannot change the dict a worker is serializing.
+    """
+
+    reference: Any
+    attention: dict[str, Any]
+
+
+def _wire_state_of(capture: _WireCapture) -> dict[str, Any]:
+    """Build the bounded ``FrontendSync`` wire payload from one capture.
+
+    Thread-safe by construction: it reads only the capture (an immutable state
+    object and private copies) and writes only objects it creates. The single
+    spelling of the build, used inline by ``state()`` and off-loop by the
+    snapshot, so the two can never serve different bytes.
+    """
+    # THE REFERENCE IS SERIALIZED AS IS, NOT CLONED FIRST. ``state()`` used to go
+    # through ``frontend_state`` -- a deep clone of every job so a caller may
+    # mutate its copy -- and then only DUMP it. A dump does not mutate, and the
+    # canonical object never changes after install, so the clone bought nothing
+    # here; dropping it measured 599 -> 343 ms per build and 454 -> 145 GC
+    # collections on a 2,000-job roster (GC passes hold the GIL whatever thread
+    # triggers them, which is what still reached ``/health`` from the worker).
+    # The bytes are identical: ``test_desktop_snapshot_off_loop`` compares the
+    # two builds. ``model_copy`` is shallow and builds a new object.
+    state = capture.reference.model_copy(update={"attention": capture.attention})
+    payload = sync_wire_payload(
+        FrontendSync(
+            epoch=state.epoch,
+            sequence=state.sequence,
+            snapshot=state,
+            live_cursor=state.history_cursor,
+        )
+    )
+    snapshot = payload.get("snapshot")
+    if isinstance(snapshot, dict):
+        slim_desktop_job_rows_in_place(snapshot)
+    return payload
+
+
+#: The job-row keys the desktop renderer reads, and the ONLY ones a desktop
+#: snapshot's roster rows keep (``slim_desktop_job_rows_in_place``).
+#:
+#: WHY AN ALLOWLIST. The desktop relay ends the stream on any record over 8 MiB
+#: (``MAX_FRAME_BYTES``, ``local-operator-ui`` ``src/main/desktop-stream.ts``),
+#: and the roster was the part of the open snapshot that grew with the session:
+#: ~3.3 KB per job, ~6.6 MB at 2,000 jobs, so a long-lived orchestrator was a
+#: few thousand jobs away from a conversation that could never open. Most of a
+#: row is data only the TUI and the runtime socket read (``descendant_usage``,
+#: ``session_dir``, ``trajectory_length``, the per-call ``usage`` receipt,
+#: ``attempt_aliases``...). An allowlist rather than a denylist so a field a
+#: future runtime adds to ``JobState`` costs the desktop nothing until the app
+#: is taught to read it -- and then it is added HERE, deliberately.
+#:
+#: WHERE THE LIST COMES FROM: the renderer's raw-row readers on
+#: ``local-operator-ui`` main -- ``deriveChild`` (``run-detail-model.ts``), the
+#: one reader of a row's fields; ``settled-job-rows.ts`` and ``job-deltas.ts``,
+#: which read only ``id``/``status``. Session cost comes from
+#: ``frontend.child_costs``/``cumulative_cost``, never a job's ``usage``.
+#:
+#: WHY IT IS SAFE TO DROP A FIELD: a job delta (``job_deltas.upserted``) still
+#: carries the FULL bounded row, and the app REPLACES the row it holds with it
+#: (``job-deltas.ts``), so the first change to a row restores every field. A
+#: settled row never changes again, and it renders nothing from what was dropped.
+#:
+#: SCOPE: the desktop plane only. ``sync_wire_payload`` itself is shared with the
+#: runtime socket and the TUI followers, which DO read the dropped fields; this
+#: runs after it, on the bridge's own copy.
+DESKTOP_JOB_ROW_KEYS: Final = frozenset(
+    {
+        "id",
+        "type",
+        "label",
+        "agent_role",
+        "status",
+        "queued",
+        "start_time",
+        "settled_at",
+        "usage",
+        "context_window",
+        "direct_cost",
+        "latest_details",
+        "error_text",
+        "result_text",
+        "session_id",
+        "parent_job_id",
+        "model_label",
+        "prompt",
+        "launch_prompts",
+        "launch_message_id",
+    }
+)
+
+#: The two ``usage`` readings the row draws: ``deriveChild``'s context label is
+#: ``context_tokens``, falling back to ``input_tokens``. The rest of the receipt
+#: (``cost_components``, cache and reasoning splits, provider ids) is the
+#: priced breakdown the TUI's spend view reads, and the bulk of a usage dict.
+DESKTOP_JOB_USAGE_KEYS: Final = frozenset({"context_tokens", "input_tokens"})
+
+#: Raw statuses the renderer folds to a SETTLED state (``foldStatus`` /
+#: ``isOpenChildStatus``): a settled row's activity line is null, so its
+#: ``latest_details`` is never drawn. Explicit rather than "not running" so a
+#: status word the app has not been taught keeps its details.
+_DESKTOP_SETTLED_JOB_STATUSES: Final = frozenset(
+    {"completed", "done", "failed", "cancelled", "canceled", "interrupted", "gone"}
+)
+
+
+#: Keys every slim row carries even when empty: the row's identity and the two
+#: words the roster partitions and folds on.
+_DESKTOP_JOB_ROW_ALWAYS: Final = frozenset({"id", "type", "status"})
+
+
+def _empty_wire_value(value: Any) -> bool:
+    # ``False`` is checked by identity: ``0`` (a zero cost, a zero token count)
+    # is a reading the row draws, not an absent one.
+    return value is None or value is False or value == "" or value == {} or value == []
+
+
+def slim_desktop_job_row(row: dict[str, Any]) -> dict[str, Any]:
+    """One roster row reduced to what the desktop app renders (a new dict).
+
+    See :data:`DESKTOP_JOB_ROW_KEYS`. ``latest_details`` is kept on an open row
+    (its activity line) and on every ``music`` row, settled or not: the music
+    card reads ``latest_details.music`` (tracks, stage) to state how a cancelled
+    or failed generation ended.
+
+    EMPTY VALUES ARE OMITTED (``None``, ``""``, ``False``, ``{}``, ``[]``): every
+    reader in ``deriveChild`` treats an absent key exactly like its empty value
+    (``wireText`` -> ``""``, ``wireNumber`` -> ``null``, ``toWireStringMap`` ->
+    ``{}``, ``queued === true``, ``isRecord(latest_details)``), and a settled
+    roster is mostly empty ``error_text``/``parent_job_id``/``queued`` -- ~60
+    bytes a row, which is what keeps 10,000 jobs inside the relay's 8 MiB.
+    """
+    slim = {
+        key: value
+        for key, value in row.items()
+        if key in DESKTOP_JOB_ROW_KEYS
+        and (key in _DESKTOP_JOB_ROW_ALWAYS or not _empty_wire_value(value))
+    }
+    usage = slim.get("usage")
+    if isinstance(usage, dict):
+        slim["usage"] = {k: v for k, v in usage.items() if k in DESKTOP_JOB_USAGE_KEYS}
+    if (
+        slim.get("latest_details") is not None
+        and slim.get("queued") is not True
+        and slim.get("type") != "music"
+        and str(slim.get("status") or "").lower() in _DESKTOP_SETTLED_JOB_STATUSES
+    ):
+        del slim["latest_details"]
+    return slim
+
+
+def slim_desktop_job_rows_in_place(snapshot: dict[str, Any]) -> None:
+    """Replace ``snapshot["jobs"]`` with slim rows (:func:`slim_desktop_job_row`).
+
+    Builds new row dicts rather than deleting keys: the rows may be shared with
+    a coalesced build another viewer is reading.
+    """
+    jobs = snapshot.get("jobs")
+    if isinstance(jobs, list):
+        snapshot["jobs"] = [
+            slim_desktop_job_row(row) if isinstance(row, dict) else row for row in jobs
+        ]
+
+
+def _wire_entries(entries: Sequence[Any]) -> list[dict[str, Any]]:
+    """A local journal page's rows as wire dicts (``history``); thread-safe.
+
+    Reads only the page's rows, which the page cache shares read-only, and
+    builds new dicts.
+    """
+    return visible_transcript_rows(
+        [{**json.loads(row.to_json()), "ts_source": "entry"} for row in entries]
+    )
+
+
+def _bounded_page(
+    entries: Sequence[Any], session_id: str, anchor_id: str | None = None
+) -> tuple[list[Mapping[str, Any]], bool, bool]:
+    """A bare page's rows clipped and bounded, for the event loop's thread.
+
+    ``_wire_entries`` is the expensive half (a JSON round trip per row, tens of
+    ms on a fat page), so both it and the clip stay off the loop.
+    """
+    return bound_history_entries(_wire_entries(entries), session_id=session_id, anchor_id=anchor_id)
+
+
+def _own_wire_state(shared: dict[str, Any]) -> dict[str, Any]:
+    """A caller-owned view of a (possibly coalesced) wire payload.
+
+    Copies the two levels the snapshot's callers write -- the cold-ask override
+    sets and pops TOP-LEVEL keys of ``snapshot`` only (``asks``, ``asks_open``,
+    ``asks_truncated``) -- so two viewers sharing one build cannot see each
+    other's overrides. Everything deeper is read-only after the build.
+    """
+    owned = dict(shared)
+    snapshot = owned.get("snapshot")
+    if isinstance(snapshot, dict):
+        owned["snapshot"] = dict(snapshot)
+    return owned
+
+
 #: The completion kinds the DESKTOP BRIDGE may put on the wire as a
 #: ``notification`` frame. Narrower than ``NotificationKind`` on purpose.
 #:
@@ -416,6 +721,58 @@ BRIDGE_NOTIFIABLE_KINDS = frozenset({"complete", "error", "retired"})
 
 async def _no_takeover() -> None:
     raise RuntimeError("Desktop viewers cannot own a runtime")
+
+
+def _log_abandoned_frame_read(task: asyncio.Future[Any]) -> None:
+    """Retrieve, and log at debug, the outcome of a bounded open-frame index read.
+
+    WHY: ``_bounded_frame_read`` stops waiting for an ``index_read_model`` worker
+    hop (``summary`` or ``frame_facts``) at the first frame's deadline but never
+    cancels it mid-I/O -- a thread cannot be interrupted, and the SQLite read is
+    side-effect free, so letting it finish is cheaper than any abort. Nobody
+    else awaits an abandoned read, so without this its failure would surface
+    only as "Task exception was never retrieved" at garbage collection. Same
+    contract as ``_log_abandoned_proof_read``; a read awaited normally re-raises
+    to its caller as well.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug(
+            "Open-frame index read failed (abandoned at the open-frame deadline or "
+            "by a cancelled request; the frame answered runs_state='building')",
+            exc_info=exc,
+        )
+
+
+async def _bounded_frame_read(
+    deadline: float | None, func: Any, /, *args: Any, **kwargs: Any
+) -> tuple[bool, Any]:
+    """Run ``func`` on a worker thread, waiting at most until ``deadline``.
+
+    Returns ``(True, value)`` when the read finished in time and ``(False, None)``
+    when the deadline was already spent or passed while waiting. ``deadline=None``
+    (a standalone ``/history`` read) waits for the whole read: that request is
+    the follow-up the degraded first frame points the client at, so it must
+    carry the facts. Exceptions from a read that finished in time propagate
+    exactly as the bare ``asyncio.to_thread`` call did.
+    """
+    if deadline is None:
+        return True, await asyncio.to_thread(func, *args, **kwargs)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        # Spent before the read began: starting a worker only to discard it
+        # would queue one more hop ahead of the next open.
+        return False, None
+    read = asyncio.ensure_future(asyncio.to_thread(func, *args, **kwargs))
+    # Attached BEFORE the wait so a request cancelled mid-wait (the viewer
+    # clicked elsewhere) also retrieves the abandoned read's exception.
+    read.add_done_callback(_log_abandoned_frame_read)
+    done, _pending = await asyncio.wait({read}, timeout=remaining)
+    if read not in done:
+        return False, None
+    return True, read.result()
 
 
 class _OpenFrameSteps:
@@ -1422,6 +1779,10 @@ class DesktopSubscription:
     #: negotiation the runtime's attach gate runs, with the query parameter as
     #: this transport's half).
     supplements: bool = False
+    #: Whether this subscriber declared ``?diff_bindings=1`` (QA F5 on #3762):
+    #: only then does its initial snapshot frame carry nested write/edit
+    #: binding rows. Default False keeps an older renderer's rows unchanged.
+    diff_bindings: bool = False
     journal_order: bool = False
     #: Whether this subscriber negotiated the COMPLETE peer-source contract
     #: (the events route's ``?peer_journal_source=1``): only then does the
@@ -1437,6 +1798,14 @@ class DesktopSubscription:
     #: to the transport. Before that the queue holds only frames the snapshot
     #: supersedes, so a full queue is EVICTION, not failure (see ``publish``).
     opened: bool = False
+    #: True once the snapshot this subscriber waits for has CAPTURED its state
+    #: and watermark but is still being built off the loop (``snapshot``'s
+    #: ``on_capture``). Frames published from here on are ABOVE that watermark
+    #: -- not superseded -- so ``publish`` must treat a full queue as it does
+    #: for an opened reader (fold, else gap), never evict them. ``events``
+    #: empties the queue of the superseded frames at that same instant, so the
+    #: build starts with the whole queue budget free.
+    captured: bool = False
     #: True once this subscription has lost its transport but is still holding
     #: the bridge open (see ``_arm_dwell``). A dwelling subscription has no
     #: reader, so ``publish`` skips it, it keeps its place in ``subscribers``
@@ -1448,6 +1817,11 @@ class DesktopSubscription:
     #: deadline is INSPECTABLE: a test asserts it and moves it past, instead of
     #: waiting ``RECONNECT_DWELL_S`` out.
     dwell_until: float = 0.0
+    #: True while an in-band RESYNC marker sits in this subscriber's queue (see
+    #: :data:`RESYNC_MARKER`). One pending marker covers every oversized frame
+    #: published before ``events`` dequeues it, because the snapshot it triggers
+    #: is captured only then -- so further markers would only repeat that work.
+    resync_pending: bool = False
 
 
 def _json_copy(value: Any) -> Any:
@@ -1517,6 +1891,9 @@ class DesktopSessionBridge:
         # tests', a reduced app's — is an ordinary admitting bridge.
         self.retiring_probe = retiring or _never_retiring
         self.remote: AttachedSession | None = None
+        #: The one off-loop snapshot build in flight, keyed by what it was
+        #: built from (see ``_wire_state_off_loop``).
+        self._wire_inflight: _WireBuild | None = None
         self.epoch = uuid.uuid4().hex
         self.sequence = 0
         self.replay: deque[tuple[dict[str, Any], int]] = deque()
@@ -1816,8 +2193,12 @@ class DesktopSessionBridge:
             "verified_at": verified_at,
         }
 
-    async def acquire(self, *, read: bool = False) -> AttachedSession:
+    async def acquire(self, *, read: bool = False, control_only: bool = False) -> AttachedSession:
         """Take one reference on this bridge, binding the owner if it is cold.
+
+        ``control_only`` reserves the same reference without binding display
+        state. Durable ask controls own their authenticated one-shot connection;
+        transient epoch-bound gates must keep the normal acquisition path.
 
         ``read`` is the READ envelope, and it is a property of the ROUTE rather
         than of the facade: reading state must never be able to fail because an
@@ -1933,7 +2314,11 @@ class DesktopSessionBridge:
                         attach_landed = bool(done)
                         if not done:
                             self.read_attach_outran.add(task)
-                else:
+                elif not control_only:
+                    # A durable ask is validated by ID at its owner, independently
+                    # of display epochs. Do not require a canonical snapshot before
+                    # delivering it: older owners can exceed the snapshot line cap
+                    # while their control socket remains fully operational.
                     await remote.attach_existing(control_budget=DESKTOP_CONTROL_ATTACH_S)
             except BaseException:
                 # SHIELDED, the shape the routes' ``_give_the_bridge_back`` settled in
@@ -2186,7 +2571,7 @@ class DesktopSessionBridge:
             remote.set_local_cwd_callback(lambda _cwd: self.publish_frontend_replace())
             self.unsubscribers = [
                 remote.subscribe(self._event),
-                remote.subscribe_frontend(self._frontend).unsubscribe,
+                self._subscribe_frontend_updates(remote),
             ]
         return self.remote
 
@@ -2679,7 +3064,17 @@ class DesktopSessionBridge:
             "payload": payload,
         }
         size = len(json.dumps(frame, separators=(",", ":")).encode())
-        if replay:
+        if replay and size > REPLAY_BYTES:
+            # A FRAME LARGER THAN THE WHOLE REPLAY BUDGET IS NEVER RETAINED.
+            # Appending it evicted every retained frame and then itself, so the
+            # observable result was already an empty replay; this states it
+            # without holding tens of MB for the length of the loop. An empty
+            # replay is what keeps reconnect honest: ``events`` computes
+            # ``first`` as ``sequence + 1``, so any cursor below this frame's
+            # seq is answered with ``gap`` and a snapshot, never a silent skip.
+            self.replay.clear()
+            self.replay_bytes = 0
+        elif replay:
             self.replay.append((frame, size))
             self.replay_bytes += size
             while self.replay and (
@@ -2728,8 +3123,18 @@ class DesktopSessionBridge:
                     stripped_frame = strip_history_delta_family(frame)
                     stripped_size = len(json.dumps(stripped_frame, separators=(",", ":")).encode())
                 wire_frame, wire_size = stripped_frame, stripped_size
+            if wire_size > REPLAY_BYTES:
+                # No queue can ever hold this frame, so it is never queued and
+                # never cuts the stream: the subscriber resyncs in band instead
+                # (see ``RESYNC_MARKER``). Per subscriber, because the stripped
+                # wire form may fit where the full one does not.
+                self._request_resync(sub, self.sequence)
+                continue
             if sub.queue.full() or sub.queued_bytes + wire_size > REPLAY_BYTES:
-                if sub.opened:
+                # ``captured``: the snapshot's watermark is already read and its
+                # frame is being built off the loop, so this queue now holds
+                # frames ABOVE it -- evicting one would lose it, not supersede it.
+                if sub.opened or sub.captured:
                     # A READER that is behind: first try to FOLD the queued
                     # delta runs (``_compact_subscriber_queue``) -- the
                     # families that in fact overflow this queue fold under
@@ -2765,6 +3170,45 @@ class DesktopSessionBridge:
             else:
                 sub.queue.put_nowait((wire_frame, wire_size))
                 sub.queued_bytes += wire_size
+
+    def _request_resync(self, sub: DesktopSubscription, seq: int) -> None:
+        """Queue ONE small resync marker for ``sub`` in place of an unqueueable frame.
+
+        ORDER IS KEPT because the marker takes the oversized frame's own slot in
+        this subscriber's FIFO: everything published before it is delivered
+        first, and ``events`` captures the resync snapshot only when it reaches
+        the marker, so that snapshot's watermark is at or above ``seq`` and
+        frames queued behind the marker are split exactly as at open --
+        superseded at or below the watermark, delivered after it above.
+
+        ISOLATION IS KEPT because the marker is a few dozen bytes on THIS
+        subscriber's queue under the same fit test as any frame: a viewer whose
+        queue is already full of unfoldable frames meets the relief valve it
+        always met, and no other viewer waits on it.
+        """
+        if sub.resync_pending:
+            return
+        if not (sub.opened or sub.captured):
+            # The snapshot this subscriber is still waiting for has not read its
+            # watermark yet, so it will carry this frame's state: superseded,
+            # exactly like the pre-open eviction in ``publish``.
+            return
+        marker = {
+            "session_id": self.session_id,
+            "epoch": self.epoch,
+            "seq": seq,
+            "type": RESYNC_MARKER,
+            "payload": {},
+        }
+        size = len(json.dumps(marker, separators=(",", ":")).encode())
+        if (
+            sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES
+        ) and not self._compact_subscriber_queue(sub, size):
+            self._disconnect(sub)
+            return
+        sub.queue.put_nowait((marker, size))
+        sub.queued_bytes += size
+        sub.resync_pending = True
 
     def publish_to_subscription(
         self, kind: str, payload: dict[str, Any], *, subscription_id: str
@@ -2819,7 +3263,7 @@ class DesktopSessionBridge:
             # eviction, not folding (see ``publish``). This frame is not itself
             # a foldable family, but the queue it lands on may hold runs that
             # are, so the attempt is the same one.
-            if sub.opened and self._compact_subscriber_queue(sub, size):
+            if (sub.opened or sub.captured) and self._compact_subscriber_queue(sub, size):
                 sub.queue.put_nowait((frame, size))
                 sub.queued_bytes += size
                 return True
@@ -3205,6 +3649,21 @@ class DesktopSessionBridge:
             **window,
         }
 
+    def _subscribe_frontend_updates(self, remote: Any) -> Callable[[], None]:
+        """Relay ``remote``'s frontend updates to ``_frontend``; returns the unsubscribe.
+
+        Update-only where the facade offers it: this bridge paints every first
+        frame from its own off-loop snapshot and never read the joining
+        snapshot ``subscribe_frontend`` clones, which on a 2,000-job roster was
+        ~0.28 s of every cold open on the serving loop (PR #4012, QA round 1,
+        Q1). A facade without the method (peer viewers' doubles in tests) keeps
+        the original call.
+        """
+        updates = getattr(remote, "subscribe_frontend_updates", None)
+        if updates is not None:
+            return cast(Callable[[], None], updates(self._frontend))
+        return cast(Callable[[], None], remote.subscribe_frontend(self._frontend).unsubscribe)
+
     def _frontend(self, update: FrontendUpdate) -> None:
         # Keep the runtime's field deltas, not a full snapshot per streamed token.
         # Large roster/usage fields still pass through the shared wire budget; the
@@ -3311,7 +3770,9 @@ class DesktopSessionBridge:
             # the read that lands afterwards is published as the correction.
             stale, self.attention_served_stale = self.attention_served_stale, False
             if previous or stale:
-                self.publish("attention", state)
+                # The frame carries the attach projection; ``self.attention`` and
+                # the notification edge below keep the full store state (R3-2).
+                self.publish("attention", attach_frame_attention(state))
                 # THE NOTIFICATION EDGE, published AFTER the attention frame so
                 # a reader that toasts already holds the receipt state that
                 # explains the toast. The same `previous` baseline rule governs
@@ -3339,7 +3800,10 @@ class DesktopSessionBridge:
             remote = self.remote
             if remote is None:
                 return {}
-            return dict(getattr(remote.frontend_state, "attention", {}) or {})
+            # The canonical object, not ``frontend_state`` (a clone of the whole
+            # roster, on the loop, once per attention poll): see
+            # ``_canonical_state``. Deep-copied because the caller owns the result.
+            return copy.deepcopy(dict(getattr(self._canonical_state(), "attention", {}) or {}))
         return await asyncio.to_thread(
             AttentionStore(self.root / "attention.db").state, f"session/{self.session_id}"
         )
@@ -3440,7 +3904,7 @@ class DesktopSessionBridge:
             remote = self.remote
             session_name = ""
             if remote is not None:
-                session_name = getattr(remote.frontend_state, "conversation_title", "") or ""
+                session_name = getattr(self._canonical_state(), "conversation_title", "") or ""
             # `compose` reads up to 128 KiB for the title and 64 KB for the
             # preview, and `refresh_attention` runs on the event loop. Off-loop
             # for the same reason the store read above is.
@@ -3525,6 +3989,24 @@ class DesktopSessionBridge:
                 # too, so the pair brackets the outage rather than leaving a
                 # single warning of unknown duration.
                 failing += 1
+                # FORGET THE COMPARISON KEY, KEEP THE VISIBLE ATTENTION. A caught
+                # failure means the store may have been unreadable, dropped or
+                # recreated while we were blind, and `revision()` is a counter
+                # DERIVED FROM THE ROWS: a rebuilt store that publishes one
+                # completion reads `(1, 0, 0)` -- exactly what the cached key
+                # holds for the OLD store -- so the equality check would call the
+                # new body "unchanged" and keep showing the old completion until
+                # some later mutation moved the counters. Clearing the key makes
+                # the first SUCCESSFUL read after an error refresh once.
+                # `self.attention` is deliberately untouched, so a flapping store
+                # never blanks an unread mark. Only the failure path clears it:
+                # an unchanged revision with no error still costs nothing. A
+                # store-generation id in `revision()` would ALSO detect a
+                # replacement that never raised, but it was rejected as the wider
+                # change (it grows the cross-process token every caller compares).
+                # Known limit: a replacement with no failed poll between is not
+                # covered by this invalidate-on-failure fix.
+                self.attention_poll_key = None
                 if failing == 1:
                     logger.warning(
                         "attention poll failed for %s (further failures quiet "
@@ -3535,7 +4017,44 @@ class DesktopSessionBridge:
             await asyncio.sleep(1)
 
     def state(self) -> dict[str, Any]:
-        assert self.remote is not None
+        return _wire_state_of(self._capture_wire_state())
+
+    def _canonical_state(self) -> Any:
+        """The facade's current state for reading a FEW FIELDS, without the clone.
+
+        ``AttachedSession.frontend_state`` deep-copies every job and usage row
+        so a caller can keep and mutate it; a reader of one immutable field
+        (a cursor, a title) or one it copies itself (attention) pays that for
+        nothing, on the serving loop. The canonical object is never mutated in
+        place (``FrontendStateStore.state_reference``), so reading a field off
+        it is safe; a caller that needs a mutable sub-object must copy it.
+        A remote without the accessor (test doubles) answers as before.
+        """
+        remote = self.remote
+        assert remote is not None
+        reader: Any = getattr(remote, "frontend_state_reference", None)
+        if reader is not None:
+            return reader()[1]
+        return remote.frontend_state
+
+    def _capture_wire_state(self) -> _WireCapture:
+        """What ``state()`` serializes, read now, without the clone or the dump.
+
+        O(attention) on the caller's thread: the canonical state is taken by
+        REFERENCE (``AttachedSession.frontend_state_reference``), so a caller on
+        the serving loop can read it in the same synchronous step as the bridge's
+        sequence watermark and leave the work proportional to the session to
+        :func:`_wire_state_of` on a worker.
+        """
+        remote = self.remote
+        assert remote is not None
+        reader: Any = getattr(remote, "frontend_state_reference", None)
+        if reader is not None:
+            _store, reference = reader()
+        else:
+            # A remote with no store accessor (test doubles) already hands out a
+            # caller-owned clone; serialize that as before.
+            reference = remote.frontend_state
         # A PEER'S ATTENTION IS THE OWNER'S, NOT THIS DEVICE'S LAST READ. The
         # override below publishes the RECEIPT state, and for a remote conversation
         # the author of that state is the peer's runtime: this bridge's own
@@ -3543,20 +4062,84 @@ class DesktopSessionBridge:
         # ``_read_attention``), so reading it through would be a copy of a copy --
         # one sync behind at the exact moment a completion moves it, which is the
         # moment the renderer paints its unread mark.
-        attention = (
-            dict(getattr(self.remote.frontend_state, "attention", {}) or {})
-            if self.remote_row is not None
-            else self.attention
-        )
-        state = self.remote.frontend_state.model_copy(update={"attention": attention})
-        return sync_wire_payload(
-            FrontendSync(
-                epoch=state.epoch,
-                sequence=state.sequence,
-                snapshot=state,
-                live_cursor=state.history_cursor,
+        #
+        # Deep-copied either way: the worker serializes it later, and the
+        # bridge's own ``attention`` is replaced by receipt reads on the loop.
+        # A local read is raw ``AttentionStore.state`` and ``model_copy`` at the
+        # snapshot build skips the model validator, so the attach projection is
+        # applied here (R3-2); a peer's copy is already projected by its store.
+        attention = attach_frame_attention(
+            copy.deepcopy(
+                dict(getattr(reference, "attention", {}) or {})
+                if self.remote_row is not None
+                else self.attention
             )
         )
+        return _WireCapture(reference=reference, attention=attention)
+
+    async def _wire_state_off_loop(self, capture: _WireCapture) -> dict[str, Any]:
+        """:func:`_wire_state_of` on the snapshot pool, coalesced per state.
+
+        Opens that captured the SAME canonical object and the same attention
+        share one build (a reconnect storm or several windows on one huge
+        session would otherwise each pay the whole clone and dump); each gets
+        its own top two levels (:func:`_own_wire_state`). Shielded, so one
+        viewer disconnecting mid-build cannot cancel the build another viewer
+        is waiting on.
+
+        ABANDONED BUILDS ARE WITHDRAWN (review round 1, R1-m1). Each build
+        counts its waiters; when the LAST one leaves (the viewer disconnected or
+        the open was cancelled) a build still QUEUED on the pool is cancelled,
+        because nobody will read it and a busy session installs a new state on
+        almost every event, so successive opens rarely coalesce -- in a
+        reconnect storm a live viewer's open otherwise waited behind several
+        abandoned multi-second builds (repro: 6 cancelled opens left 4 queued).
+        A build already RUNNING is let finish: a pool thread cannot be
+        interrupted, and the entry stays coalescable for the next open of the
+        same state meanwhile.
+        """
+        inflight = self._wire_inflight
+        if (
+            inflight is not None
+            and not inflight.future.done()
+            # A withdrawn build settles its loop-side wrapper one callback
+            # later; joining it in that window would hand this open a
+            # CancelledError it never asked for.
+            and not inflight.work.cancelled()
+            and inflight.capture.reference is capture.reference
+            and inflight.capture.attention == capture.attention
+        ):
+            entry = inflight
+            future = entry.future
+        else:
+            work = _snapshot_pool().submit(_wire_state_of, capture)
+            future = asyncio.wrap_future(work)
+            entry = _WireBuild(capture=capture, work=work, future=future)
+            self._wire_inflight = entry
+
+            def settled(done: asyncio.Future[dict[str, Any]]) -> None:
+                # Drop the entry so a finished build does not pin a large state
+                # object (and its payload) on the bridge until the next open.
+                if self._wire_inflight is entry:
+                    self._wire_inflight = None
+                # A build nobody awaits any more must not log "exception never
+                # retrieved".
+                if not done.cancelled():
+                    done.exception()
+
+            future.add_done_callback(settled)
+        entry.waiters += 1
+        try:
+            built = await asyncio.shield(future)
+        finally:
+            entry.waiters -= 1
+            if entry.waiters == 0 and not future.done():
+                # ``Future.cancel`` on the pool's own future succeeds only while
+                # the item is still queued; ``wrap_future`` then cancels
+                # ``future`` and ``settled`` drops the entry. A running build
+                # refuses and finishes normally.
+                entry.work.cancel()
+        return _own_wire_state(built)
 
     def _cold_verdict(self) -> bool:
         """Whether this bridge's facade is COLD, read now, with no I/O.
@@ -3651,7 +4234,15 @@ class DesktopSessionBridge:
         order_ids: list[str] | None = None,
         peer_journal_source: bool = False,
         supplements: bool = False,
+        diff_bindings: bool = False,
+        on_capture: Callable[[int], None] | None = None,
     ) -> dict[str, Any]:
+        """The authoritative snapshot frame.
+
+        ``on_capture`` is called with the frame's ``seq`` the instant the state
+        and watermark are captured, BEFORE the off-loop build (see the capture
+        comment below); ``events`` uses it to stop evicting a pre-open queue.
+        """
         # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
         # everything this method does before the page (the attention glance, the
         # canonical state) is time the renderer pays for too, so it comes out of
@@ -3693,7 +4284,11 @@ class DesktopSessionBridge:
         # (``session/attached.py``) and ``history_cursor`` is a real field on it,
         # so this is the same predicate the clone answered.
         remote = self.remote
-        cursor = remote.frontend_state.history_cursor if remote is not None else None
+        # ``_canonical_state``, NOT ``remote.frontend_state``: on an
+        # ``AttachedSession`` that property is a deep clone of every job (the
+        # serve stall's second on-loop cost, measured ~1 s for a 2,000-job
+        # roster), paid here for one string.
+        cursor = self._canonical_state().history_cursor if remote is not None else None
         history: dict[str, Any] = {"entries": [], "has_more": False, "cursor_missing": False}
         # The gate is about the STATE, not about bounding the page, and the empty
         # page it produces is a signal a reader ACTS on: "no history cursor, so
@@ -3766,6 +4361,9 @@ class DesktopSessionBridge:
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=peer_journal_source,
                 **supplement_read_options(supplements),
+                # Only when declared, like supplements: a forwarding path that
+                # predates the flag keeps its exact call shape.
+                **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
                 # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
                 # read may spend what REMAINS of it on facts and nothing more. See
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
@@ -3782,14 +4380,25 @@ class DesktopSessionBridge:
         # its own construction -- and a subscriber that dropped everything at or
         # below it would have dropped frames the snapshot does not contain.
         #
-        # That ordering is what makes the pre-open supersession in :meth:`events`
-        # provably lossless rather than merely plausible: at the moment this
-        # returns, every frame still in a subscriber's queue was published before
-        # the ``self.state()`` below (no await follows it, so ``publish`` cannot
-        # interleave), hence every one of them has ``seq <= this frame's seq`` and
-        # is already inside ``frontend``. Do NOT introduce an await between these
-        # two lines and the ``return``; ``tests/unit/server/test_desktop_sessions.py``
-        # pins it.
+        # THE CAPTURE IS ATOMIC; THE BUILD IS NOT ON THE LOOP (serve stall,
+        # 2026-11-15). The state is captured BY REFERENCE (``_capture_wire_state``,
+        # O(1)) in the same synchronous step as ``self.sequence`` -- so every
+        # frame published before the capture is ``<= seq`` and inside the
+        # captured state, exactly as before. The clone and ``sync_wire_payload``
+        # (seconds on a large session, which held the loop until ``/health``
+        # timed out) then run on the snapshot pool, and the loop keeps
+        # publishing meanwhile. Those frames are ``> seq`` -- NOT in this
+        # snapshot -- and must reach the subscriber after it: ``on_capture``
+        # lets ``events`` drain the superseded frames at the capture instant
+        # and switch the queue's overflow policy from eviction to backpressure
+        # (``DesktopSubscription.captured``), and its post-snapshot drain keeps
+        # every frame above the watermark. The captured object never changes
+        # (the store installs new objects; see
+        # ``FrontendStateStore.state_reference``), so the worker serializes the
+        # state AS OF the watermark however long it takes.
+        # ``tests/unit/server/test_desktop_sessions.py`` pins the capture order;
+        # ``tests/unit/server/test_desktop_snapshot_off_loop.py`` pins the
+        # off-loop build and the frames published during it.
         # COLD ASK ROWS COME FROM THE DURABLE INDEX (#1363 QA Q-1, SA-D8).
         #
         # A COLD FACADE'S ASK FOLD IS NOT DERIVABLE AND NOT TRUSTWORTHY. Two
@@ -3803,9 +4412,9 @@ class DesktopSessionBridge:
         # writes and what ``GET /v1/desktop/asks`` reads, and this method's own
         # ``cold`` verdict is exactly "no verified owner to ask".
         #
-        # READ BEFORE ``state()``, and that ordering is the contract above rather
-        # than tidiness: no await may sit between the state read, the watermark
-        # read and the return, or a subscriber's queued frame could be dropped as
+        # READ BEFORE THE CAPTURE, and that ordering is the contract above rather
+        # than tidiness: no await may sit between the state capture and the
+        # watermark read, or a subscriber's queued frame could be dropped as
         # superseded on a watermark that never contained it. ``_cold_ask_rows`` is
         # the one await, so it happens first. An index with no entry for this
         # session leaves the facade's own values alone: absence of the file is
@@ -3813,15 +4422,23 @@ class DesktopSessionBridge:
         # is empty, and a runtime that never ran the engine must keep reading as a
         # host that cannot answer (``asks_open`` absent).
         cold_asks = await self._cold_ask_rows()
-        state = self.state()
+        capture = self._capture_wire_state()
         # THE VERDICT IS ASKED AGAIN HERE, not carried over (review round 1, m1).
         # The read above yields the loop twice, and a facade can finish a resync
         # in that window; applying rows judged "cold" a moment ago would then lay
         # index rows OVER a live owner's own fold — and a delta at or below this
         # frame's watermark would be dropped as superseded while the frame carried
         # the older rows. The verdict is three local reads, so it is cheap to ask
-        # again, and this is the last look before the assignment.
-        if cold_asks is not None and self._cold_verdict():
+        # again, and it is asked AT THE CAPTURE, with the cold fields, so the
+        # verdict describes the captured state rather than whatever the facade
+        # became while the build ran off the loop.
+        apply_cold_asks = cold_asks is not None and self._cold_verdict()
+        cold_fields = self._cold_fields()
+        seq, epoch = self.sequence, self.epoch
+        if on_capture is not None:
+            on_capture(seq)
+        state = await self._wire_state_off_loop(capture)
+        if apply_cold_asks and cold_asks is not None:
             rows, open_count = cold_asks
             snapshot = state.get("snapshot")
             if isinstance(snapshot, dict):
@@ -3842,7 +4459,6 @@ class DesktopSessionBridge:
                 # the rows this frame carries.
                 snapshot.pop("asks_truncated", None)
                 bound_ask_snapshot_in_place(snapshot)
-        seq, epoch = self.sequence, self.epoch
         if open_trace.enabled():
             open_trace.mark(
                 "a.snap.total", (time.monotonic() - started) * 1000, session=self.session_id
@@ -3855,7 +4471,7 @@ class DesktopSessionBridge:
             "payload": {
                 "frontend": state,
                 "history": history,
-                **self._cold_fields(),
+                **cold_fields,
             },
         }
 
@@ -3890,6 +4506,7 @@ class DesktopSessionBridge:
         source_read: str | None = None,
         expected_journal_generation: str | None = None,
         supplements: bool = False,
+        diff_bindings: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
         """One page of the durable journal.
@@ -4051,6 +4668,10 @@ class DesktopSessionBridge:
                 journal_order=journal_order,
                 order_ids=order_ids,
                 supplements=self._can_paint_supplements(supplements),
+                # No runtime capability gate: the binding is durable host data
+                # the strip re-validates against THIS session; the viewer's
+                # declaration is the only input.
+                diff_bindings=diff_bindings,
                 # ONLY A CALLER-SUPPLIED DEADLINE bounds the display-only proof
                 # join: that is the snapshot's first frame. A standalone
                 # ``/history`` page keeps waiting for the join, because it is
@@ -4111,18 +4732,32 @@ class DesktopSessionBridge:
                 "has_more": False,
                 "cursor_missing": bool(before_id or through_id or around_id),
             }
+        # THE BARE PAGE IS BOUNDED TOO (``session.row_clip``): it is what the
+        # snapshot embeds when the renderer did not ask for ``open_frame``, and
+        # what every in-band resync re-reads, and it used to serve rows whole —
+        # one 10.59 MB ``frontend_state_checkpoint_v1`` row made a 12.13 MB
+        # snapshot the renderer's 8 MiB per-record cap refused. Each row is
+        # clipped to 1.5 MiB (a checkpoint is withheld, not cut) and the page
+        # to 4 MiB (wire bytes), newest rows first — or outward from
+        # ``around_id``, which is always kept; the full rows stay one ref away.
+        entries, capped_older, capped_newer = await asyncio.to_thread(
+            _bounded_page, page.entries, self.session_id, around_id
+        )
         answer = {
             # EVERY ROW HERE IS A JOURNAL ENTRY, so its ``ts`` is the entry time by
             # construction — the ``entry`` value of the closed vocabulary, and the
             # reason a LOCAL page needs no negotiation to be honest. Stamped here
             # rather than left to a model default so the wire says so on every row
             # a consumer might branch on.
-            "entries": visible_transcript_rows(
-                [{**json.loads(row.to_json()), "ts_source": "entry"} for row in page.entries]
-            ),
-            "has_more": page.has_more,
+            # Encoded in a thread: a page of fat rows (whole tool results) is
+            # tens of ms of JSON round trip, and the snapshot asks for one on
+            # every open (serve stall, 2026-11-15 real-path sampler).
+            "entries": entries,
+            # A cap that left rows out on a side means there is more on that
+            # side even when the journal page itself reached its end.
+            "has_more": page.has_more or capped_older,
             "cursor_missing": page.reconciled,
-            "has_newer": page.has_newer,
+            "has_newer": True if capped_newer else page.has_newer,
         }
         answer = await self._with_peer_cycle_records(answer, [page])
         return (
@@ -4130,6 +4765,44 @@ class DesktopSessionBridge:
             if journal_order
             else answer
         )
+
+    async def history_row(self, *, ref: str, offset: int, limit: int) -> dict[str, Any]:
+        """One byte range of the FULL row a clipped ``truncated.ref`` names.
+
+        The content is the row's desktop wire form (:meth:`_wire_rows`, the one
+        spelling every local read serves) in ``row_clip.canonical_row_bytes``,
+        so the ranges reassemble to exactly ``truncated.bytes_total`` bytes.
+
+        THREAT MODEL (``session.row_clip.row_ref``): the caller already passed
+        the same door ``/history`` uses (bearer auth, session placement, read
+        admission), so the ref only has to stop a CROSS-SESSION read. A ref
+        that is malformed, minted for another session, or minted by an earlier
+        serve process answers ``KeyError`` — the route's ordinary 404, the same
+        answer as a row that no longer exists, so the status is no oracle for
+        which of those it was. A peer session's rows live on its owner and
+        this device has no mesh lane that fetches one, so refs are never minted
+        for them (the owner's frame clips with no ref) and this refuses.
+        """
+        row_id = resolve_ref(self.session_id, ref)
+        if row_id is None:
+            raise KeyError(ref)
+        if self.remote_row is not None:
+            raise ValueError("full rows are served for local sessions only")
+        try:
+            page = await load_transcript_page(
+                self.root / "sessions" / self.session_id,
+                around_id=row_id,
+                before=0,
+                after=0,
+                limit=1,
+            )
+        except FileNotFoundError:
+            raise KeyError(ref) from None
+        rows = [row for row in self._wire_rows(page.entries) if row.get("id") == row_id]
+        if not rows:
+            raise KeyError(ref)
+        content = await asyncio.to_thread(canonical_row_bytes, rows[0])
+        return row_range(content, offset=offset, limit=limit)
 
     async def _open_frame_history(
         self,
@@ -4145,6 +4818,7 @@ class DesktopSessionBridge:
         journal_order: bool = False,
         order_ids: list[str] | None = None,
         supplements: bool = False,
+        diff_bindings: bool = False,
         paint_deadline: float | None = None,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
@@ -4187,6 +4861,9 @@ class DesktopSessionBridge:
         through one call, and splitting the parameter list per flag is how the two
         pages would come to disagree about the same rows.
         """
+        # The strip scopes binding rows to the VIEWED session id, never a row's
+        # own claim; ``None`` keeps the pre-flag allow-list exactly.
+        binding_view = self.session_id if diff_bindings else None
         directory = self.root / "sessions" / self.session_id
         if around_id is not None:
             try:
@@ -4204,14 +4881,24 @@ class DesktopSessionBridge:
                     "head_cut": False,
                 }
             anchored = self._wire_rows(page.entries, copy=False)
-            anchored_index = await self._frame_source(deadline, [page])
+            anchored_index = await self._frame_source(
+                deadline, [page], paint_deadline=paint_deadline
+            )
             anchored_index, facts = await self._resolve_frame_source(
-                anchored_index, anchored, [page], order_ids or [], False, deadline
+                anchored_index,
+                anchored,
+                [page],
+                order_ids or [],
+                False,
+                deadline,
+                paint_deadline=paint_deadline,
             )
             result = build_frame(
                 anchored,
+                session_id=self.session_id,
                 supplements=supplements,
-                memo=StripMemo(supplements=supplements),
+                diff_bindings=binding_view,
+                memo=StripMemo(supplements=supplements, diff_bindings=binding_view),
                 index=anchored_index,
                 resolved_runs=facts.runs if facts is not None else None,
                 runs_state="building",
@@ -4251,7 +4938,9 @@ class DesktopSessionBridge:
             if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
                 return answer
             return (
-                await self._journal_order_page(answer, [page], order_ids or [])
+                await self._journal_order_page(
+                    answer, [page], order_ids or [], paint_deadline=paint_deadline
+                )
                 if journal_order
                 else answer
             )
@@ -4276,7 +4965,7 @@ class DesktopSessionBridge:
         # strips it twice more. Safe because every row here is this request's own
         # row object built by ``_wire_rows`` (its payload may be shared with the
         # page cache, but the memo keys the request's own envelope dict).
-        strip_memo = StripMemo(supplements=supplements)
+        strip_memo = StripMemo(supplements=supplements, diff_bindings=binding_view)
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
@@ -4323,9 +5012,25 @@ class DesktopSessionBridge:
             page_rows.append((len(rows), page.has_more))
             if not collected:
                 break
-            kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
-            paintable_rows = paintable(collected, supplements=supplements, memo=strip_memo)
-            if reached and len(paintable(kept, supplements=supplements, memo=strip_memo)) >= limit:
+            kept, reached = align_page(
+                collected,
+                limit,
+                supplements=supplements,
+                memo=strip_memo,
+                diff_bindings=binding_view,
+            )
+            paintable_rows = paintable(
+                collected, supplements=supplements, memo=strip_memo, diff_bindings=binding_view
+            )
+            if (
+                reached
+                and len(
+                    paintable(
+                        kept, supplements=supplements, memo=strip_memo, diff_bindings=binding_view
+                    )
+                )
+                >= limit
+            ):
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
             # what the client asked for and it must not wait behind a scan, while
@@ -4350,7 +5055,9 @@ class DesktopSessionBridge:
                 and through_id is None
                 and around_id is None
             ):
-                index = await self._frame_source(deadline, order_pages)
+                index = await self._frame_source(
+                    deadline, order_pages, paint_deadline=paint_deadline
+                )
                 index_at_first_page = index is not None
             if (
                 index is not None
@@ -4378,7 +5085,7 @@ class DesktopSessionBridge:
                 break
         step("pages", pages=len(order_pages), rows=len(collected))
         if index is None:
-            index = await self._frame_source(deadline, order_pages)
+            index = await self._frame_source(deadline, order_pages, paint_deadline=paint_deadline)
             if tail_read and not index_at_first_page:
                 # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1; the relay twin
                 # carries the same rule): the facts will say ``ready``, so the rows
@@ -4391,6 +5098,7 @@ class DesktopSessionBridge:
                     limit=limit,
                     supplements=supplements,
                     memo=strip_memo,
+                    diff_bindings=binding_view,
                 )
                 if stop is not None and stop < len(page_rows):
                     collected = collected[-sum(rows for rows, _more in page_rows[:stop]) :]
@@ -4405,14 +5113,28 @@ class DesktopSessionBridge:
         # not paid for, and ``runs`` carries that run's true size instead.
         step("frame_source", index=type(index).__name__)
         index, facts = await self._resolve_frame_source(
-            index, collected, order_pages, order_ids or [], tail_read, deadline
+            index,
+            collected,
+            order_pages,
+            order_ids or [],
+            tail_read,
+            deadline,
+            paint_deadline=paint_deadline,
         )
         step("resolve", facts=facts is not None)
-        kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
-        result = build_frame(
-            kept,
+        kept, reached = align_page(
+            collected,
+            limit,
             supplements=supplements,
             memo=strip_memo,
+            diff_bindings=binding_view,
+        )
+        result = build_frame(
+            kept,
+            session_id=self.session_id,
+            supplements=supplements,
+            memo=strip_memo,
+            diff_bindings=binding_view,
             index=index,
             resolved_runs=facts.runs if facts is not None else None,
             runs_state="building",
@@ -4455,7 +5177,9 @@ class DesktopSessionBridge:
             step("journal_order", source="facts")
             return answer
         if journal_order:
-            answer = await self._journal_order_page(answer, order_pages, order_ids or [])
+            answer = await self._journal_order_page(
+                answer, order_pages, order_ids or [], paint_deadline=paint_deadline
+            )
             step("journal_order", source="page", state=answer.get("journal_order_state"))
         return answer
 
@@ -4492,11 +5216,24 @@ class DesktopSessionBridge:
             ]
         )
 
-    async def _frame_source(self, deadline: float, pages: list[Any]) -> Any:
+    async def _frame_source(
+        self, deadline: float, pages: list[Any], *, paint_deadline: float | None = None
+    ) -> Any:
         """Resident first, then witnessed tail summary; fallback keeps its wager.
 
         A summary only guides the head hunt. It never authorizes suppressing a
         refresh for a later failed selection or pretending the whole index exists.
+
+        THE SUMMARY READ IS BOUNDED BY THE FIRST FRAME'S DEADLINE (``paint_deadline``,
+        set only for the snapshot's embedded page). It is a SQLite read on a
+        worker thread and was awaited in full: on the operator's v0.102.2
+        desktop it measured up to 1,178 ms on one 3.2 s open (session
+        7c8130c573dd) against a 120 ms ``OPEN_FRAME_SNAPSHOT_BUDGET_S``. Past the
+        deadline the frame proceeds with no index -- the head hunt's existing
+        blind path and ``runs_state='building'`` -- and the follow-up ``/history``
+        (``paint_deadline=None``) waits for the summary and carries the facts.
+        No refresh is started on that timeout: the summary EXISTS, it was only
+        slow, and a full scan would cost far more than the read it replaces.
         """
         source = index_read_model.page_source(pages)
         resident = transcript_index.fresh_resident(self.root, self.session_id)
@@ -4508,9 +5245,20 @@ class DesktopSessionBridge:
             )
             return resident if source == expected else None
         step = _OpenFrameSteps(self.session_id)
-        projected = await asyncio.to_thread(
-            index_read_model.summary, self.root, self.session_id, source
+        # Large journals also accept a companion the journal has grown past by
+        # run-neutral rows (``index_read_model._prefix_tail``; see
+        # ``_journal_order_page``'s "LARGE JOURNALS STAY ON THE COMPANION").
+        finished, projected = await _bounded_frame_read(
+            paint_deadline,
+            index_read_model.summary,
+            self.root,
+            self.session_id,
+            source,
+            prefix_ok=transcript_index.companion_first(self.root, self.session_id),
         )
+        if not finished:
+            step("frame_source.summary", state="deadline")
+            return None
         step("frame_source.summary", state=projected.state)
         if projected.state == "ready":
             return projected.value
@@ -4526,11 +5274,28 @@ class DesktopSessionBridge:
         order_ids: list[str],
         reaches_eof: bool,
         deadline: float,
+        *,
+        paint_deadline: float | None = None,
     ) -> tuple[Any, Any]:
-        """Materialize selected facts before build_frame, on an existing worker hop."""
+        """Materialize selected facts before build_frame, on an existing worker hop.
+
+        THE ``frame_facts`` HOP IS BOUNDED BY THE FIRST FRAME'S DEADLINE, as
+        ``_frame_index`` and the proof join already are. It was the one
+        open-frame await with no bound: on the operator's v0.102.2 desktop
+        (21 sidebar opens, ``LOP_OPEN_TRACE``) ``a.hist.resolve`` on the summary
+        path measured median 88 ms and max 818 ms, against a 120 ms
+        ``OPEN_FRAME_SNAPSHOT_BUDGET_S`` it was supposed to share. Past the
+        deadline the frame answers with no facts -- the ``building`` shape it
+        already serves for a cold index -- and the standalone ``/history``
+        that follows (``paint_deadline=None``) waits for the read and carries
+        them. No ``_frame_index`` wait follows a timeout: the budget is spent,
+        and starting a full refresh scan for a summary that exists would cost
+        more than the read it abandons.
+        """
         source = index_read_model.page_source(pages)
         if isinstance(candidate, index_read_model.FrameSummary):
-            result = await asyncio.to_thread(
+            finished, result = await _bounded_frame_read(
+                paint_deadline,
                 index_read_model.frame_facts,
                 self.root,
                 self.session_id,
@@ -4538,7 +5303,10 @@ class DesktopSessionBridge:
                 reaches_eof=reaches_eof,
                 order_ids=order_ids,
                 source=source,
+                prefix_ok=transcript_index.companion_first(self.root, self.session_id),
             )
+            if not finished:
+                return None, None
             if result.state == "ready":
                 return None, result.value
             # Summary success is NOT selection success. Corruption/races use the
@@ -4629,7 +5397,12 @@ class DesktopSessionBridge:
         return apply_journal_order(self.root, self.session_id, answer, source, ids)
 
     async def _journal_order_page(
-        self, answer: dict[str, Any], pages: list[Any], ids: list[str]
+        self,
+        answer: dict[str, Any],
+        pages: list[Any],
+        ids: list[str],
+        *,
+        paint_deadline: float | None = None,
     ) -> dict[str, Any]:
         """Answer ``journal_order`` from the cheapest source that can prove it.
 
@@ -4661,21 +5434,68 @@ class DesktopSessionBridge:
         converges onto. Same singleflight, not awaited, and only when nothing is
         resident: no scan is added to this request's latency and none is started
         twice.
+
+        THE COMPANION READ IS BOUNDED BY THE FIRST FRAME'S DEADLINE
+        (``paint_deadline``, set only for the snapshot's embedded page), exactly as
+        ``_frame_source``'s summary and ``_resolve_frame_source``'s ``frame_facts``
+        hops are (#3904). It was the one open-frame worker hop still awaited in
+        full: on the operator's v0.106.7 desktop (13 traced sidebar opens,
+        ``LOP_OPEN_TRACE``, 2026-11-17) ``a.hist.journal_order`` reached 1,547 and
+        3,081 ms on a 743 MB / 134k-entry journal while the whole frame's budget is
+        ``OPEN_FRAME_SNAPSHOT_BUDGET_S`` (120 ms); across 146 ``ready`` answers
+        the read was median 1.7 ms, p90 34 ms, max 3,429 ms — a cheap read with a
+        multi-second tail (SQLite contention, a cold page cache under swap).
+
+        A companion that answers INSIDE what is left of the deadline is still
+        used, so the common open keeps a final order on first paint. Past it the
+        frame answers source (3) — ``building`` plus the existing
+        ``_order_correction`` singleflight, whose ``start_refresh`` is also the
+        resident scan a companion answer would have armed — and the renderer
+        RECONCILES the order after first paint from the ``journal_order`` events
+        that correction publishes. That after-paint change is the accepted price:
+        a conversation on screen in ~100 ms that settles its order a moment later
+        beats one held blank for seconds. The abandoned read keeps running on its
+        worker (a thread cannot be cancelled) and ``_bounded_frame_read`` retrieves
+        its outcome; it is not retried here. A standalone ``/history``
+        (``paint_deadline=None``) still waits for the companion in full.
+
+        LARGE JOURNALS STAY ON THE COMPANION (``transcript_index.companion_first``,
+        ADR ``docs/design/transcript-index-off-process.md`` step 2). Two changes,
+        both only above ``COMPANION_FIRST_MIN_BYTES``:
+
+        * the companion may answer for a journal that has GROWN since it was
+          published (``prefix_ok``, the append-prefix rule in
+          ``index_read_model._extends``) whenever every row asked about lies in
+          the covered prefix; a page reaching an appended row still falls to (3);
+        * a companion answer does NOT arm the resident scan. For these journals
+          that "warm" is a whole-index hydration on serve's GIL (~1.1 s for the
+          808 MB anchor) that the 4-slot resident LRU evicts again as soon as the
+          operator switches across more than four large conversations -- so it
+          was re-paid on most opens. Re-opening the companion is the cheaper
+          steady state (a page-bounded SQLite read), which is the trade the
+          25/25-reopen measurement above did NOT have to weigh at 36.5 MB.
         """
         ids = list(dict.fromkeys(ids))
         source = index_read_model.page_source(pages)
         if self._apply_journal_order(answer, source, ids):
             return answer
-        projected = await asyncio.to_thread(
+        large = transcript_index.companion_first(self.root, self.session_id)
+        finished, projected = await _bounded_frame_read(
+            paint_deadline,
             index_read_model.order_facts,
             self.root,
             self.session_id,
             collected_ids=[row["id"] for row in answer["entries"]],
             order_ids=ids,
             source=source,
+            prefix_ok=large,
         )
+        if not finished:
+            _OpenFrameSteps(self.session_id)("journal_order.companion", state="deadline")
+            return self._journal_page(answer, pages, ids)
         if projected.state == "ready" and index_read_model.apply_order(answer, projected.value):
-            self._warm_resident_scan()
+            if not large:
+                self._warm_resident_scan()
             return answer
         # A missing, stale, corrupt or unsupported projection is NOT an error: the
         # policy below is exactly what an absent companion answered before this
@@ -4754,6 +5574,11 @@ class DesktopSessionBridge:
 
             async def correct() -> None:
                 try:
+                    if (
+                        transcript_index.companion_first(self.root, self.session_id)
+                        and await self._companion_order_correction()
+                    ):
+                        return
                     task, _ = transcript_index.start_refresh(self.root, self.session_id)
                     await asyncio.shield(task)
                     if self._closing:
@@ -4801,6 +5626,91 @@ class DesktopSessionBridge:
 
             self._order_correction = asyncio.create_task(correct())
         return answer
+
+    async def _companion_order_correction(self) -> bool:
+        """Publish the pending journal-order coordinates from the companion.
+
+        ``True`` when every pending row was answered (events published, rows
+        consumed); ``False`` leaves ``_order_pending`` untouched for base's
+        resident correction, which then runs exactly as before.
+
+        WHY, MEASURED (ADR ``docs/design/transcript-index-off-process.md`` step
+        2; real-path rig on this PR, 6 x 70 MB journals at load 40-100): on a
+        loaded host the 120 ms first-frame budget is spent before the companion
+        reads start, so most opens of a large journal answered ``building`` and
+        this correction's ``start_refresh`` re-hydrated the whole index on
+        serve's GIL -- 6 ``index.refresh_start`` per six-session pass, every
+        pass, because the 4-slot resident LRU evicts across the switch. The
+        correction is after paint and owes no deadline, so it can afford the
+        page-bounded SQLite read the frame could not.
+
+        THE SAME ORDINALS AS THE RESIDENT PATH, NOT ALWAYS THE SAME EVENTS
+        (review round 1, m2). Pending rows are grouped by the page source they
+        were read under, each group is answered by
+        ``index_read_model.order_selection`` under the append-prefix rule, and
+        the batches come from the one existing
+        ``journal_order_correction_batches``. For a group read under the
+        current source the events match the resident path's. For a group read
+        under an OLDER source of the same append-only journal the resident path
+        publishes ``reconcile`` (its ``original != expected`` rule against one
+        index) while this one publishes that group's ``journal_seq`` rows: the
+        values are the ones a reconcile would re-fetch, because an append never
+        renumbers a covered row. A group the companion cannot prove -- missing,
+        stale past a visible append, corrupt -- fails the attempt and the
+        caller falls to the resident path for what is still pending.
+
+        ROWS ADDED WHILE THIS AWAITS ARE ANSWERED TOO (review round 1, m1). A
+        page that queues pending rows while this task is in flight starts no
+        task of its own (``_order_correction`` is not done), so this loops
+        until a pass finds nothing new. Each pass consumes only the entries it
+        answered; a later pass that cannot prove its group returns ``False``,
+        leaving exactly the unanswered entries to the resident path.
+        """
+        answered_before = False
+        while True:
+            pending = dict(self._order_pending)
+            if not pending:
+                return answered_before
+            groups: dict[Any, list[str]] = {}
+            for id_, (_descriptor, original) in pending.items():
+                if original is None:
+                    return False
+                groups.setdefault(original, []).append(id_)
+            answered: list[tuple[Any, list[dict[str, Any]]]] = []
+            for original, ids in groups.items():
+                result = await asyncio.to_thread(
+                    index_read_model.order_selection,
+                    self.root,
+                    self.session_id,
+                    order_ids=ids,
+                    source=original,
+                    prefix_ok=True,
+                )
+                if result.state != "ready" or not result.value.journal_generation:
+                    return False
+                selection = result.value
+                rows = [
+                    {**pending[id_][0], "journal_seq": selection.journal_rows[id_]}
+                    for id_ in ids
+                    if id_ in selection.journal_rows
+                ]
+                answered.append((selection, rows))
+            if self._closing:
+                return True
+            for id_, value in pending.items():
+                if self._order_pending.get(id_) is value:
+                    del self._order_pending[id_]
+            for selection, rows in answered:
+                for batch in transcript_index.journal_order_correction_batches(selection, rows):
+                    self.publish(
+                        "event",
+                        {
+                            "type": JOURNAL_ORDER_EVENT,
+                            "journal_generation": selection.journal_generation,
+                            "rows": batch,
+                        },
+                    )
+            answered_before = True
 
     async def _peer_source_read(
         self,
@@ -6526,6 +7436,7 @@ class DesktopSessionBridge:
         *,
         frontend_replace: bool = False,
         supplements: bool = False,
+        diff_bindings: bool = False,
         journal_order: bool = False,
         peer_journal_source: bool = False,
     ) -> DesktopSubscription:
@@ -6556,6 +7467,7 @@ class DesktopSessionBridge:
         sub = DesktopSubscription(
             frontend_replace=frontend_replace,
             supplements=supplements,
+            diff_bindings=diff_bindings,
             journal_order=journal_order,
             peer_journal_source=peer_journal_source,
         )
@@ -6603,53 +7515,39 @@ class DesktopSessionBridge:
                 if not gap
                 else []
             )
-            snapshot = await self.snapshot(
-                entry_times=entry_times,
-                open_frame=open_frame,
-                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
-                peer_journal_source=peer_journal_source,
-                **supplement_read_options(sub.supplements),
-            )
-            if open_trace.enabled():
-                open_trace.mark(
-                    "a.gen.snapshot",
-                    (time.monotonic() - gen_at) * 1000,
-                    session=self.session_id,
-                    open_frame=open_frame,
-                )
-            # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
-            # ``snapshot()``'s state and sequence are its last reads with nothing
-            # awaiting between them, so no frame can have been published after
-            # the watermark this loop compares against -- which is what makes the
-            # split below exact rather than a race: everything at or below the
-            # watermark is already inside ``frontend`` and is dropped as
-            # superseded, and anything above it is newer than the snapshot and
-            # must be delivered after it. Order corrections are the exception:
-            # they are not frontend state and their IDs may be outside both the
-            # bounded page and order_ids lookup; the drain below preserves them.
-            #
-            # The frames are drained BEFORE ``open`` is yielded, and ``opened``
-            # is set before the first yield of the handshake, so the overflow
-            # policy switches to backpressure at the same moment the subscriber
-            # stops being able to lose anything by eviction.
             disconnected = False
             # NOT `pending`: `events`'s `finally` uses that name for the
             # exception still propagating through it (main's C5 diagnostic), and
             # two different values under one name in one function is the kind of
-            # trap a reader pays for later. The rename is this branch's, so
-            # main's block stays byte-identical.
+            # trap a reader pays for later.
             pending_frames: list[dict[str, Any]] = []
             replayed_sequences = {prior["seq"] for prior in replay}
-            while True:
-                try:
-                    item = sub.queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if item is None:  # ``close()``/``_disconnect`` ran mid-build
-                    disconnected = True
-                    break
-                frame, size = item
-                sub.queued_bytes -= size
+
+            def drain(watermark: int) -> None:
+                nonlocal disconnected
+                while not disconnected:
+                    try:
+                        item = sub.queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if item is None:  # ``close()``/``_disconnect`` ran mid-build
+                        disconnected = True
+                        break
+                    frame, size = item
+                    sub.queued_bytes -= size
+                    if kept_past(frame, watermark):
+                        pending_frames.append(frame)
+
+            def kept_past(frame: dict[str, Any], watermark: int) -> bool:
+                """Whether ``frame`` must still be delivered after a snapshot at ``watermark``."""
+                if frame["seq"] > watermark:
+                    return True
+                if frame.get("type") == RESYNC_MARKER:
+                    # The snapshot being cut already carries the state the
+                    # oversized frame described: the marker is superseded, and
+                    # the next oversized frame must be free to queue its own.
+                    sub.resync_pending = False
+                    return False
                 # Source metadata is not folded into frontend and a bounded
                 # snapshot need not carry its IDs. Preserve it through cutover
                 # unless this exact frame is already in the initial replay;
@@ -6659,9 +7557,59 @@ class DesktopSessionBridge:
                     and frame.get("type") == "event"
                     and frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
                 )
-                already_replayed = frame["seq"] in replayed_sequences
-                if frame["seq"] > snapshot["seq"] or (order_fact and not already_replayed):
-                    pending_frames.append(frame)
+                return order_fact and frame["seq"] not in replayed_sequences
+
+            def captured(watermark: int) -> None:
+                # THE CAPTURE INSTANT (``snapshot``'s ``on_capture``), still on the
+                # loop and in the same synchronous step as the watermark read: every
+                # frame queued so far is ``<= watermark`` and superseded, so drop it
+                # now and stop EVICTING -- what the queue receives while the frame
+                # is built off the loop is above the watermark and must be kept.
+                drain(watermark)
+                sub.captured = True
+
+            async def cut_snapshot() -> dict[str, Any]:
+                # ONE argument list for the open snapshot and every in-band
+                # resync snapshot (``RESYNC_MARKER``), so a resync restates the
+                # world in exactly the shape this subscriber negotiated at open.
+                return await self.snapshot(
+                    entry_times=entry_times,
+                    open_frame=open_frame,
+                    **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                    peer_journal_source=peer_journal_source,
+                    **supplement_read_options(sub.supplements),
+                    **cast(
+                        "DiffBindingReadOptions",
+                        {"diff_bindings": True} if sub.diff_bindings else {},
+                    ),
+                    on_capture=captured,
+                )
+
+            snapshot = await cut_snapshot()
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.gen.snapshot",
+                    (time.monotonic() - gen_at) * 1000,
+                    session=self.session_id,
+                    open_frame=open_frame,
+                )
+            # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
+            # ``snapshot()`` captures its state and sequence with nothing
+            # awaiting between them, and the frames published while it then
+            # built the frame off the loop carry ``seq`` above that watermark --
+            # which is what makes the split below exact rather than a race:
+            # everything at or below the
+            # watermark is already inside ``frontend`` and is dropped as
+            # superseded, and anything above it is newer than the snapshot and
+            # must be delivered after it. Order corrections are the exception:
+            # they are not frontend state and their IDs may be outside both the
+            # bounded page and order_ids lookup; the drain below preserves them.
+            #
+            # The frames are drained BEFORE ``open`` is yielded. The overflow
+            # policy switched to backpressure at the capture (``captured``),
+            # the moment the queue started receiving frames the snapshot does
+            # not contain; ``opened`` below keeps it there.
+            drain(snapshot["seq"])
             sub.opened = True
             open_payload: dict[str, Any] = {
                 "subscription_id": sub.id,
@@ -6712,12 +7660,36 @@ class DesktopSessionBridge:
                     session=self.session_id,
                 )
             yield snapshot
-            for frame in pending_frames:
-                yield frame
-            if disconnected:
-                yield {"type": "gap", "session_id": self.session_id}
-                return
+            # Frames still to deliver, in queue order. A deque rather than the
+            # old straight iteration because an in-band resync (below) must be
+            # able to drop the ones its fresh snapshot supersedes.
+            outbox = deque(pending_frames)
+            pending_frames.clear()
             while True:
+                while outbox:
+                    frame = outbox.popleft()
+                    if frame.get("type") != RESYNC_MARKER:
+                        yield frame
+                        continue
+                    # IN-BAND RESYNC (see ``RESYNC_MARKER``): a frame no queue
+                    # could carry was published here. Mark the break, then cut a
+                    # fresh snapshot NOW -- its watermark is at or above the
+                    # marker's seq because it is read after this dequeue -- and
+                    # split everything behind the marker against it exactly as
+                    # the open path does.
+                    sub.resync_pending = False
+                    yield {"type": "gap", "session_id": self.session_id}
+                    resynced = await cut_snapshot()
+                    drain(resynced["seq"])
+                    outbox = deque(
+                        [prior for prior in outbox if kept_past(prior, resynced["seq"])]
+                        + pending_frames
+                    )
+                    pending_frames.clear()
+                    yield resynced
+                if disconnected:
+                    yield {"type": "gap", "session_id": self.session_id}
+                    return
                 try:
                     item = await asyncio.wait_for(sub.queue.get(), timeout=15)
                 except asyncio.TimeoutError:
@@ -6729,7 +7701,7 @@ class DesktopSessionBridge:
                 frame, size = item
                 sub.queued_bytes -= size
                 if frame["seq"] > cutoff:
-                    yield frame
+                    outbox.append(frame)
         finally:
             # ONE LINE PER ENDED SUBSCRIBER STREAM, NAMING THE REASON (C5).
             # The drop storm this fix addresses had no readable cause anywhere:
@@ -6943,17 +7915,256 @@ class PeerAttachmentUnavailable(Exception):
 
     code = "attachment_on_peer"
 
+    def __init__(self, session_id: str, row: SessionRow, *, owner_code: str = "") -> None:
+        from local_operator.resume import UNNAMED_DEVICE
+
+        self.device = row.owner_label or UNNAMED_DEVICE
+        #: The owner's refusal, folded to the sentence's closed ``reason`` set: the
+        #: owner's own code says WHY (not referenced, revoked, gone…), which is what
+        #: the reader can act on (#3872 Q1-1). The envelope's ``code`` is unchanged.
+        self.reason = peer_refusal_reason(owner_code)
+        super().__init__(f"{self.code}:{owner_code or 'none'}")
+        self.session_id = session_id
+        self.row = row
+
+
+#: Owner refusal codes (``network/files.py``, the authorizer) by the clause of
+#: ``attachment_owner_refused`` that tells the reader what happened.
+_PEER_REFUSAL_REASONS: dict[str, str] = {
+    "not_referenced": "not_referenced",
+    "missing": "missing",
+    "not_found": "missing",
+    "session_not_found": "missing",
+    "not_authorised": "not_allowed",
+    "not_a_member": "not_allowed",
+    "phase_forbidden": "not_allowed",
+    "integrity_failed": "integrity",
+    "corrupt_source": "integrity",
+    "stale_file": "integrity",
+}
+
+
+def peer_refusal_reason(owner_code: str) -> str:
+    return _PEER_REFUSAL_REASONS.get(owner_code, "other")
+
+
+class PeerAttachmentRetryable(Exception):
+    """A peer session's bytes could not be fetched NOW; asking again may succeed.
+
+    docs/design/remote-files-parity.md §1's status table: the owner (or this
+    device's relay) is unreachable, or the pull is still running at the route's
+    wait bound. Both are 504, never 503 — an undeclared 503 under ``/v1/desktop/``
+    reads to the renderer as the PLANE closing — and never 409, which the renderer
+    treats as permanent. ``pending`` adds ``Retry-After``: the transfer continues and
+    the next ask joins it.
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        row: SessionRow | None,
+        *,
+        pending: bool,
+        device: str | None = None,
+    ) -> None:
+        from local_operator.resume import UNNAMED_DEVICE
+
+        # ``row`` is ``None`` when the owner's row could not be read at all (it is
+        # offline, so the listing has no row for it): ``device`` then names it from
+        # the listing's silence (#3872 Q3-1/Q3-2).
+        self.device = device or (row.owner_label if row is not None else "") or UNNAMED_DEVICE
+        self.pending = pending
+        self.code = "attachment_fetch_pending" if pending else "attachment_owner_unreachable"
+        super().__init__(self.code)
+        self.session_id = session_id
+        self.row = row
+
+
+class PeerAttachmentOutdated(Exception):
+    """The owner predates mesh file transfer: a named update, never a fallback."""
+
+    code = "attachment_peer_outdated"
+
     def __init__(self, session_id: str, row: SessionRow) -> None:
         from local_operator.resume import UNNAMED_DEVICE
 
-        device = row.owner_label or UNNAMED_DEVICE
-        super().__init__(
-            f"{session_id}'s images are kept on {device}, which holds that "
-            "conversation; this desktop can only read attachments out of its "
-            "own store today, so this one cannot be shown here yet."
-        )
+        self.device = row.owner_label or UNNAMED_DEVICE
+        #: The device ID for the command the sentence names: a label can be
+        #: ``unnamed device`` or contain spaces, and neither runs (#3872 I1-3).
+        self.peer = str(row.owner_device or "") or self.device
+        super().__init__(self.code)
         self.session_id = session_id
         self.row = row
+
+
+class _OnPeer:
+    """A digest route's read found no local directory: the peer branch answers."""
+
+
+_ON_PEER = _OnPeer()
+
+
+@dataclass(frozen=True)
+class PeerAttachmentFile:
+    """A peer session's blob, OPENED, for a route to stream.
+
+    Opened before the route answers so a concurrent cache eviction cannot take the
+    bytes away mid-body (POSIX keeps an unlinked inode alive for its open fds).
+    """
+
+    handle: BinaryIO
+    mime_type: str
+
+
+async def peer_blob(
+    root: Path,
+    session_id: str,
+    row: SessionRow,
+    digest: str,
+    *,
+    member_id: str,
+) -> Any:
+    """``digest`` for a peer-held session: store, replica, cache, then one pull.
+
+    docs/design/remote-files-parity.md §1's lookup order — every local step is a
+    ``stat``, and only a miss on all three asks the owner, through
+    ``remote_files.fetch`` (single-flight, bounded wait). ``member_id`` is the
+    session whose transcript references the digest (the child for a subagent's
+    image); the owner's ``_session_scope`` admits any session it owns.
+
+    Returns a :class:`~local_operator.remote_files.cache.CachedBlob`. Raises
+    :class:`PeerAttachmentUnavailable` for a permanent owner refusal (not
+    referenced, view revoked…), :class:`PeerAttachmentOutdated` for an owner
+    without mesh file transfer, :class:`PeerAttachmentRetryable` otherwise.
+    """
+    from local_operator.remote_files import cache as remote_cache
+
+    replicas = tuple(dict.fromkeys((member_id, session_id)))
+    blob = await asyncio.to_thread(remote_cache.lookup, root, replicas, digest)
+    if blob is not None:
+        return blob
+    if not row.owner_device:
+        raise PeerAttachmentUnavailable(session_id, row)
+    return await _fetch_peer(
+        root, session_id, row, member_id, {"attachment": digest}, digest, replicas
+    )
+
+
+def peer_row(root: Path, session_id: str, *, owner: str = "") -> SessionRow:
+    """The owner's row for a peer session whose bytes are NOT on this device. Blocking.
+
+    Called only after :func:`local_peer_blob` missed: the row is what a PULL needs,
+    never what a local copy needs. ``KeyError`` when every device answered and none
+    holds the id (the ordinary 404). When the read missed and a device stayed
+    SILENT, the owner may simply be asleep — its sessions drop out of the listing —
+    so the answer is the retryable 504, never a "not found" this device cannot
+    support (#3872 Q3-1/Q3-2). ``owner`` (the Library's indexed origin device)
+    narrows that silence to the device that holds it: an owner that answered
+    without the session no longer has it.
+    """
+    from local_operator.resume import UNNAMED_DEVICE
+    from local_operator.session.remote_open import remote_row_and_silence
+
+    row, silent = remote_row_and_silence(session_id, root)
+    if row is not None:
+        return row
+    if owner:
+        silent = tuple(peer for peer in silent if peer.device_id == owner)
+    if not silent:
+        raise KeyError("Unknown session")
+    names = dict.fromkeys(peer.name or UNNAMED_DEVICE for peer in silent)
+    raise PeerAttachmentRetryable(session_id, None, pending=False, device=", ".join(names))
+
+
+def indexed_owner(root: Path, session_id: str) -> str:
+    """The owner device the Library index recorded for a peer session, or ``""``.
+
+    Blocking. The index keeps a silent owner's sessions (``library/remote.py``
+    ages out only devices that answered), so this is the existence proof that
+    survives the owner going offline, where the listing's row does not. No index
+    file means no proof; it is never created from here.
+    """
+    from local_operator.library.store import LibraryStore
+
+    store = LibraryStore(root)
+    if not store.path.is_file():
+        return ""
+    try:
+        record = store.session(session_id)
+    except Exception:  # noqa: BLE001 — an unreadable index proves nothing
+        return ""
+    return str((record or {}).get("origin_device") or "")
+
+
+async def local_peer_blob(
+    root: Path, session_id: str, digest: str, *, member_id: str, owner: str = ""
+) -> tuple[Any, SessionRow | None]:
+    """``(blob, row)`` for a digest of a session this device holds no directory for.
+
+    THIS DEVICE'S COPIES FIRST, WITHOUT THE OWNER'S ROW (#3872 R3-2/Q3-1/Q3-2):
+    store, replica, then the remote-files cache, by ``stat`` only; ``row`` is
+    ``None`` for such a hit. Only a miss resolves the row (:func:`peer_row`) and
+    pulls through :func:`peer_blob`. Reading the row first made a precached file
+    404 exactly when the cache matters most — the owner offline — and dialled a
+    listing read for bytes already here.
+
+    The session id stays an EXISTENCE check: a row-free hit needs the id known as
+    a peer's session on this device — ``owner`` (the caller's indexed origin, as
+    the Library's own occurrence gives) or :func:`indexed_owner`. An id nobody
+    recorded takes the row path, as before, so it cannot read the shared store or
+    cache by guessing.
+    """
+    from local_operator.remote_files import cache as remote_cache
+
+    known = owner or await asyncio.to_thread(indexed_owner, root, session_id)
+    if known:
+        replicas = tuple(dict.fromkeys((member_id, session_id)))
+        blob = await asyncio.to_thread(remote_cache.lookup, root, replicas, digest)
+        if blob is not None:
+            return blob, None
+    row = await asyncio.to_thread(peer_row, root, session_id, owner=known)
+    return await peer_blob(root, session_id, row, digest, member_id=member_id), row
+
+
+async def _fetch_peer(
+    root: Path,
+    session_id: str,
+    row: SessionRow,
+    member_id: str,
+    source: dict[str, str],
+    key: str,
+    replicas: tuple[str, ...],
+) -> Any:
+    """One ``remote_files.fetch``, its failure kinds mapped to the route family."""
+    from local_operator.remote_files import fetch as remote_fetch
+
+    try:
+        return await remote_fetch.fetch(
+            root,
+            owner=row.owner_device,
+            member_id=member_id,
+            source=source,
+            key=key,
+            session_ids=replicas,
+        )
+    except remote_fetch.RemoteFetchError as error:
+        if error.kind == "outdated":
+            raise PeerAttachmentOutdated(session_id, row) from None
+        if error.kind in ("unreachable", "pending"):
+            raise PeerAttachmentRetryable(
+                session_id, row, pending=error.kind == "pending"
+            ) from None
+        logger.info("peer refused %s of %s: %s", key, member_id, error.code)
+        raise PeerAttachmentUnavailable(session_id, row, owner_code=error.code) from None
+
+
+def _open_blob(blob: Any) -> PeerAttachmentFile:
+    from local_operator.remote_files import cache as remote_cache
+
+    handle = open(blob.path, "rb")  # noqa: SIM115 — the response body closes it
+    if blob.source == "cache":
+        remote_cache.touch(blob.path)
+    return PeerAttachmentFile(handle=handle, mime_type=blob.mime)
 
 
 #: How many times the OWNER's own ingest may be re-applied before the bytes this
@@ -7209,260 +8420,48 @@ class SessionDeletionRefused(ValueError):
         super().__init__(message)
 
 
-class SubagentChildUnavailable(Exception):
-    """A child-route URL does not name a readable child of that conversation.
-
-    ONE refusal for every containment failure — a malformed id, a parent that
-    is not the user's session, a child the parent never launched, a directory
-    whose origin marker is not ``subagent``, a record pointing outside
-    ``sessions/``. The caller learns that this pair is unreadable and nothing
-    else, which is the point: separate refusals would let an authenticated
-    renderer walk ids and use the difference between "no such session" and "not
-    a child of this one" to enumerate the machine's session store.
-
-    ``child_not_found`` is the code design § 9.1 fixes, and it is RETRYABLE: a
-    runtime snapshots its roster asynchronously, so a child launched inside the
-    last write window is briefly missing from the persisted record. A reader
-    that re-probes on its next pulse (the sidebar's 1 Hz child read) resolves
-    that case without any special handling, which is why the route does not
-    distinguish it from a permanent refusal.
-    """
-
-    code = "child_not_found"
-
-    def __init__(self) -> None:
-        super().__init__("That subagent does not belong to this conversation.")
+# Family discovery lives in ``session_files.family`` (remote files parity C3: the
+# relay needs it without this module's import cost); re-exported under the same names.
+from local_operator.session_files.family import (  # noqa: E402,F401
+    FAMILY_MAX_CHILDREN,
+    FAMILY_MAX_DEPTH,
+    SubagentChildUnavailable,
+    _contained_child_dir,
+    _persisted_children,
+    _prove_child,
+    contained_descendants,
+)
 
 
-def _persisted_children(
-    parent_dir: Path, *, indexed_roster: dict[str, Any] | None = None, indexed: bool = False
-) -> list[Any]:
-    """The records of the children a conversation launched, from its own store.
-
-    The roster is the ownership record for a child read (design § 9.1), and it
-    is read the way every other reader reads it rather than through a query of
-    this module's invention:
-
-    * the roster SIDECAR, replaced atomically by
-      ``Session._persist_subagent_roster`` on every roster move — the store a
-      current runtime writes; then
-    * the legacy ``subagent_roster`` transcript custom entry, written once by
-      builds that predate the sidecar, so a conversation last run by one of
-      those still opens its children — **accepted only when it was appended
-      after this session's fork boundary**.
-
-    That is exactly ``Session._load_subagent_roster``'s order AND its fork
-    guard, deliberately not re-derived here: two readers of one ownership
-    record that disagree is the defect ``session/restored_rows.py`` exists to
-    prevent, and the fork case is where this reader used to be the one that
-    disagreed (review round 1, R1-1). ``fork_session`` CLONES the parent's
-    transcript — so the parent's entry is present VERBATIM in the fork — while
-    ``fork.EXCLUDED_SIDECARS`` leaves the sidecar behind. Without the guard a
-    fork inherits the original's children as its own and can read them through
-    its own route; with it, only a fork's OWN roster (written after
-    ``forked_at``) counts. Re-stamping the sidecar happens on the fork's first
-    roster move, so the fallback is what a fresh fork rides until then.
-
-    The design's ``subagent_roster`` custom-entry wording predates the v0.40.0
-    sidecar; the sidecar holds the same ``records`` list and is newer, so it is
-    consulted first and the entry is the fallback, never the other way round.
-
-    Runs off the event loop like every other reader here. It used to construct a
-    ``Transcript`` for the legacy fallback, which parsed the parent's whole
-    journal; it now takes the same backward one-row read the rest of this module
-    does (``read_latest_custom_entry``), so the roster read is bounded by the
-    distance from EOF to the newest roster row rather than by the journal, and a
-    roster read must not block the loop a streaming turn is using either way.
-    """
-    from local_operator.fork import fork_instant
-    from local_operator.session.roster_sidecar import (
-        SUBAGENT_ROSTER_CUSTOM_TYPE,
-        SUBAGENT_ROSTER_SIDECAR,
-        read_roster_sidecar,
-    )
-
-    payload = read_roster_sidecar(parent_dir / SUBAGENT_ROSTER_SIDECAR)
-    if payload is None and indexed:
-        # Files already scanned the journal under its request budget, including a durable
-        # negative result. Never fall back to a second unbounded journal read here.
-        forked_at = fork_instant(parent_dir)
-        if indexed_roster is None or (
-            forked_at is not None and indexed_roster.get("ts", 0) <= forked_at
-        ):
-            return []
-        payload = indexed_roster.get("details", {})
-    if payload is None:
-        # The entry's TIMESTAMP is the half of the fork rule the sidecar makes
-        # unnecessary: an entry at or before ``forked_at`` belongs to the
-        # conversation this one was cloned from.
-        entry = read_latest_custom_entry(parent_dir, SUBAGENT_ROSTER_CUSTOM_TYPE)
-        forked_at = fork_instant(parent_dir)
-        if entry is None or (forked_at is not None and not entry.ts > forked_at):
-            return []
-        payload = dict(entry.payload.get("details", {}))
-    return list(roster_records(payload))
-
-
-def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
-    """The directory of ``child_id`` as a child of ``session_id``, or refuse.
-
-    This is the whole containment proof of the child read route (design § 9.1),
-    and every clause carries weight. It is a new READ PATH ACROSS A TRUST
-    BOUNDARY — the renderer holds an absolute ``session_dir`` on the wire and
-    must never be able to ask for one — so the route proves membership here, in
-    the server, and the caller asserts nothing:
-
-    * **Both ids are ids, never paths.** The same 12-hex-character shape the
-      whole desktop surface validates a session on. Checked before any path is
-      built, so a crafted value cannot reach ``sessions/`` through ``..`` (a
-      directory name is not a legal id).
-    * **The parent is the user's own conversation.** A child route scoped to a
-      subagent or a fork would make the graph reachable from either end; only a
-      conversation the user opened may name its children (``is_user_session``).
-    * **The parent's persisted roster names this child.** Membership is not
-      inferred from the directory layout, because every session directory looks
-      alike on disk; the parent has to have recorded the launch. The record's
-      ``session_dir`` must point at exactly ``sessions/<child_id>`` with the
-      resolved sessions root as its parent, so a hand-edited record cannot
-      redirect a read outside the store.
-    * **The target resolves inside the store.** The id cannot be a path, but the
-      DIRECTORY it names can be a link, and the store is writable by anything
-      running as the user — so a symlinked ``sessions/<12-hex>`` would take the
-      read (and the checks below) out of the store while every clause above
-      still passed (review round 1, R1-2). The path is resolved and the
-      resolved path is what the rest of this function — and the caller — then
-      treats as the child, so the thing checked is the thing read. That is the
-      same gate ``session/cleanup.py`` applies before it removes a directory
-      and the legacy chat route applies before it opens a file.
-    * **A child that is still on disk is marked a subagent.** Reversing the
-      parent's rule: a user conversation or a fork must be unreadable through
-      this route even if it somehow appears in a roster. A directory that is
-      ABSENT is not refused here — the caller answers that with the derived
-      ``gone`` state, which is the one case where the absence itself is the
-      answer. A path that EXISTS and is not a directory is not a child session
-      at all, so it is refused too rather than reported as ``gone``: it claims
-      a deletion that never happened (review round 1, R1-5).
-
-    Deliberately does NOT acquire a desktop bridge: answering must never start,
-    attach to or wake a runtime. The live comms graph may *confirm* membership
-    when the runtime happens to be attached, but nothing here reads it — a
-    route that a paused session answers identically is a route with no second
-    behaviour to test.
-    """
-    sessions = root / "sessions"
-    if not SESSION_ID.fullmatch(session_id) or not SESSION_ID.fullmatch(child_id):
-        raise SubagentChildUnavailable()
-    parent_dir = sessions / session_id
-    if not parent_dir.is_dir() or not is_user_session(parent_dir):
-        raise SubagentChildUnavailable()
-    return _prove_child(root, child_id, _persisted_children(parent_dir))
-
-
-def _prove_child(root: Path, child_id: str, records: Sequence[Any]) -> Path:
-    """The tail of :func:`_contained_child_dir`, over ALREADY-READ roster ``records``.
-
-    Split out so :func:`contained_descendants` can prove many children against ONE read of a
-    roster (a heavy session's sidecar is several MB; re-parsing it per child would turn a
-    64-child family walk into 64 parses). The clauses are exactly the ones documented above -
-    id shape and the parent's own-conversation rule stay in the caller, the roster naming, the
-    resolved-inside-the-store check and the subagent-marker check live here - and there is one
-    copy of them, so the single-child route and the family walk cannot disagree about who is a
-    child.
-    """
-    sessions = root / "sessions"
-    resolved_root = sessions.resolve()
-    try:
-        child_dir = (sessions / child_id).resolve()
-    except (OSError, RuntimeError):
-        # A path that cannot be resolved (a symlink loop) is not a child.
-        raise SubagentChildUnavailable() from None
-    if not child_dir.is_relative_to(resolved_root):
-        raise SubagentChildUnavailable()
-    named = False
-    for record in records:
-        raw_dir = record_field(record, "session_dir")
-        if not raw_dir:
-            continue
-        candidate = Path(str(raw_dir).rstrip("/"))
-        if candidate.name == child_id and candidate.parent.resolve() == resolved_root:
-            named = True
-            break
-    if not named:
-        raise SubagentChildUnavailable()
-    if child_dir.exists() and (
-        not child_dir.is_dir() or session_origin(child_dir) != ORIGIN_SUBAGENT
-    ):
-        raise SubagentChildUnavailable()
-    return child_dir
-
-
-#: Bounds on a conversation's FAMILY walk (``session_files``): how deep a subagent chain is
-#: followed and how many children are read. Past either, a child is COUNTED as skipped and the
-#: response says so - a cap that is invisible reads as "that is everything".
-FAMILY_MAX_DEPTH = 3
-FAMILY_MAX_CHILDREN = 64
-
-
-def contained_descendants(
-    root: Path,
+def _diff_page(
+    session_dir: Path,
     session_id: str,
-    *,
-    indexed_roster: dict[str, Any] | None = None,
-    indexed: bool = False,
-) -> tuple[list[Any], int]:
-    """``(children, skipped)``: the subagent sessions ``session_id`` launched, each PROVEN.
+    call_id: str,
+    start: int,
+    limit: int,
+    offset: int,
+    root: Path,
+) -> dict[str, Any]:
+    """``diff_archive.load_page`` with its refusals mapped to the host's errors.
 
-    ``children`` are :class:`~local_operator.session_files.service.ChildRef` values. A child is
-    listed only if :func:`_prove_child` accepts it against the parent's persisted roster -
-    the same containment proof the child transcript route applies, run once per record over one
-    roster read. The parent's roster is FLAT (a grandchild is a record with ``parent_job_id``
-    and ``depth`` 2 in the root's own sidecar), so one read covers the whole tree.
-
-    ``skipped`` counts records dropped by the depth/count caps or refused by the proof; both are
-    "the list may not be complete" and the caller reports them as one number. Never raises for
-    a missing or unreadable roster (that is an empty family), and does not touch a session's
-    runtime: it reads files.
+    Not-found becomes ``KeyError`` (uniform 404 via ``errors()``); a bad page
+    request stays :class:`~local_operator.tools.diff_archive.DiffPageRangeError`
+    for the route to answer 422.
     """
-    from local_operator.session_files.service import ChildRef
+    from local_operator.tools import diff_archive
 
-    if not SESSION_ID.fullmatch(session_id):
-        return [], 0
-    parent_dir = root / "sessions" / session_id
-    if not parent_dir.is_dir() or not is_user_session(parent_dir):
-        return [], 0
     try:
-        records = _persisted_children(parent_dir, indexed_roster=indexed_roster, indexed=indexed)
-    except (OSError, ValueError):
-        return [], 0
-    children: list[Any] = []
-    seen: set[str] = set()
-    skipped = 0
-    for record in records:
-        raw_dir = record_field(record, "session_dir")
-        child_id = Path(str(raw_dir or "").rstrip("/")).name
-        if not SESSION_ID.fullmatch(child_id) or child_id == session_id or child_id in seen:
-            continue
-        seen.add(child_id)
-        depth = record_field(record, "depth")
-        depth = depth if isinstance(depth, int) and not isinstance(depth, bool) else 1
-        if depth > FAMILY_MAX_DEPTH or len(children) >= FAMILY_MAX_CHILDREN:
-            skipped += 1
-            continue
-        try:
-            child_dir = _prove_child(root, child_id, records)
-        except SubagentChildUnavailable:
-            skipped += 1
-            continue
-        label = record_field(record, "label") or record_field(record, "agent_role")
-        children.append(
-            ChildRef(
-                child_id=child_id,
-                label=str(label) if label else None,
-                depth=max(depth, 1),
-                session_dir=child_dir,
-            )
+        return diff_archive.load_page(
+            session_dir,
+            session_id,
+            call_id,
+            start=start,
+            limit=limit,
+            offset=offset,
+            config_root=root,
         )
-    return children, skipped
+    except diff_archive.DiffArchiveNotFound:
+        raise KeyError("Unknown tool call") from None
 
 
 def _persisted_child_for_job(parent_dir: Path, job_id: str) -> str:
@@ -8424,12 +9423,10 @@ class DesktopSessions:
             outcomes: list[tuple[str, dict[str, Any] | None]] = [("unknown", None) for _ in items]
             batched: list[int] = []
             for index, (session_id, token) in enumerate(items):
+                if not BULK_RECEIPT_SESSION_ID_RE.fullmatch(session_id):
+                    continue
                 path = self.root / "sessions" / session_id
-                if (
-                    not SESSION_ID.fullmatch(session_id)
-                    or not path.is_dir()
-                    or not is_user_session(path)
-                ):
+                if not path.is_dir() or not is_user_session(path):
                     continue
                 batched.append(index)
             verdicts = store.acknowledge_many(
@@ -8520,7 +9517,36 @@ class DesktopSessions:
 
         return await asyncio.to_thread(claim)
 
-    async def attachment(self, session_id: str, digest: str) -> tuple[bytes, str]:
+    async def _peer_lookup(
+        self, session_id: str, digest: str, *, member_id: str, child: bool = False
+    ) -> tuple[Any, SessionRow | None]:
+        """:func:`local_peer_blob` for this pool; a CHILD route's unknown parent keeps
+        the containment refusal it always had, not the generic 404."""
+        try:
+            return await local_peer_blob(self.root, session_id, digest, member_id=member_id)
+        except KeyError:
+            if child:
+                raise SubagentChildUnavailable() from None
+            raise
+
+    async def _peer_file(
+        self, session_id: str, digest: str, *, member_id: str, child: bool = False
+    ) -> PeerAttachmentFile:
+        """The peer branch's blob, OPENED; one re-lookup if an eviction won the race."""
+        for attempt in (1, 2):
+            blob, row = await self._peer_lookup(
+                session_id, digest, member_id=member_id, child=child
+            )
+            try:
+                return await asyncio.to_thread(_open_blob, blob)
+            except FileNotFoundError:
+                if attempt == 2:
+                    raise PeerAttachmentRetryable(session_id, row, pending=False) from None
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def attachment(
+        self, session_id: str, digest: str
+    ) -> tuple[bytes, str] | PeerAttachmentFile:
         """Decoded bytes and mime type for one content-addressed attachment.
 
         Durable transcript rows reference images by digest, not by payload:
@@ -8562,7 +9588,7 @@ class DesktopSessions:
         here exactly as a local one does.
         """
 
-        def read() -> tuple[bytes, str]:
+        def read() -> tuple[bytes, str] | _OnPeer:
             # Both halves of this gate carry weight and neither is redundant.
             # The shape check keeps a crafted id from escaping the sessions
             # namespace through ``..`` before a path is ever built; the origin
@@ -8573,29 +9599,54 @@ class DesktopSessions:
             if not SESSION_ID.fullmatch(session_id):
                 raise KeyError("Unknown session")
             path = self.root / "sessions" / session_id
-            if not path.is_dir() or not is_user_session(path):
-                from local_operator.session.remote_open import remote_row_for
-
-                row = remote_row_for(session_id, self.root)
-                if row is None:
-                    raise KeyError("Unknown session")
-                # THIS DEVICE'S STORE FIRST: the digest is content-addressed, so a
-                # session that moved here (or one this device holds a copy of)
-                # has the bytes under the same name, so hanging the lookup on
-                # the id's placement before looking would take a working image
-                # away from a conversation that can serve it.
-                resolved_elsewhere = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
-                if resolved_elsewhere is None:
-                    raise PeerAttachmentUnavailable(session_id, row)
-                data_b64, mime_type = resolved_elsewhere
-                return base64.b64decode(data_b64), mime_type
+            if not path.is_dir():
+                # THE PEER BRANCH (remote files parity §1): this device's store
+                # first (a moved session still serves), then the replica, then the
+                # remote cache, and only then the owner's row and one pull —
+                # answered as an open file the route STREAMS, never a buffer.
+                return _ON_PEER
+            if not is_user_session(path):
+                raise KeyError("Unknown session")
             resolved = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
             if resolved is None:
                 raise KeyError("Unknown attachment")
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
 
-        return await asyncio.to_thread(read)
+        result = await asyncio.to_thread(read)
+        if isinstance(result, _OnPeer):
+            return await self._peer_file(session_id, digest, member_id=session_id)
+        return result
+
+    async def bridge_card_body(self, session_id: str, entry_id: str) -> dict[str, Any]:
+        """The admitted body behind one inbound Team Bridge card (bridge-body §4).
+
+        Outside :meth:`session` for :meth:`attachment`'s reason: viewing a past
+        card must not start a runtime. The session gate is the same durable
+        user-session namespace check; the resolver then answers only for a
+        ``team_bridge_message`` row in that conversation, whose validated
+        receipt names the live owner (``other_account`` otherwise). A peer's
+        conversation has no local journal here and reads as unknown (404) —
+        the phone/desktop keep today's copy for it.
+
+        ``KeyError`` (404) for an unknown session or a row that is not a card.
+        """
+        from local_operator.team_bridge.card_body import (
+            CardBodyNotFound,
+            resolve_card_body,
+        )
+
+        if not SESSION_ID.fullmatch(session_id):
+            raise KeyError("Unknown session")
+        path = self.root / "sessions" / session_id
+        if not await asyncio.to_thread(lambda: path.is_dir() and is_user_session(path)):
+            raise KeyError("Unknown session")
+        try:
+            return await resolve_card_body(
+                self.root, session_id, entry_id, sessions_root=self.root / "sessions"
+            )
+        except CardBodyNotFound as missing:
+            raise KeyError("Unknown bridge card") from missing
 
     async def attachment_waveform(self, session_id: str, digest: str) -> dict[str, Any]:
         """The waveform payload ``{version, bars, peaks}`` for one attachment.
@@ -8617,31 +9668,42 @@ class DesktopSessions:
         a placeholder.
         """
 
-        def read() -> dict[str, Any]:
+        def read() -> dict[str, Any] | _OnPeer:
             from local_operator.audiogen.recovery import waveform_payload
 
             if not SESSION_ID.fullmatch(session_id):
                 raise KeyError("Unknown session")
             path = self.root / "sessions" / session_id
             store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
-            if not path.is_dir() or not is_user_session(path):
-                from local_operator.session.remote_open import remote_row_for
-
-                row = remote_row_for(session_id, self.root)
-                if row is None:
-                    raise KeyError("Unknown session")
-                # THIS DEVICE'S STORE FIRST, exactly as the byte route does:
-                # a moved conversation that kept a local copy still serves it.
-                payload = waveform_payload(store, digest)
-                if payload is None:
-                    raise PeerAttachmentUnavailable(session_id, row)
-                return payload
+            if not path.is_dir():
+                # The byte route's lookup order (remote files parity §1): the
+                # peaks are a sidecar of whichever store holds the bytes.
+                return _ON_PEER
+            if not is_user_session(path):
+                raise KeyError("Unknown session")
             payload = waveform_payload(store, digest)
             if payload is None:
                 raise KeyError("Unknown waveform")
             return payload
 
-        return await asyncio.to_thread(read)
+        result = await asyncio.to_thread(read)
+        if isinstance(result, _OnPeer):
+            return await self._peer_waveform(session_id, digest, member_id=session_id)
+        return result
+
+    async def _peer_waveform(
+        self, session_id: str, digest: str, *, member_id: str, child: bool = False
+    ) -> dict[str, Any]:
+        """Peaks for a peer-held blob, computed beside wherever the bytes landed."""
+        from local_operator.audiogen.recovery import waveform_payload
+
+        blob, _row = await self._peer_lookup(session_id, digest, member_id=member_id, child=child)
+        payload = await asyncio.to_thread(
+            waveform_payload, AttachmentStore(blob.path.parent), digest
+        )
+        if payload is None:
+            raise KeyError("Unknown waveform")
+        return payload
 
     async def supplement_document(self, session_id: str, digest: str) -> str:
         """The assembled HTML document of one stored supplement component.
@@ -8674,22 +9736,9 @@ class DesktopSessions:
         bytes (one assembler, memo §2.6).
         """
 
-        def read() -> str:
-            from local_operator.session.remote_open import remote_row_for
-            from local_operator.supplements.document import assemble_stored_component
+        from local_operator.supplements.document import assemble_stored_component
 
-            store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
-            if not SESSION_ID.fullmatch(session_id):
-                raise KeyError("Unknown session")
-            path = self.root / "sessions" / session_id
-            if not path.is_dir() or not is_user_session(path):
-                row = remote_row_for(session_id, self.root)
-                if row is None or store.get(digest) is None:
-                    if row is not None:
-                        # The conversation exists, the bytes are not HERE: name the
-                        # device (409 attachment_on_peer), never 404 a live row.
-                        raise PeerAttachmentUnavailable(session_id, row)
-                    raise KeyError("Unknown session")
+        def assemble(store: AttachmentStore) -> str:
             resolved = store.get(digest)
             if resolved is None:
                 raise KeyError("Unknown supplement component")
@@ -8701,7 +9750,25 @@ class DesktopSessions:
                 # reader remedy as a missing blob, so the same ordinary 404.
                 raise KeyError("Unknown supplement component") from None
 
-        return await asyncio.to_thread(read)
+        def read() -> str | _OnPeer:
+            store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir():
+                # The byte route's lookup order (remote files parity §1); a
+                # refusal still names the device (409 attachment_on_peer).
+                return _ON_PEER
+            if not is_user_session(path):
+                raise KeyError("Unknown session")
+            return assemble(store)
+
+        result = await asyncio.to_thread(read)
+        if isinstance(result, _OnPeer):
+            blob, _row = await self._peer_lookup(session_id, digest, member_id=session_id)
+            # ``get`` re-verifies the digest against the bytes, as for a local blob.
+            return await asyncio.to_thread(assemble, AttachmentStore(blob.path.parent))
+        return result
 
     async def child_transcript(
         self,
@@ -8837,7 +9904,7 @@ class DesktopSessions:
 
     async def child_attachment(
         self, session_id: str, child_id: str, digest: str
-    ) -> tuple[bytes, str]:
+    ) -> tuple[bytes, str] | PeerAttachmentFile:
         """Decoded bytes and mime type for one attachment in a CHILD transcript.
 
         The mirror of :meth:`attachment`, and the same containment proof runs
@@ -8850,13 +9917,98 @@ class DesktopSessions:
         without the subagent marker.
         """
 
-        def read() -> tuple[bytes, str]:
+        def read() -> tuple[bytes, str] | _OnPeer:
+            if self._peer_parent(session_id, child_id):
+                return _ON_PEER
             _contained_child_dir(self.root, session_id, child_id)
             resolved = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
             if resolved is None:
                 raise KeyError("Unknown attachment")
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
+
+        result = await asyncio.to_thread(read)
+        if isinstance(result, _OnPeer):
+            return await self._peer_file(session_id, digest, member_id=child_id, child=True)
+        return result
+
+    def _peer_parent(self, session_id: str, child_id: str) -> bool:
+        """Whether the PARENT is not on this disk, so the peer branch answers (blocking).
+
+        The peer branch serves this device's copy first and resolves the owner's
+        row only on a miss (:func:`local_peer_blob`); a parent nobody holds is
+        still the containment refusal (``_peer_lookup``'s ``child``).
+
+        The local containment proof (``_contained_child_dir``) needs the parent's
+        directory on this disk, so a remote subagent's image used to be a 404. When
+        no local parent exists and a peer holds it, the owner is the one that can
+        prove the child is its parent's: it serves only a digest the CHILD's
+        transcript references, under its own ``_session_scope``. A malformed id is
+        left to ``_contained_child_dir``'s own refusal, so it never reaches a path
+        or the wire and its answer is unchanged.
+        """
+        if not SESSION_ID.fullmatch(session_id) or not SESSION_ID.fullmatch(child_id):
+            return False
+        return not (self.root / "sessions" / session_id).is_dir()
+
+    async def tool_call_diff(
+        self,
+        session_id: str,
+        call_id: str,
+        *,
+        start: int = 0,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """One page of a write/edit call's complete, source-redacted diff.
+
+        The durable read behind the tool card's "full diff" view: the inline
+        preview keeps 200 rows, and the rest lives in the redacted archive
+        (``tools/diff_archive``). Outside :meth:`session` for the same reason
+        as :meth:`attachment` -- reading a finished conversation's evidence
+        must not start a runtime. The id gate is the attachment route's (shape
+        first, then a USER conversation on this device), and membership is
+        then proved by ``diff_archive.load_page`` from this session's own
+        transcript: the call must be a persisted write/edit row and the
+        artifact header must name this session and call. Every refusal is a
+        ``KeyError`` so the route's 404 cannot tell an unknown session from a
+        foreign call. A peer's conversation has no local archive and refuses
+        the same way.
+        """
+
+        def read() -> dict[str, Any]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                raise KeyError("Unknown session")
+            return _diff_page(path, session_id, call_id, start, limit, offset, self.root)
+
+        return await asyncio.to_thread(read)
+
+    async def child_tool_call_diff(
+        self,
+        session_id: str,
+        child_id: str,
+        call_id: str,
+        *,
+        start: int = 0,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """The child twin of :meth:`tool_call_diff`, behind the child containment proof.
+
+        The subagent reader is where the operator reported the missing rows,
+        so this is the primary door. ``_contained_child_dir`` refuses an
+        unknown parent, a child the parent never launched and a non-subagent
+        directory before the transcript is touched; the archive is then bound
+        to the CHILD'S own session id (its directory name, which is the id its
+        loop stamped on the artifact).
+        """
+
+        def read() -> dict[str, Any]:
+            child_dir = _contained_child_dir(self.root, session_id, child_id)
+            return _diff_page(child_dir, child_dir.name, call_id, start, limit, offset, self.root)
 
         return await asyncio.to_thread(read)
 
@@ -8872,16 +10024,21 @@ class DesktopSessions:
         the 404 fallback are identical to the parent's.
         """
 
-        def read() -> dict[str, Any]:
+        def read() -> dict[str, Any] | _OnPeer:
             from local_operator.audiogen.recovery import waveform_payload
 
+            if self._peer_parent(session_id, child_id):
+                return _ON_PEER
             _contained_child_dir(self.root, session_id, child_id)
             payload = waveform_payload(AttachmentStore(self.root / ATTACHMENTS_DIRNAME), digest)
             if payload is None:
                 raise KeyError("Unknown waveform")
             return payload
 
-        return await asyncio.to_thread(read)
+        result = await asyncio.to_thread(read)
+        if isinstance(result, _OnPeer):
+            return await self._peer_waveform(session_id, digest, member_id=child_id, child=True)
+        return result
 
     async def create(
         self,
@@ -9000,13 +10157,9 @@ class DesktopSessions:
                         "not created. Retry after checking storage."
                     )
             if target:
-                write_session_attachment(path, **binding, goal="")
-                stored = read_session_attachment(path)
-                if (
-                    stored is None
-                    or stored.agent != binding["agent"]
-                    or stored.team != binding["team"]
-                ):
+                # Shared with the relay's start route (``resume.bind_session_attachment``)
+                # so the two creators cannot disagree on what a bound session is.
+                if not bind_session_attachment(path, agent=binding["agent"], team=binding["team"]):
                     # Never publish desktop.json after a best-effort writer lost
                     # the attachment. No possibly admitted work is deleted.
                     raise ValueError(
@@ -9216,6 +10369,25 @@ class DesktopSessions:
             if silent:
                 raise PeerSessionUnresolved(session_id, silent)
             raise KeyError("Unknown session")
+        # OPENING a remote session's Files/canvas prepares its media now (§4), and keeps
+        # it in the opened LRU so later catalogue polls keep it warm whatever its age.
+        from local_operator.remote_files import precache
+
+        try:
+            precache.for_root(self.root).opened_session(
+                session_id,
+                {
+                    "id": session_id,
+                    "mtime": float(getattr(row, "mtime", 0.0) or 0.0),
+                    "locality": "remote",
+                    "reachable": True,
+                    "archived": bool(getattr(row, "archived", False)),
+                    "owner_device": str(getattr(row, "owner_device", "") or ""),
+                    "owner_device_name": str(getattr(row, "owner_device_name", "") or ""),
+                },
+            )
+        except Exception:  # noqa: BLE001 — precache is an optimisation, never the answer
+            logger.debug("precache trigger for %s failed", session_id, exc_info=True)
         return "peer", None
 
     def _draft_for(self, session_id: str) -> _Draft | None:
@@ -9674,7 +10846,15 @@ class DesktopSessions:
                 remote=(remote_session_rows(self.root, pins=pins) if include_peers else []),
             )
 
-        return await asyncio.to_thread(rows)
+        page = await asyncio.to_thread(rows)
+        if page.remote:
+            # THE PRECACHE TRIGGER (remote files parity §4): the catalogue poll already
+            # holds every remote row; active ones that moved get their media prepared
+            # in the background (bounded, one pull per owner, never on this request).
+            from local_operator.remote_files import precache
+
+            precache.for_root(self.root).observe(page.remote)
+        return page
 
     async def search(
         self,
@@ -10165,9 +11345,18 @@ class DesktopSessions:
 
     @contextlib.asynccontextmanager
     async def session(
-        self, session_id: str, *, read: bool = False, allow_draft: bool = False
+        self,
+        session_id: str,
+        *,
+        read: bool = False,
+        allow_draft: bool = False,
+        control_only: bool = False,
     ) -> AsyncIterator[DesktopSessionBridge]:
         """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
+
+        ``control_only`` skips only display attachment at acquisition, not
+        lookup, draft exclusion, retirement, or the bridge reference lifetime.
+        The durable ask transport authenticates separately against its owner.
 
         ``read`` says the caller is READING state (``snapshot``, ``history``,
         ``events``, the ``/watch`` presence beat), and it is threaded down to
@@ -10465,7 +11654,10 @@ class DesktopSessions:
                             )
                             self.bridges[session_id] = bridge
             assert bridge is not None  # resolved above: either found or built
-            await bridge.acquire(read=read)
+            if control_only:
+                await bridge.acquire(read=read, control_only=True)
+            else:
+                await bridge.acquire(read=read)
         finally:
             # The window closes when acquire() returns, success or failure: from
             # here on the bridge is an ordinary resident one, and ``users`` (which
@@ -10650,3 +11842,6 @@ class DesktopSessions:
     async def close(self) -> None:
         await asyncio.gather(*(bridge.close() for bridge in self.bridges.values()))
         self.bridges.clear()
+        # Every bridge is gone, so no open can await a build any more; drop the
+        # queued ones rather than let the interpreter's exit join run them.
+        shutdown_snapshot_pool()

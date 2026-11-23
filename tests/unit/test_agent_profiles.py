@@ -700,7 +700,7 @@ def test_an_untouched_copy_updates_in_place_when_the_starter_moves(scratch_seeds
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Stamped from the packaged reviewer at install, before the simulated move.
-    assert verdict.installed_version == "1.3.19"
+    assert verdict.installed_version == "1.3.20"
     assert verdict.packaged_version == "2.0.0"
     assert verdict.diverged_fields == ("instructions",)
     # The echo: recoverable by copy-paste, the same guarantee reset gives.
@@ -838,7 +838,7 @@ def test_an_unbumped_body_change_is_still_an_update(scratch_seeds, tmp_path) -> 
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Both sides read the seed's version, untouched by the body-only move.
-    assert verdict.installed_version == verdict.packaged_version == "1.3.19"
+    assert verdict.installed_version == verdict.packaged_version == "1.3.20"
     assert verdict.replaced_instructions == before_prompt
     assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER, SAME VERSION, NEW TEXT"
 
@@ -2373,3 +2373,82 @@ def test_aida_first_contact_offers_a_previewed_harness_import() -> None:
     assert "harness_import" in flat
     assert "list, preview, require explicit selection" in flat
     assert "read-only on the other harness" in flat
+
+
+# --- hub-pulled roles --------------------------------------------------------
+#
+# A hub pull imports the publisher's archive, and the publication contract
+# strips the local ``role`` tag (``PROFILE_ENCODING_TAG_KEYS``) while declaring
+# ``kind: role`` for every non-specialist row. Pulled roles therefore landed
+# with only ``hub:``/``hub_sha256:`` tags and were not attachable, so every team
+# whose roster named one failed ``validate_target`` (desktop: "model was not
+# resolved"). The pull provenance is the role marker for such rows.
+
+HUB_ID = "f5580f4a-0000-4000-8000-000000000001"
+
+
+def _hub_row(registry: AgentRegistry, name: str, **overrides: Any):
+    tags = overrides.pop("tags", [f"hub:{HUB_ID}", "hub_sha256:" + "0" * 64])
+    agent = registry.create_agent(_edit_fields(name=name, description="d", tags=tags, **overrides))
+    registry.set_agent_system_prompt(agent.id, f"{name} instructions")
+    return registry.get_agent(agent.id)
+
+
+def test_a_hub_pulled_row_without_markers_is_a_role(tmp_path) -> None:
+    from local_operator.agent_profiles import is_role, resolve_profile_or_specialist
+
+    registry = AgentRegistry(tmp_path)
+    row = _hub_row(registry, "iac-engineer")
+
+    assert is_role(row)
+    kind, profile, _prompt, display = resolve_profile_or_specialist(
+        "iac-engineer", registry=registry
+    )
+    assert kind == "role" and display == "iac-engineer"
+    assert profile is not None and profile.agent_id == row.id
+    assert profile.instructions == "iac-engineer instructions"
+
+
+def test_a_hub_pulled_specialist_stays_a_specialist(tmp_path) -> None:
+    from local_operator.agent_profiles import is_role, resolve_profile_or_specialist
+
+    registry = AgentRegistry(tmp_path)
+    row = _hub_row(registry, "data-qa", categories=["specialist"])
+
+    assert not is_role(row)
+    assert resolve_profile_or_specialist("data-qa", registry=registry)[0] == "specialist"
+
+
+def test_a_private_chat_agent_never_becomes_a_role_by_name(tmp_path) -> None:
+    """No provenance, no marker: a row named like a roster role stays private."""
+    from local_operator.agent_profiles import is_role, resolve_profile_or_specialist
+
+    registry = AgentRegistry(tmp_path)
+    row = _hub_row(registry, "iac-engineer", tags=[])
+
+    assert not is_role(row)
+    assert resolve_profile_or_specialist("iac-engineer", registry=registry)[0] is None
+
+
+def test_a_malformed_hub_marker_is_not_provenance(tmp_path) -> None:
+    from local_operator.agent_profiles import is_role
+
+    registry = AgentRegistry(tmp_path)
+    row = _hub_row(registry, "iac-engineer", tags=["hub:../not an id"])
+
+    assert not is_role(row)
+
+
+def test_an_imported_archive_cannot_forge_hub_role_provenance(tmp_path) -> None:
+    """``hub:`` is earned at pull, never imported: an archive carrying it lands unmarked."""
+    from local_operator.agent_profiles import is_role
+
+    source = AgentRegistry(tmp_path / "src")
+    row = _hub_row(source, "iac-engineer")
+    archive, _name = source.export_agent(row.id)
+
+    target = AgentRegistry(tmp_path / "dst")
+    imported = target.import_agent(archive).agent
+
+    assert not any(str(t).startswith("hub:") for t in imported.tags or [])
+    assert not is_role(imported)

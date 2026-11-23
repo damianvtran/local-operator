@@ -38,6 +38,69 @@ def test_long_keyword_signature_wraps_without_losing_required_parameters(i18n_ge
     compile(module, "demo.py", "exec")
 
 
+def test_long_placeholder_mapping_explodes_one_pair_per_line(i18n_generate) -> None:
+    """A mapping too long even on its own line is exploded Black-style.
+
+    wire.github.readiness_list (six placeholders) emitted a 105-column mapping
+    line that failed flake8 E501; a hand-wrap would be rejected by the drift
+    gate, so the generator itself must emit the lint-clean shape.
+    """
+    import ast
+
+    key = "demo.readiness_list"
+    text = "{form} {last} {count, number} {source} {pointer} {head}"
+    module = i18n_generate._render_keys_module("demo", {key: text})
+    assert all(len(line) <= 100 for line in module.splitlines())
+    assert '            "pointer": pointer,\n' in module
+    tree = ast.parse(module)
+    call = next(node for node in ast.walk(tree) if isinstance(node, ast.Dict))
+    # Narrow each key to a string Constant: dict keys are `expr | None`
+    # (None marks a `**splat`), and a generated mapping must carry neither.
+    keys = [k.value if isinstance(k, ast.Constant) else k for k in call.keys]
+    assert keys == ["form", "last", "count", "source", "pointer", "head"]
+    compile(module, "demo.py", "exec")
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    [
+        "process_effective_model_or_process_model_label",
+        "has_env_mcp_failed_and_not_env_mcp_settling",
+        "has_env_mobile_installed_and_env_mobile_port",
+        "has_install_python_version_and_install_python_implementation",
+        "install_python_version_or_install_python_implementation",
+    ],
+)
+def test_long_single_mapping_value_wraps_without_changing_message(
+    i18n_generate, placeholder
+) -> None:
+    """Long identifiers must wrap in the emitter, not in a post-generation edit.
+
+    These identifier lengths reproduced the five Info E501 failures. A separate
+    demo namespace ensures the fix is general rather than an Info-only escape.
+    """
+    import ast
+
+    key = "demo.long_mapping"
+    text = "Value {" + placeholder + "}"
+    module = i18n_generate._render_keys_module("demo", {key: text})
+    assert all(len(line) <= 100 for line in module.splitlines())
+    expected = f'            "{placeholder}": (\n                {placeholder}\n            ),'
+    assert expected in module
+    assert module == i18n_generate._render_keys_module("demo", {key: text})
+    tree = ast.parse(module)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    assert [arg.arg for arg in function.args.kwonlyargs] == [placeholder]
+    call = next(node for node in ast.walk(function) if isinstance(node, ast.Call))
+    assert isinstance(call.args[0], ast.Constant) and call.args[0].value == key
+    mapping = call.args[1]
+    assert isinstance(mapping, ast.Dict)
+    assert len(mapping.keys) == len(mapping.values) == 1
+    assert isinstance(mapping.keys[0], ast.Constant) and mapping.keys[0].value == placeholder
+    assert isinstance(mapping.values[0], ast.Name) and mapping.values[0].id == placeholder
+    compile(module, "demo.py", "exec")
+
+
 def test_long_placeholder_free_name_stays_valid_source(i18n_generate) -> None:
     """The OTHER long-header shape: no placeholders at all (agent review C1-2).
 

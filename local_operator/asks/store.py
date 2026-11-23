@@ -46,6 +46,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from local_operator.asks.surfaces import weakest_surface
+
 logger = logging.getLogger(__name__)
 
 #: The event log inside ``sessions/<id>/``.
@@ -75,7 +77,10 @@ EVENT_DISMISSED = "dismissed"
 #: THE REVISION EVENT (design §10, #1936). It exists ONLY to SUPERSEDE an
 #: already-recorded, not-yet-delivered answer: :func:`fold` keeps status,
 #: ``answered_at`` and ``answered_by`` from the FIRST ``answered`` row and takes
-#: the effective ``answers`` from the LATEST ``revised`` one. A revision that
+#: the effective ``answers`` from the LATEST ``revised`` one — except that
+#: ``answered_by.surface`` becomes the WEAKEST across the answer and every
+#: revision (``asks.surfaces.weakest_surface``), so a revision can never inherit
+#: a more trusted label than its own write had. A revision that
 #: arrives before any answer is recorded degrades to a plain ``answered`` and
 #: never writes this kind (see ``AskQueue.revise``), so every ``revised`` row has
 #: an ``answered`` row to supersede — the fold never honours a revision alone.
@@ -356,26 +361,34 @@ def append_event(session_directory: Path | str, event: Mapping[str, Any]) -> boo
         os.close(fd)
 
 
-def read_events(session_directory: Path | str) -> list[dict[str, Any]]:
-    """Every readable event, in write order. A torn final line is skipped."""
+def read_events(session_directory: Path | str, *, strict: bool = False) -> list[dict[str, Any]]:
+    """Every readable event, in write order. A torn final line is skipped.
+
+    ``strict`` re-raises an unreadable log (any ``OSError`` but a missing file)
+    instead of answering ``[]``: a caller that settles something on "no open
+    asks" (the mesh ask forwarder, ``remote_attention.open_ask_notices``) must
+    not read a failed read as that answer (PR #3934 review R1-2).
+    """
     path = asks_log_path(session_directory)
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
         return []
     except OSError:
+        if strict:
+            raise
         logger.warning("ask log unreadable at %s", path, exc_info=True)
         return []
+    # ONE STRICT STAMP PARSER (mesh-origin-stamp review R3-1): this log carries
+    # ``by.mesh_origin`` stamps the fold publishes, so its rows go through the
+    # same parser the import downgrade uses; a stamp on a line that parser
+    # rejects reads ``verified: false``. Ordinary rows stay tolerant (a torn line
+    # is skipped, never fatal: this file is read every minute beside a live
+    # writer).
+    from local_operator.network.origin import read_jsonl_rows
+
     events: list[dict[str, Any]] = []
-    for row in raw.splitlines():
-        if not row.strip():
-            continue
-        try:
-            payload = json.loads(row.decode("utf-8", "replace"))
-        except ValueError:
-            # A torn line (killed mid-write) is skipped, never fatal: this file
-            # is read every minute beside a live writer.
-            continue
+    for payload in read_jsonl_rows(raw):
         if isinstance(payload, dict) and payload.get("ask_id"):
             events.append(payload)
     return events
@@ -573,6 +586,48 @@ def _last(events: Sequence[Mapping[str, Any]], ask_id: str, kind: str) -> dict[s
     return found
 
 
+class _EventIndex:
+    """First and last event per ``(ask_id, kind)``, built in ONE pass.
+
+    WHY. ``fold`` asked :func:`_first`/:func:`_last` up to eight times per ask,
+    each a full linear pass over the log, so a fold cost O(asks x events): about
+    28 ms per fold on a long-lived session's log (266 asks, 522 events), and the
+    fold runs on every queue read and refresh — on the event loop. A watchdog
+    sample of that session put 24 of 117 event-loop samples inside those two
+    helpers. One pass here makes the fold linear.
+
+    THE SEMANTICS ARE THE HELPERS' EXACTLY, which the parity test pins: the key
+    is ``str(event.get("ask_id"))`` (the helpers' coercion — NOT the
+    ``or ""`` spelling :func:`_asks_in_order` uses), "first"/"last" mean log
+    order, and every lookup returns a fresh ``dict`` copy as the helpers do, so a
+    caller mutating its result can never corrupt another lookup.
+    """
+
+    __slots__ = ("_first", "_last")
+
+    def __init__(self, events: Sequence[Mapping[str, Any]]) -> None:
+        self._first: dict[tuple[str, str], Mapping[str, Any]] = {}
+        self._last: dict[tuple[str, str], Mapping[str, Any]] = {}
+        for event in events:
+            kind = event.get("kind")
+            if not isinstance(kind, str):
+                # Lookups are always by a string kind, which nothing else can
+                # equal; skipping also keeps a hand-edited unhashable ``kind``
+                # (a list) from crashing the fold the helpers tolerated.
+                continue
+            key = (str(event.get("ask_id")), kind)
+            self._first.setdefault(key, event)
+            self._last[key] = event
+
+    def first(self, ask_id: str, kind: str) -> dict[str, Any] | None:
+        event = self._first.get((ask_id, kind))
+        return dict(event) if event is not None else None
+
+    def last(self, ask_id: str, kind: str) -> dict[str, Any] | None:
+        event = self._last.get((ask_id, kind))
+        return dict(event) if event is not None else None
+
+
 def _attachment_refs(raw: Any) -> dict[str, list[dict[str, Any]]]:
     """The ``attachments`` map of an ``answered`` event, normalised, or ``{}``.
 
@@ -652,8 +707,9 @@ def fold(
             }
         )
     records: list[dict[str, Any]] = []
+    index = _EventIndex(events)
     for ask_id in _asks_in_order(events):
-        queued = _first(events, ask_id, EVENT_QUEUED)
+        queued = index.first(ask_id, EVENT_QUEUED)
         if queued is None:
             # A relay row has no ``queued`` event by design: the watcher records
             # only the REFERENCE (#2520), because a copy would be a second truth
@@ -661,18 +717,18 @@ def fold(
             # without a ``queued`` row (a truncated log, an answer for an ask
             # whose question is gone) is not reconstructible: skip rather than
             # invent one.
-            relayed = _first(events, ask_id, EVENT_RELAYED)
+            relayed = index.first(ask_id, EVENT_RELAYED)
             if relayed is None:
                 continue
             relay_row = _relay_record(ask_id, relayed, events, session_id=session_id)
             if relay_row is not None:
                 records.append(relay_row)
             continue
-        answered = _first(events, ask_id, EVENT_ANSWERED)
-        declined = _first(events, ask_id, EVENT_DECLINED)
-        dismissed = _first(events, ask_id, EVENT_DISMISSED)
-        withdrawn = _first(events, ask_id, EVENT_WITHDRAWN)
-        revised = _last(events, ask_id, EVENT_REVISED)
+        answered = index.first(ask_id, EVENT_ANSWERED)
+        declined = index.first(ask_id, EVENT_DECLINED)
+        dismissed = index.first(ask_id, EVENT_DISMISSED)
+        withdrawn = index.first(ask_id, EVENT_WITHDRAWN)
+        revised = index.last(ask_id, EVENT_REVISED)
         expires_at = int(queued.get("expires_at") or 0)
         created_at = int(queued.get("at") or 0)
         answered_at = int(answered.get("at") or 0) if answered else 0
@@ -740,6 +796,15 @@ def fold(
                 response_required=bool(dismissed_at and expires_at and dismissed_at < expires_at),
             ),
         }
+        if status == STATUS_WITHDRAWN and withdrawn is not None:
+            # WHO retired it, when the writer said so: the desktop's approvals
+            # batch stamps ``{"surface": "desktop", "via": ...}``, and the card's
+            # refusal must name that decision rather than claim the agent
+            # withdrew the question (QA Q2). Additive: absent for every other
+            # withdrawal, so their records are unchanged.
+            withdrawn_by = withdrawn.get("by")
+            if isinstance(withdrawn_by, Mapping):
+                record["withdrawn_by"] = dict(withdrawn_by)
         if dismissed is not None:
             # A DISMISSAL DOES NOT CANCEL A NOTICE THE MODEL NEVER GOT (fork A,
             # §14). The dismissal is the USER's act on a settled row; the notice is
@@ -790,7 +855,7 @@ def fold(
         if isinstance(consent, Mapping):
             # ABSENT, never empty: an ordinary ask keeps its exact record shape.
             record["consent"] = dict(consent)
-            record["consent_used"] = _first(events, ask_id, EVENT_CONSENT_USED) is not None
+            record["consent_used"] = index.first(ask_id, EVENT_CONSENT_USED) is not None
         folded = context_by_ask.get(ask_id)
         if folded:
             # ABSENT, never empty (the ``surfaced_in`` rule): an ask with no
@@ -828,9 +893,10 @@ def fold(
             if refs:
                 record["attachments"] = refs
             if revised is not None:
-                # The status, the stamp and the attribution stay the FIRST
-                # answer's (design §10: a revision does not rewrite who answered
-                # or when); only the ANSWERS move, and only to the newest
+                # The status and the stamp stay the FIRST answer's (design §10:
+                # a revision does not rewrite who answered or when), and so does
+                # the attribution save for the weakest-surface rule below; only
+                # the ANSWERS move, and only to the newest
                 # revision. ``revised_at`` is published beside them so the
                 # revision path can name the write it supersedes without a
                 # second read of the log.
@@ -840,6 +906,58 @@ def fold(
                     record["answers"] = {
                         str(k): [str(v) for v in (vals or ())] for k, vals in replacement.items()
                     }
+                # ...EXCEPT where the attribution would LAUNDER (agent review
+                # round 1, R1-1). Any connection may revise until delivery, so a
+                # proved "No, keep it" revised to "Yes" by an unproven dial must
+                # not keep the proved label over the unproven words: the guard
+                # and the profile classifier read ``answered_by`` as consent.
+                # The effective surface is the WEAKEST across the answer and
+                # EVERY revision (each row carries the runtime-stamped ``by``),
+                # so it is trusted only when every write was. Taking every
+                # revision, not just the newest, is deliberately fail-closed.
+                # When all writes share one label nothing changes, so design
+                # §10 ("a revision does not rewrite who answered") still holds
+                # for the honest case.
+                if isinstance(by, Mapping):
+                    surfaces = [str(by.get("surface") or "")]
+                    proofs = {str(by.get("proof") or "")}
+                    for event in events:
+                        if (
+                            event.get("kind") == EVENT_REVISED
+                            and str(event.get("ask_id")) == ask_id
+                        ):
+                            rev_by = event.get("by")
+                            rev_map = rev_by if isinstance(rev_by, Mapping) else {}
+                            surfaces.append(str(rev_map.get("surface") or ""))
+                            proofs.add(str(rev_map.get("proof") or ""))
+                    merged = {**dict(by), "surface": weakest_surface(*surfaces)}
+                    # ``proof`` (F2, R1-m3) follows the same laundering rule:
+                    # it is kept only when EVERY write carried the same one,
+                    # so an unproven revision never sits under a signature.
+                    if len(proofs) != 1 or "" in proofs:
+                        merged.pop("proof", None)
+                    record["answered_by"] = merged
+                    # THE MESH ORIGIN FOLDS THE SAME WAY (mesh-origin-stamp §2
+                    # rule 4, M-8): ``verified`` survives only if EVERY revision
+                    # carries a verified stamp from the same device and runtime; a
+                    # revision with no stamp at all counts as unverified.
+                    first_origin = by.get("mesh_origin")
+                    if isinstance(first_origin, Mapping):
+                        from local_operator.network.origin import fold_answer_origin
+
+                        revision_origins = [
+                            (
+                                event.get("by", {}).get("mesh_origin")
+                                if isinstance(event.get("by"), Mapping)
+                                else None
+                            )
+                            for event in events
+                            if event.get("kind") == EVENT_REVISED
+                            and str(event.get("ask_id")) == ask_id
+                        ]
+                        record["answered_by"]["mesh_origin"] = fold_answer_origin(
+                            first_origin, revision_origins
+                        )
         records.append(record)
     return records
 

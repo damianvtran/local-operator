@@ -26,6 +26,12 @@ def main(argv: list[str] | None = None) -> int:
         default=IDLE_SHUTDOWN_S,
         help="Exit after this many seconds with no sessions and no requests (0 disables)",
     )
+    # The two successor switches are passed ONLY by `secrets.roll.roll_broker`,
+    # a local process holding `broker.lock` (security R6: no protocol op or
+    # remote frame can start a roll). `--bind` is the temp rendezvous beside the
+    # live socket; `--successor-of` names the broker this one will replace.
+    parser.add_argument("--bind", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--successor-of", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     def _terminate(signum: int, frame: FrameType | None) -> None:
@@ -50,7 +56,13 @@ def main(argv: list[str] | None = None) -> int:
     # carries only the family name.
     procname.brand_this_process()
 
-    return run_broker(idle_shutdown_s=args.idle_shutdown)
+    from pathlib import Path
+
+    return run_broker(
+        idle_shutdown_s=args.idle_shutdown,
+        bind_path=Path(args.bind) if args.bind else None,
+        predecessor_pid=args.successor_of,
+    )
 
 
 if __name__ == "__main__":

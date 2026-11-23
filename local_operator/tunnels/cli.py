@@ -18,19 +18,29 @@ from typing import Any
 import httpx
 
 from local_operator import launchd
+from local_operator.i18n.keys import tunnel_status
+from local_operator.i18n.text import tr
 from local_operator.providers.auth_store import self_clearing_window
-from local_operator.tunnels import config, gateway, report, state
+from local_operator.tunnels import config, gateway, report, request_log, state
 from local_operator.tunnels.api import (
     RadientTunnels,
     credential_id,
     usable_credential_id,
 )
-from local_operator.tunnels.errors import LocalPrerequisite, RecordNotFound
+from local_operator.tunnels.errors import (
+    LocalPrerequisite,
+    RecordNotFound,
+    RequestFailed,
+)
 from local_operator.tunnels.service import (
     authorization_failure_reason,
     cloudflared_binary,
     tunnel_path,
 )
+
+#: Copy added to this module since the catalogues exist is keyed (AGENTS.md
+#: "Internationalization"); resolved at call time so a language change applies.
+_t = tr("tunnel.status")
 
 
 def _read_origin_auth(path: Path) -> dict[str, str]:
@@ -135,7 +145,12 @@ def _stamp(seconds: Any) -> str:
 
 
 def _status_text(
-    payload: dict[str, Any], record: dict[str, Any], source: str, *, stopped: bool = False
+    payload: dict[str, Any],
+    record: dict[str, Any],
+    source: str,
+    *,
+    stopped: bool = False,
+    stale_build: str = "",
 ) -> str:
     """`lop tunnel status`, human form: the connector leads, then the login.
 
@@ -170,6 +185,20 @@ def _status_text(
         # the docstring: a paragraph welded to the state is what buried the
         # command four rows down.
         lines.append(f"  {connector['detail']}")
+    last_error = connector.get("last_error")
+    if isinstance(last_error, dict) and last_error.get("reason"):
+        # The connector's own last retrying exit, from service.log: shown so the
+        # cause is on this screen rather than only in a log file (field report:
+        # an upstream 503 visible only in service.log).
+        # It may be HISTORY (`current: false`): `report.probe` decides whether
+        # it explains the present state; this row only says when it happened.
+        at = _stamp(last_error.get("at"))
+        label = gateway.reason_label(str(last_error["reason"]))
+        lines.append(
+            _t(tunnel_status.last_exit_at(label=label, at=at))
+            if at
+            else _t(tunnel_status.last_exit_plain(label=label))
+        )
     transport = connector.get("transport")
     if transport:
         # `relay` / `cloudflare` are protocol identifiers, like the state words
@@ -180,6 +209,12 @@ def _status_text(
             else ""
         )
         lines.append(f"Transport: {transport}{overlap}")
+    if stale_build:
+        # A connector on an OLD BUILD answers like a current one; after an
+        # upgrade that is what kept remote access on old code (2026-11-18).
+        # Already keyed copy, from `services.stale_daemon_status_line`; printed
+        # bare so this English-labelled block adds no untranslated word.
+        lines.append(stale_build)
     login = payload["login"]
     if login["state"] == "login_required":
         if stopped:
@@ -271,7 +306,7 @@ def _status_text(
         # (U1: the window re-arms, so a deferral that keeps returning is where a sign-in
         # becomes the remedy).
         if connector["reason"] == gateway.AUTHORIZATION_DEFERRED:
-            lines.append("Login: refresh deferred — retried automatically.")
+            lines.append(_t(tunnel_status.login_deferred_retried()))
         else:
             window = f"about {self_clearing_window()}"
             lines.append(
@@ -282,8 +317,9 @@ def _status_text(
         # Never "sign-in expired": this state means the check itself could not run,
         # and naming it anything else sends an operator whose network is down to a
         # login that cannot help them.
-        lines.append("Login: could not be checked (a refresh could not reach Radient).")
+        lines.append(_t(tunnel_status.login_unchecked()))
     lines.extend(_summary(record, source, stopped=stopped).splitlines())
+    lines.extend(request_log.render(payload.get("requests") or {}))
     return "\n".join(lines)
 
 
@@ -399,7 +435,68 @@ async def _missing_record_message(api: RadientTunnels, old: dict[str, Any]) -> s
     )
 
 
-def _prepare_mobile(value: dict[str, Any]) -> None:
+async def _adopt_conflicting_create(api: RadientTunnels, pending: dict[str, Any]) -> dict[str, Any]:
+    """The record a 409 on a pending create conflicts with, when it is provably ours.
+
+    Why this exists (field report on 0.96.5, still present on 0.102.4): the
+    control plane answered the first `POST /v1/tunnels` with a 503 AFTER it had
+    created the record, so the retry with the SAME `Idempotency-Key` from
+    `create.json` answered 409 — and nothing ever saved `config.json`, leaving
+    `lop tunnel setup apply` stuck at `reservation_outcome=unconfirmed` forever.
+
+    The proof that the conflicting record is this machine's own reservation is
+    the `device_id`: it is a UUID this machine generated and persisted in the
+    pending intent before the first POST, and the list read is owner-pinned to
+    the same login, so a match cannot be another device's or another account's
+    tunnel. The name is checked as well so a reused device id under a renamed
+    pending request is not silently adopted. Exactly one match, or nothing: an
+    ambiguous list must not pick a tunnel to bind (and bill) on a guess.
+
+    A 409 with no matching record stays a failure, with a sentence that names
+    the conflict rather than a bare status, because "HTTP 409" gives the
+    operator nothing to act on.
+    """
+    device_id = pending.get("device_id")
+    name = pending.get("name")
+    # Exact, typed matches only (review round 1, R1-2): a pending intent saved
+    # from a config whose record had no device id carries `None`, and `None ==
+    # None` would match every same-name record without one; a defaulted name
+    # would let a NAMELESS record match. Either is a guess, and a guess here
+    # binds (and bills) a tunnel, so a missing proof means no adoption.
+    if not isinstance(device_id, str) or not device_id or not isinstance(name, str):
+        raise ValueError(_t(tunnel_status.create_conflict_unmatched()))
+    records = await api.request("GET")
+    if isinstance(records, dict):
+        records = records.get("tunnels", [])
+    matches = [
+        record
+        for record in (records if isinstance(records, list) else [])
+        if isinstance(record, dict)
+        and isinstance(record.get("id"), str)
+        and record.get("device_id") == device_id
+        and record.get("name") == name
+    ]
+    if len(matches) != 1:
+        raise ValueError(_t(tunnel_status.create_conflict_unmatched()))
+    return matches[0]
+
+
+def _mobile_build_is_stale() -> bool:
+    """Whether the supervised mobile daemon is PROVEN to run an older build."""
+    from local_operator import update
+    from local_operator.mobile import install as mobile_install
+
+    pid = mobile_install._supervised_pid()
+    return pid is not None and update.generation_staleness_of_process(pid) is True
+
+
+def _prepare_mobile(value: dict[str, Any]) -> str:
+    """Make sure the mobile relay the tunnel fronts is installed and current.
+
+    Returns the mobile install's running-build step when this call restarted a
+    stale mobile daemon (review R1-3: `lop tunnel install` used to bounce the
+    phone's relay without saying so), else ``""``.
+    """
     from local_operator.mobile import install as mobile_install
 
     mobile = next(
@@ -407,15 +504,27 @@ def _prepare_mobile(value: dict[str, Any]) -> None:
         None,
     )
     if mobile is None:
-        return
-    if mobile_install.health(mobile["port"]) and mobile_install.gate_closed(mobile["port"]):
-        return
+        return ""
+    serving = mobile_install.health(mobile["port"]) and mobile_install.gate_closed(mobile["port"])
+    # A HEALTHY MOBILE DAEMON ON AN OLD BUILD is not "prepared" (field finding,
+    # 2026-11-18: the phone kept old code after an upgrade). A proven-stale one
+    # goes through `install`, whose skip branch restarts it onto the new build;
+    # an unproven one is left to `lop mobile install`, so a tunnel restart does
+    # not also bounce the phone's relay on a guess.
+    stale = bool(serving) and _mobile_build_is_stale()
+    if serving and not stale:
+        return ""
     result = mobile_install.install(port=mobile["port"])
     if not result.get("ok"):
+        if stale and result.get("error"):
+            # The build restart itself was refused: its keyed line names
+            # `lop mobile restart`, which is the fix — not a re-install.
+            raise ValueError(str(result["error"]))
         raise ValueError(
             "Mobile relay installation failed. Run lop mobile install; "
             "on Linux run lop mobile serve first."
         )
+    return str(result.get("build") or "") if stale else ""
 
 
 async def dispatch(args: argparse.Namespace) -> str:
@@ -545,7 +654,12 @@ async def dispatch(args: argparse.Namespace) -> str:
                     raise ValueError(
                         "A different create request is pending; retry its original arguments."
                     )
-                record = await api.request("POST", body=payload, idempotency_key=intent["key"])
+                try:
+                    record = await api.request("POST", body=payload, idempotency_key=intent["key"])
+                except RequestFailed as failure:
+                    if failure.status != 409:
+                        raise
+                    record = await _adopt_conflicting_create(api, intent["payload"])
             elif action == "connect":
                 identifier = args.tunnel_id or old.get("tunnel_id")
                 if not identifier:
@@ -657,9 +771,34 @@ async def dispatch(args: argparse.Namespace) -> str:
             connector=connector,
             login=login,
         )
+        # Additive: the connector's recent relayed requests and their status
+        # classes, read from the bounded file the gateway writes. This is the
+        # evidence for "the phone says Not answering while this Mac looks fine":
+        # an empty list while the phone is retrying means nothing reached here.
+        payload["requests"] = request_log.read_tail(
+            config.directory() / request_log.REQUEST_LOG_NAME
+        )
+        from local_operator.services import (
+            stale_background_daemons,
+            stale_daemon_status_line,
+        )
+
+        # ONE census read serves both forms, so `--json` (the TUI and report's
+        # reader) cannot disagree with the human line (review R1-5). Additive
+        # key: the generation the connector is PROVEN to still run, else null.
+        rows = await asyncio.to_thread(stale_background_daemons)
+        payload["running_build_stale"] = next(
+            (d.generation for d in rows if d.name == "tunnel"), None
+        )
         if getattr(args, "json", False):
             return json.dumps(payload, allow_nan=False)
-        return _status_text(payload, record, source, stopped=bool(value.get("stopped")))
+        return _status_text(
+            payload,
+            record,
+            source,
+            stopped=bool(value.get("stopped")),
+            stale_build=stale_daemon_status_line("tunnel", "lop tunnel restart", daemons=rows),
+        )
     if action == "stop":
         value["stopped"] = True
         config.save(value)
@@ -718,7 +857,7 @@ async def dispatch(args: argparse.Namespace) -> str:
             # service uses when present, not a prerequisite for installing.
             if not await asyncio.to_thread(config.relay_offered):
                 raise
-        await asyncio.to_thread(_prepare_mobile, value)
+        mobile_note = await asyncio.to_thread(_prepare_mobile, value)
         # User services do not inherit the terminal's environment. An explicit
         # foreground/Linux origin password stays in private local config;
         # Keychain-backed macOS installs need no redundant password copy.
@@ -726,14 +865,21 @@ async def dispatch(args: argparse.Namespace) -> str:
             value["mobile_password"] = os.environ["LOP_MOBILE_PASSWORD"]
         value["stopped"] = False
         config.save(value)
+        # The install's note: a connector that was restarted onto the new build,
+        # or whose running build could not be confirmed (it used to be silent).
+        note = ""
         if action == "install":
-            await asyncio.to_thread(install.install)
+            note = await asyncio.to_thread(install.install)
         else:
             await asyncio.to_thread(install.action, action)
-        return (
+        started = (
             "Tunnel service started. Run lop tunnel status, then open your harness URL "
             "and log in with Radient."
         )
+        # The mobile line is bare keyed copy naming "the running service"; the
+        # "mobile:" prefix says which one, since the tunnel's own note may follow.
+        notes = [f"mobile: {mobile_note}" if mobile_note else "", note]
+        return "\n".join([*(n for n in notes if n), started])
     raise ValueError(
         "Use lop tunnel --help to create, configure, start, stop, or revoke remote access."
     )
@@ -781,8 +927,17 @@ def mobile_action(
         if action in {"enable", "status"}:
             from local_operator.tunnels import setup
 
+            if await asyncio.to_thread(setup.auto_reconnecting):
+                # The post-sign-in run owns `setup.lock`: say so (a wait, no
+                # command) rather than the stale paused step it is clearing, or an
+                # `enable` that would only meet "setup is in progress". The desktop
+                # routes answer the same plan (U10), so the TUI cannot disagree.
+                return setup.text(setup.reconnecting_plan(), surface="tui")
             plan = (
-                await setup.apply(selected, accepted, progress=progress)
+                # A typed `/mobile enable` is the person asking for phone access
+                # back, so it may lift a deliberate stop (`setup.apply`'s
+                # `resume_stopped`); the auto-hook never reaches this function.
+                await setup.apply(selected, accepted, progress=progress, resume_stopped=True)
                 if action == "enable"
                 else await setup.observe(selected)
             )
@@ -797,7 +952,12 @@ def mobile_action(
     except ValueError as exc:
         return str(exc)
     except (OSError, httpx.HTTPError):
-        # `lop login radient`: every other line this command prints names the
-        # remedy this shell can run, and this one used to be the exception
-        # (review round 2, m5).
-        return "Tunnel operation failed; check network access and lop login radient."
+        # This function only answers the TUI (`_cmd_mobile` shows its return
+        # value verbatim), so the remedy is the TUI's own `/login radient`, keyed
+        # like every other line of the card. It used to be hard-coded English
+        # naming the shell command `lop login radient`, which a TUI user cannot
+        # run where they are (#3958 review round 1, R2). The CLI's own failure
+        # line lives in `main` above and is unchanged.
+        from local_operator.i18n.keys import mobile_setup as ms
+
+        return tr("mobile.setup")(ms.operation_failed_tui())

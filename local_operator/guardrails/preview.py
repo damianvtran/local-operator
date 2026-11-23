@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from local_operator.guardrails.check import (
+    BUILTIN_HOLD_CLEANUP,
     BUILTIN_JUDGE,
     BUILTIN_PASS,
     BUILTIN_REFUSE_CREDENTIAL,
@@ -52,12 +53,19 @@ from local_operator.guardrails.check import (
     _targets_text,
     build_delete_case,
     builtin_branch,
+    cleanup_hold_text,
+    credential_path_masks,
     credential_refusal_text,
+    escalate_asked_targets,
     evidence_write_verdict,
+    guard_version,
+    lapsed_refusal_reason,
+    mask_credential_paths,
     read_settings,
     review_text,
     rule_block_text,
     rule_warn_text,
+    stamp_guard_version,
     worktree_flagged,
 )
 from local_operator.guardrails.classify import Verdict, classify_bash
@@ -67,7 +75,18 @@ from local_operator.guardrails.rules import call_text, load_rules
 #: and is the only value a *rule* decision can report; every other value is the
 #: branch ``check.builtin_branch`` chose, imported rather than re-spelled so the
 #: preview cannot hold a second copy of the checkpoint's precedence.
-_REFUSING = frozenset({BUILTIN_REFUSE_CRITICAL, BUILTIN_REFUSE_CREDENTIAL})
+#: Preview-only name for ``_dangerous_delete``'s ``case.lapsed_only`` branch:
+#: ``builtin_branch`` says "judge", but the checkpoint refuses these paths
+#: before any model when only a non-consenting ask points at them.
+BUILTIN_REFUSE_LAPSED = "refuse-lapsed-ask"
+_REFUSING = frozenset(
+    {
+        BUILTIN_REFUSE_CRITICAL,
+        BUILTIN_REFUSE_CREDENTIAL,
+        BUILTIN_REFUSE_LAPSED,
+        BUILTIN_HOLD_CLEANUP,
+    }
+)
 
 _LIMITS = (
     "not proven: this is ONE call against the rule files this preview loaded "
@@ -145,10 +164,16 @@ class PreviewReport:
     #: The rule directories this preview actually loaded, so the report states its
     #: own basis instead of calling a candidate folder "the current rules".
     rule_dirs: tuple[str, ...] = ()
+    #: The installed guard's version, the other half of the refusal-text
+    #: ``(guard <version>)`` comparison the re-evaluation exception in
+    #: ``check.REFUSAL_SCOPE`` asks for: one report carries both facts.
+    guard_version: str = ""
 
     def render(self) -> str:
         """The report as text an agent reads back from its ``eval`` output."""
         lines = [f"preview: {self.tool}  {_one_line(self.call_text)}"]
+        if self.guard_version:
+            lines.append(f"guard: {self.guard_version} (installed)")
         if self.builtin_effect:
             lines.append(
                 f"built-in {DANGEROUS_DELETE_RULE}: risk={self.builtin_risk or 'LOW'} "
@@ -267,6 +292,10 @@ _EFFECT_WORDS = {
     BUILTIN_REFUSE_CREDENTIAL: (
         "refused outright — a target comes from a secret, so no consent is possible"
     ),
+    BUILTIN_REFUSE_LAPSED: (
+        "refused outright, no model call — an ask names it and no operator answer approves it"
+    ),
+    BUILTIN_HOLD_CLEANUP: "refused outright, no model call — worktree cleanup not verified",
 }
 
 
@@ -320,57 +349,91 @@ def preview_tool_call(
     effect = ""
     builtin_text = ""
     builtin_facts: tuple[str, ...] = ()
-    if tool_name == "bash":
-        command = args.get("command")
-        if isinstance(command, str) and command.strip():
-            verdict = classify_bash(
-                command,
-                cwd=context.cwd,
-                env=context.env,
-                scratchpad=context.scratchpad,
-                session_id=context.session_id,
-            )
-            effect = builtin_branch(verdict, critical_override=live.critical_override)
-            if effect == BUILTIN_REFUSE_CRITICAL:
-                builtin_text = _critical_text(verdict)
-            elif effect == BUILTIN_REFUSE_CREDENTIAL:
-                builtin_text = credential_refusal_text(command)
-            elif effect == BUILTIN_JUDGE:
-                case = build_delete_case(verdict, context)
-                builtin_facts = (*case.facts, *case.evidence.describe())
-                if case.excluded:
-                    builtin_facts += (f"excluded as untrusted: {case.excluded}",)
-                proven = case.evidence_basis()
-                if proven:
-                    # The checkpoint allows this without the judge
-                    # (``DeleteCase.evidence_basis``); report that branch.
-                    effect = BUILTIN_PASS
-                    builtin_facts += (f"allowed without the judge: {proven}",)
-                else:
-                    builtin_text = review_text(
-                        DANGEROUS_DELETE_RULE,
-                        "<judge reason>",
-                        _targets_text(verdict),
-                        worktree=worktree_flagged(verdict),
-                    )
+    # The same forge auth the checkpoint gives its PR-state lookups (QA Q1,
+    # PR #4161): without it a preview on a gh-borrowing node read "PR state
+    # unknown" where ``check_tool_call`` read the merged PR, and refusal text
+    # sends agents here to re-evaluate. Set and reset exactly as there.
+    from local_operator.guardrails import provenance as prov
 
-    elif tool_name in FILE_DESTINATION_TOOLS:
-        # The checkpoint refuses a write/edit of the guard's own evidence
-        # before any rule; report that same branch and text.
-        verdict = evidence_write_verdict(tool_name, args, context)
-        if verdict is not None:
-            effect = BUILTIN_REFUSE_CRITICAL
-            builtin_text = _critical_text(verdict)
+    forge_token = prov.FORGE_AUTH.set(context.forge_auth)
+    try:
+        if tool_name == "bash":
+            command = args.get("command")
+            if isinstance(command, str) and command.strip():
+                verdict = classify_bash(
+                    command,
+                    cwd=context.cwd,
+                    env=context.env,
+                    scratchpad=context.scratchpad,
+                    session_id=context.session_id,
+                )
+                # Same ranking the checkpoint applies (unanswered asks lift LOW).
+                verdict = escalate_asked_targets(verdict, context)
+                effect = builtin_branch(verdict, critical_override=live.critical_override)
+                if effect == BUILTIN_REFUSE_CRITICAL:
+                    builtin_text = _critical_text(verdict)
+                elif effect == BUILTIN_REFUSE_CREDENTIAL:
+                    builtin_text = credential_refusal_text(command)
+                elif effect == BUILTIN_HOLD_CLEANUP:
+                    builtin_text = cleanup_hold_text(verdict)
+                elif effect == BUILTIN_JUDGE:
+                    case = build_delete_case(verdict, context)
+                    builtin_facts = (*case.facts, *case.evidence.describe())
+                    if case.excluded:
+                        builtin_facts += (f"excluded as untrusted: {case.excluded}",)
+                    proven = case.evidence_basis()
+                    if proven:
+                        # The checkpoint allows this without the judge
+                        # (``DeleteCase.evidence_basis``); report that branch.
+                        effect = BUILTIN_PASS
+                        builtin_facts += (f"allowed without the judge: {proven}",)
+                    elif case.lapsed_only:
+                        # The checkpoint refuses a path only a non-consenting ask
+                        # points at before any judge runs (QA R1-Q1): say so,
+                        # rather than naming a judge that never runs.
+                        effect = BUILTIN_REFUSE_LAPSED
+                        builtin_text = review_text(
+                            DANGEROUS_DELETE_RULE,
+                            lapsed_refusal_reason(case),
+                            _targets_text(verdict),
+                            worktree=worktree_flagged(verdict),
+                        )
+                    else:
+                        builtin_text = review_text(
+                            DANGEROUS_DELETE_RULE,
+                            "<judge reason>",
+                            _targets_text(verdict),
+                            worktree=worktree_flagged(verdict),
+                        )
+
+        elif tool_name in FILE_DESTINATION_TOOLS:
+            # The checkpoint refuses a write/edit of the guard's own evidence
+            # before any rule; report that same branch and text.
+            verdict = evidence_write_verdict(tool_name, args, context)
+            if verdict is not None:
+                effect = BUILTIN_REFUSE_CRITICAL
+                builtin_text = _critical_text(verdict)
+    finally:
+        prov.FORGE_AUTH.reset(forge_token)
+
+    # Item C: a credential variable's path value resolves like a literal, so
+    # the preview hides it exactly as the checkpoint's carriers do.
+    masks = credential_path_masks(context.env)
+
+    def private(text: str) -> str:
+        return _safe_text(mask_credential_paths(text, masks))
 
     base: dict[str, Any] = {
         "tool": tool_name,
         "call_text": call_text(tool_name, args),
         "builtin_risk": verdict.risk.name if verdict is not None else "",
-        "builtin_targets": _ranked_targets(verdict),
+        "builtin_targets": private(_ranked_targets(verdict)),
         "builtin_effect": effect,
-        "builtin_text": _safe_text(builtin_text),
-        "builtin_facts": tuple(_safe_text(f) for f in builtin_facts),
+        # Stamped like the checkpoint's result so the preview stays byte-equal.
+        "builtin_text": stamp_guard_version(private(builtin_text)),
+        "builtin_facts": tuple(private(f) for f in builtin_facts),
         "rule_dirs": tuple(str(path) for path in live.rules_dirs) if live.enabled else (),
+        "guard_version": guard_version(),
     }
     if effect in _REFUSING:
         return PreviewReport(**base, action="refuse", rule=DANGEROUS_DELETE_RULE)
@@ -409,7 +472,10 @@ def preview_tool_call(
             gate.append(rule.name)
             continue
         entry = RulePreview(
-            rule.name, "block", text=_safe_text(rule_block_text(rule)), gated_by=gated_by
+            rule.name,
+            "block",
+            text=stamp_guard_version(_safe_text(rule_block_text(rule))),
+            gated_by=gated_by,
         )
         matched.append(entry)
         blocked = entry
@@ -444,6 +510,7 @@ __all__ = [
     "BUILTIN_PASS",
     "BUILTIN_REFUSE_CREDENTIAL",
     "BUILTIN_REFUSE_CRITICAL",
+    "BUILTIN_REFUSE_LAPSED",
     "PreviewReport",
     "RulePreview",
     "preview_tool_call",

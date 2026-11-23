@@ -51,10 +51,19 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from local_operator.i18n.cli_help import help_text
 from local_operator.i18n.keys import cli_group_help as _gg
+from local_operator.i18n.keys import cli_network_send as _network_send
+from local_operator.i18n.keys import wire_github as _github_strings
+from local_operator.i18n.text import tr as _github_tr
+
+if TYPE_CHECKING:
+    from local_operator.mobile.types import SessionRecord
+    from local_operator.session.attached import _RuntimeLocator
+
+_github_text = _github_tr("wire.github")
 
 #: The default invite lifetime. A string flag parsed by :func:`_duration`, because
 #: ``--expires 10m`` is what a person types and ``600`` is what they would have to
@@ -191,6 +200,18 @@ def add_parser(
         default="",
         help="Bind the token to one device id (only that device may redeem it)",
     )
+    # INDEPENDENT OF --role on purpose: a read invite still offers by default, and
+    # coupling the two would change every existing read pairing. Read-only rigs
+    # (QA, demos, test devices) are told in the network guide to pass this.
+    invite.add_argument(
+        "--no-credential-offers",
+        action="store_true",
+        dest="no_credential_offers",
+        help=(
+            "Pair without credentials: this device never lists its logins, sends an "
+            "empty share list and grants nothing (recommended for read-only rigs)"
+        ),
+    )
     invite.add_argument(
         "--print",
         action="store_true",
@@ -323,7 +344,13 @@ def add_parser(
     # the default `drive` role cannot move, delete or borrow a login, and the only
     # other way to widen it is a re-pair that burns the device id.
     for verb, words in (
-        ("grant", "Allow a peer more on this device (move, delete, broker_credential, ...)"),
+        # ``workset_import`` is named here because ``move`` does not imply it: without
+        # it a move onto this device carries the conversation and leaves the files.
+        (
+            "grant",
+            "Allow a peer more on this device (move, workset_import, delete, "
+            "broker_credential, ...)",
+        ),
         ("revoke", "Take capabilities back from a peer on this device"),
     ):
         caps = member_actions.add_parser(verb, help=words)
@@ -401,7 +428,7 @@ def add_parser(
         help="capability to grant on join (repeatable; default: approve)",
     )
     approval_request.add_argument(
-        "--session", default="", help="the session id this request is filed from"
+        "--session", default=None, help="the session id this request is filed from"
     )
     approval_request.add_argument(
         "--request-id",
@@ -435,7 +462,7 @@ def add_parser(
     )
     approval_withdraw.add_argument("approval")
     approval_withdraw.add_argument(
-        "--session", default="", help="the session id this request was filed from"
+        "--session", default=None, help="the session id this request was filed from"
     )
     approval_withdraw.add_argument("--json", action="store_true")
     approval_run = approval_actions.add_parser(
@@ -541,6 +568,14 @@ def add_parser(
         default="",
         metavar="KEY",
         help="with --create: retry a create whose reply was lost, without duplicating it",
+    )
+    # WHO ASKED FOR THE CREATE (2026-11-13). Hidden: the ``sessions spawn
+    # peer=`` tool passes ``--origin agent``, and a run from an agent's shell is
+    # read as ``agent`` from its marker (``_create_origin``). The owner stamps
+    # it as ``origin.kind`` and never forwards an agent-created session's
+    # ``notify`` items to the operator (``notifications/remote_attention``).
+    net_sessions.add_argument(
+        "--origin", choices=("user", "agent"), default="", help=argparse.SUPPRESS
     )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
@@ -800,6 +835,31 @@ def add_parser(
         "state", help="What this device holds, and what it mirrored from a peer"
     )
     definitions_state.add_argument("--json", action="store_true")
+
+    # `lop network skills`: what makes `skill://NAME` resolve on the OTHER device.
+    # The definitions/mcp pair's shape — `push` is the deliberate half of the sync
+    # the mesh-definitions cadence also performs; `state` is local and relay-free,
+    # and names every skill that will NOT travel (too large, unreadable) and why.
+    skills = actions.add_parser(
+        "skills",
+        help="Sync your user skills so a peer's sessions can load them",
+        description=(
+            "A session on another device reads the same skills a local one does only "
+            "when that device holds them. The mesh syncs this device's own skills "
+            "(~/.local-operator/skills) to every paired member each minute and before "
+            "a create; `push` does it now and reports per skill, `state` lists what "
+            "this device holds, where each copy came from, and what will not travel."
+        ),
+    )
+    skills_actions = skills.add_subparsers(dest="skills_command")
+    skills_push = skills_actions.add_parser("push", help="Send this device's skills to a peer")
+    skills_push.add_argument("--peer", default="", help="the device to send them to")
+    skills_push.add_argument("--all-peers", action="store_true", help="every linked peer")
+    skills_push.add_argument("--json", action="store_true")
+    skills_state = skills_actions.add_parser(
+        "state", help="What this device holds, what it mirrored, and what will not travel"
+    )
+    skills_state.add_argument("--json", action="store_true")
 
     # `lop network mcp`: what makes a peer able to RUN this device's MCP servers.
     # Two verbs, the definitions pair's shape and reasons — `push` is the
@@ -1189,6 +1249,42 @@ def add_parser(
         "--network", default="", help="Network name or id (default: the only one)"
     )
     cred_mark.add_argument("--json", action="store_true")
+    # The GitHub designation's own surface (operator decision 2026-11-12): with no
+    # explicit list, a share lends for every repo this device's GitHub login can
+    # push to MINUS these opt-outs. ONE leaf with an action positional, like
+    # ``mark``'s choice, so ``--json`` sits on the verb the agent path drives.
+    cred_github = credential_actions.add_parser(
+        "github",
+        help=(
+            "Show the GitHub repositories a share lends for, or opt one out of "
+            "(or back into) that list"
+        ),
+    )
+    cred_github.add_argument(
+        "action",
+        choices=("repos", "exclude", "include"),
+        help=(
+            "'repos' lists the effective repositories and where the list came from; "
+            "'exclude'/'include' opt one repository out of / back into it"
+        ),
+    )
+    cred_github.add_argument(
+        "repository", nargs="?", default="", help="owner/repo (for exclude/include)"
+    )
+    cred_github.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Ask GitHub again now instead of using the cached list ('repos' only)",
+    )
+    cred_github.add_argument(
+        "--use-default",
+        action="store_true",
+        help=(
+            "Explicitly return to every pushable repository minus opt-outs, removing "
+            "the hand-picked list and its clear fence ('repos' only)"
+        ),
+    )
+    cred_github.add_argument("--json", action="store_true")
 
     install = actions.add_parser("install", help="Install the relay's restart-on-boot service")
     install.add_argument("--json", action="store_true")
@@ -1314,7 +1410,14 @@ CODE_RELAY_UNAVAILABLE = "relay_unavailable"
 
 
 def _relay_call(
-    op: str, *, timeout: float = 5.0, allow_no_answer: bool = False, **fields: Any
+    op: str,
+    *,
+    timeout: float = 5.0,
+    allow_no_answer: bool = False,
+    allow_no_relay: bool = False,
+    no_answer_message: str | None = None,
+    report_unsent: bool = False,
+    **fields: Any,
 ) -> dict[str, Any] | None:
     """Run one op on the running relay, or REFUSE when no relay answers it.
 
@@ -1337,23 +1440,55 @@ def _relay_call(
 
     ``allow_no_answer`` is the deliberate opt-out for a caller that handles a
     missing answer ITSELF: either because the verb has a LOCAL spelling of the same
-    op (``ls``/``show``/``invite``/``member_rm``/``disconnect``/``panic``/``trust``/
+    op (``ls``/``show``/``invite``/``disconnect``/``panic``/``trust``/
     ``confirm``/``doctor``/``pending``, each of which does that work here and says so
     in its own payload), or because it emits the family's refusal document itself
     (``peers``). Taking it means accepting that no peer was asked. A verb whose whole
     contract is "did the relay/peer do it" must not take it — inventing an outcome
     for a thing that never happened is the defect this parameter exists to make
     visible.
+
+    ``allow_no_relay`` is narrower: member removal may run locally only when no
+    live relay record exists. Once a running relay was asked, silence can mean
+    its operation failed or partially completed, not permission to repeat the
+    destructive operation offline. Keep that distinction at this single lookup.
+    ``no_answer_message`` lets the caller name its already-resolved context;
+    it is display-only and never sent in the control frame or read back from disk.
+
+    ``report_unsent`` is for a caller whose sentence depends on WHETHER the op could
+    have run (security review round 3, S-R3-1: ``confirm`` reports a terminal
+    pairing answer). With it, "the op never left this device" — no relay record, or
+    ``relay.control_request`` saw the connection fail before the op line was
+    written — raises :class:`~local_operator.network.types.ControlRequestUnsent`,
+    and a ``None`` (under ``allow_no_answer``) then means only "sent, no reply":
+    the relay may have acted. It is forwarded only when set, so the existing test
+    doubles of ``control_request`` keep their exact call shape.
     """
     from local_operator.network import relay, store
 
     record = store.find_own_relay()
-    reply = relay.control_request(record, op, timeout=timeout, **fields) if record else None
+    if record is None and report_unsent:
+        from local_operator.network.types import ControlRequestUnsent
+
+        raise ControlRequestUnsent()
+    unsent_flag: dict[str, Any] = {"report_unsent": True} if report_unsent else {}
+    reply = (
+        relay.control_request(record, op, timeout=timeout, **unsent_flag, **fields)
+        if record
+        else None
+    )
     if reply is None:
-        if allow_no_answer:
+        if allow_no_answer or (allow_no_relay and record is None):
             return None
         from local_operator.network.types import MeshRefusal
 
+        if allow_no_relay:
+            raise MeshRefusal(
+                "relay_control_failed",
+                no_answer_message
+                or "the relay did not confirm the removal; the removal may be incomplete. "
+                "This command did not retry the removal. Wait a moment and retry.",
+            )
         raise MeshRefusal(CODE_RELAY_UNAVAILABLE, _relay_unavailable_message())
     if reply.get("op") == "error":
         from local_operator.network.types import MeshRefusal
@@ -2161,7 +2296,10 @@ def _durable_record(
       shared it again. ``granted_at`` is the owner's clock, so a few seconds of skew
       is the residual; the record carries no ``doc_rev`` to compare instead.
     """
-    if not evidence or str(evidence.get("state") or "") == "synced":
+    # ``held`` is not a failure either: the owner is away and the token it lent is
+    # still serving through the offline hold (2026-11-14). The listing's live
+    # columns already say the borrow works; a failure record here would contradict it.
+    if not evidence or str(evidence.get("state") or "") in ("synced", "held"):
         return None
     recorded_owner = str(evidence.get("owner_device") or "")
     if recorded_owner and owner_device and recorded_owner != owner_device:
@@ -2288,7 +2426,7 @@ def _refusal_words(code: str, owner: str) -> str:
         return f"{owner} has no login for this — sign in on {owner}"
     if code == "refresh_failed":
         return f"{owner} could not refresh the login — try again shortly"
-    if code == "rate_limited":
+    if code in ("rate_limited", "owner_busy"):
         return f"{owner} is busy — try again shortly"
     if code == "quota_blocked":
         return f"rate-limited on {owner} — try again later"
@@ -2676,8 +2814,11 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     # device that has been shared a credential but whose record has not been re-read
     # would otherwise print "nothing is shared" — the exact state this listing exists
     # to make visible. The record is joined only for the NAME.
+    from local_operator.network.credentials import github as github_mod
+
     networks: list[dict[str, Any]] = []
     lines: list[str] = []
+    github_source: str | None = None
     for document in _placement_documents():
         record = _record_for(document.network_id)
         network_name = record.name if record is not None else document.network_id
@@ -2717,6 +2858,15 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                     for h in entry.holders
                 ],
             }
+            if row["owned_here"] and key == github_mod.GITHUB_KEY:
+                # THE LEND THIS DEVICE SERVES, NAMED BY ITS ARM (lend honesty,
+                # 2026-11-19): the placement's ``kind`` is the row's wire type and
+                # stays put; ``label`` is what the operator reads, so a gh-served
+                # lend no longer prints as ``github-app``. Resolved once per listing.
+                if github_source is None:
+                    github_source = github_mod.resolve_source(_config_dir())
+                row["source"] = github_source
+                row["label"] = github_mod.source_label(github_source)
             if not row["owned_here"]:
                 holder = entry.is_holder(self_device)
                 if holder:
@@ -2736,8 +2886,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 # THE OWNER'S OWN VIEW OF EACH HOLDER'S COPY (S3; design §5.2): one
                 # segment per member row — ``synced (gen 7)`` / ``stale (gen 6 of
                 # 7, last acked 14:02)``. Read from the sync document only: a
-                # listing never dials and never reads a store, and a copy
-                # relationship with no generation yet shows NO segment (absent,
+                # listing never dials, and the one store touch is the github
+                # arm's metadata ``describe`` above (``resolve_source``; no value
+                # is read, as ``source_present`` already does for ``shareable``).
+                # A copy relationship with no generation yet shows NO segment (absent,
                 # never "failed" — the rollout segment's own rule). The §4.2
                 # selection mark rides the same read (S4): one document, so the
                 # mark cannot disagree with the holders it governs.
@@ -2758,6 +2910,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
             lines.append(f"{network_name}: nothing is shared in this network yet")
         else:
             lines.append(f"{network_name}:")
+            # The type column is sized to the widest entry (min 15, the historic
+            # width) so the 27-character gh label keeps ``owner:`` aligned across
+            # rows instead of pushing that one row right (agent review n1 / QA Q3).
+            kind_width = max([15] + [len(r.get("label") or r["kind"]) for r in keys])
             for row in keys:
                 owner = (
                     "this device"
@@ -2766,9 +2922,16 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 )
                 label = _peer_label(row["identity_label"] or "")
                 who = f" ({label})" if label else ""
+                shown_kind = row.get("label") or row["kind"]
                 lines.append(
-                    f"  {row['credential_name']:<14} {row['kind']:<15} owner: {owner}{who}"
+                    f"  {row['credential_name']:<14} {shown_kind:<{kind_width}} owner: {owner}{who}"
                 )
+                if row.get("source") == github_mod.SOURCE_GH:
+                    # The same caution the ``shareable`` row and ``ready`` give, on
+                    # the lend itself: borrowers of this row get the full account.
+                    from local_operator.network.readiness import GITHUB_BROAD_TOKEN_NOTE
+
+                    lines.append(f"      {GITHUB_BROAD_TOKEN_NOTE}")
                 if row.get("mark"):
                     mark_tail = " — never crosses" if row["mark"] == "local-only" else ""
                     lines.append(f"      marked {row['mark']}{mark_tail}")
@@ -3064,42 +3227,92 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str) -> dict[str, Any]:
+def _github_residual(source: str, lent_hold_until_ms: int = 0) -> tuple[int, str]:
+    """``(seconds, words)``: how long a node that cannot hear a revoke may keep a GitHub grant.
+
+    THE OFFLINE HOLD (2026-11-14, "Yes, GitHub and MCP"): a node keeps a lent grant
+    while it cannot reach the owner, and a revoke or panic only stops a node that
+    HEARS it (review #3947 M1).
+
+    STATED FROM WHAT WAS LENT (review #3947 R2-m2): ``lent_hold_until_ms`` is the
+    latest hold end this relay stated on a grant to that holder (the revoke op's
+    ``lent_hold_until_ms``). Lowering ``github_token_hold_s`` only affects later
+    grants, so the CURRENT setting would understate the residual. When the relay did
+    not answer, or restarted since it lent, nothing is known, and the receipt states
+    the ceiling instead: an App token's own 60 minutes, else the 24 h hold maximum
+    (``OFFLINE_HOLD_MAX_S``, which every borrower also caps at), counted from the
+    node's last grant.
+    """
+    from local_operator.network.credentials import OFFLINE_HOLD_MAX_S
+    from local_operator.network.credentials import github as github_mod
+
+    now = time.time()
+    if lent_hold_until_ms and lent_hold_until_ms / 1000.0 > now:
+        until = lent_hold_until_ms / 1000.0
+        return (
+            int(until - now + 0.999),
+            time.strftime("until %H:%M UTC (the hold it was lent with)", time.gmtime(until)),
+        )
+    ceiling = 3600 if source == github_mod.SOURCE_APP else int(OFFLINE_HOLD_MAX_S)
+    return ceiling, f"for up to {_duration_words(ceiling)} after its last grant"
+
+
+def _duration_words(seconds: int) -> str:
+    """``"24 h"`` / ``"60 min"`` — the unit a person reads an incident bound in."""
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return f"{seconds // 3600} h"
+    if seconds >= 60:
+        return f"{round(seconds / 60)} min"
+    return f"{seconds} s"
+
+
+def _github_revocation_payload(
+    revoked_now: int | None, ttl_s: int, source: str, *, lent_hold_until_ms: int = 0
+) -> dict[str, Any]:
     """The ``github`` revoke receipt's payload — ONE spelling for lines and ``--json``.
 
     Per-source (§3.3): only the App arm has a server-side revoke handle. A
     token arm was not minted here, so no DELETE was run and the sentence names
     the forge as the place the token actually ends — an incident reader must
     not believe "revoked" means "dead" for a bearer lop never minted.
+
+    ``lent_grant_max_s`` is the OFFLINE-HOLD bound (review #3947 M1), not the
+    grant window: a node that cannot hear this revoke may keep using what it holds
+    that long. ``ttl_s`` (the grant window) is kept as ``grant_window_s``.
     """
     from local_operator.network.credentials import github as github_mod
 
+    bound, residual = _github_residual(source, lent_hold_until_ms)
     if source == github_mod.SOURCE_APP:
         copied = (
-            "revoked at GitHub at the grant's window end — and immediately when "
-            "this revoke ran — via DELETE /installation/token (204; idempotent); "
-            "only if no revoke can be delivered does the token fall back to its "
-            "own 60-minute ceiling"
+            "revoked at GitHub immediately when this revoke ran, via DELETE "
+            "/installation/token (204; idempotent); if no revoke can be delivered the "
+            "token ends at its own 60-minute ceiling, and a node that cannot hear this "
+            "revoke may keep using it until then"
         )
     elif source == github_mod.SOURCE_TOKEN:
         copied = (
             "a GITHUB_TOKEN-class PAT is not minted by this device: there is no "
             "server-side revoke here — it keeps working at GitHub until it expires "
             "or is revoked there (Settings -> Developer settings -> Personal access "
-            "tokens); a grant already lent is dropped by the borrower at its window end"
+            "tokens); a node that hears this revoke stops using it at once, one that "
+            f"cannot (lost, stolen or offline) may keep using it {residual}"
         )
     elif source == github_mod.SOURCE_GH:
         copied = (
             "the gh CLI login is a user token this device did not mint: there is no "
-            "server-side revoke here — sign out of the gh CLI or revoke the token at "
-            "GitHub (Settings -> Applications) to end it; a grant already lent is "
-            "dropped by the borrower at its window end"
+            "server-side revoke here — revoke the GitHub CLI's access at GitHub "
+            "(Settings -> Applications -> Authorized OAuth Apps; `gh auth logout` only "
+            "forgets it locally) to end it; a node that hears this revoke "
+            "stops using it at once, one that cannot (lost, stolen or offline) may keep "
+            f"using it {residual}"
         )
     elif source == github_mod.SOURCE_UNREADABLE:
         copied = (
             "the secret store on this device could not be read, so the serving arm "
-            "could not be determined — any grant already lent is dropped by the borrower "
-            "at its window end; repair the store before the next revoke"
+            "could not be determined — a node that hears this revoke stops using what it "
+            f"holds at once, one that cannot may keep it {residual}; "
+            "repair the store before the next revoke"
         )
     else:
         copied = (
@@ -3109,42 +3322,52 @@ def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str)
         )
     return {
         "new_grants": "refused now",
-        "lent_grant_max_s": ttl_s,
+        "lent_grant_max_s": bound,
+        # Epoch seconds of the hold actually lent, or ``None`` when not known.
+        "lent_hold_until": (lent_hold_until_ms / 1000.0) if lent_hold_until_ms else None,
+        "grant_window_s": ttl_s,
         "minted_tokens_revoked": revoked_now,
         "source": source,
         "copied_bearer": copied,
     }
 
 
-def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> list[str]:
+def _github_revoke_lines(
+    name: str, revoked_now: int | None, source: str, *, lent_hold_until_ms: int = 0
+) -> list[str]:
     """The receipt's operator-visible lines, per serving arm (§3.3).
 
-    App arm: the mint-revoke wording (M1, restated), unchanged — line 1 holds
-    the CONDITIONAL inside it, line 2 says which branch actually happened. The
-    token arms say the plainer truth: this device minted nothing, there is no
-    DELETE to run, and the end at the forge is where the operator goes. ``""``
-    (no source configured at revoke time) gets the neutral pair.
+    App arm: line 1 holds the CONDITIONAL, line 2 says which branch actually
+    happened. The token arms say the plainer truth: this device minted nothing,
+    there is no DELETE to run, and the end at the forge is where the operator goes.
+    ``""`` (no source configured at revoke time) gets the neutral pair.
+
+    THE HOLD BOUND (review #3947 M1): since 2026-11-14 a node keeps a lent grant
+    through the offline hold, and a revoke only stops a node that HEARS it. These
+    lines name that bound instead of the old "window end", because an incident
+    response that believed "revoked" meant "dead" would stop looking too early.
     """
     from local_operator.network.credentials import github as github_mod
 
+    _seconds, residual = _github_residual(source, lent_hold_until_ms)
     if source == github_mod.SOURCE_APP:
         if revoked_now is None:
             delivered = (
                 "no immediate DELETE could be delivered (this device's relay is not "
                 "running): the token dies at GitHub at its own 60-minute ceiling unless "
-                "the borrowing device's window-end self-revoke lands first"
+                f"{name} revokes it first when it hears this revoke"
             )
         else:
             delivered = (
                 f"the immediate DELETE ran: {revoked_now} outstanding token(s) revoked at "
-                "GitHub just now (a retry closes anything the call missed; the window-end "
-                "revoke still stands)"
+                "GitHub just now (a retry closes anything the call missed)"
             )
         return [
             (
                 f"new borrows by {name}: refused now; the outstanding GitHub token is "
-                "revoked at GitHub at its window end, and on this revoke's DELETE when it "
-                "can be delivered — via `DELETE /installation/token` (204; idempotent)"
+                "revoked at GitHub on this revoke's DELETE when it can be delivered — via "
+                "`DELETE /installation/token` (204; idempotent) — and otherwise ends at its "
+                "own 60-minute ceiling"
             ),
             delivered,
         ]
@@ -3157,14 +3380,19 @@ def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> lis
         end = (
             "revoke the PAT at GitHub (Settings -> Developer settings -> Personal " "access tokens)"
             if source == github_mod.SOURCE_TOKEN
-            else "sign out of the gh CLI on the owner, or revoke the token at GitHub "
-            "(Settings -> Applications)"
+            # ``gh auth logout`` only forgets the token locally (cli.github.com
+            # manual): revoking the GitHub CLI's OAuth access is what ends it, and
+            # it signs the gh CLI out on every device that uses that login.
+            else "revoke the GitHub CLI's access at GitHub (Settings -> Applications -> "
+            "Authorized OAuth Apps; this signs gh out everywhere — `gh auth logout` "
+            "only forgets the token locally)"
         )
         return [
             (
                 f"new borrows by {name}: refused now; {served} was not minted here, so "
-                "there is no window-end DELETE and nothing for this device to revoke — a "
-                f"grant already lent is dropped by {name} at its own window end"
+                f"there is no DELETE and nothing for this device to revoke — {name} stops "
+                f"using a lent grant as soon as it hears this revoke, but if it cannot "
+                f"(lost, stolen or offline) it may keep using it {residual}"
             ),
             (
                 f"to end the token itself now, {end}; it keeps working at GitHub until "
@@ -3178,8 +3406,9 @@ def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> lis
                 "not be read, so the serving arm could not be determined"
             ),
             (
-                f"a token already lent is dropped by {name} at its window end; repair "
-                "the store here and re-run the revoke for the per-arm receipt"
+                f"a token already lent is dropped by {name} as soon as it hears this "
+                f"revoke, or keeps it {residual} if it cannot; repair the store here and "
+                "re-run the revoke for the per-arm receipt"
             ),
         ]
     return [
@@ -3249,9 +3478,16 @@ def _github_shareable_row(self_device: str) -> dict[str, Any]:
                     "scope": holder.scope,
                 }
             )
+    # THE ARM THAT WOULD SERVE, beside the stable ``kind`` (lend honesty,
+    # 2026-11-19): ``kind`` stays ``github-app`` for every reader keyed on it, and
+    # ``source``/``label`` say what actually travels — a gh login is the account's
+    # full user token, not an App grant. Metadata only: no token is read.
+    source = github_mod.resolve_source(_config_dir())
     return {
         "provider": github_mod.GITHUB_KEY,
         "kind": github_mod.GITHUB_KIND,
+        "source": source,
+        "label": github_mod.source_label(source),
         "identity_label": "",
         "shared_with": shared_with,
         "remedy": (
@@ -3345,7 +3581,10 @@ def _cmd_credential_inherit(args: argparse.Namespace) -> int:
 
 
 def _cmd_credential_refresh(args: argparse.Namespace) -> int:
-    """Ask the existing owner broker once; never expose the returned bearer.
+    """Ask the existing owner broker; retry one transient GitHub lookup deadline.
+
+    Other keys and all authorization refusals still get exactly one ask. Never
+    expose a returned bearer or extend a lease while recovering the source.
 
     The local relay resolves the owner from placement and the owner still checks
     holder permission and ADMIN. A CLI refresh cannot grant, retarget, or repair
@@ -3355,12 +3594,27 @@ def _cmd_credential_refresh(args: argparse.Namespace) -> int:
     from local_operator.network.types import MeshRefusal
 
     key = str(args.key)
-    detail = _relay_answer(
-        "credential_grant",
-        timeout=BROKER_OP_DEADLINE_S,
-        credential_key=key,
-        force_refresh=True,
-    )
+    from local_operator.network.credentials.messages import render_broker_error
+    from local_operator.network.credentials.types import BrokerError
+
+    def ask() -> dict[str, Any]:
+        # Explicit refresh can also mint an App token outside the gh-source
+        # lane. Preserve its existing 75s broker window, not the 14s hot borrow.
+        detail = _relay_answer(
+            "credential_grant",
+            timeout=BROKER_OP_DEADLINE_S,
+            credential_key=key,
+            force_refresh=True,
+        )
+        error = BrokerError.from_detail(detail).as_borrower_error()
+        if error.code == "owner_busy":
+            return {**detail, "code": error.code, "message": render_broker_error(error, key=key)}
+        return detail
+
+    detail = ask()
+    if key == "github" and detail.get("code") == "owner_busy":
+        time.sleep(0.25)
+        detail = ask()
     if detail.get("kind") != "grant":
         raise MeshRefusal(
             str(detail.get("code") or "grant_invalid"),
@@ -3569,6 +3823,288 @@ def _delivery_lines(delivery: dict[str, Any], name: str, *, other_owner: str = "
     return ["usable there: not yet — it arrives on that device's next sync"]
 
 
+#: How many repository names the share RECEIPT prints before "and N more" (UX
+#: round 1, U2): the receipt confirms, ``credential github repos`` lists. The
+#: ``--json`` payloads always carry the whole list.
+_RECEIPT_SHOWN = 10
+
+#: The progress line a share prints when listing takes longer than this (N5):
+#: a fast listing stays silent, a slow one is not mistaken for a hang.
+_LISTING_PROGRESS_AFTER_S = 1.0
+
+
+def _github_designation_now(*, refresh: bool, progress: bool = False) -> tuple[Any, str]:
+    """THIS device's effective GitHub designation and the arm serving it.
+
+    The arm's credential is read the way the owner's serve reads it (the stored
+    App key, the stored token, or gh's login), and the list is computed by the
+    one function the serve uses, so the receipt cannot describe a different list
+    than a borrow would get. A credential that cannot be read here still answers
+    from the cache (``allow_fetch=False``) instead of failing the command.
+    """
+    import threading
+
+    from local_operator.network.credentials import github as github_mod
+
+    root = _config_dir()
+    source = github_mod.resolve_source(root)
+    token = ""
+    app = None
+    try:
+        if source == github_mod.SOURCE_APP:
+            app = github_mod.read_app_key(root)
+        elif source == github_mod.SOURCE_TOKEN:
+            token = github_mod.read_token_secret(root)
+        elif source == github_mod.SOURCE_GH:
+            token = github_mod.read_gh_token()
+    except (
+        github_mod.GithubAppKeyError,
+        github_mod.GithubTokenError,
+        github_mod.GithubGhError,
+    ):
+        return github_mod.designation(root, source=source, allow_fetch=False), source
+    if source not in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH):
+        return github_mod.designation(root, source=source, allow_fetch=False), source
+    timer = None
+    if progress:
+        timer = threading.Timer(
+            _LISTING_PROGRESS_AFTER_S,
+            lambda: print(
+                _github_text(_github_strings.progress()),
+                file=sys.stderr,
+                flush=True,
+            ),
+        )
+        timer.daemon = True
+        timer.start()
+    try:
+        designated = github_mod.designation(
+            root, source=source, token=token, app=app, refresh=refresh
+        )
+    finally:
+        if timer is not None:
+            timer.cancel()
+    return designated, source
+
+
+def _designation_payload(designated: Any) -> dict[str, Any]:
+    """The machine shape of a designation: the whole list, its origin and age."""
+    return {
+        "repositories": list(designated.repositories),
+        "count": len(designated.repositories),
+        "origin": designated.origin,
+        "fetched_at": designated.fetched_at or None,
+        "age_s": int(designated.age_s()) if designated.fetched_at else None,
+        "excluded": list(designated.excluded),
+        "excluded_count": designated.excluded_count,
+        "error": designated.error,
+    }
+
+
+def _github_ttl_words() -> str:
+    """Format the existing grant-window bound, not a new timeout or authority."""
+    from local_operator.network.credentials import grant_ttl_s
+
+    return _github_text(
+        _github_strings.ttl(count=max(1, int((grant_ttl_s(_config_dir()) + 59) // 60)))
+    )
+
+
+def _designation_source(designated: Any) -> str:
+    """Localized list provenance; account matching stays in github.designation."""
+    from local_operator.network.credentials import github as github_mod
+
+    ago = github_mod.listed_ago(designated.age_s() if designated.fetched_at else None)
+    if designated.origin == github_mod.ORIGIN_EXPLICIT:
+        return _github_text(_github_strings.source_explicit())
+    if designated.origin == github_mod.ORIGIN_LAST_GOOD:
+        failure = (
+            f" ({github_mod.listing_failure_text(designated.error)})" if designated.error else ""
+        )
+        return _github_text(_github_strings.source_last_good(ago=ago, failure=failure))
+    return _github_text(_github_strings.source_enumerated(ago=ago))
+
+
+def _opted_out_lines(designated: Any) -> list[str]:
+    """Name every opt-out, preserving the exact technical undo command."""
+    names = list(designated.excluded)
+    if not names:
+        return [_github_text(_github_strings.opt_out_none())]
+    return [
+        _github_text(
+            _github_strings.opt_out_names(
+                count=len(names),
+                names=", ".join(names),
+                command="lop network credential github include <owner/repo>",
+            )
+        )
+    ]
+
+
+def _designation_lines(designated: Any, source: str, *, receipt: bool) -> list[str]:
+    """Localized owner output; receipts stay short and repos still lists all."""
+    from local_operator.network.credentials import github as github_mod
+
+    names = list(designated.repositories)
+    if not names:
+        key = _github_strings.share_empty if receipt else _github_strings.repos_empty
+        return [
+            _github_text(
+                key(reason=designated.reason("this device's"), remedy=designated.remedy())
+            ),
+            *_opted_out_lines(designated),
+        ]
+    opted = (
+        _github_text(_github_strings.opted_suffix(count=designated.excluded_count))
+        if designated.excluded_count
+        else ""
+    )
+    lines = [
+        _github_text(
+            _github_strings.repos_head(
+                count=len(names), source=_designation_source(designated), opted=opted
+            )
+        )
+    ]
+    shown = names[:_RECEIPT_SHOWN] if receipt else names
+    lines.extend(f"  {name}" for name in shown)
+    if len(names) > len(shown):
+        lines.append(
+            _github_text(
+                _github_strings.more(
+                    count=len(names) - len(shown), command="lop network credential github repos"
+                )
+            )
+        )
+    carry = (
+        github_mod.APP_MINT_MAX_REPOSITORIES
+        if source == github_mod.SOURCE_APP
+        else github_mod.MAX_DESIGNATED_REPOSITORIES
+    )
+    if len(names) > carry:
+        lines.append(_github_text(_github_strings.capacity(count=carry)))
+    lines.extend(_opted_out_lines(designated))
+    lines.append(
+        _github_text(
+            _github_strings.opt_out_step(
+                command="lop network credential github exclude <owner/repo>",
+                ttl=_github_ttl_words(),
+            )
+        )
+    )
+    return lines
+
+
+def _cmd_credential_github(args: argparse.Namespace) -> int:
+    """``credential github repos [--refresh] [--use-default] | exclude|include <owner/repo>``.
+
+    LOCAL: the designation is this device's own (it is the owner that lends), so
+    nothing crosses the mesh. ``exclude`` takes effect at each borrower's next
+    borrow or refresh — the owner re-reads the opt-outs on every serve and the
+    grant carries the narrowed list — which is the security direction: no cache
+    can keep an opted-out repository pushable past one grant window.
+
+    A name ``exclude`` cannot find in the current list is STORED, with a warning
+    (UX round 1, U1): an opt-out is the security direction, and a repository the
+    login gains later must arrive already opted out. Refusing it would make the
+    operator wait for the repo to exist before they could keep it out.
+    """
+    from local_operator.network.credentials import github as github_mod
+    from local_operator.network.types import MeshRefusal
+
+    action = str(args.action)
+    root = _config_dir()
+    if action == "repos":
+        if args.repository:
+            raise MeshRefusal("bad_request", _github_text(_github_strings.usage_repos_args()))
+        use_default = bool(getattr(args, "use_default", False))
+        if use_default:
+            try:
+                github_mod.use_default_repositories(root)
+            except OSError as exc:
+                raise MeshRefusal(
+                    "github_default_reset_failed",
+                    _github_text(
+                        _github_strings.reset_failed(
+                            error=exc.__class__.__name__,
+                            command="lop network credential github repos --use-default",
+                        )
+                    ),
+                ) from exc
+        designated, source = _github_designation_now(
+            refresh=bool(args.refresh) or use_default, progress=not bool(args.json)
+        )
+        payload = {"action": "repos", **_designation_payload(designated)}
+        return _emit(args, payload, _designation_lines(designated, source, receipt=False))
+    if getattr(args, "use_default", False):
+        raise MeshRefusal("bad_request", _github_text(_github_strings.usage_default()))
+    if args.refresh:
+        raise MeshRefusal("bad_request", _github_text(_github_strings.usage_refresh()))
+    entry = github_mod.normalise_repository(args.repository)
+    if not entry:
+        raise MeshRefusal("bad_request", _github_text(_github_strings.usage_repo(action=action)))
+    designated, _source = _github_designation_now(refresh=False)
+    known = bool(designated.listed) or designated.origin != github_mod.ORIGIN_UNAVAILABLE
+    in_list: bool | None = (
+        entry.lower() in {name.lower() for name in designated.listed} if known else None
+    )
+    which = (
+        _github_text(_github_strings.which_explicit())
+        if designated.origin == github_mod.ORIGIN_EXPLICIT
+        else _github_text(_github_strings.which_enumerated())
+    )
+    unchecked = (
+        f" ({github_mod.listing_failure_text(designated.error)})" if designated.error else ""
+    )
+    current = list(github_mod.excluded_repositories(root))
+    lowered = [name.lower() for name in current]
+    if action == "exclude":
+        changed = entry.lower() not in lowered
+        updated = current + [entry] if changed else current
+    else:
+        changed = entry.lower() in lowered
+        updated = [name for name in current if name.lower() != entry.lower()]
+    if changed:
+        github_mod.write_excluded(root, updated)
+    ttl = _github_ttl_words()
+    if action == "exclude" and not changed:
+        line = _github_text(_github_strings.exclude_already(repo=entry))
+    elif action == "exclude" and in_list is False:
+        line = _github_text(_github_strings.exclude_typo(repo=entry, which=which))
+    elif action == "exclude" and in_list is None:
+        line = _github_text(
+            _github_strings.exclude_unchecked(repo=entry, which=which, failure=unchecked)
+        )
+    elif action == "exclude":
+        line = _github_text(_github_strings.exclude_added(repo=entry, ttl=ttl))
+    elif not changed:
+        line = _github_text(_github_strings.include_unchanged(repo=entry))
+    elif in_list is False:
+        line = _github_text(_github_strings.include_typo(repo=entry, which=which))
+    elif in_list is None:
+        line = _github_text(
+            _github_strings.include_unchecked(repo=entry, which=which, failure=unchecked)
+        )
+    else:
+        line = _github_text(_github_strings.include_added(repo=entry, ttl=ttl))
+    payload = {
+        "action": action,
+        "repository": entry,
+        "changed": changed,
+        "in_list": in_list,
+        "excluded": updated,
+    }
+    remaining = _with_excluded(designated, updated)
+    return _emit(args, payload, [line, *_opted_out_lines(remaining)])
+
+
+def _with_excluded(designated: Any, excluded: list[str]) -> Any:
+    """``designated`` with the opt-out list as it stands AFTER this command."""
+    import dataclasses
+
+    return dataclasses.replace(designated, excluded=tuple(excluded))
+
+
 def _cmd_credential(args: argparse.Namespace) -> int:
     """``credential share|revoke <key> --with/--from <dev>``: the owner's own verb.
 
@@ -3687,6 +4223,14 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             device,
             {"credential_key": key},
             "owner-revoke:" + str(_clock.time_ns()),
+        )
+        # A REVOKED NODE IS NO LONGER THE RENEWER (#3955 Q1): end the lend here, in
+        # this process, so the owner renews on its own at once — even with no relay
+        # running to hear about it.
+        from local_operator.network.credentials import renewal as renewal_mod
+
+        renewal_mod.end_lends(
+            _config_dir(), record.network_id, devices=[device], key=key, cause="revoked"
         )
         entry_json = reduced["entry"] or {}
         action = "revoked"
@@ -3830,6 +4374,15 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # narrowed server-side, and the share receipt must not promise narrowing
         # a token arm cannot deliver.
         lines.append(_github_share_disclosure(name, github_mod.resolve_source(_config_dir())))
+        # THE LIST IS SHOWN WHERE THE OPERATOR SHARES (operator decision
+        # 2026-11-12): the share is a moment the operator is looking, so the list
+        # is refreshed here and every repository it lends for is on the receipt,
+        # with how to opt one out.
+        designated, gh_source = _github_designation_now(
+            refresh=True, progress=not getattr(args, "json", False)
+        )
+        payload["repositories"] = _designation_payload(designated)
+        lines.extend(_designation_lines(designated, gh_source, receipt=True))
     if verb == "revoke":
         # THE TRUE REVOCATION LATENCY, said where the operator acts (QA round 1, Q5;
         # design §3.7). A revoke stops NEW grants at once, but no provider offers a
@@ -3851,6 +4404,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # (the borrowing device's own window-end self-revoke, then the token's
         # 60-minute ceiling).
         revoked_now: int | None = None
+        lent_hold_until_ms = 0
         if github_mod.is_github_key(key):
             detail = _relay_call(
                 "credential_revoke",
@@ -3863,19 +4417,28 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             if isinstance(detail, dict):
                 revoked_now = int(detail.get("revoked") or 0)
                 payload["minted_tokens_revoked"] = revoked_now
+                # What this relay lent the holder (#3947 R2-m2); an older relay
+                # omits it and the receipt states the ceiling instead.
+                from local_operator.network.credentials.types import peer_int
+
+                lent_hold_until_ms = peer_int(detail.get("lent_hold_until_ms"))
         if is_secret_key(key):
             # CLASS-2 COPIES END BY WIPE, not by a broker TTL (S4, §4.3): the receipt says
             # which happened — a queued notice, an already-wiped copy, or no RECORDED copy —
             # and carries the ceiling after EVERY one of them (design review round 1, D1: the
             # state that claims the most used to be the only one without it).
-            copied, wiped = _copy_ledger_state(record.network_id, device, key)
+            copied, wiped, unacknowledged = _copy_ledger_state(record.network_id, device, key)
             payload["copy"] = {
                 "confirmed": copied,
                 "wiped": wiped,
-                "wipe": "done" if (copied and wiped) else ("queued" if copied else "none"),
+                "wipe": "done" if wiped else ("queued" if copied or unacknowledged else "none"),
             }
+            if unacknowledged:
+                payload["copy"]["unacknowledged"] = True
             lines.extend(
-                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+                messages_mod.render_copy_revoke_notice(
+                    name, key, copied=copied, wiped=wiped, unacknowledged=unacknowledged
+                )
             )
             lines.extend(messages_mod.COPY_CEILING_LINES)
             return _emit(args, payload, lines)
@@ -3885,38 +4448,67 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # exactly the case where the remedy matters most. Read from the entry the
         # revoke just wrote, so the receipt describes what was actually lent.
         static = str(entry_json.get("kind") or "") == "api-key-static"
-        copied, wiped = _copy_ledger_state(record.network_id, device, key)
-        if copied:
+        copied, wiped, unacknowledged = _copy_ledger_state(record.network_id, device, key)
+        if copied or unacknowledged:
             # The class-4 copy half, same vocabulary as class 2's (§4.3: the
             # receipt says which happened).
             payload["copy"] = {"confirmed": copied, "wiped": wiped}
+            if unacknowledged:
+                payload["copy"]["unacknowledged"] = True
             lines.extend(
-                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+                messages_mod.render_copy_revoke_notice(
+                    name, key, copied=copied, wiped=wiped, unacknowledged=unacknowledged
+                )
             )
         if github_mod.is_github_key(key):
-            # THE M1-RESTATED COPY, to match the mechanism (mint-revoke at the
-            # window end + on this revoke; the 60-minute figure is the fallback).
+            # THE M1-RESTATED COPY, to match the mechanism (an App token is DELETEd
+            # on this revoke, else ends at its 60-minute ceiling; since the offline
+            # hold, 2026-11-14, a node that cannot hear the revoke keeps a PAT/gh
+            # grant up to ``github_token_hold_s`` — #3947 M1).
             # Both halves live in helpers so the copy has ONE home (the tests
             # assert against the same strings the receipt prints).
             # PER-SOURCE (§3.3): resolved at THIS moment — the receipt describes
             # the arm that serves now, and says plainly when nothing does.
             source = github_mod.resolve_source(_config_dir())
-            payload["revocation"] = _github_revocation_payload(revoked_now, ttl_s, source)
-            lines.extend(_github_revoke_lines(name, revoked_now, source))
+            payload["revocation"] = _github_revocation_payload(
+                revoked_now, ttl_s, source, lent_hold_until_ms=lent_hold_until_ms
+            )
+            lines.extend(
+                _github_revoke_lines(
+                    name, revoked_now, source, lent_hold_until_ms=lent_hold_until_ms
+                )
+            )
             return _emit(args, payload, lines)
         copied = (
             "valid at the provider until the key is rotated there (a static key never expires)"
             if static
             else "valid at the provider until the token expires"
         )
+        # THE OFFLINE HOLD'S BOUND, NOT THE GRANT WINDOW (#3922 + #3947 M1's honesty
+        # class, carried into model and MCP keys here): a node keeps a lent grant
+        # while it cannot reach this device, and a revoke only stops a node that
+        # HEARS it. So the residual for a lost, stolen or offline node is the hold
+        # (``offline_hold_s``, 24 h by default) after its last grant — never past
+        # the token's own expiry, and with no expiry at all for a static key.
+        from local_operator.network.credentials import offline_hold_s
+
+        hold_s = int(offline_hold_s(_config_dir()))
         payload["revocation"] = {
             "new_grants": "refused now",
-            "lent_grant_max_s": ttl_s,
+            "lent_grant_max_s": hold_s,
+            "grant_window_s": ttl_s,
             "copied_bearer": copied,
         }
+        bound = (
+            f"for up to {_duration_words(hold_s)} after its last grant"
+            if static
+            else f"for up to {_duration_words(hold_s)} after its last grant, never past "
+            "the token's own expiry"
+        )
         lines.append(
-            f"new borrows by {name}: refused now; a grant already lent is dropped by "
-            f"{name} within {ttl_s} s"
+            f"new borrows by {name}: refused now; {name} drops a grant it already holds "
+            f"as soon as it hears this revoke, but if it cannot (lost, stolen or offline) "
+            f"it may keep using it {bound}"
         )
         if static:
             lines.append(
@@ -3931,8 +4523,8 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     return _emit(args, payload, lines)
 
 
-def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bool]:
-    """``(confirmed, wiped)`` for one member's copy of ``key``, from the ledger.
+def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bool, bool]:
+    """``(confirmed, wiped, unacknowledged)`` for one member's copy of ``key``.
 
     The same document the listing's segments read, so the receipt and the
     listing cannot disagree about whether a copy is outstanding. An unreadable
@@ -3944,31 +4536,41 @@ def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bo
     try:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
-        return False, False
-    row = state.ack_for(device, key)
-    if not isinstance(row, dict):
-        return False, False
-    return True, bool(row.get("wiped"))
+        return False, False, False
+    # Prefer the newest open copy, including a re-copy after a confirmed wipe.
+    # A dispatch is evidence of sending, NEVER evidence of confirmed delivery.
+    # A newer unacknowledged send does not erase an older live delivery ACK;
+    # report both facts without promoting that send or reusing a wiped ACK.
+    ack = state.ack_for(device, key)
+    for row in state.open_copies(device):
+        if row["key"] == key:
+            pending = bool(row["unacknowledged"])
+            confirmed = not pending or (isinstance(ack, dict) and not bool(ack.get("wiped")))
+            return confirmed, False, pending
+    if not isinstance(ack, dict):
+        return False, False, False
+    return True, bool(ack.get("wiped")), False
 
 
-def _unconfirmed_copies(network_id: str, device: str) -> int:
-    """How many ledger rows for ``device`` are still NOT ``wiped``.
+def _unconfirmed_copies(network_id: str, device: str) -> tuple[int, int]:
+    """``(open, unacknowledged)`` copy counts when the relay cannot run endings.
 
     The removal receipt's count when there is no relay to run the ending
     exchange (review round 1, Q1): every open row is a copy nothing confirmed
     deleted, so the receipt names the open state instead of a clean sweep. The
     same read ``_copy_ledger_state`` makes, summed over the member instead of
-    one key; an unreadable ledger counts zero rows and the receipt stays as it
-    was rather than inventing copies.
+    one key; an unreadable ledger derives neither count rather than inventing
+    copies. The second count preserves uncertainty about delivery, not deletion.
     """
     from local_operator.network.credentials.sync import SyncState
 
     try:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
-        return 0
-    # Sent-but-unacknowledged copies are open too (``SyncState.dispatched``).
-    return len(state.open_copies(device))
+        return 0, 0
+    # The offline receipt must retain delivery uncertainty, just like the relay.
+    rows = state.open_copies(device)
+    return len(rows), sum(bool(row["unacknowledged"]) for row in rows)
 
 
 def _canonical_credential_key(raw: str) -> str:
@@ -4425,23 +5027,34 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             f"{args.device!r} is not a device in {record.name}; run 'lop network show' "
             "for the member list (a name, a device id, or an unambiguous tail of one)",
         )
-    # ``allow_no_answer``: a revocation HAS a local spelling — the tombstone, the
-    # epoch rotation and the queue write all happen here (below), and the payload
-    # says the rotation is queued rather than fanning out.
+    # ``allow_no_relay``: a revocation has a local spelling ONLY when no live
+    # relay record exists. That path tombstones, rotates and queues below. A
+    # running relay that gives no answer refuses; it never triggers a second write.
     #
     # ``timeout=REMOVAL_CLI_TIMEOUT_S``, not the 5 s default (review round 2, F1):
     # the relay's ending exchange is probe (3 s) + a 25 s frame budget by
-    # construction, and a CLI that gave up first would fall back to the LOCAL
-    # write while the relay was still mid-exchange — the double-write
-    # ``allow_no_answer`` exists to prevent, not to enable.
+    # construction. Keep that window so a slow ending can finish, while
+    # ``allow_no_relay`` still refuses a lost reply instead of writing twice.
+    import shlex
+
     from local_operator.network.credentials import messages as messages_mod
     from local_operator.network.credentials.sync import REMOVAL_CLI_TIMEOUT_S
 
+    device_name = _member_name(record, device_id) or args.device
+    show_command = shlex.join(["lop", "network", "show", args.network])
+    retry_command = shlex.join(["lop", "network", "member", "rm", args.network, args.device])
     live = _relay_call(
         "net_member_rm",
         network=args.network,
         device_id=device_id,
-        allow_no_answer=True,
+        allow_no_relay=True,
+        no_answer_message=(
+            f"the relay did not confirm removing {device_name!r} from {record.name!r}; "
+            "the removal may be incomplete. This command did not retry the removal. "
+            f"Run {show_command!r}: if {device_name!r} is still listed, "
+            f"run {retry_command!r} again. If the relay is stuck, "
+            "run 'lop network restart' first; if it has just stopped, wait a moment and retry."
+        ),
         timeout=REMOVAL_CLI_TIMEOUT_S,
     )
     if live is not None:
@@ -4455,6 +5068,14 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             wiped=int(live.get("wiped") or 0),
             timed_out=int(live.get("timed_out") or 0),
             unacknowledged=int(live.get("unacknowledged") or 0),
+        )
+        # G9: what it was LENT, beside what was copied to it (``lends.py``).
+        endings += messages_mod.render_removal_lends(
+            _member_name(record, device_id) or str(live.get("removed") or device_id),
+            revoked=int(live.get("lends_revoked") or 0),
+            open_lends=list(live.get("lends_open") or []),
+            told=int(live.get("lends_told") or 0),
+            renewal_ended=int(live.get("lends_renewal_ended") or 0),
         )
         return _emit(
             args,
@@ -4474,8 +5095,13 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # THE COPIES THIS PATH CANNOT CONTACT (review round 1, Q1): with no relay there
     # is no link, so nothing is confirmed deleted — but the receipt must still say
     # what the ledger shows, or a removal with live copies reads as a clean sweep.
-    copies = _unconfirmed_copies(record.network_id, device_id)
+    copies, unacknowledged = _unconfirmed_copies(record.network_id, device_id)
     outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
+    # G9, relay-less: nothing can tell the member (no link) and no broker runs to
+    # DELETE an App token, so every unexpired lend is reported as left usable.
+    from local_operator.network.credentials.lends import removal_lends
+
+    lends = removal_lends(None, record.network_id, device_id, told=False, revokes_at_issuer=False)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
             continue
@@ -4511,12 +5137,24 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             "copies": copies,
             "wiped": 0,
             "timed_out": 0,
+            "unacknowledged": unacknowledged,
+            **lends,
         },
         [
             f"removed {args.device} from {record.name}; epoch is now {outcome.epoch}",
             "the relay is not running, so the rotation is queued for delivery",
             *messages_mod.render_removal_endings(
-                _member_name(record, device_id) or args.device, copies=copies, wiped=0
+                _member_name(record, device_id) or args.device,
+                copies=copies,
+                wiped=0,
+                unacknowledged=unacknowledged,
+            ),
+            *messages_mod.render_removal_lends(
+                _member_name(record, device_id) or args.device,
+                revoked=int(lends["lends_revoked"]),
+                open_lends=list(lends["lends_open"]),
+                told=0,
+                renewal_ended=int(lends["lends_renewal_ended"]),
             ),
         ],
     )
@@ -4525,6 +5163,12 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # Pairing
 # ---------------------------------------------------------------------------
+
+
+#: The control-plane codes a relay answers for an op it does not serve
+#: (``RelayServer.control_dispatch``): what an older relay says to
+#: ``net_invite_policy``, having changed nothing.
+_UNSERVED_OP_CODES: frozenset[str] = frozenset({"unknown_local_op", "not_implemented"})
 
 
 def _cmd_invite(args: argparse.Namespace) -> int:
@@ -4547,29 +5191,105 @@ def _cmd_invite(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    from local_operator.network.types import CREDENTIAL_OFFERS_NONE
+
     hosts = [host for host in (args.hosts or "").split(",") if host]
+    no_offers = bool(getattr(args, "no_credential_offers", False))
     # ADOPT BEFORE MINTING (mesh-mcp-credentials §3): the offer built at admission
     # reads the needs-list, and a literal in ``mcp.json`` is invisible to it until
     # it becomes a ``${NAME}`` reference. Best-effort by design — a mint must not
     # fail because the owner's config could not be rewritten — and completely
     # silent about values: only counts leave this block.
+    #
+    # SKIPPED UNDER --no-credential-offers: adoption exists only to feed an offer
+    # this invite will never build, and it reads and rewrites ``mcp.json`` — a
+    # credential walk the operator asked this pairing not to make.
     adoption: dict[str, Any] = {}
-    try:
-        from local_operator.mcp.credential_sources import adopt_literal_credentials
-        from local_operator.paths import config_dir
+    if not no_offers:
+        try:
+            from local_operator.mcp.credential_sources import adopt_literal_credentials
+            from local_operator.paths import config_dir
 
-        adoption = adopt_literal_credentials(config_dir())
-    except Exception:  # noqa: BLE001 — an invite is not blocked by adoption
-        adoption = {}
-    live = _relay_call(
-        "net_invite",
-        network=args.network,
-        role=args.role,
-        ttl_s=float(args.expires),
-        hosts=hosts,
-        device_id=args.device,
-        allow_no_answer=True,
-    )
+            adoption = adopt_literal_credentials(config_dir())
+        except Exception:  # noqa: BLE001 — an invite is not blocked by adoption
+            adoption = {}
+    if no_offers:
+        # A SEPARATE, VERSIONED OP, NOT A FIELD ON ``net_invite`` (review round 1,
+        # S2/R1-2): a relay that predates the policy ignores an unknown field and
+        # mints, and writes the token of, an ordinary credential-offering invite
+        # before this process could read its reply. ``net_invite_policy`` is an op
+        # name such a relay does not serve, so it refuses with NOTHING written —
+        # the support check is the mutation's own precondition, not a rollback.
+        from local_operator.network.types import MeshRefusal
+
+        try:
+            live = _relay_call(
+                "net_invite_policy",
+                network=args.network,
+                role=args.role,
+                ttl_s=float(args.expires),
+                hosts=hosts,
+                device_id=args.device,
+                credential_offers=CREDENTIAL_OFFERS_NONE,
+                # ``allow_no_relay``, NOT ``allow_no_answer`` (review round 2, R2-1 /
+                # security S2): the local mint below is safe ONLY when no relay record
+                # exists. A registered relay that does not answer may be an older
+                # process that later serves admission for a row it cannot read the
+                # policy of, and would then offer credentials; the joiner's own refusal
+                # comes after its receipt, so it is no privacy proof. So silence from a
+                # registered relay refuses and mints nothing here.
+                #
+                # OFFLINE ASSUMPTION (operator-accepted): with no record, the local
+                # mint relies on whatever relay later serves this network being this
+                # build or newer, which reads ``credential_offers`` off the row.
+                # Starting an OLDER owner relay on a newer invite record is unsupported
+                # — source cannot retrofit code that is already installed.
+                allow_no_relay=True,
+                no_answer_message=(
+                    "refusing: the running relay did not answer, and no invite was minted "
+                    "locally and no token is returned here: a relay that predates "
+                    "--no-credential-offers would admit a locally minted invite WITH "
+                    "credential offers. Check it with `lop network status`, restart it "
+                    "(`lop network serve`/launchd unit) on this build and mint again. "
+                    "(A current relay that answers late still applies the policy to "
+                    "anything it mints.)"
+                ),
+            )
+        except MeshRefusal as refusal:
+            if refusal.code == "relay_control_failed":
+                # Exit 2 like the sibling unsupported-relay refusal: both are the
+                # policy declining to mint, not a transport fault of the command.
+                print(str(refusal), file=sys.stderr)
+                return 2
+            if refusal.code not in _UNSERVED_OP_CODES:
+                raise
+            print(
+                "refusing: the running relay predates --no-credential-offers, so it was not "
+                "asked to mint anything and no invite or token was created; restart it "
+                "(`lop network serve`/launchd unit) on this build and mint again",
+                file=sys.stderr,
+            )
+            return 2
+        if live is not None and live.get("credential_offers") != CREDENTIAL_OFFERS_NONE:
+            # Unreachable from any build that serves ``net_invite_policy`` (it
+            # mints with the policy or refuses); kept so a receipt can never
+            # present a policy the relay did not confirm.
+            print(
+                "refusing: the running relay did not confirm --no-credential-offers for "
+                f"invite {live.get('invite_id') or '?'}; do not hand out its token",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        live = _relay_call(
+            "net_invite",
+            network=args.network,
+            role=args.role,
+            ttl_s=float(args.expires),
+            hosts=hosts,
+            device_id=args.device,
+            allow_no_answer=True,
+        )
     if live is not None:
         payload = {"ok": True, **live}
         path = str(live.get("path") or "")
@@ -4622,7 +5342,8 @@ def _cmd_invite(args: argparse.Namespace) -> int:
         }
     lines = [
         f"invite {payload['invite_id']} for role {payload['role']}, "
-        f"expires in {int(float(payload.get('expires_in_s') or 0))}s",
+        f"expires in {int(float(payload.get('expires_in_s') or 0))}s"
+        + (", no credential offers" if no_offers else ""),
         f"token written to {path}",
         "it is single use and is not printed: read that file, or run this with a TTY "
         "and --print",
@@ -4645,6 +5366,7 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
     from local_operator.network import relay as relay_mod
     from local_operator.network import store
     from local_operator.network.invite import mint as mint_invite
+    from local_operator.network.types import CREDENTIAL_OFFERS_NONE
 
     record = _resolve(args.network)
     state = store.require_secrets(record.network_id)
@@ -4661,9 +5383,12 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
         or relay_mod.advertise_endpoints(relay_mod.NetworkSettings.from_config())
         or None,
         device_id=args.device,
+        credential_offers=(
+            CREDENTIAL_OFFERS_NONE if getattr(args, "no_credential_offers", False) else ""
+        ),
     )
     # Same rule as the relay's mint: dead entries go with the write that adds one.
-    expired = store.prune_invites(record)
+    expired = store.prune_invites(record, keep=store.binding_invite_ids())
     record.invites.append(minted.record)
     store.save(record)
     store.forget_invite_tokens(expired)
@@ -4677,11 +5402,13 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
             "role": minted.record.role,
             "expires_at": minted.record.expires_at,
             "bound_device": minted.record.device_id,
+            "credential_offers": minted.record.credential_offers,
         },
     )
     return (
         {
             "ok": True,
+            "credential_offers": minted.record.credential_offers,
             "invite_id": minted.record.invite_id,
             "path": str(path),
             "expires_at": minted.record.expires_at,
@@ -4959,7 +5686,43 @@ def _cmd_join(args: argparse.Namespace) -> int:
                 lines=link_result[0],
             )
         return _emit(args, {"ok": True, **link_result[1]}, link_result[0])
-    failure = MeshRefusal(
+    failure = _join_failure(last_reason)
+    _attach_join_block(failure, _attempt_block_from_record(_attempt_record(store)))
+    if explain:
+        return _explain_refusal(args, failure, preflight, store, from_attempt=True)
+    raise failure
+
+
+class _KnownJoinCause(str):
+    """A per-host join sentence whose cause the joiner KNOWS (``code``).
+
+    A ``str`` so every caller that loops over ``_join_one``'s sentences keeps working;
+    the ``code`` lets :func:`_join_failure` drop the ambiguous-close tail, which is
+    true of a silent close and false of a refusal this device decided itself.
+    """
+
+    code: str
+
+    def __new__(cls, code: str, sentence: str) -> _KnownJoinCause:
+        made = super().__new__(cls, sentence)
+        made.code = code
+        return made
+
+
+def _join_failure(last_reason: str) -> Any:
+    """The ``join_failed`` refusal for the last host's sentence.
+
+    The token tail ("a redeemed token, a rejected one and a wrong address all end
+    the same way") explains a SILENT close, and ends in "mint a fresh one". After a
+    refusal THIS device decided (the inviter could not prove itself, or another
+    device answered) it is wrong, and re-minting from the same old inviter fails the
+    same way, so the specific sentence stands alone (UX U2, review N2).
+    """
+    from local_operator.network.types import MeshRefusal
+
+    if isinstance(last_reason, _KnownJoinCause):
+        return MeshRefusal("join_failed", f"could not join: {last_reason}.")
+    return MeshRefusal(
         "join_failed",
         "could not join: "
         f"{last_reason or 'every endpoint in the invite refused or was unreachable'}. "
@@ -4968,10 +5731,6 @@ def _cmd_join(args: argparse.Namespace) -> int:
         "every refusal tells an attacker which tokens are real. If you are not certain "
         "the token is still open, mint a fresh one with `lop network invite`.",
     )
-    _attach_join_block(failure, _attempt_block_from_record(_attempt_record(store)))
-    if explain:
-        return _explain_refusal(args, failure, preflight, store, from_attempt=True)
-    raise failure
 
 
 def _read_token(argument: str) -> str:
@@ -5537,6 +6296,8 @@ def _join_one(
 
     Handshake = helpers["Handshake"]
     Credential = helpers["Credential"]
+    from local_operator.network.handshake import DialerExpectation
+
     store = helpers["store"]
     invite_mod = helpers["invite_mod"]
     relay_mod = helpers["relay_mod"]
@@ -5561,6 +6322,12 @@ def _join_one(
         attempt.note("dial", exc.__class__.__name__)
         _record_join_attempt(attempt, envelope, store, ok=False)
         return f"nothing was listening at {host} ({exc.__class__.__name__})"
+    # The joiner's end of a pair socket may now park for up to the whole invite life
+    # (``handshake.PAIR_PARK_CEILING_S``) while a person types the code in the app;
+    # kernel keepalive keeps NAT/tunnel mappings warm without any new wire frame.
+    from local_operator.network.handshake import set_pair_keepalive
+
+    set_pair_keepalive(sock)
     deadline = wire.deadline_in(settings.handshake_timeout_s)
     # ONE ANSWER, used for the hello we send AND for our own durable record: the
     # inviter copies the hello's list onto our member row, and `listen` is what
@@ -5595,6 +6362,14 @@ def _join_one(
             "joiner_public_key": identity.public_key,
             "joiner_name": args.name or identity.name,
         }
+        policy = str(getattr(envelope, "credential_offers", "") or "")
+        if policy:
+            # ECHOED, NOT ENFORCED: the owner compares this with the invite it
+            # saved and refuses a mismatch; omitted for a default invite so the
+            # hello stays byte-identical to older builds.
+            from local_operator.network.invite import OFFER_POLICY_KEY
+
+            handshake.join_block[OFFER_POLICY_KEY] = policy
         handshake.send_hello(sock)
         reader = wire.FrameReader(sock)
         attempt.stage = "challenge"
@@ -5608,9 +6383,23 @@ def _join_one(
         # ``_JoinAttempt`` names it, and without this line a death while WRITING the
         # auth frame was filed at `challenge` — one statement behind the wire.
         attempt.stage = "auth"
+        # A challenge from anyone but the token's inviter is refused before our auth
+        # frame leaves (``Handshake.refuse_unexpected_peer``); the proof check below
+        # is what actually authenticates the inviter.
+        inviter = DialerExpectation(device_id=envelope.inviter_device_id)
+        handshake.refuse_unexpected_peer(inviter)
         handshake.send_auth(sock, credential)
         attempt.stage = "welcome"
-        handshake.read_welcome(reader, deadline)
+        # PINNED TO THE TOKEN'S INVITER (mesh-listener-auth §5). The joiner has no
+        # member table, so the welcome proof is verified under the key the inviter
+        # sends in ``welcome.inviter`` — accepted only because its fingerprint is
+        # the token's ``inviter_device_id`` — and MACed under the invite key. That MAC
+        # is NOT the identity check: every member can derive the invite key (epoch
+        # secret + the plaintext invite id), so join security rests on the signature
+        # under the fingerprint-bound key (design §5, review N-1). Without this the SAS
+        # digits were the only MITM defence, and ``--automated`` joins
+        # (``typed = result.sas``) skip that comparison.
+        handshake.read_welcome(reader, deadline, inviter)
         attempt.stage = "establish"
         result = handshake.establish()
         attempt.result = result
@@ -5629,6 +6418,9 @@ def _join_one(
             reader=reader,
             remaining_s=invite_mod.remaining_seconds(envelope),
             attempt=attempt,
+        )
+        _refuse_offer_against_policy(
+            envelope, offer_view["items"], sock=sock, codec=codec, helpers=helpers
         )
         # The offer read is done; the NEXT wire step is the ready frame, whichever
         # seat (park, automated, prompt) decides its value. Marking it here means a
@@ -5723,6 +6515,19 @@ def _join_one(
         # sentence below would be unreachable.
         attempt.note("handshake", refusal.code)
         _record_join_attempt(attempt, envelope, store, ok=False)
+        if refusal.code == "listener_unproven":
+            # A KNOWN CAUSE, not an ambiguous wire close (UX U2, security S-5): the
+            # inviter answered and could not prove itself. The sentence already names
+            # the only way forward (update the inviter), so the caller must not bury
+            # it under the generic "mint a fresh token" tail, which loops.
+            return _KnownJoinCause(refusal.code, refusal.sentence)
+        if refusal.code in ("invite_wrong_inviter", "peer_identity_mismatch"):
+            return _KnownJoinCause(
+                refusal.code,
+                f"a different device answered at {host}, not the one that issued this "
+                "invite, so this device stopped before joining; nothing was shared. Check "
+                "the address (or drop --host) and try again",
+            )
         return f"the handshake at {host} stopped: {refusal.sentence}"
     except MeshRefusal as exc:
         if isinstance(exc, JoinParkUnanswered):
@@ -5841,7 +6646,9 @@ def _drain_pair_offer(
     op = str(frame.get("op") or "")
     if op == "net_pair_abort":
         raise refusal_from_pairing(
-            str(frame.get("reason") or "aborted"), detail=str(frame.get("detail") or "")
+            str(frame.get("reason") or "aborted"),
+            detail=str(frame.get("detail") or ""),
+            spent=frame.get("spent") is True,
         )
     if op != "net_pair_offer":
         raise MeshRefusal(
@@ -5851,6 +6658,75 @@ def _drain_pair_offer(
         )
     items = parse_pair_offer(frame)
     return ("empty" if not items else "listed"), items
+
+
+def _refuse_offer_against_policy(
+    envelope: Any,
+    items: list[dict[str, Any]],
+    *,
+    sock: Any,
+    codec: Any,
+    helpers: dict[str, Any],
+) -> None:
+    """Fail closed when a ``--no-credential-offers`` invite receives a non-empty list.
+
+    The owner enforces the policy from its saved invite; this is the joiner's own
+    half, so a modified or misbehaving owner cannot get credential rows onto this
+    screen (or into a confirm) under an invite that promised none. An EMPTY list,
+    or no frame at all (an owner predating ``pair-offer-v1``), is fine.
+
+    THE OWNER IS TOLD (review round 1, R1-3): raising alone left the owner waiting
+    out its window and recording a retryable ``timeout``, so the invite stayed
+    redeemable. A sealed ``net_pair_abort`` (``protocol_error``) in place of the
+    ready frame is what the owner's ready read already treats as terminal, so it
+    consumes the invite at once — the same wire the local decline uses. Sending
+    is best effort: the joiner refuses whether or not the owner is still there.
+    """
+    if items and not getattr(envelope, "offers_credentials", True):
+        from local_operator.network.types import MeshRefusal
+
+        sentence = (
+            "the other device sent a share list although this invite carries no "
+            "credential offers; the pairing is refused"
+        )
+        try:
+            sock.sendall(
+                codec.seal(
+                    helpers["pair_abort_frame"](req=1, reason="protocol_error", detail=sentence)
+                )
+            )
+        except OSError:
+            pass
+        raise MeshRefusal("protocol_error", sentence)
+
+
+def _pin_inviter_key(answer: dict[str, Any], envelope: Any, handshake: Any) -> None:
+    """Refuse a member table whose inviter row carries a key the handshake did not verify.
+
+    The welcome proof bound the inviter to ONE key (fingerprint == the token's
+    ``inviter_device_id``, signature under it). The ``pair_result`` table that
+    follows is what the joiner persists and later verifies every dial against, so
+    an inviter row with a different ``public_key`` would undo the handshake's pin
+    on the very next dial (mesh-listener-auth §5). A row for the inviter that is
+    absent is left to ``_persist_join``; a row that disagrees is refused here,
+    before anything is written.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    for row in answer.get("members") or []:
+        if not isinstance(row, dict) or row.get("device_id") != envelope.inviter_device_id:
+            continue
+        verified = (
+            str(getattr(handshake, "peer_public_key", "") or "")
+            if getattr(handshake, "auth_verified", False)
+            else ""
+        )
+        if not verified or str(row.get("public_key") or "") != verified:
+            raise MeshRefusal(
+                "invite_wrong_inviter",
+                "the inviter's member row carries a different key than the one it proved "
+                "in the handshake; nothing was admitted",
+            )
 
 
 def _finish_pairing(
@@ -5917,6 +6793,7 @@ def _finish_pairing(
                 "the other device sent a second share list; the pairing is refused",
             )
         items = parse_pair_offer(answer)
+        _refuse_offer_against_policy(envelope, items, sock=sock, codec=codec, helpers=helpers)
         offer_view["state"] = "empty" if not items else "listed"
         offer_view["items"] = items
         answer = codec.open(reader.read_record_payload(deadline))
@@ -5932,11 +6809,23 @@ def _finish_pairing(
         # The refusing device's own sentence comes too: it is the only place the
         # joiner can learn which id was refused and what to do about it (Q-R3-3).
         raise refusal_from_pairing(
-            str(answer.get("reason") or "aborted"), detail=str(answer.get("detail") or "")
+            str(answer.get("reason") or "aborted"),
+            detail=str(answer.get("detail") or ""),
+            spent=answer.get("spent") is True,
         )
     if not answer.get("admit"):
         raise MeshRefusal("not_admitted", "the other device did not admit this machine")
     shares = [str(key) for key in (answer.get("shares") or [])]
+    if shares and not getattr(envelope, "offers_credentials", True):
+        # FAIL CLOSED BEFORE PERSISTING: a --no-credential-offers invite was
+        # answered with granted shares, which an honest owner of this build
+        # cannot produce (it grants from its saved invite). Not joining is the
+        # only safe reading of a peer that broke the invite's terms.
+        raise MeshRefusal(
+            "protocol_error",
+            "the other device granted credentials although this invite carries no "
+            "credential offers; the pairing is refused",
+        )
     # THE WIRE READ IS DONE; what follows is LOCAL persistence. Advancing the stage past
     # ``result_read`` is what lets ``_park_join``'s transport clause tell a death ON THE
     # WIRE (a transport ``pairing_stopped``) from a LOCAL write failure — an ``OSError``
@@ -5944,6 +6833,7 @@ def _finish_pairing(
     # be relabelled a peer-side stop (review round 1, F2).
     if attempt is not None:
         attempt.stage = "persist"
+    _pin_inviter_key(answer, envelope, handshake)
     record = _persist_join(
         answer,
         envelope,
@@ -6113,10 +7003,30 @@ def _awaiting_payload(pending: Any) -> dict[str, Any]:
         # An owner-side state must never leak into a joiner payload: this record is
         # a PendingJoin, whose states are the three below.
         state = offers_mod.OFFER_EMPTY
-    sentence = (
-        f"Ask the user to read back the {what} {shown} from the other device, then "
-        f"confirm it with `lop network join --confirm <{what}>`."
-    )
+    if pending.verify:
+        # ``--verify`` asks for the 160-bit FINGERPRINT, which the Mesh approvals card's
+        # six-digit input cannot carry, so this mode stays on the terminal path.
+        sentence = (
+            f"Ask the user to read back the {what} {shown} from the other device, then "
+            f"confirm it with `lop network join --confirm <{what}>`."
+        )
+    else:
+        # APP FIRST (operator request: pairing must not require terminal commands). The
+        # person approves it in the app's Mesh approvals by typing the code the OTHER
+        # device shows; the agent relays nothing back. The terminal path still exists
+        # as a same-user fallback (GUIDE "Without the app") and is not named here, so
+        # an agent reading this sentence is never handed a command to run itself. The
+        # last clause claims only what holds (review round 1, M3/S-R1-6): the app's
+        # attestation guards the CARD; the CLI fallback is not gated, so the sentence
+        # asks the agent to leave the answer to the person rather than claiming an
+        # agent cannot answer.
+        sentence = (
+            f"This device's code is {shown}: the person on the other device types it "
+            "there. Ask the user to approve this pairing in the app's Mesh approvals by "
+            "typing the code the other device shows. Leave the answer to the user: the "
+            "app's card is the path that needs a person, and the terminal fallback is "
+            "a same-user path with no such check."
+        )
     clause = offers_mod.sentence_clause(
         state, items, inviter=pending.inviter_name or pending.inviter_device_id
     )
@@ -6244,6 +7154,10 @@ def _park_join(
         # printed, not a re-enumeration that could have drifted.
         offers=[dict(item) for item in offer_view["items"]],
         offer_state=str(offer_view["state"]),
+        # The Mesh approvals card's attestation binds this (``pairing_attest``).
+        nonce=types.new_pairing_nonce(),
+        # The card's "as <role>" (QA round 1, Q1): the token's own role.
+        role=str(getattr(envelope, "role", "") or ""),
     )
     # A leftover answer from an earlier ceremony would answer THIS one: the record is
     # keyed by invite, and one invite mints one ceremony. Cleared BEFORE the record is
@@ -6270,7 +7184,8 @@ def _park_join(
             )
         )
         print(
-            f"waiting up to {int(window)}s for the code from the other device: answer it with "
+            f"waiting up to {int(window)}s for the code from the other device: type it in "
+            "the app's Mesh approvals, or answer it with "
             "`lop network join --confirm <code>`, run wherever the person reading that "
             "screen is."
         )
@@ -6381,11 +7296,11 @@ def _live_parked_joins(store: Any) -> list[Any]:
     that knows the difference between "that ceremony has an outcome, report it" and
     "that ceremony is gone", and it is the only place both are asked at once.
     """
-    return [
-        row
-        for row in store.pending_joins()
-        if row.status == "awaiting_confirmation" and row.is_open() and _process_alive(row.pid)
-    ]
+    # ONE implementation shared with the Mesh approvals card (``pairing_answers``);
+    # the probe stays this module's ``_process_alive`` so callers can patch it here.
+    from local_operator.network import pairing_answers
+
+    return pairing_answers.live_parked_joins(store, alive=_process_alive)
 
 
 def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
@@ -6405,7 +7320,7 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
     through its outcome, so answering one twice reports the same receipt instead of
     inventing a second pairing.
     """
-    from local_operator.network import store, types
+    from local_operator.network import store
     from local_operator.network.types import MeshRefusal
 
     records = store.pending_joins()
@@ -6431,13 +7346,12 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
     live_ids = {row.invite_id for row in live}
     chosen = next((row for row in reversed(matches) if row.invite_id in live_ids), None)
     if chosen is not None:
-        answer = types.JoinAnswer(
-            invite_id=chosen.invite_id,
-            decision="admit",
-            code=typed,
-            answered_by=_answered_by(args),
+        # The ONE writer of a joiner answer, shared with the Mesh approvals card.
+        from local_operator.network import pairing_answers
+
+        pairing_answers.submit(
+            store, chosen, decision="admit", code=typed, answered_by=_answered_by(args)
         )
-        store.save_join_answer(answer)
         outcome = _await_join_result(chosen, store)
         store.clear_pending_join(chosen.invite_id)
         store.clear_join_answer(chosen.invite_id)
@@ -6494,20 +7408,12 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
 def _parked_code_matches(pending: Any, typed: str) -> bool:
     """Whether the human's value is this ceremony's own derivation.
 
-    ``--verify`` compares the 160-bit fingerprint as the prompt path does, and strips
-    the same separators; otherwise it is the six digits through the shared
-    ``sas_matches`` (constant time, and a value that is not six digits is a mismatch
-    rather than a near miss).
+    Delegates to ``pairing_answers.parked_code_matches`` — the one checker the CLI
+    and the Mesh approvals card share, so the two doors cannot drift.
     """
-    import hmac
+    from local_operator.network import pairing_answers
 
-    from local_operator.network.handshake import sas_matches
-
-    if pending.verify:
-        typed_fp = typed.replace("-", "").replace(" ", "").upper()
-        derived_fp = str(pending.fingerprint).replace("-", "").upper()
-        return bool(typed_fp) and hmac.compare_digest(derived_fp, typed_fp)
-    return sas_matches(str(pending.sas), typed)
+    return pairing_answers.parked_code_matches(pending, typed)
 
 
 def _await_join_result(pending: Any, store: Any) -> Any:
@@ -6619,6 +7525,16 @@ def _persist_join(
                 added_via="invite",
             ),
         ]
+    # NO RECEIVER-LOCAL GRANT RIDES THE ADMISSION TABLE (#4245 security round 4, S17,
+    # the join-path sibling of S15): ``workset_import`` is THIS device's own decision
+    # about a peer ("granted on the receiver, never implied by any role incl. admin"),
+    # and a fresh joiner has decided nothing yet, so whatever the inviter's table says
+    # about it is dropped here exactly as ``relay.adopt_members`` drops it from a pull.
+    from local_operator.network.relay import _without_receiver_local
+
+    for row in rows:
+        if row.device_id != identity.device_id:
+            row.capabilities = _without_receiver_local(row.capabilities)
     self_row = next((row for row in rows if row.device_id == identity.device_id), None)
     # WHERE WE CAN BE REACHED, from our own settings rather than from the address
     # we happened to dial.
@@ -6921,6 +7837,29 @@ _STOP_REMEDIES: dict[str, str] = {
 #: socket default. It is the same reason the TUI grants a peer call 260 s.
 PILOT_BIND_TIMEOUT_S = 120.0
 
+#: Publication grace for a stored send after the peer ACKs engage. Use the
+#: existing local cold-start allowance (runtime.launch.DEFAULT_DEADLINE_S),
+#: inside, never on top of, the CLI's bind deadline. A warm or refused engage
+#: never gets this grace.
+PILOT_COLD_BOOT_BUDGET_S = 30.0
+
+#: How much of :data:`PILOT_BIND_TIMEOUT_S` the BIND hands back before its own
+#: outer bound fires. The viewer is given the bind budget as an absolute deadline
+#: (``AttachedSession.bind_runtime(deadline=...)``) so a busy runtime gets the
+#: whole window rather than the TUI's 15 s foreground envelope; ending the inner
+#: wait this much earlier makes the viewer's own typed answer (busy, refused,
+#: stopped) the one that is reported, not the outer ``wait_for``'s bare timeout.
+_PILOT_BIND_SLACK_S = 2.0
+
+#: What a busy runtime's refusal says was NOT done, per act, so the sentence names
+#: the person's own action rather than the transport's.
+_PILOT_UNDONE: dict[str, str] = {
+    "send": "the message was not delivered",
+    "steer": "the steer was not delivered",
+    "slash": "the command was not run",
+    "peek": "nothing was read",
+}
+
 #: How long ``--send`` waits for the owner's TERMINAL outcome once the prompt is
 #: admitted. ADMISSION IS NOT COMPLETION (``AttachedSession.prompt_and_wait``
 #: says exactly that), and a turn is unbounded work on a machine nobody here
@@ -7206,9 +8145,21 @@ def _translate_act_target(target: str, peer: str) -> str:
 
 
 def _pilot_dial_refusal(
-    session_id: str, peer: str, message: str, config_dir: Path
+    session_id: str,
+    peer: str,
+    message: str | BaseException,
+    config_dir: Path,
+    *,
+    verb: str = "send",
+    device: str = "",
 ) -> tuple[str, str]:
-    """The refusal for a viewer whose dial produced NO SESSION.
+    """Preserve an answered refusal or connection observation before the dial rung.
+
+    Typed peer errors are answers, not evidence that the device is unreachable.
+    An admitted stream going quiet likewise cannot truthfully say no session was
+    reached. Neither fact needs another catalogue read, dial, retry or timeout.
+
+    The remaining generic dial branch retains its existing rule:
 
     ONE RULE FOR BOTH RUNGS — the open and the bind — and it is a correction this
     PR made against itself twice. The first version asked the peer's catalogue
@@ -7227,8 +8178,30 @@ def _pilot_dial_refusal(
     component in both), and the transport's own sentence rides along verbatim, so a
     refused frame still reads as a refusal rather than as a link problem.
     """
+    from local_operator.ansi import sanitize_prompt_line
+    from local_operator.mobile.attach_client import RemoteStreamUnresponsiveError
     from local_operator.network import store
+    from local_operator.network.projection import RemoteStreamRefused
+    from local_operator.redaction_shapes import scrub_shapes
 
+    undone = _PILOT_UNDONE.get(verb, "nothing was done")
+    label = device or peer
+    # The local relay labels a missing owner answer explicitly; that typed
+    # observation still belongs to the doctor/transport rung, not refusal copy.
+    if isinstance(message, RemoteStreamRefused) and message.code != "peer_unreachable":
+        detail = sanitize_prompt_line(scrub_shapes(str(message)), limit=300)
+        if message.code == "session_unreachable":
+            sentence = f"{session_id} on {label} could not be reached: {detail}; {undone}. "
+        else:
+            sentence = f"{session_id} on {label} was refused by {label}: {detail}; {undone}. "
+        return message.code, sentence + "Re-run the command to retry."
+    if isinstance(message, RemoteStreamUnresponsiveError):
+        return (
+            "peer_unreachable",
+            f"{session_id} on {label} stopped answering after connecting; {undone}. "
+            f"Run `lop network doctor --peer {peer}` to distinguish a lost connection "
+            "from a stopped runtime.",
+        )
     if store.find_own_relay(config_dir) is None:
         return "relay_unavailable", _relay_unavailable_message()
     return (
@@ -7237,6 +8210,57 @@ def _pilot_dial_refusal(
         "nothing about that conversation is known from here: `lop network doctor "
         f"--peer {peer}` tells a link that is down from a runtime that stopped, and "
         "the session itself is untouched either way",
+    )
+
+
+def _pilot_runtime_busy(exc: BaseException) -> bool:
+    """Whether this failure belongs to the runtime-answer lane, not the doctor.
+
+    The pilot retains the desktop's ``RuntimeUnresponsiveError`` / ``owner_alive``
+    rule, plus its existing ``RuntimeBindFailedError`` case. The latter is an
+    explicit refusal, NOT evidence of load: its own reason is printed instead of
+    the timed busy sentence. It remains unmarked so the desktop bind-failure
+    ladder is unchanged. ``OwnerAckTimeout`` is also a ``TimeoutError``; ask this
+    predicate before either generic sibling rung. A remote sync timeout without
+    a post-welcome answer stays an ordinary transport error at its source.
+    """
+    from local_operator.session.attached import (
+        RuntimeBindFailedError,
+        RuntimeUnresponsiveError,
+    )
+
+    if isinstance(exc, (RuntimeUnresponsiveError, RuntimeBindFailedError)):
+        return True
+    return bool(getattr(exc, "owner_alive", False))
+
+
+def _pilot_busy_sentence(
+    verb: str, session_id: str, device: str, waited_s: float, *, refusal: str | None = None
+) -> str:
+    """The runtime-answer lane: its explicit refusal, or the timed busy answer.
+
+    The timed branch says the three things the person acts on: it is running over
+    there, this act did NOT happen, and the remedy is to retry. It does not send
+    them to ``network doctor``: the link worked, the stream opened, and the
+    runtime spoke — a link diagnosis would send them after a fault that is not
+    there.
+    """
+    undone = _PILOT_UNDONE.get(verb, "nothing was done")
+    if refusal is not None:
+        from local_operator.mobile.attach_client import bind_failed_cause
+
+        # Keep the canonical safe cause, not another surface's reconnect remedy.
+        # An immediate refusal is not an invented one-second load measurement.
+        cause = bind_failed_cause(refusal)
+        detail = f": {cause}" if cause else ""
+        return (
+            f"{session_id} is running on {device}, but its runtime could not prepare "
+            f"the connection{detail}; {undone}. Re-run the command to retry."
+        )
+    return (
+        f"{session_id} is running on {device}, but its runtime was too busy to answer "
+        f"within {max(1, int(waited_s))}s, so {undone}. "
+        "Re-run the command to retry when its current work settles."
     )
 
 
@@ -7502,6 +8526,7 @@ async def _pilot_act(
     the resolution works on the RESOLVED id, so a name is one spelling of an
     address rather than a second kind of session.
     """
+    from local_operator.network.projection import ProjectionRefusal
     from local_operator.network.types import MeshRefusal
     from local_operator.session.remote_open import (
         open_remote_viewer,
@@ -7582,6 +8607,19 @@ async def _pilot_act(
                 "session_stored", f"{_stored_peek_sentence(session_id, peer)} ({fallback})"
             )
 
+    if verb == "send" and mailbox is not None:
+        # A MAILBOX SEND NEEDS NO VIEW, so it is not opened through one. See
+        # ``_pilot_mailbox_direct``: the viewer below asks the owner to prepare
+        # a canonical frontend sync first, and a busy owner holding a long
+        # transcript refuses that (``bind_failed``) before the message is ever
+        # written. ``None`` means only "this owner predates the mesh mailbox":
+        # the viewer path below then runs today's turn fallback unchanged.
+        direct = await _pilot_mailbox_direct(
+            row, session_id, device, text, mailbox, config_dir, peer=peer
+        )
+        if direct is not None:
+            return _pilot_named_receipt(*direct, named=named, session_id=session_id, device=device)
+
     async def _never() -> Any:
         # A remote viewer never takes over: a remote owner sets ``_can_go_cold``,
         # so owner loss leaves this viewer cold rather than making this device a
@@ -7619,7 +8657,7 @@ async def _pilot_act(
         # as a traceback, which is the one thing this family never does with a
         # refusal; see ``_pilot_dial_refusal`` for how the component is decided.
         code, sentence = await asyncio.to_thread(
-            _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+            _pilot_dial_refusal, session_id, peer, exc, config_dir, verb=verb, device=device
         )
         raise MeshRefusal(code, sentence) from exc
     if viewer is None:
@@ -7628,18 +8666,58 @@ async def _pilot_act(
         # viewer for a conversation this device does not hold.
         raise MeshRefusal("session_unknown", f"{session_id} is no longer a session held by {peer}")
     try:
+        bind_started = time.monotonic()
         try:
             # The cold-to-working seam: the first act that needs the runtime binds
             # it, which is where a stored session on the peer ENGAGES a runtime.
-            await asyncio.wait_for(viewer.bind_runtime(), timeout=PILOT_BIND_TIMEOUT_S)
-        except TimeoutError as exc:
-            raise MeshRefusal(
-                "session_unreachable",
-                f"{peer} did not answer for {session_id} within "
-                f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
-                f"`lop network doctor --peer {peer}` diagnoses the link",
-            ) from exc
-        except ConnectionError as exc:
+            # The viewer gets THIS verb's budget as its deadline; without it the
+            # bind kept the TUI's 15 s foreground envelope inside a 120 s bound.
+            deadline = bind_started + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
+            if verb == "send" and not live:
+
+                async def _wait_for_publication(
+                    locate: _RuntimeLocator, bind_deadline: float
+                ) -> SessionRecord:
+                    return await _pilot_wait_for_runtime_record(
+                        locate, bind_deadline, session_id, device
+                    )
+
+                bind = viewer.bind_runtime(
+                    deadline=deadline, wait_for_publication=_wait_for_publication
+                )
+            else:
+                bind = viewer.bind_runtime(deadline=deadline)
+            await asyncio.wait_for(bind, timeout=PILOT_BIND_TIMEOUT_S)
+        except ProjectionRefusal as exc:
+            if verb != "send":
+                raise
+            raise MeshRefusal(exc.code, exc.sentence) from exc
+        except (TimeoutError, ConnectionError) as exc:
+            # ONE HANDLER, THREE RUNGS, ASKED IN THIS ORDER. A runtime that was
+            # REACHED and is merely busy comes first: two of its three shapes are
+            # ``ConnectionError``s and one is also a ``TimeoutError``, so either
+            # sibling rung would otherwise claim it — which is how a busy session
+            # on a healthy link read as a device that "produced no session".
+            if _pilot_runtime_busy(exc):
+                from local_operator.session.attached import RuntimeBindFailedError
+
+                raise MeshRefusal(
+                    "session_unreachable",
+                    _pilot_busy_sentence(
+                        verb,
+                        session_id,
+                        device,
+                        time.monotonic() - bind_started,
+                        refusal=str(exc) if isinstance(exc, RuntimeBindFailedError) else None,
+                    ),
+                ) from exc
+            if isinstance(exc, TimeoutError):
+                raise MeshRefusal(
+                    "session_unreachable",
+                    f"{peer} did not answer for {session_id} within "
+                    f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+                    f"`lop network doctor --peer {peer}` diagnoses the link",
+                ) from exc
             # A DIAL THAT PRODUCED NO STREAM IS THE DEVICE, whichever rung noticed:
             # this is the one CI's stopped-peer case lands on (the viewer is cold
             # until ``bind_runtime``, so the dial that produces no welcome frame
@@ -7650,7 +8728,7 @@ async def _pilot_act(
             # settled on the GUIDE side: its ``session_unreachable`` row says a
             # bind that ran out of its BUDGET, which is the timeout rung above).
             code, sentence = await asyncio.to_thread(
-                _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+                _pilot_dial_refusal, session_id, peer, exc, config_dir, verb=verb, device=device
             )
             raise MeshRefusal(code, sentence) from exc
         if verb == "peek":
@@ -7691,15 +8769,223 @@ async def _pilot_act(
         except Exception:  # noqa: BLE001 — see above: the refusal outranks it
             logging.getLogger(__name__).debug("disposing the pilot viewer failed", exc_info=True)
 
+    return _pilot_named_receipt(payload, lines, named=named, session_id=session_id, device=device)
+
+
+def _pilot_named_receipt(
+    payload: dict[str, Any], lines: list[str], *, named: str, session_id: str, device: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Note a ``--peer`` that named another device beside the act's receipt.
+
+    The typed string was NOT this device. The receipt keeps the answer (who ran
+    it) and carries the caller's own word beside it, in the payload and in the
+    lines, so both a script and a person can see the disagreement. One helper
+    because two act paths return a receipt (the viewer and the direct mailbox).
+    """
     if named:
-        # The typed string was NOT this device. The receipt keeps the answer (who
-        # ran it) and carries the caller's own word beside it, in the payload and in
-        # the lines, so both a script and a person can see the disagreement.
         payload["peer_named"] = named
         lines.append(
             f"you named {named}; {session_id} is held by {device}, which is where this ran"
         )
     return payload, lines
+
+
+async def _pilot_mailbox_direct(
+    row: Any,
+    session_id: str,
+    device: str,
+    text: str,
+    mode: "_MailboxMode",
+    config_dir: Path,
+    *,
+    peer: str,
+) -> tuple[dict[str, Any], list[str]] | None:
+    """Deliver a ``--send --mailbox`` WITHOUT opening a view of the session.
+
+    WHY THIS PATH EXISTS. The pilot's viewer (``open_remote_viewer`` +
+    ``bind_runtime``) attaches with ``frontend_state`` and ``display_window``, so
+    the owner starts a canonical frontend sync for it, and until that sync lands
+    the owner refuses every op outside ``_SYNC_PRIORITY_OPS`` — ``peer_message``
+    included (``server._on_request``). For a REMOTE viewer that sync has to
+    capture the history window on the session's own loop within
+    ``_REMOTE_HISTORY_BIND_WAIT_S`` (2.0 s); an owner mid-turn, or one whose
+    transcript is long enough that the capture itself is slow, misses it and
+    answers ``bind_failed``. The mesh send then bounced with "the dial … produced
+    no session (owner could not prepare this view …)" although the message needs
+    no view at all — measured live 2026-11-14 on 0.102.5: every send to one long,
+    usually mid-turn session bounced while sends to another session on the same
+    device, over the same link, delivered.
+
+    THE CONSTRAINT IT KEEPS: nothing changes on the owner. The client below is
+    the same ``RemoteSessionClient`` the viewer uses, over the same relay
+    ``stream_open`` carrier (``net_stream`` needs ``view``, the forwarded
+    ``peer_message`` needs ``prompt`` — the capabilities the viewer path already
+    spends), but it declares NO events, frontend state or display window. The
+    owner relay forwards only the auth fields it is given (``dial.AUTH_FIELDS``),
+    so the runtime sees an attach client with nothing to sync, never enters the
+    sync gate, and admits the message on its own merits. That is true of every
+    owner build that has the mesh mailbox, which is why this is a sender-side fix.
+
+    THE RECEIPT STAYS TRUTHFUL because delivery is the same helper the viewer
+    path uses (``_deliver_mailbox``): "delivered" only on the owner's admission
+    ack, "not confirmed" when that ack does not arrive in
+    ``PILOT_REPLY_TIMEOUT_S`` (the message id lets the owner drop a re-send as a
+    duplicate), and a dial that fails before the frame was written is reported
+    by the same ``_pilot_dial_refusal`` the viewer's dial uses — nothing landed.
+
+    Returns ``None`` ONLY for an owner without ``MESH_PEER_MESSAGE_CAPABILITY``:
+    its fallback is a TURN, which needs the viewer, so the caller runs the
+    viewer path exactly as before. ``--peek`` never comes here: a read of the
+    live display window is a view, and may still refuse honestly.
+    """
+    from local_operator.network.projection import (
+        PeerRow,
+        ProjectionRefusal,
+        remote_owner_for,
+    )
+    from local_operator.network.types import MeshRefusal
+    from local_operator.session.attached import (
+        _BIND_RETRY_ATTEMPTS,
+        _BIND_RETRY_INITIAL_S,
+    )
+
+    peer_row = PeerRow(
+        session_id=session_id,
+        device_id=str(getattr(row, "owner_device", "") or ""),
+        device_name=str(getattr(row, "owner_device_name", "") or ""),
+        conversation_name=str(getattr(row, "name", "") or ""),
+        reachable=bool(getattr(row, "reachable", True)),
+    )
+    owner = await asyncio.to_thread(
+        remote_owner_for, session_id, config_dir=config_dir, row=peer_row, root=config_dir
+    )
+
+    async def _refuse_dial(exc: BaseException) -> MeshRefusal:
+        code, sentence = await asyncio.to_thread(
+            _pilot_dial_refusal, session_id, peer, exc, config_dir
+        )
+        return MeshRefusal(code, sentence)
+
+    bind_deadline = time.monotonic() + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
+
+    async def _locate() -> Any:
+        # ENGAGE, THEN LOCATE — the order ``AttachedSession._bind_under_lock``
+        # uses, for the same reason: a stored session on the peer gets its
+        # runtime here (the act is what warms it, §8.3 — a send is a write), and
+        # a warm one answers the engage at once. The short locate retry is the
+        # bind loop's own, by its constants rather than a copy of their values:
+        # a runtime that has just been spawned publishes its record after the
+        # engage returns. Only a catalogued stored session is eligible for the
+        # longer publication wait; a warm row keeps its existing dial failure.
+        try:
+            await owner.engage(cwd="")
+        except ProjectionRefusal as exc:
+            raise MeshRefusal(exc.code, exc.sentence) from exc
+        delay = _BIND_RETRY_INITIAL_S
+        for attempt in range(_BIND_RETRY_ATTEMPTS):
+            record, _pid = await asyncio.to_thread(owner.locate)
+            if record is not None:
+                return record
+            if not str(getattr(row, "live_state", "") or ""):
+                return await _pilot_wait_for_runtime_record(
+                    owner.locate, bind_deadline, session_id, device
+                )
+            if attempt < _BIND_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(delay)
+                delay *= 2
+        raise await _refuse_dial(ConnectionError("could not start a runtime for this session"))
+
+    try:
+        record = await asyncio.wait_for(_locate(), timeout=PILOT_BIND_TIMEOUT_S)
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{peer} did not answer for {session_id} within "
+            f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+            f"`lop network doctor --peer {peer}` diagnoses the link",
+        ) from exc
+
+    # No projection or disconnect handling: this connection lives for ONE
+    # request, and its outcome is the reply to that request (a close before the
+    # reply fails the request's own future in the client's pump).
+    client = owner.make_client(lambda _projection: None, lambda _reason: None)
+    try:
+        try:
+            await asyncio.wait_for(client.connect(record, session_id), timeout=PILOT_BIND_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise MeshRefusal(
+                "session_unreachable",
+                f"{peer} did not answer for {session_id} within "
+                f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+                f"`lop network doctor --peer {peer}` diagnoses the link",
+            ) from exc
+        except ConnectionError as exc:
+            raise await _refuse_dial(exc) from exc
+        if not client.mesh_peer_message_supported:
+            return None
+        return await _deliver_mailbox(client.peer_message, session_id, device, text, mode)
+    finally:
+        # The owner keeps its runtime: closing this connection is a detach, the
+        # same as the viewer path's dispose. A failed close never speaks for the
+        # act (the refusal or receipt above outranks it).
+        try:
+            await client.detach()
+        except Exception:  # noqa: BLE001 — see above
+            logging.getLogger(__name__).debug("closing the mailbox dial failed", exc_info=True)
+
+
+async def _pilot_wait_for_runtime_record(
+    locate: _RuntimeLocator, bind_deadline: float, session_id: str, device: str
+) -> SessionRecord:
+    """Wait only for publication: the existing engage succeeded, but locate missed.
+
+    No second engage or write is allowed here. Both send paths remain unable to
+    hand over the text until this returns a record and the normal dial succeeds.
+    """
+    from local_operator.i18n.text import tr
+    from local_operator.network.types import MeshRefusal
+    from local_operator.session.attached import (
+        _BIND_RETRY_DELAY_CAP_S,
+        _BIND_RETRY_FACTOR,
+        _BIND_RETRY_INITIAL_S,
+    )
+
+    started = time.monotonic()
+    budget = max(0.0, min(PILOT_COLD_BOOT_BUDGET_S, bind_deadline - started))
+    logger = logging.getLogger(__name__)
+    scope = asyncio.timeout(budget)
+    delay = _BIND_RETRY_INITIAL_S
+    try:
+        async with scope:
+            while True:
+                logger.debug(
+                    "pilot cold ready miss session=%s peer=%s blocked_s=%.3f deadline_s=%.3f",
+                    session_id,
+                    device,
+                    time.monotonic() - started,
+                    budget,
+                )
+                await asyncio.sleep(delay)
+                record, _pid = await asyncio.to_thread(locate)
+                if record is not None:
+                    return record
+                delay = min(delay * _BIND_RETRY_FACTOR, _BIND_RETRY_DELAY_CAP_S)
+    except TimeoutError as exc:
+        if not scope.expired():
+            raise
+        logger.warning(
+            "pilot cold ready deadline session=%s peer=%s blocked_s=%.3f deadline_s=%.3f",
+            session_id,
+            device,
+            time.monotonic() - started,
+            budget,
+        )
+        raise MeshRefusal(
+            "session_unreachable",
+            tr("cli.network_send")(
+                _network_send.still_starting(session_id=session_id, peer=device)
+            ),
+        ) from exc
 
 
 class _MailboxMode:
@@ -7742,11 +9028,10 @@ async def _pilot_mailbox(
     today's prompt path for a plain send, with ``fallback: "prompt"`` and that
     path's honest receipt. A quiet drop or a steer cannot be expressed as a turn
     — a turn always wakes — so those are refused rather than silently changed.
+
+    ``_pilot_act`` reaches this only when ``_pilot_mailbox_direct`` found such an
+    owner: an owner WITH the mailbox is delivered to without a viewer at all.
     """
-    from local_operator.mobile.peer_send import (
-        mint_peer_message_id,
-        peer_sender_identity_async,
-    )
     from local_operator.network.types import MeshRefusal
 
     if not viewer.owner_takes_mesh_peer_message():
@@ -7761,6 +9046,24 @@ async def _pilot_mailbox(
         payload, lines = await _pilot_send(viewer, session_id, peer, text)
         payload["fallback"] = "prompt"
         return payload, [*lines, prompt_fallback_line(peer)]
+    return await _deliver_mailbox(viewer.send_peer_message, session_id, peer, text, mode)
+
+
+async def _deliver_mailbox(
+    deliver: Any, session_id: str, peer: str, text: str, mode: _MailboxMode
+) -> tuple[dict[str, Any], list[str]]:
+    """Send ONE ``peer_message`` through ``deliver`` and render its receipt.
+
+    Shared by the viewer path (``_pilot_mailbox``, ``viewer.send_peer_message``)
+    and the view-free path (``_pilot_mailbox_direct``, ``client.peer_message``) so
+    the two cannot disagree about what "delivered" means: both take the same
+    keywords and return the owner's reply frame.
+    """
+    from local_operator.mobile.peer_send import (
+        mint_peer_message_id,
+        peer_sender_identity_async,
+    )
+    from local_operator.network.types import MeshRefusal
 
     identity = await peer_sender_identity_async(os.getpid())
     sender = {key: identity[key] for key in _MESH_SENDER_FIELDS if identity.get(key)}
@@ -7777,7 +9080,7 @@ async def _pilot_mailbox(
     }
     try:
         reply = await asyncio.wait_for(
-            viewer.send_peer_message(
+            deliver(
                 text, mode=wire_mode, wake=bool(mode.wake), sender=sender, message_id=message_id
             ),
             timeout=PILOT_REPLY_TIMEOUT_S,
@@ -8542,6 +9845,8 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         explicit_yolo = bool(getattr(args, "yolo", False))
         implied_yolo = (not explicit_yolo) and saved_tool_approval_is_auto()
 
+        from local_operator.network.relay import CREATE_CLIENT_BOUND_S
+
         def _create(yolo: bool) -> dict[str, Any]:
             # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing
             # but ``yolo``. The retry is a CHANGED BODY — a changed intent — and
@@ -8575,7 +9880,11 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # fallback's first attempt was refused above the owner's mint,
                 # which reserves nothing, so the key is still free for the second.
                 create_key=str(getattr(args, "create_key", "") or ""),
-                timeout=120.0,  # a spawn plus its first turn's admission
+                origin=_create_origin(args),
+                # A spawn plus its first turn's admission, plus the relay's bounded
+                # confirm-by-key window after a lost reply: a client that gave up
+                # first would lose the id the relay was about to confirm.
+                timeout=CREATE_CLIENT_BOUND_S,
             )
 
         unattended_notice = ""
@@ -8679,6 +9988,20 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             lines.append(
                 f"no copy of {names} on this device: that device's own revision of it is "
                 "what runs there"
+            )
+        # WHAT THIS CREATE DID ABOUT SKILLS (``skillsync.push_for_create``): printed
+        # only when this create's own push did not finish cleanly — still running in
+        # the background, or failed — so a clean create's receipt is unchanged.
+        # Standing facts (an oversize skill that never travels, a skill the peer keeps
+        # as its own) would repeat on every create; they are named by `lop network
+        # skills state|push` and `lop network ready` instead, and `--json` carries
+        # the whole block here (``**detail``).
+        skills_note = detail.get("skills")
+        if isinstance(skills_note, dict) and (
+            skills_note.get("background") or not skills_note.get("ok")
+        ):
+            lines.append(
+                f"skills: {skills_note.get('message') or skills_note.get('code') or 'not synced'}"
             )
         if prompt:
             # ONE FACT, SAID ONCE (UX round 3, U21). This printed the boolean
@@ -9108,6 +10431,26 @@ def _peer_line(row: Any) -> str:
     return line + readiness_mod.build_suffix(comparison)
 
 
+def _listener_proof_line(row: Any) -> str:
+    """The dedicated line for a member whose listener cannot prove its identity.
+
+    NOT PART OF THE REACHABILITY PARENTHETICAL, on purpose: that clause follows
+    ``reason``, which the redial loop overwrites with each later ``connect_failed``,
+    while ``listener_proof`` is the relay's sticky fact (``RelayServer.
+    _unproven_listeners``) — so this line stays put until a verified outbound link
+    to the member exists, and the remedy is never hidden by backoff.
+    """
+    from local_operator.resume import UNNAMED_DEVICE, listener_unproven_sentence
+
+    if not isinstance(row, Mapping):
+        return ""
+    proof = row.get("listener_proof")
+    if not isinstance(proof, Mapping) or proof.get("state") != "unproven":
+        return ""
+    name = str(row.get("name") or "").strip() or UNNAMED_DEVICE
+    return "  " + listener_unproven_sentence(name, proof, device_id=str(row.get("device_id") or ""))
+
+
 def _cmd_peers(args: argparse.Namespace) -> int:
     # A LISTING PROBES ITS PEERS, so it needs the relay's own listing budget plus
     # slack rather than the 5s default: with the default, one unreachable member
@@ -9143,11 +10486,16 @@ def _cmd_peers(args: argparse.Namespace) -> int:
     if not isinstance(raw_rows, list):
         raw_rows = live.get("peers")
     rows: list[Any] = raw_rows if isinstance(raw_rows, list) else []
+    lines: list[str] = []
+    for row in rows:
+        lines.append(_peer_line(row))
+        proof_line = _listener_proof_line(row)
+        if proof_line:
+            lines.append(proof_line)
     return _emit(
         args,
         {"ok": True, "peers": rows},
-        [_peer_line(row) for row in rows]
-        or ["no peers: this device is the only member of its networks"],
+        lines or ["no peers: this device is the only member of its networks"],
     )
 
 
@@ -9437,7 +10785,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
     property the joiner's prompt enforces from the other side. ``--sas-stdin`` is
     the harness's seam and is refused outside ``LOP_NETWORK_TEST_MODE=1``.
     """
-    from local_operator.network import store, types
+    from local_operator.network import types
 
     rows = _pending_pairings()
     if args.list_pending:
@@ -9472,47 +10820,47 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         answer, shares = _read_confirmation(args, chosen)
         admit = answer == "yes"
     chosen_shares = sorted(shares) if admit else []
-    live = _relay_call(
-        "net_pair_confirm",
-        invite_id=invite_id,
-        decision="admit" if admit else "decline",
-        matched=admit,
-        reason="" if admit else "declined",
-        answered_by=_answered_by(args),
-        # THE SHARE CHOICES TRAVEL WITH THE ANSWER (§3.3). A relay new enough to
-        # have sent an offer understands them; one that does not answers without
-        # the echo below, and this CLI says so by name instead of quietly
-        # admitting more than the operator chose.
-        shares=chosen_shares,
-        allow_no_answer=True,
-    )
-    if live is None:
-        # No relay running: the pairing loop cannot be waiting either, so this
-        # records the answer for a relay that starts later — and says so, rather
-        # than reporting a success that nobody is watching for.
-        decision = types.PairDecision(
+    # ONLY A LIVE ACKNOWLEDGMENT IS AN ANSWER (security review round 3, S-R3-1).
+    # This used to write a decision file and a success audit itself whenever the
+    # relay did not answer, "for a relay that starts later". That fallback was
+    # wrong twice: the file is unstamped, so no ceremony's poll would ever honour
+    # it (it only blocked the next live answer), and a missing reply AFTER the
+    # frame left may mean the relay already recorded an answer — so reporting
+    # either "recorded" or "nothing recorded" would be a guess. Each outcome is
+    # now said only as far as it is known, nothing is written here, and the exit
+    # is non-zero. An explicit relay rejection still raises from ``_relay_call``
+    # with the relay's own code and sentence.
+    try:
+        live = _relay_call(
+            "net_pair_confirm",
             invite_id=invite_id,
             decision="admit" if admit else "decline",
             matched=admit,
             reason="" if admit else "declined",
+            answered_by=_answered_by(args),
+            # THE SHARE CHOICES TRAVEL WITH THE ANSWER (§3.3). A relay new enough to
+            # have sent an offer understands them; one that does not answers without
+            # the echo below, and this CLI says so by name instead of quietly
+            # admitting more than the operator chose.
             shares=chosen_shares,
+            allow_no_answer=True,
+            report_unsent=True,
         )
-        store.save_pair_decision(decision, None)
-        _audit(
-            "pairing_confirmed" if admit else "pairing_refused",
-            actor=str(chosen.get("joiner_device_id") or ""),
-            subject=str(chosen.get("network_id") or ""),
-            cause="" if admit else "declined",
+    except types.ControlRequestUnsent as exc:
+        # Known: the frame never left this device, so nothing can have recorded it.
+        raise types.MeshRefusal(
+            CODE_RELAY_UNAVAILABLE,
+            "No relay is running on this device, so nothing was recorded. "
+            "Start it and answer again.",
+        ) from exc
+    if live is None:
+        # Sent, but no reply: the relay may or may not have recorded it, so this
+        # claims neither.
+        raise types.MeshRefusal(
+            "pairing_answer_unconfirmed",
+            "Could not confirm whether the relay recorded this answer.",
         )
-        live = {
-            "invite_id": invite_id,
-            "decision": decision.decision,
-            "matched": admit,
-            "joiner_device_id": chosen.get("joiner_device_id"),
-            "shares": list(chosen_shares),
-            "relay": "not running: the answer is recorded for when it is",
-        }
-    elif chosen_shares and "shares" not in live:
+    if chosen_shares and "shares" not in live:
         # §4.5, the one silent-loss case: the relay that answered did not report
         # the share choices, so it is older than this CLI and the shares were not
         # applied by it. The admission still lands — warn, never refuse; the
@@ -9544,7 +10892,16 @@ def _pending_pairings() -> list[dict[str, Any]]:
     rows = live.get("value") if isinstance(live, dict) else None
     if isinstance(rows, list):
         return [row for row in rows if isinstance(row, dict)]
-    return [pending.to_json() for pending in store.pending_pairings()]
+    # Stage-1 rows (``awaiting_joiner``) are the Mesh approvals card's "waiting for
+    # the joiner" state: nothing to compare yet, so the y/N never lists them —
+    # the same filter the relay's ``net_pair_pending`` applies for this caller.
+    from local_operator.network.types import PAIR_STAGE_AWAITING_CONFIRMATION
+
+    return [
+        pending.to_json()
+        for pending in store.pending_pairings()
+        if pending.stage == PAIR_STAGE_AWAITING_CONFIRMATION
+    ]
 
 
 def _read_confirmation(args: argparse.Namespace, chosen: dict[str, Any]) -> tuple[str, list[str]]:
@@ -9722,6 +11079,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     )
     payload = live if live is not None else _doctor_locally(args)
     checks = [dict(check) for check in payload.get("checks") or []]
+    # THIS DEVICE'S NETWORK FIRST (2026-11-18): see ``network.uplink``. A
+    # passive route reading taken here, on the relay's own host; prepended so
+    # the first remedy names this device when the fault is ours.
+    uplink_reading = _uplink_reading()
+    if checks:
+        checks = _uplink_rows(uplink_reading, checks) + checks
     from local_operator.network import relay as relay_mod
 
     supervision = relay_mod.supervision_state()
@@ -9780,14 +11143,25 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         observed = check.get("observed")
         observed = observed if isinstance(observed, Mapping) else {}
         scoped = bool(observed.get("out_of_scope"))
+        if check.get("check") == "uplink":
+            # Composed, localized prose (``network.uplink``): printed as written,
+            # never through the dial-code gloss, with its remedies under it.
+            state = (
+                "n/a " if observed.get("not_applicable") else ("ok " if check.get("ok") else "FAIL")
+            )
+            lines.extend(readiness_mod.uplink_lines(check, state))
+            continue
         if scoped:
             # EXCLUDED FROM THE DECISION, VISIBLE IN THE READING (F9; design
             # round 1, D3): the same address reads the same way here as on
             # ``ready`` — neither a failure nor a verification — and the raw
             # dial result does not ride along.
             state = "n/a "
+        elif check.get("ok"):
+            state = "ok "
         else:
-            state = "ok " if check.get("ok") else "FAIL"
+            # ``severity: warn`` (the unproven-listener finding): named, not gating.
+            state = "warn" if check.get("severity") == "warn" else "FAIL"
         # The shared clause hangs here with one separator spelling: the
         # sentences live in ``readiness``, so these lines and the readiness
         # readings cannot drift apart (design round 1, D3).
@@ -9797,25 +11171,57 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         else:
             clause = readiness_mod.informational_clause(check)
             detail_words = doctor_detail_words(str(check.get("detail", "")))
+            if check.get("check") == "listener_proof" and check.get("message"):
+                # The warning's own sentence; its ``detail`` stays a code (UX U8).
+                detail_words = str(check["message"])
+            elif check.get("endpoint_removed") and check.get("endpoint"):
+                # Said only when the address really left the row (UX U6): the
+                # ``bad_mac`` demotion, never an unauthenticated answer (review M1).
+                owner = str(check.get("device_name") or check.get("device_id") or "")
+                detail_words += f"; this device removed the address from {owner}'s record"
+        # Empty columns are dropped, not joined: a row with no endpoint printed two
+        # spaces where the address would be (UX U7).
+        # ``state`` keeps its padding ("ok " aligns with "FAIL"); only the columns
+        # after it collapse.
+        head = f"{state} " + " ".join(
+            str(part)
+            for part in (
+                check.get("check", ""),
+                check.get("device_id", ""),
+                check.get("endpoint", ""),
+                detail_words,
+            )
+            if part
+        )
         lines.append(
-            f"{state} {check.get('check', '')} {check.get('device_id', '')} "
-            f"{check.get('endpoint', '')} {detail_words}".rstrip()
+            head
             + (f" {check['latency_ms']}ms" if check.get("latency_ms") is not None else "")
             + (f" — {clause}" if clause else "")
         )
+        if check.get("check") == "listener_proof":
+            # The member cannot be dialled until it updates, so the remedy is the
+            # point of the row: printed, not left to ``--json``.
+            lines.extend(f"    - {remedy}" for remedy in check.get("remedies") or ())
     if not lines:
         lines.append("nothing to check: no networks, or no other members yet")
     if not payload.get("identity_present", True):
         lines.append(readiness_mod.NO_IDENTITY_LINE)
 
     def failure_words(check: Mapping[str, Any]) -> str:
+        if check.get("check") == "uplink":
+            return f"uplink: {check.get('detail', '') or 'failed'}"
         return (
             f"{check.get('check', '')}: "
             f"{doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
         )
 
+    # A ``severity: warn`` row (the unproven-listener finding) is NAMED but does not
+    # gate: the handshake row beside it already reports the failed dial, and an
+    # inbound link from that member can still be healthy.
     link_failures = [
-        failure_words(check) for check in checks if not check.get("ok") and check["class"] == "link"
+        failure_words(check)
+        for check in checks
+        if not check.get("ok") and check["class"] == "link" and check.get("severity") != "warn"
     ]
     payload_failures = [
         failure_words(check)
@@ -9838,6 +11244,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "degraded": degraded,
         "payload_failures": payload_failures,
         "supervision_failures": supervision_failures,
+        "uplink": uplink_reading,
     }
     if not healthy:
         answer["code"] = "unhealthy"
@@ -9877,6 +11284,49 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                     "this device"
                 )
     return _emit(args, answer, lines)
+
+
+def _uplink_reading() -> dict[str, Any]:
+    """This device's passive uplink reading (``network.uplink``); never raises.
+
+    A module attribute lookup at call time so tests inject a scripted reading
+    with ``monkeypatch`` instead of depending on the runner's real routes.
+    """
+    from local_operator.network import uplink as uplink_mod
+
+    try:
+        return uplink_mod.read_uplink()
+    except Exception:  # noqa: BLE001 — fail-safe: an unreadable uplink claims nothing
+        return uplink_mod.unknown_reading()
+
+
+def _uplink_rows(reading: Mapping[str, Any], checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The ``uplink`` rows, or none at all when building them fails (fail-safe)."""
+    from local_operator.network import uplink as uplink_mod
+
+    try:
+        return uplink_mod.uplink_checks(reading, checks, names=_member_names())
+    except Exception:  # noqa: BLE001 — never let the new row break the old report
+        return []
+
+
+def _member_names() -> dict[str, str]:
+    """Device id -> member name across this device's networks, for row labels.
+
+    ``doctor``'s rows carry only the id; an uplink sentence that names a peer
+    reads its name. An unreadable store labels by id, never fails the report.
+    """
+    from local_operator.network import store
+
+    names: dict[str, str] = {}
+    try:
+        for record in store.list_networks():
+            for member in record.members:
+                if member.name:
+                    names.setdefault(member.device_id, member.name)
+    except Exception:  # noqa: BLE001 — labels only
+        return {}
+    return names
 
 
 def _ready_lines(checks: list[dict[str, Any]]) -> list[str]:
@@ -9943,6 +11393,11 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     )
     payload = live if live is not None else _ready_locally(args)
     checks = list(payload.get("checks") or [])
+    # THIS DEVICE'S NETWORK FIRST: the same rows, and the same reason, as
+    # ``doctor`` (see ``network.uplink``).
+    uplink_reading = _uplink_reading()
+    if checks:
+        checks = _uplink_rows(uplink_reading, checks) + checks
     # THE ROW'S OWN STATE, ON THE ROW (F8 residual): `ready --json` is the
     # drill's acceptance surface, and a reader there scans ROWS, not the
     # aggregate — a reported-but-non-gating row must not read failure-shaped
@@ -9966,7 +11421,7 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     # nothing admission-shaped or still-gating.
     failures = [_ready_failure(check) for check in readiness_mod.onboarding_failures(checks)]
     healthy = not failures and bool(payload.get("identity_present", True))
-    answer: dict[str, Any] = {**payload, "ok": healthy}
+    answer: dict[str, Any] = {**payload, "checks": checks, "ok": healthy, "uplink": uplink_reading}
     if not healthy:
         answer["code"] = "unhealthy"
         answer["message"] = "; ".join(failures) or "the device has no identity"
@@ -10280,6 +11735,7 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
         from local_operator.paths import config_dir
 
         checks.extend(readiness_mod.local_serve_daemon_rows(config_dir()))
+        checks.extend(readiness_mod.local_github_source_rows(config_dir()))
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),
@@ -10662,6 +12118,8 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
         return _cmd_credential_refresh(args)
     if verb == "inherit":
         return _cmd_credential_inherit(args)
+    if verb == "github":
+        return _cmd_credential_github(args)
     if verb in ("share", "revoke", "mark"):
         return _cmd_credential(args)
     print(
@@ -10672,6 +12130,8 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
         "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
         "       lop network credential mark   <secret> sync|local-only|default\n"
         "       lop network credential refresh <provider> [--json]\n"
+        "       lop network credential github repos [--refresh] [--use-default] [--json] | "
+        "exclude|include <owner/repo> [--json]\n"
         "       lop network credentials [--json]   # what is shared, and with whom",
         file=sys.stderr,
     )
@@ -11100,15 +12560,39 @@ def _host_key_for_request(host: str, user: str, given: str) -> str:
     return found.host_key_fp
 
 
+def _create_origin(args: argparse.Namespace) -> str:
+    """``agent`` when an AGENT asked for this ``--create``, else ``user``.
+
+    The explicit ``--origin`` wins (the ``sessions spawn peer=`` tool passes
+    it); otherwise the ``bash`` tool's marker (``agent_shell.AGENT_SHELL_ENV``)
+    says an agent's command is running this. Like that marker it is attribution,
+    not a security boundary: what rides on it is only whether the session's
+    ``notify`` items are forwarded to the operator (operator rule 2026-11-13 —
+    a reviewer/QA/probe child reports to its parent agent, never the inbox).
+    """
+    explicit = str(getattr(args, "origin", "") or "")
+    if explicit in ("user", "agent"):
+        return explicit
+    from local_operator.agent_shell import AGENT_SHELL_ENV
+
+    return "agent" if os.environ.get(AGENT_SHELL_ENV) == "1" else "user"
+
+
 def _env_filing_session() -> str:
     """The audit-only ``LOCAL_OPERATOR_SESSION_ID`` a tool child inherits, or ``""``.
 
     For the credential request factories, whose own ``--session`` flag is the lend's
     TARGET scope and must never be read as attribution (nor this as a target).
     """
+    from local_operator.network.approvals import filing_session
     from local_operator.secrets.access import session_id
 
-    return session_id() or ""
+    # PINNED HERE, once, for every reader (#3436 review R1-3 / QA Q-1): the env is
+    # now the DEFAULT source and any same-uid process can set it, so a value not
+    # shaped like a session id (QA filed ``ctx-deadbeef`` on a device card) is no
+    # attribution at all. The next slice shows these cards inline, where free text
+    # would read as a real session.
+    return filing_session(session_id() or "")
 
 
 def _filing_session(args: argparse.Namespace) -> str:
@@ -11123,8 +12607,13 @@ def _filing_session(args: argparse.Namespace) -> str:
     lend's TARGET scope) do not read it. An explicit flag wins; an empty env is the
     legacy empty attribution, unchanged.
     """
-    explicit = str(getattr(args, "session", "") or "")
-    return explicit or _env_filing_session()
+    # ``None`` is "not given"; ``--session ""`` is an explicit EMPTY value and wins
+    # too (#3436 review R1-2), so a tool child can still withdraw a card that was
+    # filed unattributed. The explicit value is passed as typed, as it always was.
+    explicit = getattr(args, "session", None)
+    if explicit is not None:
+        return str(explicit)
+    return _env_filing_session()
 
 
 def _cmd_approvals_request(args: argparse.Namespace) -> int:
@@ -11758,13 +13247,32 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                     else f"  custom instructions: {instructions.get('outcome')}"
                     + (f" ({why})" if why else "")
                 )
+            # The subagent model tiers: same reasoning, same line shape. A peer that
+            # kept its own map is why a pinned role runs on a different model there.
+            tiers = item.get(definitions.SUBAGENT_TIERS_KIND)
+            if isinstance(tiers, dict) and tiers.get("outcome") in (
+                "installed",
+                "updated",
+                "conflict",
+                "refused",
+                "withheld",
+            ):
+                tiers_notice = str(tiers.get("notice") or "")
+                tiers_why = str(tiers.get("reason") or "")
+                lines.append(
+                    f"  subagent model tiers: {tiers_notice}"
+                    if tiers_notice
+                    else f"  subagent model tiers: {tiers.get('outcome')}"
+                    + (f" ({tiers_why})" if tiers_why else "")
+                )
         return _emit(
             args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
         )
 
     # ``state``: this device's own definitions, plus what was mirrored here.
     index = definitions.read_index(root)
-    state = definitions.definition_state(root)
+    # Local view: the tier values are shown here, never sent in the wire reply.
+    state = definitions.definition_state(root, include_tier_models=True)
     mirrored = {
         kind: {
             str(name): str(row.get("origin") or "")
@@ -11809,8 +13317,76 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                 else ""
             )
         )
+    # Failover routing (``retry.*`` units, see ``routing_sync``): which units are a
+    # peer's mirror and which this device owns. Kept units are the answer to "why
+    # does this node fail over differently from my Mac".
+    from local_operator.network import routing_sync
+
+    routing = state.get(routing_sync.ROUTING_KIND) or {}
+    for unit, cls in sorted((routing.get("units") or {}).items()):
+        source = str(cls.get("source") or "")
+        if source == "mirror":
+            lines.append(f"failover routing {unit}: mirrored from {cls.get('origin') or '?'}")
+        elif source in ("local", "edited"):
+            lines.append(f"failover routing {unit}: yours")
+    if routing.get("status") == "unreadable":
+        lines.append("failover routing: config.yml could not be read")
+    # The subagent model tiers (``subagents.models``): whose map this is, which
+    # model each tier runs on HERE, and the last peer revision kept out. Answers
+    # "why does effort=hi refuse / run on another model on this node" locally.
+    tiers = state.get(definitions.SUBAGENT_TIERS_KIND) or {}
+    tiers_status = str(tiers.get("status") or "absent")
+    tier_models = tiers.get("models") or {}
+    tier_text = ", ".join(
+        f"{tier}={value.get('model') if isinstance(value, dict) else value}"
+        for tier, value in tier_models.items()
+    )
+    tier_suffix = f" ({tier_text})" if tier_text else ""
+    if tiers_status == "mirror":
+        lines.append(
+            f"subagent model tiers: mirrored from {tiers.get('origin') or '?'}{tier_suffix}"
+        )
+    elif tiers_status == "edited":
+        lines.append(
+            "subagent model tiers: yours (edited after being mirrored from "
+            f"{tiers.get('origin') or '?'}){tier_suffix}"
+        )
+    elif tiers_status == "authored":
+        lines.append(f"subagent model tiers: yours{tier_suffix}")
+    elif tiers_status == "unreadable":
+        lines.append("subagent model tiers: the config could not be read")
+    tiers_conflict = tiers.get("conflict")
+    if isinstance(tiers_conflict, dict):
+        lines.append(
+            f"subagent model tiers from {tiers_conflict.get('origin') or '?'} not installed: "
+            f"{tiers_conflict.get('reason') or 'this device kept its own'}"
+            + (
+                "; clear subagents.models here to receive those"
+                if tiers_status in ("authored", "edited")
+                else ""
+            )
+        )
     if not lines:
         lines = ["no agent or team definitions on this device"]
+    # Routing authority (review r2, m3), after the empty-state line so a bare
+    # device still says it has no definitions: the one fact that explains a node staying
+    # primary-only — it holds no anchor (the head will not send to it), or it holds
+    # one verify-only (it accepts the operator's chain), or it signs for it (it is
+    # the operator's device and keeps its own). From ``mirror_authority.state_fact``.
+    authority = routing.get("authority")
+    if isinstance(authority, dict):
+        key_id = str(authority.get("key_id") or "")
+        if not key_id:
+            lines.append(
+                "routing authority: no operator anchor (the operator's failover routing "
+                "is not accepted here)"
+            )
+        elif authority.get("signs"):
+            lines.append(f"routing authority: signs for {key_id} (this device sends routing)")
+        else:
+            lines.append(
+                f"routing authority: verify-only under {key_id} (accepts that operator's routing)"
+            )
     return _emit(
         args,
         {
@@ -11819,6 +13395,8 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             "teams": state.get("teams") or {},
             "mirrored": mirrored,
             definitions.OPERATOR_INSTRUCTIONS_KIND: instructions,
+            routing_sync.ROUTING_KIND: routing,
+            definitions.SUBAGENT_TIERS_KIND: tiers,
         },
         lines,
     )
@@ -11863,7 +13441,9 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
             # the state round trip and the apply's summary), printed rather than
             # re-derived here — the definitions verb's rule.
             lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
-            for outcome in ("installed", "updated"):
+            # ``withdrawn``: a mirror the peer removed because this device turned
+            # the server off — the peer's own answer, never what was asked.
+            for outcome in ("installed", "updated", "withdrawn"):
                 for row in item.get(outcome) or []:
                     if isinstance(row, dict):
                         lines.append(f"  {outcome} server {row.get('name')!r}")
@@ -11920,10 +13500,86 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         withheld = str(row.get("withheld") or "")
         if withheld:
             line += f" — will not travel: {mcpdefs.shape_likeness(withheld)}"
+        # A server this device turned off is not sent; its name goes out as a
+        # withdrawal instead (mcpdefs' explicit-withdrawal exception). Only for
+        # the device's own rows: a mirror is never sent from here either way.
+        if row.get("disabled") and not origin:
+            line += " — disabled: not sent; peers withdraw an unedited mirror of it"
         lines.append(line)
     if not lines:
         lines = ["no user-scope MCP servers on this device"]
     return _emit(args, {"ok": True, "servers": rows}, lines)
+
+
+def _cmd_skills(args: argparse.Namespace) -> int:
+    """``lop network skills push|state`` — user skills over the mesh (``skillsync.py``).
+
+    The same split as ``mcp push|state``: the cadence already carries skills, so
+    ``push`` is the deliberate, per-skill-reporting half, and ``state`` answers
+    "why is ``skill://x`` missing over there" on the side that can act, with no
+    relay needed.
+    """
+    from local_operator.network import skillsync
+    from local_operator.network.types import MeshRefusal
+    from local_operator.paths import config_dir
+
+    verb = str(getattr(args, "skills_command", None) or "state")
+    root = config_dir()
+    if verb == "push":
+        peer = str(getattr(args, "peer", "") or "")
+        if not peer and not bool(getattr(args, "all_peers", False)):
+            raise MeshRefusal(
+                "peer_required",
+                "name a device with --peer, or ask every device with --all-peers",
+            )
+        detail = _relay_answer("skills_sync", peer=peer, timeout=180.0)
+        rows = [item for item in (detail.get("peers") or []) if isinstance(item, dict)]
+        lines = [str(detail.get("message") or "")] if detail.get("message") else []
+        for item in rows:
+            # The member's NAME where the mesh knows one (QA round 1, Q-5): a raw
+            # ``d_…`` id is not what the operator typed or can recognise.
+            label = str(item.get("name") or item.get("device_id") or "?")
+            lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
+            for outcome in ("installed", "updated"):
+                for row in item.get(outcome) or []:
+                    if isinstance(row, dict):
+                        lines.append(f"  {outcome} skill {row.get('name')!r}")
+            for outcome in ("kept", "refused", "skipped"):
+                for row in item.get(outcome) or []:
+                    if isinstance(row, dict):
+                        lines.append(
+                            f"  {outcome} skill {row.get('name')!r}: "
+                            f"{row.get('reason') or outcome}"
+                        )
+        return _emit(
+            args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
+        )
+
+    rows = skillsync.state_rows(root)
+    receipts = skillsync.read_receipts(root)
+    lines = []
+    for row in rows:
+        origin = str(row.get("origin") or "")
+        if origin:
+            source = _device_name_anywhere(origin) or origin
+            line = f"skill: {row.get('name')} (mirrored from {source}" + (
+                ", edited here)" if row.get("edited") else ")"
+            )
+        else:
+            line = f"skill: {row.get('name')} (yours)"
+        if row.get("status") != "ready" and (not origin or row.get("edited")):
+            line += f" — will not travel: {row.get('reason') or row.get('status')}"
+        lines.append(line)
+    if not lines:
+        lines = ["no user skills on this device"]
+    for device_id, receipt in sorted(receipts.items()):
+        if isinstance(receipt, dict):
+            target = str(receipt.get("name") or "") or _device_name_anywhere(device_id)
+            lines.append(
+                f"last push to {target or device_id}: "
+                f"{receipt.get('message') or receipt.get('code') or '?'}"
+            )
+    return _emit(args, {"ok": True, "skills": rows, "pushes": receipts}, lines)
 
 
 def _mcp_server_shape(server: Mapping[str, Any]) -> str:
@@ -12673,6 +14329,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "sessions": _cmd_sessions,
     "definitions": _cmd_definitions,
     "mcp": _cmd_mcp,
+    "skills": _cmd_skills,
     "serve": _cmd_serve,
     "start": _cmd_service("start"),
     "stop": _cmd_service("stop"),

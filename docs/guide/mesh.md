@@ -33,6 +33,7 @@ compare on two screens.
 ```bash
 lop network init devmesh                 # create the network, mint this device's identity, start the relay
 lop network invite --role drive          # a single-use token, written to a file, never printed into a pipe
+lop network invite --role read --no-credential-offers   # read-only rig: no share list, no grants
 ```
 
 It prints where the token went; hand that file to the other device out of band
@@ -148,8 +149,35 @@ bounded grant (`network.credentials.grant_ttl_s`, fifteen minutes by default),
 and `lop network credentials` shows who owns what and what this device borrows.
 A refresh belongs to the device that owns the credential — it lends a short-lived
 access token and never its refresh token, which is why a token is never refreshed
-on a device that does not own it. `kimi` is the one provider that can never be
-lent: its grants are signed with the fingerprint of the device that made them.
+on a device that does not own it. While the owner is unreachable (a laptop
+closed overnight), a peer keeps using the login it already borrowed for up to
+24 hours (`network.credentials.offline_hold_s`), counted from the last grant it
+received (a working peer asks again every grant period), so an owner that comes
+online once a day keeps remote work going. An idle peer is renewed too: when the
+owner reconnects or wakes, it tells each peer to ask again, and the peer's relay
+fetches a fresh grant through the ordinary path. Any session on that peer —
+including one started while the owner is away — is then served that renewed
+login until the hold ends; the owner's audit records those asks under the
+session `relay-renew`. The hold never outlives the access token itself: a token that
+expires sooner (Anthropic OAuth after about 8 hours, Radient after about an
+hour) stops working at its own expiry until the owner is back. Lent GitHub and MCP
+logins are held the same way: a GitHub token from the owner's `GITHUB_TOKEN` or
+`gh` login lasts the whole hold (`network.credentials.github_token_hold_s` can
+shorten it for those two alone; lowering it affects grants lent after the change,
+not one a node already holds), a GitHub App token at most its one hour, and an
+MCP sign-in until its access token expires. `kimi` is the one provider that can
+never be lent: its grants are signed with the fingerprint of the device that made
+them.
+
+`lop network panic` and revoking a share stop every node that *hears* them from
+using held logins at once, and revoke a GitHub App token at GitHub. They cannot
+reach a node that is lost, stolen or offline: such a node can keep pushing with a
+lent `GITHUB_TOKEN` or `gh` token for up to 24 hours after its last grant (a GitHub
+App token for at most an hour), and a copy of the token taken off it works until
+the token itself is revoked. For a lost node, **revoke the token at GitHub**:
+Settings → Developer settings → Personal access tokens for a `GITHUB_TOKEN`, or
+Settings → Applications → Authorized OAuth Apps → GitHub CLI → Revoke for a `gh`
+login (`gh auth logout` only forgets the token locally).
 
 **The desktop app has its own view of it.**
 [`local-operator-ui`](https://github.com/damianvtran/local-operator-ui) mounts a

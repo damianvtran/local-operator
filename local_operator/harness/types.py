@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import unicodedata
 import urllib.parse
 import uuid
 from collections.abc import Iterable
@@ -722,11 +723,15 @@ _CLONE_GUARD_FIELDS = frozenset(
         # never changes the prompt bytes the model reads.
         "cache_diagnostics",
         "cache_diagnostics_previous_id",
+        "cache_diagnostics_chain",
         # Request role for the Anthropic cache-TTL policy, stamped by
         # ``SessionStreamFn`` on every request (``anthropic_cache_ttl``). It
         # selects a marker TTL, never message bytes, so an armed one-turn secret
         # stays in the one body it was approved for.
         "cache_role",
+        # Marker placement for one-shot auxiliary calls (``cache_markers``):
+        # where cache_control goes, never which bytes the model reads.
+        "cache_markers",
         # Same policy input, same stamper: "this conversation already had a
         # long-streaming turn" picks the marker TTL and nothing else.
         "cache_after_long_call",
@@ -946,7 +951,7 @@ class OneTurnSecretScopeError(ValueError):
 _AGENT_FORWARDING_TOOLS = frozenset({"task", "hub", "send", "sessions", "network"})
 _FORWARDING_READ_OPS: dict[str, frozenset[str]] = {
     "hub": frozenset({"list", "peek", "pause", "cancel"}),
-    "sessions": frozenset({"list", "info", "stop", "peek", "help"}),
+    "sessions": frozenset({"list", "info", "stop", "park", "peek", "help"}),
     "network": frozenset(
         {
             "status",
@@ -973,6 +978,10 @@ def is_agent_forwarding_call(tool_name: str, arguments: Mapping[str, Any]) -> bo
             arguments.get(field) for field in ("create", "engage", "send", "steer", "slash", "text")
         )
     return operation not in _FORWARDING_READ_OPS.get(tool_name, frozenset())
+
+
+#: ``(before, after, preview_rows, full)`` -- see ``ToolResult._diff_source``.
+DiffSourceCarrier = tuple[str, str, tuple[str, ...], tuple[str, ...] | str | None]
 
 
 class ToolResult(BaseModel):
@@ -1013,7 +1022,10 @@ class ToolResult(BaseModel):
 
     # The write/edit SOURCE EVIDENCE: the complete raw ``before``/``after``
     # file texts plus the raw rendered diff preview, as
-    # ``(before, after, preview_rows)``. While it is attached,
+    # ``(before, after, preview_rows, full)``. ``full`` is the COMPLETE raw
+    # diff the preview was cut from (``None`` when nothing was cut, the string
+    # ``"oversized"`` past the archive ceiling); the seam archives its
+    # source-redacted form (``tools/diff_archive``). While it is attached,
     # ``details['diff']`` holds only the withheld receipt. The native loop's
     # seam (``AgentLoop._settle_write_diff``) redacts each COMPLETE side once,
     # masks every preview row whose source line the redactor touched, then runs
@@ -1030,7 +1042,7 @@ class ToolResult(BaseModel):
     # event copy or deep-copied trajectory row would keep raw file text alive.
     # Only the ORIGINAL object carries it; a result that never reaches the
     # seam keeps the withheld receipt (fail-closed by construction).
-    _diff_source: tuple[str, str, tuple[str, ...]] | None = PrivateAttr(default=None)
+    _diff_source: DiffSourceCarrier | None = PrivateAttr(default=None)
 
     def __copy__(self) -> "ToolResult":
         copied = super().__copy__()
@@ -1049,7 +1061,7 @@ class ToolResult(BaseModel):
             state = {**state, "__pydantic_private__": {**private, "_diff_source": None}}
         return state
 
-    def take_diff_source(self) -> tuple[str, str, tuple[str, ...]] | None:
+    def take_diff_source(self) -> DiffSourceCarrier | None:
         """Return and CLEAR the raw source-evidence carrier (single consumption)."""
         source = self._diff_source
         self._diff_source = None
@@ -1190,6 +1202,12 @@ class Message(BaseModel):
     # Explicit provider encoders may read the content; generic serialization may
     # not silently turn this raw-bearing row into apparently safe public JSON.
     _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
+
+    # Non-serialized internal marker for request-local transient frames (e.g.,
+    # PendingTurn's admitted Team Bridge body frame). Never enters wire JSON or
+    # transcript dumps; tells provider cache-breakpoint placement not to anchor
+    # the tail cache_control marker on a message that vanishes after this turn.
+    _ephemeral: bool = PrivateAttr(default=False)
 
     def _assert_publicly_serializable(self) -> None:
         if self._one_turn_secret is not None:
@@ -1522,6 +1540,10 @@ class CustomMessage(BaseModel):
     on_discard: Callable[[], None] | None = Field(
         default=None, exclude=True, json_schema_extra={"compare": False}
     )
+    # Non-serialized internal marker propagated to the rendered Message so
+    # transient frames (PendingTurn body frames) are skipped when placing the
+    # tail prompt-cache breakpoint.
+    _ephemeral: bool = PrivateAttr(default=False)
 
 
 class StaleAside:
@@ -1782,12 +1804,16 @@ class BrowserSurface:
         "handed",
         "handed_to",
         "late_handoff_to_parent",
+        "terminal_cleanup_generation",
     )
 
     def __init__(self, resource: Any = None, *, parent_session_id: str = "") -> None:
         self.surface_id = ""
         # Host-owned persistence stays outside the harness import graph.
         self.resource = resource
+        # The child runner alone consumes this exact failed-close marker after
+        # disposal, while it still owns the live job's resume fence.
+        self.terminal_cleanup_generation: str = ""
         # Whether the tool has already spent its ONE line telling the agent that
         # a newer browser extension exists. It lives HERE, on the host-owned
         # holder, because the ToolContext is rebuilt at the start of every turn
@@ -1974,6 +2000,57 @@ class AskOption(BaseModel):
 # is PRE-TICKED: on a multi-select the visible ticks are the answer, and the
 # user builds them (see the pinned picker test). Consumers read
 # `recommended_rows`, never `recommended`, so a set cannot be half-drawn.
+#: The longest suggested command an ask may carry, in characters (after strip).
+#: A one-liner the user is expected to READ before running it; the desktop's
+#: Run confirmation shows the exact bytes untruncated, so the cap keeps that
+#: dialog legible and bounds what a row adds to every frame that carries it.
+ASK_COMMAND_MAX_CHARS = 500
+
+#: Unicode categories a suggested command may not contain. ``Cc`` covers C0,
+#: DEL and C1 — newline, carriage return, tab and ESC — so one command can never
+#: smuggle a second line, an Enter, or a bracketed-paste terminator into the
+#: terminal it is typed into. ``Cf`` covers bidi overrides, zero-width
+#: characters and the BOM, which make the bytes a user reviews differ from the
+#: bytes that run (Trojan Source). ``Zl``/``Zp`` are line/paragraph separators
+#: some terminals and renderers treat as a newline.
+_ASK_COMMAND_REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+#: ``Zs`` (space separators) is refused too, except the plain ASCII space. A
+#: NO-BREAK SPACE, an en/em space or an ideographic space reads as a word break
+#: in the dialog, but the shell does not split on it: ``echo<U+00A0>hi`` runs
+#: as one word and fails with "command not found". Same class as ``Cf`` — the
+#: bytes the user reads are not the bytes that run — so the same rule names the
+#: code point back to the model instead (round 1, Q3).
+_ASK_COMMAND_ALLOWED_SPACE = " "
+
+
+def ask_command_problem(command: str) -> str | None:
+    """Why ``command`` (already stripped) cannot ride an ask, or ``None``.
+
+    The ONE rule for the ``AskQuestion.command`` field, shared by the tool's
+    validator and by ``asks/queue._question_shape`` (which re-applies it to rows
+    that reach the queue without passing the tool, e.g. a hand-built or older
+    projection), so the two can never drift. Characters are REFUSED, never
+    stripped: the message goes back to the model, which can correct the
+    command, whereas silently rewriting it would put a command in front of the
+    user that nobody wrote.
+    """
+    if not command:
+        return "command is empty; omit it instead"
+    if len(command) > ASK_COMMAND_MAX_CHARS:
+        return f"command is longer than {ASK_COMMAND_MAX_CHARS} characters"
+    for char in command:
+        category = unicodedata.category(char)
+        if category in _ASK_COMMAND_REFUSED_CATEGORIES or (
+            category == "Zs" and char != _ASK_COMMAND_ALLOWED_SPACE
+        ):
+            return (
+                f"command must be one plain line: U+{ord(char):04X} "
+                f"({unicodedata.name(char, 'control character')}) is not allowed"
+            )
+    return None
+
+
 class AskQuestion(BaseModel):
     """One question the ``ask`` tool puts to the user."""
 
@@ -2015,8 +2092,78 @@ class AskQuestion(BaseModel):
         ),
     )
 
+    # A SUGGESTED terminal command for the user (e.g. `glab auth login`), so a
+    # surface can offer it as an action instead of the user copying inline code
+    # out of the prose: the desktop app types it into a NEW terminal tab on the
+    # device showing the card (Insert) or, after a confirmation dialog, types
+    # and runs it (Run). Nothing ever runs it without that click + confirm. One
+    # per question, not per option, to keep the card to one action row. Allowed
+    # with `secret` ("run `gh auth token`, paste the result"). The field is
+    # absent from a stored row unless supplied (`_question_shape`), and bridge
+    # rows never carry it: another team's agent may not hand the operator a
+    # command. The description is deliberately short — it rides every request's
+    # tools array (see the two ask ledgers in AGENTS.md "The ask queue").
+    command: str | None = Field(
+        default=None,
+        max_length=ASK_COMMAND_MAX_CHARS,
+        description=(
+            "Optional one-line shell command for the user to run; the app offers "
+            "it in a terminal. Include cd if the directory matters."
+        ),
+    )
+    # WHICH DEVICE the command is for. The desktop's terminal is a node-pty on
+    # the machine showing the card, which for a mesh-remote conversation is NOT
+    # the machine the agent works on: `glab auth login` meant for the agent's
+    # box would sign in the viewer's Mac instead. So the model names the
+    # target, and the desktop offers one-click Run only when the terminal it
+    # would type into IS that device (Insert/copy stay available everywhere).
+    # "agent" is the default because nearly every suggested command fixes the
+    # agent's own environment; "user" is for the operator's own computer
+    # ("glab is signed out on your Mac"). Only valid alongside `command`, and
+    # stamped "agent" on validation when omitted, so a stored row always
+    # carries an explicit target and a consumer never has to guess a default.
+    command_target: Literal["agent", "user"] | None = Field(
+        default=None,
+        description=(
+            "Where it must run: 'agent' (default: your machine) or 'user' (their "
+            "own computer). One-click run is offered only on the right device."
+        ),
+    )
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _strip_command(cls, value: object) -> object:
+        # Strip BEFORE the `max_length` constraint runs, so the cap is measured
+        # on the command the user will see — the same order the queue path
+        # (`asks/queue._carried_command`) uses. As a plain (after) validator the
+        # strip ran too late: `" " + "x" * 500` was refused by pydantic's
+        # length check though the stripped command is exactly at the cap
+        # (round 1, n1/Q2). `max_length` stays on the Field so the published
+        # schema's `maxLength` hint, and the ledgers measuring it, are unchanged.
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("command")
+    @classmethod
+    def _one_line_command(cls, value: str | None) -> str | None:
+        # A field validator, not part of `_shape`: `_shape` returns early for a
+        # secret question, and the command rule applies to both kinds.
+        if value is None:
+            return None
+        value = value.strip()
+        problem = ask_command_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
     @model_validator(mode="after")
     def _shape(self) -> "AskQuestion":
+        # Command target first: `_shape` returns early for a secret question
+        # below, and a secret question may carry a command too.
+        if self.command is None:
+            if self.command_target is not None:
+                raise ValueError("command_target only applies with a command")
+        elif self.command_target is None:
+            self.command_target = "agent"
         if self.secret:
             # A secret question is a masked paste, not a picker. Options and
             # multi-select have no meaning there, and a recommended option
@@ -2148,6 +2295,10 @@ class AskRowQuestion(AskQuestion):
     human_required: bool = False
     #: The authority block frozen at issuance (S-3), present only when supplied.
     bridge: dict[str, Any] | None = None
+    #: A headless node's site approval: the inputs its ``site:v1:`` question id
+    #: binds, so the SIGNER can rebuild the id and the card it shows
+    #: (``browser_bridge/site_approval.verify_site_card``). Present only then.
+    site: dict[str, Any] | None = None
     # The row's options are the strict option PLUS the carriage's id, so the
     # field narrows to the seat-bearing subclass. A list is mutable and therefore
     # invariant, which pyright reports even though every ``AskRowOption`` IS an
@@ -2400,6 +2551,8 @@ class ToolContext(BaseModel):
     # exactly this field, and its absence is what keeps the tool out of a
     # session that has no bridge. Stays None until the session lane wires it.
     bridge_runtime: Any | None = Field(default=None, exclude=True, repr=False)
+    # Host identity frozen for this dispatch context, not a model argument.
+    bridge_session_agent_display: str | None = Field(default=None, exclude=True, repr=False)
     # The path a READER resolved, reported by the reader itself the instant it
     # resolved it: ``(resolved_path, resolvable)``. Installed by the loop for the
     # duration of ONE call -- the recorder it holds is bound to that call's own id
@@ -2446,6 +2599,13 @@ class ToolContext(BaseModel):
     #: (team-bridge-egress.md: "Propagation between sessions").
     #: Tighten-only: a child inherits its parent's taint for life.
     inherited_bridge_taint: bool = False
+    #: The session's community read flag (``community/taint.py``
+    #: ``CommunityTaint``, RFC v2.4 §5.9), owned by the session and injected
+    #: per turn. The bridge tool's ``community_post`` reads it to tell the owner
+    #: why a standing permission does not apply; ``None`` on a host that does
+    #: not track it, which then reads as tainted (fail closed). Host state,
+    #: never serialized.
+    community_taint: Any = Field(default=None, exclude=True, repr=False)
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
     session_name: str = ""
@@ -2518,6 +2678,16 @@ class ToolContext(BaseModel):
     # accepted (see harness/approval.py); call it through ``ask_approval``
     # rather than directly, which is what picks the one this host wrote.
     request_approval: ApprovalGate | None = None
+    #: The session's BASE approval gate, present even under ``--yolo`` (where
+    #: ``request_approval`` is ``None`` because yolo skips the tool gate). Only
+    #: for a person-only card a tool raises itself
+    #: (``harness.approval.never_auto_approved``: the community post): every
+    #: base gate routes those to a person or refuses (the TUI card, desktop
+    #: serving, the yolo/tty gate, SDK ``auto()``), so handing it over lets the
+    #: owner at the keyboard answer instead of the run refusing outright.
+    #: ``None`` on hosts that do not set it; callers fall back to
+    #: ``request_approval``. Host state, never serialized.
+    person_approval: ApprovalGate | None = Field(default=None, exclude=True, repr=False)
     # THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2). A tool may create/update/delete
     # a CONVERSATION-scoped role or team on its own; changing the user's ACCOUNT
     # store is a user decision, and a model must not be able to stamp its own
@@ -2633,6 +2803,16 @@ class ToolContext(BaseModel):
     # ``self._tools`` (``harness.subagent``), and a declared inventory narrows
     # the same list (``Session._filter_declared``).
     may_delegate: bool = False
+    # Whether THIS session can expand a ``spill://`` handle, i.e. holds ``read``
+    # (deferred counts: a deferred tool is callable). DERIVED from the live
+    # inventory in ``Session._build_tool_context``, exactly like
+    # ``may_delegate``. ``spill_truncate`` reads it so a capped result's footer
+    # never teaches a call the run cannot make: a bounded ``--tools`` run
+    # without ``read`` answered "SAVED at spill://… read(path=…)" by calling
+    # its MCP ``fetch`` on the handle or re-searching (head-to-head benchmark,
+    # 2026-11-20: 11 such fetches across three arms). ``True`` by default so
+    # every host that does not derive it keeps today's footer.
+    spill_readable: bool = True
     # The user's persistent agent registry (``local_operator.agents``), behind
     # the ``agent`` tool and behind role resolution for ``task(agent=...)``.
     # Typed ``Any`` because that module is heavy (dill, yaml, the whole agent
@@ -2746,19 +2926,58 @@ class ToolContext(BaseModel):
     #: :attr:`enqueue_ask`: a plain callable returning ``{"ok", "text"/"error",
     #: "details"}``, resolved once per session turn.
     withdraw_ask: Callable[..., Mapping[str, Any]] | None = None
-    #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
-    #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
-    #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``
-    #: wherever it is, so its presence IS the mode, one fact. TOTAL and
-    #: fail-open: it returns a diversion mapping (``{"text": …, "details": …}``
-    #: carrying the hidden marker) or ``None``, and NEVER raises for any
-    #: policy, provider, parse or timeout condition — ``None`` means "enqueue,
-    #: unchanged". The in-callable policy read owns the kill switch; the
-    #: tool-side guard around the await is the last line so even a contract
-    #: breach cannot lose the ask (design §2.2's failure-semantics table).
-    gate_ask: Callable[..., Awaitable[Mapping[str, Any] | None]] | None = None
-    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async, mirroring
-    #: :attr:`gate_ask`: the ``no_reply`` tool awaits it for the run's refusal
+    #: A headless node's site cards (``browser_bridge/site_approval.py``):
+    #: ``withdraw_site_asks(origin, keep_question_id="")`` settles (``moot``)
+    #: every OPEN site card in this session for ``origin`` except the one bound
+    #: to ``keep_question_id``, and returns the ask ids it withdrew. The browser
+    #: tool calls it on ``cancel_access`` and before raising a fresh card, so a
+    #: card bound to a dead extension entry never blocks the live one (review
+    #: U3/Q1). Bound beside :attr:`withdraw_ask`, ``None`` where it is.
+    withdraw_site_asks: Callable[..., list[str]] | None = None
+    #: ``site_ask_lapses(origin)``: how many of this session's site cards for
+    #: ``origin`` lapsed unanswered since the operator's last admitted chat
+    #: message. ``request_access`` refuses a further card past the one re-raise
+    #: (review U15); an operator reply re-opens one card plus one re-raise
+    #: (review R4-1). Bound beside
+    #: :attr:`withdraw_site_asks`, ``None`` where it is.
+    site_ask_lapses: Callable[[str], int] | None = None
+    #: THE SITE-CARD DOOR (security review 60334). A ``task`` subagent is
+    #: built without an ask handler, so it has no queue and :attr:`enqueue_ask`
+    #: is ``None``. ``enqueue_site_card(facts, timeout, tool_call_id="",
+    #: cancel=None)`` takes ONLY a typed ``site_approval.SiteAccessFacts``
+    #: (never a question) and hands it to the nearest live ancestor with a
+    #: queue, which rebuilds the canonical signed card itself and binds it to
+    #: this requester and request. ``cancel`` is the tool's ``cancel_access``
+    #: closure for the entry, kept for this requester's teardown. Returns the
+    #: ask receipt shape (``{"ok", "details"/"error"}``); ``"busy": True``
+    #: means another open card already asks about the origin (its ids in
+    #: ``details``); ``"no_ancestor": True`` means no session up the tree can
+    #: queue it. Bound ONLY on a subagent with no queue; a session with its
+    #: own queue keeps :attr:`enqueue_ask`.
+    enqueue_site_card: Callable[..., Mapping[str, Any]] | None = None
+    #: THE TEARDOWN FENCE, before dispatch (60334 design correction (2)):
+    #: ``begin_site_request(cancel)`` returns a ``finish()`` to call once the
+    #: ``request_access`` reply has been handled, or ``None`` once the
+    #: session's teardown has begun — then nothing may be dispatched. Bound
+    #: beside :attr:`enqueue_site_card`.
+    begin_site_request: Callable[..., Any] | None = None
+    #: THE TEAM INTEGRATIONS CONSENT SEAM (RFC "Radient Team Integrations"
+    #: §8.2): a ``team_bridge.integration_consent.IntegrationConsent`` over this
+    #: session's ask queue and the ids a PERSON answered in this run. Only the
+    #: session can say that — a tool reading the ask log cannot tell a card
+    #: answer from ``answered_in_chat`` — so publishing an app or minting a
+    #: credential is reachable only where the session binds this. ``None``
+    #: without a queued-ask engine (blocking arm, children, headless hosts),
+    #: which also keeps the ``integrations`` tool off those sessions.
+    integration_consent: Any | None = Field(default=None, exclude=True, repr=False)
+    #: Test seam only: a zero-arg factory returning an object with the
+    #: ``IntegrationsClient`` surface (a faked HTTP layer). Production never
+    #: sets it; the tool then rides the Team Bridge client's pinned OAuth row.
+    integrations_client_factory: Callable[[], Any] | None = Field(
+        default=None, exclude=True, repr=False
+    )
+    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async: the
+    #: ``no_reply`` tool awaits it for the run's refusal
     #: decision, and its presence IS the fact that this session may end a turn
     #: quietly — ``build_no_reply_tool`` returns ``None`` without it
     #: (footprint ladder rung 3: the tool is absent, not inert, where a quiet
@@ -3123,6 +3342,16 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: a synthetic end, or one produced by a pre-field build — keeps every
     #: existing reader's behaviour.
     notify: bool = True
+    #: ADR 0009 (mobile repo ``docs/adr/0009-*``): the run's ORIGIN, the surface
+    #: of its most recent human input or the conversation's inherited driver
+    #: (``mobile``/``remote``/``desktop``/``tui``/``unknown``). Stamped by the
+    #: session beside ``notify``; ``""`` (a synthetic end, an older build) reads
+    #: as ``unknown`` and routes as non-mobile.
+    origin: str = ""
+    #: ADR 0009 §3: an ask opened in this run's window is still open at its end.
+    #: Computed independently of ``notify`` (a wake run ending on ``ask_user``
+    #: has ``notify = False`` and must still reach an away phone).
+    needs_user: bool = False
     #: Permission/request is not completion. The loop may nominate a settled
     #: invocation; only the owning Session, after host continuations settle,
     #: commits acceptance. Defaults never reconstruct authority on replay.
@@ -3707,6 +3936,27 @@ class CompactionEndEvent(AgentEvent[Literal["compaction_end"]]):
     #: Optional and defaulting to ``None`` so a host that predates it (and
     #: every ordinary size-triggered pass) is unchanged.
     detail: str | None = None
+    #: Which SIZE term the gate was over when this pass ran, so a reader of a
+    #: recorded session need not reconstruct it: ``"tokens"``,
+    #: ``"wire_bytes"`` (the serialized-request trigger, which fires on image
+    #: weight far below any token line), ``"tokens+wire_bytes"``, or
+    #: ``"none"`` for a pass neither size term forced (manual, advised, idle;
+    #: ``reason`` and ``detail`` say which). Without it a byte-fired pass at
+    #: 35k tokens of a 400k threshold is indistinguishable from a misfire, and
+    #: the three episodes that motivated the field had to be diagnosed from
+    #: estimated artifact sizes. ``""`` when the pass failed or the session
+    #: could not measure. Diagnostic only: no host branches on it.
+    trigger: str = ""
+    #: Serialized request size (``compaction.tokens.estimate_wire_bytes``, a
+    #: BYTE ruler, never comparable with the token figures above) of the
+    #: history the pass planned against, and of the committed context the next
+    #: request sends. ``wire_bytes_trigger`` is the resolved soft byte trigger
+    #: the pair is read against (0 = disabled), so ``trigger - after`` is the
+    #: room the pass left before the next byte-fired one. All three default to
+    #: 0 so a host that predates them, and every failed pass, is unchanged.
+    wire_bytes_before: int = 0
+    wire_bytes_after: int = 0
+    wire_bytes_trigger: int = 0
 
 
 class RetryStartEvent(AgentEvent[Literal["retry_start"]]):
@@ -4037,6 +4287,20 @@ class LoopConfig(BaseModel):
     #: should hold to; anything that touches disk, a lock or a socket belongs on
     #: the far side of a queue, not here.
     capture_prepared_write: Callable[[ToolCall, ToolResult], None] | None = None
+    #: Owner-only live file capture/binding. Unlike analytics this is awaited:
+    #: metadata freezes adjacent to real producer completion, before arbitrary
+    #: hooks or delayed event delivery. Handles never enter Message/wire JSON.
+    file_provenance: Callable[[str, Any, Any], Awaitable[None]] | None = None
+    #: Durably bind a NESTED (``eval`` -> ``tool('write'|'edit')``) archived
+    #: full diff to this session as ``(outer_call_id, call_id, tool_name,
+    #: descriptor)``; returns ``True`` only once the binding is written. AWAITED
+    #: by the eval bridge before the descriptor reaches the nested end event or
+    #: the cell (see ``tools.diff_archive.NESTED_DIFF_BINDING_TYPE``): a nested
+    #: call has no tool row of its own, so this host-written journal entry is
+    #: what the diff routes prove membership with. ``None`` (a host without a
+    #: journal) or ``False`` downgrades the descriptor to ``unavailable``
+    #: rather than advertise an archive no route could serve.
+    bind_nested_diff: Callable[[str, str, str, dict[str, Any]], Awaitable[bool]] | None = None
     #: The session's divergence observer (``local_operator.divergence.
     #: DivergenceJudge``), or ``None`` for a host that does not wire one.
     #:
@@ -4271,6 +4535,9 @@ EFFORT_CHOICE_UNSET = object()
 
 class ModelSpec(BaseModel):
     """A provider/model pair plus the knobs wire clients need."""
+
+    # Persisted connection-scoped listing facts; dispatch performs no IAM lookup.
+    bedrock_metadata: dict[str, Any] | None = None
 
     provider: str  # registry id: openai, anthropic, kimi, xai, ollama, ...
     model_id: str
@@ -4751,6 +5018,25 @@ class ChatRequest(BaseModel):
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
     tool_choice: Literal["auto", "none", "required"] = "auto"
+    # Opt-in transport invariant, not a role-name special case. Failover must
+    # recheck it against the model and content it actually dispatches.
+    required_image_count: int = Field(default=0, ge=0)
+
+    def validate_required_images(self) -> None:
+        if not self.required_image_count:
+            return
+        count = sum(
+            isinstance(block, ImageContent)
+            for message in self.messages
+            for block in message.content
+        )
+        if (
+            not self.model.supports_images
+            or not self.model.supports_images_stated
+            or count < self.required_image_count
+        ):
+            raise ValueError("required image evidence cannot be sent to the serving model")
+
     # A reasoning-effort ceiling the harness set DELIBERATELY (an empty
     # truncation retry stepped the effort down one rung). The session's
     # frozen auto-effort override must not raise the request back above it:
@@ -4837,6 +5123,9 @@ class ChatRequest(BaseModel):
     #: metadata: it is request policy for one wire, not conversation state.
     cache_diagnostics: bool = Field(default=False, exclude=True, repr=False)
     cache_diagnostics_previous_id: str | None = Field(default=None, exclude=True, repr=False)
+    #: Per-stream local Google comparison identity; forks never share this even
+    #: when they inherit prompt_cache_key. Never sent to any provider or saved.
+    cache_diagnostics_chain: str | None = Field(default=None, exclude=True, repr=False)
     # Native reasoning is opaque: use provider-reported token counts rather
     # than treating encrypted bytes as text. Populated only after replay checks.
     native_context_tokens: int = Field(default=0, exclude=True, repr=False)
@@ -4847,6 +5136,21 @@ class ChatRequest(BaseModel):
     #: outside a session stream) derives the role from ``purpose`` alone, as a
     #: top-level conversation. Transport policy, never wire content.
     cache_role: str | None = Field(default=None, exclude=True, repr=False)
+    #: Where the Anthropic wire may place ``cache_control`` markers.
+    #: ``"auto"`` (default) is the conversation policy, byte-identical to the
+    #: tree before this field: system breakpoints plus message breakpoints.
+    #: ``"system"`` puts ONE marker on the last system block and none on
+    #: messages; ``"none"`` sends no marker at all.
+    #:
+    #: WHY: one-shot auxiliary calls (screeners, judges) are isolated, single
+    #: user-turn requests whose only marker landed on ``messages[-1]`` — AFTER
+    #: content unique to that call — so every call paid the cache-WRITE premium
+    #: for a prefix nothing would ever read. Measured on the 7-day usage ledger:
+    #: ``team_bridge_screen`` 37,014 distinct prompt hashes over 37,457 calls
+    #: (1.4% cache hit), ``guardrail`` 0% hit. Transport policy, never content.
+    cache_markers: Literal["auto", "system", "none"] = Field(
+        default="auto", exclude=True, repr=False
+    )
     #: This conversation has already had a turn that ran at least
     #: ``anthropic_cache_ttl.SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` from request
     #: start to stream end. Stamped by ``SessionStreamFn`` from its own
@@ -5331,6 +5635,10 @@ class StreamUsageEvent(BaseModel):
 
 class StreamEndEvent(BaseModel):
     type: Literal["end"] = "end"
+    #: Local Google prefix diagnosis, available only after usageMetadata.
+    #: Debug metadata for analytics/logging, never user-facing usage content.
+    cache_miss_type: str | None = Field(default=None, exclude=True, repr=False)
+    cache_missed_tokens: int = Field(default=0, exclude=True, repr=False)
     stop_reason: str  # stop | length | toolUse | refusal | error | aborted
     usage: Usage | None = None
     provider_payload: dict[str, Any] | None = None

@@ -1,0 +1,4373 @@
+{
+  "locale": "es",
+  "namespace": "tui.info",
+  "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+  "context_sha256": "905690aae095d0ec8fe0b36f6dfe92db05e9c6e3bfdbc0fe87577a37002b9d11",
+  "target_sha256": "cd9603eaf49a117499f1680092b9f42ef695ad1b7219cbe3107ede40ef96eb09",
+  "commit": "e9e6c3711149cba6899083eab019342d98d5fa55",
+  "scope": "ea92d3c2faa7..e9e6c3711149",
+  "round": 1,
+  "translator": {
+    "agent": "translator/info-translate-es",
+    "session": "fe613bb2e394",
+    "model": "openai/gpt-6.1-sol",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "provider failure: quota",
+    "date": null,
+    "date_provenance": "Translator mechanical receipt does not record date; not invented"
+  },
+  "auditor": {
+    "agent": "translation-auditor/info-audit-es",
+    "session": "f6e6e222623a",
+    "model": "openai/gpt-6.1-sol",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "provider failure: quota",
+    "date": "2026-11-21",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "Independent full 277-key semantic audit: 0 blocker, 0 major, 3 grouped minor findings (7 keys), plus measured non-gating fit risks. App QA/design/CI and real screen fitting not performed and remain separate. Runtime/trajectory/queued/unknown/lower-bound/retained distinctions are preserved. Context-only normal parsing fallback authorized by parent after audited-reader 200000-character size cap; lossless dedup decode equals all 277 original context entries. All source and target prose read through audited reader.",
+  "unresolved_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 3,
+    "nit": 0
+  },
+  "read_counts": {
+    "english": 277,
+    "spanish": 277,
+    "context": 277,
+    "per_key_results": 277
+  },
+  "namespace_verdict": "passed with minor findings; no ship readiness claimed",
+  "groups": {
+    "heading": {
+      "read": 7,
+      "verdict": "clean"
+    },
+    "label": {
+      "read": 35,
+      "verdict": "clean"
+    },
+    "status": {
+      "read": 9,
+      "verdict": "clean"
+    },
+    "install": {
+      "read": 17,
+      "verdict": "clean"
+    },
+    "latest": {
+      "read": 10,
+      "verdict": "clean"
+    },
+    "kind_of_runtime": {
+      "read": 8,
+      "verdict": "clean"
+    },
+    "import_path": {
+      "read": 6,
+      "verdict": "clean"
+    },
+    "kind": {
+      "read": 7,
+      "verdict": "clean"
+    },
+    "session": {
+      "read": 6,
+      "verdict": "clean"
+    },
+    "approval": {
+      "read": 4,
+      "verdict": "clean"
+    },
+    "redirect": {
+      "read": 3,
+      "verdict": "clean"
+    },
+    "sessions": {
+      "read": 11,
+      "verdict": "clean"
+    },
+    "fleet_caveats": {
+      "read": 1,
+      "verdict": "clean"
+    },
+    "agents": {
+      "read": 38,
+      "verdict": "passed with minor findings"
+    },
+    "env": {
+      "read": 18,
+      "verdict": "clean"
+    },
+    "report": {
+      "read": 3,
+      "verdict": "clean"
+    },
+    "info_hint": {
+      "read": 2,
+      "verdict": "clean"
+    },
+    "action_copy_report": {
+      "read": 2,
+      "verdict": "clean"
+    },
+    "latest_line": {
+      "read": 3,
+      "verdict": "clean"
+    },
+    "not_answering_clause": {
+      "read": 5,
+      "verdict": "clean"
+    },
+    "tree_lines": {
+      "read": 1,
+      "verdict": "clean"
+    },
+    "export": {
+      "read": 60,
+      "verdict": "passed with minor findings"
+    },
+    "count": {
+      "read": 4,
+      "verdict": "clean"
+    },
+    "state": {
+      "read": 12,
+      "verdict": "clean"
+    },
+    "leaving": {
+      "read": 3,
+      "verdict": "clean"
+    },
+    "update": {
+      "read": 2,
+      "verdict": "clean"
+    }
+  },
+  "findings_detail": [
+    {
+      "id": "ES1",
+      "severity": "minor",
+      "keys": [
+        "tui.info.agents.unreported_full",
+        "tui.info.agents.unreported_short",
+        "tui.info.agents.unreported_suffix",
+        "tui.info.export.trajectories_unreported"
+      ],
+      "current": {
+        "tui.info.agents.unreported_full": "{subagents_unreported} de {runtimes, plural, one {# runtime} many {# de runtimes} other {# runtimes}} no informaron",
+        "tui.info.agents.unreported_short": "{subagents_unreported} no informaron",
+        "tui.info.agents.unreported_suffix": " · {subagents_unreported} no informaron",
+        "tui.info.export.trajectories_unreported": "  trayectorias      — ({subagents_unreported} de {sessions_live_sessions_wedged, plural, one {# runtime} many {# de runtimes} other {# runtimes}} no informaron)"
+      },
+      "proposed": {
+        "tui.info.agents.unreported_full": "{subagents_unreported} de {runtimes, plural, one {# runtime} many {# de runtimes} other {# runtimes}} sin datos",
+        "tui.info.agents.unreported_short": "{subagents_unreported} sin datos",
+        "tui.info.agents.unreported_suffix": " · {subagents_unreported} sin datos",
+        "tui.info.export.trajectories_unreported": "  trayectorias      — ({subagents_unreported} de {sessions_live_sessions_wedged, plural, one {# runtime} many {# de runtimes} other {# runtimes}} sin datos)"
+      },
+      "reason": "The invariant plural verb no informaron disagrees when exactly one runtime did not report; use a number-neutral nominal phrase without changing the simple-argument contract.",
+      "evidence": "Production tr_record: subagents_unreported='1', runtimes=1 -> '1 de 1 runtime no informaron'; same export case -> '  trayectorias      — (1 de 1 runtime no informaron)'."
+    },
+    {
+      "id": "ES2",
+      "severity": "minor",
+      "keys": [
+        "tui.info.agents.retained_full",
+        "tui.info.export.session_counts"
+      ],
+      "current": {
+        "tui.info.agents.retained_full": "{settled, plural, one {# finalizado} many {# de finalizados} other {# finalizados}} (conservados)",
+        "tui.info.export.session_counts": "  esta sesión       {running, plural, one {# en ejecución} many {# en ejecución} other {# en ejecución}} · {queued, plural, one {# en cola} many {# en cola} other {# en cola}} · {settled, plural, one {# finalizado} many {# de finalizados} other {# finalizados}} (conservados)"
+      },
+      "proposed": {
+        "tui.info.agents.retained_full": "{settled, plural, one {# finalizado (conservado)} many {# de finalizados (conservados)} other {# finalizados (conservados)}}",
+        "tui.info.export.session_counts": "  esta sesión       {running, plural, one {# en ejecución} many {# en ejecución} other {# en ejecución}} · {queued, plural, one {# en cola} many {# en cola} other {# en cola}} · {settled, plural, one {# finalizado (conservado)} many {# de finalizados (conservados)} other {# finalizados (conservados)}}"
+      },
+      "reason": "The retained-history qualifier is invariably plural, yielding 1 finalizado (conservados); put agreement inside the existing settled plural branches.",
+      "evidence": "Production tr_record with settled=1 -> '1 finalizado (conservados)'. info_panel.py notes at 1598 and render.py export_session_counts confirm retained describes bounded settled roster history, not successful-only completion."
+    },
+    {
+      "id": "ES3",
+      "severity": "minor",
+      "keys": [
+        "tui.info.export.mobile"
+      ],
+      "current": {
+        "tui.info.export.mobile": "  teléfono          {has_mobile_installed, select, yes {instalado} other {no instalado}}{has_mobile_healthy, select, yes { · funciona correctamente} other {}}{has_env_mobile_installed_and_env_mobile_port, select, yes { · puerto {mobile_port}} other {}}"
+      },
+      "proposed": {
+        "tui.info.export.mobile": "  relé del teléfono {has_mobile_installed, select, yes {instalado} other {no instalado}}{has_mobile_healthy, select, yes { · funciona correctamente} other {}}{has_env_mobile_installed_and_env_mobile_port, select, yes { · puerto {mobile_port}} other {}}"
+      },
+      "reason": "The export names the phone itself as installed although the collected fact is installation of the local mobile relay; match the existing Relé del teléfono label.",
+      "evidence": "collect.py mobile() tests mobile_install.plist_path().exists(); render.py:651 uses env.mobile_installed. Production tr_record -> '  teléfono          instalado · funciona correctamente · puerto 5421'. Minor diagnostic-label precision, not a process/count corruption."
+    }
+  ],
+  "supersedes_scratch_receipt": "es-info-independent-audit-round1-e9e6.json had a scratch defaultdict aggregation bug affecting group summaries only; this final receipt corrects it, reviewed target bytes unchanged.",
+  "per_key": [
+    {
+      "message_id": "tui.info.heading.install",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.version",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.install_kind",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.install_path",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.interpreter",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.running_code",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.source",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.built",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.python",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.platform",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.heading.this_session",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.session_id",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.kind",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.model",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.working_dir",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.answering",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.started",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.config_dir",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.cache_dir",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.agent_home",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.log_dir",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.control_port",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.heading.sessions_on_this_machine",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.heading.sessions_unavailable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.heading.agents_and_subagents",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.runtimes",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.trajectories",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.agent_profiles",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.teams",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.subagent_capacity",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.heading.environment",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.terminal",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.theme",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.approvals",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.mcp_servers",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.browser",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.mobile_relay",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.multiplexer",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.guides",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.skills",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.label.credentials",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.heading.could_not_read",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.status.leaving_silent",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.status.leaving_for_build",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.status.no_movement",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.status.leaving",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.status.bound_held",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.status.updating",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.status.updated",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.status.update_failed",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.status.moving_to_a_new_build",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.description",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.full_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.loading",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.unavailable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.shadow_label_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.shadow_label_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.shadow_label_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.shadow_meta_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.shadow_meta_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.shadow_meta_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.source_snapshot",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.source_snapshot_unknown",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.snapshot_note_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.snapshot_note_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.source_wheel",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.build_age",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.install.shadow_explanation",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest.installed_unreadable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest.full_unknown",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest.unknown",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest.never_checked",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest.behind_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest.behind_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest.current",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest.stale",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest.checked_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest.checked_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.attached_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.attached_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.exec_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.exec_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.exec_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.import_path.editable_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.import_path.editable_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.import_path.editable_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.import_path.shadowed_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.import_path.shadowed_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.import_path.shadowed_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind.editable_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind.editable_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind.uv_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind.uv_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind.non_editable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind.pip_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.kind.pip_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.session.description",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.session.description_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.session.failover_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.session.failover_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.session.started",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.session.protocol",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.approval.ask_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.approval.ask_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.approval.auto_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.approval.auto_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.redirect.full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.redirect.short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.redirect.terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.loading",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.registry_loading",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.registry_unavailable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.summary_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 36,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.not_answering_clause",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.summary_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.empty",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.self",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.pid",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.build_skew",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.sessions.memory_unavailable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.fleet_caveats.lower_bound",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.loading_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.loading_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.loading_mid",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.loading_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.summary_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.unknown_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.unknown_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.queued_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.queued_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.queued_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.quiet_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.quiet_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.runtimes",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 18,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.unreported_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "minor",
+      "finding_ids": [
+        "ES1"
+      ],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.unreported_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "minor",
+      "finding_ids": [
+        "ES1"
+      ],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.unreported_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.queued_suffix",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.queued_count",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.queued_count_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.trajectories_total",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.unreported_suffix",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "minor",
+      "finding_ids": [
+        "ES1"
+      ],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.roster_unreadable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.session_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 108,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.session_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 36,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.session_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.retained_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "minor",
+      "finding_ids": [
+        "ES2"
+      ],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.retained_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.retained_terse",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.capacity",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.capacity_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.capacity_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.roster_failure",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.empty",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.waiting",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.tree_counts",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.tree_legacy",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.description",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.description_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.mcp_connected",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.mcp_connecting_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.mcp_connecting_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.mcp_failed_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.mcp_failed_short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.mcp_empty",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.none",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.mobile_installed",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.mobile_absent",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.mobile_healthy",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.mobile_up",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.credentials_unreadable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.credential_count",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.credentials_more",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.credentials_set",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.env.credentials_empty",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.report.degraded_count",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.report.degraded",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.report.captured",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.info_hint.short",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.info_hint.full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.action_copy_report.loading",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.action_copy_report.redacted",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest_line.installed_unreadable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest_line.never_checked",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.latest_line.checked",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.no_rows",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.more",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.remedy_one",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.remedy_many",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.tree_lines.deeper",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.heading_install",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.version",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.latest_known",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.install_kind",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.install_path",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.interpreter",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.running_code",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 9,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.source",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 9,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.build_age",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.python",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 3,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.platform",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.heading_session",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.session_id",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.kind",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.pid",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.model",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.effective_model",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.uptime",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.working_dir",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.config_dir",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 3,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.cache_dir",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.agent_home",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 3,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.log_dir",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.control_port",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 3,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.protocol",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 3,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.heading_sessions",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.sessions_unavailable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.sessions_empty",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.sessions_summary",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 108,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.pid_fallback",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.heading_agents",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.runtimes",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 36,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.trajectories_unreported",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "minor",
+      "finding_ids": [
+        "ES1"
+      ],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.queued_suffix",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.trajectories",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.profiles",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.teams",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.roster_unreadable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.session_counts",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "minor",
+      "finding_ids": [
+        "ES2"
+      ],
+      "mechanical_result": "PASS",
+      "render_cases": 216,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.capacity",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 18,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.tree_heading",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.tree_unreadable",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.tree_empty",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.tree_counts",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.tree_legacy",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.lower_bound",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.heading_environment",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.terminal",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 9,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.multiplexer",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.tty",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 3,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.theme",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.approvals",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.browser",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 3,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.mobile",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "minor",
+      "finding_ids": [
+        "ES3"
+      ],
+      "mechanical_result": "PASS",
+      "render_cases": 27,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.mcp",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 54,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.guides",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.skills",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.credentials",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 18,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.heading_degraded",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.count.session",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.count.runtime",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.count.trajectory",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.count.subagent",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 6,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.running",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.starting",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.queued",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.pausing",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.paused",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.completed",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.failed",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.cancelled",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.gone",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.live",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.stale",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.state.unknown",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.leaving.signal",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.leaving.build",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.leaving.overdue",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.update.target",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.update.done_target",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.summary_full",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 36,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.agents.addends",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 36,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    },
+    {
+      "message_id": "tui.info.export.summary",
+      "english_read": true,
+      "spanish_read": true,
+      "context_read": true,
+      "semantic_result": "passed",
+      "finding_ids": [],
+      "mechanical_result": "PASS",
+      "render_cases": 1,
+      "register": "neutral Spanish; tú where addressed; sentence case",
+      "width_result": "measured text cells only; no screen-fit approval"
+    }
+  ],
+  "mechanical": {
+    "hashes": {
+      "source": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+      "context": "905690aae095d0ec8fe0b36f6dfe92db05e9c6e3bfdbc0fe87577a37002b9d11",
+      "target": "cd9603eaf49a117499f1680092b9f42ef695ad1b7219cbe3107ede40ef96eb09"
+    },
+    "key_count": 277,
+    "plural_nodes": 47,
+    "plural_branch_checks": 141,
+    "select_nodes": 23,
+    "render_cases": 1179,
+    "provenance": {
+      "es": 1179
+    },
+    "plural_controls": [
+      {
+        "count": 0,
+        "category": "other",
+        "render": "0 sesiones"
+      },
+      {
+        "count": 1,
+        "category": "one",
+        "render": "1 sesión"
+      },
+      {
+        "count": 2,
+        "category": "other",
+        "render": "2 sesiones"
+      },
+      {
+        "count": 1000000,
+        "category": "many",
+        "render": "1.000.000 de sesiones"
+      },
+      {
+        "count": 1500000,
+        "category": "other",
+        "render": "1.500.000 sesiones"
+      },
+      {
+        "count": 1.5,
+        "category": "other",
+        "render": "1,5 sesiones"
+      }
+    ],
+    "negative_controls": [
+      {
+        "case": "missing_arg",
+        "result": "MessageFormatError"
+      },
+      {
+        "case": "broken_icu",
+        "result": "MessageSyntaxError"
+      }
+    ],
+    "source_equal": [
+      "tui.info.label.python",
+      "tui.info.label.runtimes",
+      "tui.info.label.terminal",
+      "tui.info.import_path.editable_terse",
+      "tui.info.approval.auto_short",
+      "tui.info.sessions.pid",
+      "tui.info.export.python",
+      "tui.info.export.pid",
+      "tui.info.export.pid_fallback",
+      "tui.info.export.terminal"
+    ],
+    "hidden_bidi_controls": 0
+  },
+  "width_risks": {
+    "class": "minor rendered-check risk, not demonstrated overflow",
+    "method": "rich.cells.cell_len and actual source _Sections.__post_init__/value_cells formula",
+    "source": "local_operator/tui/widgets/info_panel.py:316-372",
+    "english_label_cells": 20,
+    "spanish_label_cells": 25,
+    "at_card_width_40": {
+      "english_value_cells": 16,
+      "spanish_value_cells": 11
+    },
+    "long_labels": {
+      "tui.info.label.log_dir": {
+        "es": "Directorio de registros",
+        "en_cells": 7,
+        "es_cells": 23,
+        "suggestion": "Dir. de registros"
+      },
+      "tui.info.label.subagent_capacity": {
+        "es": "Capacidad de subagentes",
+        "en_cells": 17,
+        "es_cells": 23,
+        "suggestion": "Keep accurate wording; rendered narrow-state check required"
+      },
+      "tui.info.label.working_dir": {
+        "es": "Directorio de trabajo",
+        "en_cells": 11,
+        "es_cells": 21,
+        "suggestion": "Dir. de trabajo"
+      }
+    },
+    "all_expansions": [
+      {
+        "key": "tui.info.heading.install",
+        "en_cells": 7,
+        "es_cells": 11,
+        "text": "Instalación"
+      },
+      {
+        "key": "tui.info.label.install_kind",
+        "en_cells": 12,
+        "es_cells": 19,
+        "text": "Tipo de instalación"
+      },
+      {
+        "key": "tui.info.label.install_path",
+        "en_cells": 12,
+        "es_cells": 19,
+        "text": "Ruta de instalación"
+      },
+      {
+        "key": "tui.info.label.running_code",
+        "en_cells": 12,
+        "es_cells": 19,
+        "text": "Código en ejecución"
+      },
+      {
+        "key": "tui.info.label.built",
+        "en_cells": 5,
+        "es_cells": 11,
+        "text": "Compilación"
+      },
+      {
+        "key": "tui.info.label.platform",
+        "en_cells": 8,
+        "es_cells": 10,
+        "text": "Plataforma"
+      },
+      {
+        "key": "tui.info.label.session_id",
+        "en_cells": 10,
+        "es_cells": 12,
+        "text": "ID de sesión"
+      },
+      {
+        "key": "tui.info.label.model",
+        "en_cells": 5,
+        "es_cells": 6,
+        "text": "Modelo"
+      },
+      {
+        "key": "tui.info.label.working_dir",
+        "en_cells": 11,
+        "es_cells": 21,
+        "text": "Directorio de trabajo"
+      },
+      {
+        "key": "tui.info.label.config_dir",
+        "en_cells": 10,
+        "es_cells": 21,
+        "text": "Directorio de ajustes"
+      },
+      {
+        "key": "tui.info.label.cache_dir",
+        "en_cells": 9,
+        "es_cells": 19,
+        "text": "Directorio de caché"
+      },
+      {
+        "key": "tui.info.label.agent_home",
+        "en_cells": 10,
+        "es_cells": 21,
+        "text": "Directorio de agentes"
+      },
+      {
+        "key": "tui.info.label.log_dir",
+        "en_cells": 7,
+        "es_cells": 23,
+        "text": "Directorio de registros"
+      },
+      {
+        "key": "tui.info.label.control_port",
+        "en_cells": 12,
+        "es_cells": 17,
+        "text": "Puerto de control"
+      },
+      {
+        "key": "tui.info.heading.sessions_unavailable",
+        "en_cells": 20,
+        "es_cells": 23,
+        "text": "Sesiones no disponibles"
+      },
+      {
+        "key": "tui.info.label.agent_profiles",
+        "en_cells": 14,
+        "es_cells": 19,
+        "text": "Perfiles de agentes"
+      },
+      {
+        "key": "tui.info.label.teams",
+        "en_cells": 5,
+        "es_cells": 7,
+        "text": "Equipos"
+      },
+      {
+        "key": "tui.info.label.subagent_capacity",
+        "en_cells": 17,
+        "es_cells": 23,
+        "text": "Capacidad de subagentes"
+      },
+      {
+        "key": "tui.info.label.approvals",
+        "en_cells": 9,
+        "es_cells": 12,
+        "text": "Aprobaciones"
+      },
+      {
+        "key": "tui.info.label.mcp_servers",
+        "en_cells": 11,
+        "es_cells": 14,
+        "text": "Servidores MCP"
+      },
+      {
+        "key": "tui.info.label.browser",
+        "en_cells": 7,
+        "es_cells": 9,
+        "text": "Navegador"
+      },
+      {
+        "key": "tui.info.label.mobile_relay",
+        "en_cells": 12,
+        "es_cells": 17,
+        "text": "Relé del teléfono"
+      },
+      {
+        "key": "tui.info.label.skills",
+        "en_cells": 6,
+        "es_cells": 11,
+        "text": "Habilidades"
+      },
+      {
+        "key": "tui.info.label.credentials",
+        "en_cells": 11,
+        "es_cells": 12,
+        "text": "Credenciales"
+      },
+      {
+        "key": "tui.info.heading.could_not_read",
+        "en_cells": 14,
+        "es_cells": 15,
+        "text": "No se pudo leer"
+      },
+      {
+        "key": "tui.info.status.leaving_for_build",
+        "en_cells": 17,
+        "es_cells": 36,
+        "text": "saliendo para cambiar de compilación"
+      },
+      {
+        "key": "tui.info.status.leaving",
+        "en_cells": 7,
+        "es_cells": 8,
+        "text": "saliendo"
+      },
+      {
+        "key": "tui.info.status.bound_held",
+        "en_cells": 10,
+        "es_cells": 29,
+        "text": "límite excedido; sigue activo"
+      },
+      {
+        "key": "tui.info.status.updating",
+        "en_cells": 8,
+        "es_cells": 12,
+        "text": "actualizando"
+      },
+      {
+        "key": "tui.info.status.updated",
+        "en_cells": 7,
+        "es_cells": 11,
+        "text": "actualizado"
+      },
+      {
+        "key": "tui.info.status.update_failed",
+        "en_cells": 13,
+        "es_cells": 22,
+        "text": "falló la actualización"
+      },
+      {
+        "key": "tui.info.status.moving_to_a_new_build",
+        "en_cells": 21,
+        "es_cells": 28,
+        "text": "cambiando a otra compilación"
+      },
+      {
+        "key": "tui.info.install.full_short",
+        "en_cells": 7,
+        "es_cells": 11,
+        "text": "instalación"
+      },
+      {
+        "key": "tui.info.install.loading",
+        "en_cells": 9,
+        "es_cells": 12,
+        "text": "comprobando…"
+      },
+      {
+        "key": "tui.info.install.unavailable",
+        "en_cells": 11,
+        "es_cells": 13,
+        "text": "no disponible"
+      },
+      {
+        "key": "tui.info.install.shadow_label_full",
+        "en_cells": 32,
+        "es_cells": 40,
+        "text": "fuera de la ruta de instalación anterior"
+      },
+      {
+        "key": "tui.info.install.shadow_label_short",
+        "en_cells": 26,
+        "es_cells": 31,
+        "text": "fuera de la ruta de instalación"
+      },
+      {
+        "key": "tui.info.install.shadow_label_terse",
+        "en_cells": 22,
+        "es_cells": 24,
+        "text": "no es el árbol instalado"
+      },
+      {
+        "key": "tui.info.install.source_snapshot_unknown",
+        "en_cells": 12,
+        "es_cells": 18,
+        "text": "instantánea de git"
+      },
+      {
+        "key": "tui.info.install.snapshot_note_full",
+        "en_cells": 37,
+        "es_cells": 48,
+        "text": "compilado con lop-update, no es un wheel de PyPI"
+      },
+      {
+        "key": "tui.info.install.snapshot_note_short",
+        "en_cells": 16,
+        "es_cells": 25,
+        "text": "compilación de lop-update"
+      },
+      {
+        "key": "tui.info.install.source_wheel",
+        "en_cells": 10,
+        "es_cells": 13,
+        "text": "wheel de PyPI"
+      },
+      {
+        "key": "tui.info.install.shadow_explanation",
+        "en_cells": 255,
+        "es_cells": 310,
+        "text": "No se producirá ningún error: la versión y las rutas anteriores siguen describiendo la instalación, pero el código en ejecución es el árbol indicado aquí. Los cambios en uno parecerán no tener efecto en el otro. Para corregirlo, vuelve a iniciar desde fuera de esa copia del repositorio; /reload no lo corrige."
+      },
+      {
+        "key": "tui.info.latest.installed_unreadable",
+        "en_cells": 45,
+        "es_cells": 58,
+        "text": "última versión desconocida (no se puede leer la instalada)"
+      },
+      {
+        "key": "tui.info.latest.full_unknown",
+        "en_cells": 14,
+        "es_cells": 26,
+        "text": "última versión desconocida"
+      },
+      {
+        "key": "tui.info.latest.unknown",
+        "en_cells": 7,
+        "es_cells": 11,
+        "text": "desconocida"
+      },
+      {
+        "key": "tui.info.latest.never_checked",
+        "en_cells": 30,
+        "es_cells": 46,
+        "text": "última versión desconocida (nunca se comprobó)"
+      },
+      {
+        "key": "tui.info.latest.behind_short",
+        "en_cells": 6,
+        "es_cells": 8,
+        "text": "atrasada"
+      },
+      {
+        "key": "tui.info.latest.current",
+        "en_cells": 6,
+        "es_cells": 14,
+        "text": "última versión"
+      },
+      {
+        "key": "tui.info.latest.stale",
+        "en_cells": 8,
+        "es_cells": 15,
+        "text": " (dato antiguo)"
+      },
+      {
+        "key": "tui.info.kind_of_runtime.daemon_full",
+        "en_cells": 41,
+        "es_cells": 46,
+        "text": "runtime independiente; sigue sin esta terminal"
+      },
+      {
+        "key": "tui.info.kind_of_runtime.daemon_short",
+        "en_cells": 15,
+        "es_cells": 21,
+        "text": "runtime independiente"
+      },
+      {
+        "key": "tui.info.kind_of_runtime.daemon_terse",
+        "en_cells": 7,
+        "es_cells": 13,
+        "text": "independiente"
+      },
+      {
+        "key": "tui.info.kind_of_runtime.attached_full",
+        "en_cells": 37,
+        "es_cells": 42,
+        "text": "en este proceso, vinculado a esta terminal"
+      },
+      {
+        "key": "tui.info.kind_of_runtime.attached_short",
+        "en_cells": 8,
+        "es_cells": 9,
+        "text": "vinculado"
+      },
+      {
+        "key": "tui.info.kind_of_runtime.exec_full",
+        "en_cells": 28,
+        "es_cells": 30,
+        "text": "ejecución única no interactiva"
+      },
+      {
+        "key": "tui.info.kind_of_runtime.exec_short",
+        "en_cells": 12,
+        "es_cells": 15,
+        "text": "ejecución única"
+      },
+      {
+        "key": "tui.info.import_path.editable_full",
+        "en_cells": 33,
+        "es_cells": 49,
+        "text": "lo esperado en una copia editable del repositorio"
+      },
+      {
+        "key": "tui.info.import_path.shadowed_full",
+        "en_cells": 47,
+        "es_cells": 59,
+        "text": "una copia del repositorio en sys.path oculta la instalación"
+      },
+      {
+        "key": "tui.info.import_path.shadowed_short",
+        "en_cells": 35,
+        "es_cells": 47,
+        "text": "una copia del repositorio oculta la instalación"
+      },
+      {
+        "key": "tui.info.kind.editable_full",
+        "en_cells": 40,
+        "es_cells": 60,
+        "text": "copia editable; los cambios de código se aplican al instante"
+      },
+      {
+        "key": "tui.info.kind.editable_short",
+        "en_cells": 22,
+        "es_cells": 25,
+        "text": "editable · código en vivo"
+      },
+      {
+        "key": "tui.info.session.description",
+        "en_cells": 31,
+        "es_cells": 35,
+        "text": "el runtime al que estás escribiendo"
+      },
+      {
+        "key": "tui.info.session.failover_full",
+        "en_cells": 20,
+        "es_cells": 41,
+        "text": "se está usando la alternativa de respaldo"
+      },
+      {
+        "key": "tui.info.approval.ask_full",
+        "en_cells": 28,
+        "es_cells": 39,
+        "text": "se confirma cada llamada a herramientas"
+      },
+      {
+        "key": "tui.info.approval.ask_short",
+        "en_cells": 9,
+        "es_cells": 16,
+        "text": "con confirmación"
+      },
+      {
+        "key": "tui.info.approval.auto_full",
+        "en_cells": 31,
+        "es_cells": 51,
+        "text": "las herramientas se ejecutan sin pedir confirmación"
+      },
+      {
+        "key": "tui.info.redirect.short",
+        "en_cells": 17,
+        "es_cells": 34,
+        "text": "redirigido por variable de entorno"
+      },
+      {
+        "key": "tui.info.sessions.registry_loading",
+        "en_cells": 29,
+        "es_cells": 32,
+        "text": "Leyendo el registro de sesiones."
+      },
+      {
+        "key": "tui.info.sessions.registry_unavailable",
+        "en_cells": 58,
+        "es_cells": 70,
+        "text": "No se pudo consultar el registro de sesiones. Pulsa r para reintentar."
+      },
+      {
+        "key": "tui.info.sessions.empty",
+        "en_cells": 50,
+        "es_cells": 57,
+        "text": "No hay otras sesiones de lop en ejecución en este equipo."
+      },
+      {
+        "key": "tui.info.sessions.build_skew",
+        "en_cells": 115,
+        "es_cells": 124,
+        "text": "Las sesiones activas usan distintas compilaciones; un cambio puede parecer ausente en una ventana que no se haya reiniciado."
+      },
+      {
+        "key": "tui.info.sessions.memory_unavailable",
+        "en_cells": 42,
+        "es_cells": 43,
+        "text": "No se pudo medir la memoria en este equipo."
+      },
+      {
+        "key": "tui.info.agents.capacity_full",
+        "en_cells": 32,
+        "es_cells": 44,
+        "text": "capacidad agotada; los nuevos quedan en cola"
+      },
+      {
+        "key": "tui.info.agents.capacity_short",
+        "en_cells": 11,
+        "es_cells": 17,
+        "text": "capacidad agotada"
+      },
+      {
+        "key": "tui.info.agents.roster_failure",
+        "en_cells": 49,
+        "es_cells": 54,
+        "text": "No se pudo leer la lista de subagentes de esta sesión."
+      },
+      {
+        "key": "tui.info.agents.waiting",
+        "en_cells": 46,
+        "es_cells": 59,
+        "text": "Los subagentes aparecen aquí mientras se ejecuta una tarea."
+      },
+      {
+        "key": "tui.info.agents.tree_counts",
+        "en_cells": 99,
+        "es_cells": 134,
+        "text": "Los árboles de subagentes se guardan en cada proceso; solo se muestra el de esta sesión. Las demás sesiones informan de sus recuentos."
+      },
+      {
+        "key": "tui.info.agents.tree_legacy",
+        "en_cells": 119,
+        "es_cells": 146,
+        "text": "Los árboles de subagentes se guardan en cada proceso; solo se ve el de esta sesión. Las demás sesiones informan de ocupados, pendientes y memoria."
+      },
+      {
+        "key": "tui.info.env.description",
+        "en_cells": 15,
+        "es_cells": 24,
+        "text": "para informar de errores"
+      },
+      {
+        "key": "tui.info.env.mcp_failed_short",
+        "en_cells": 6,
+        "es_cells": 8,
+        "text": "fallidos"
+      },
+      {
+        "key": "tui.info.env.mcp_empty",
+        "en_cells": 15,
+        "es_cells": 19,
+        "text": "ninguno configurado"
+      },
+      {
+        "key": "tui.info.env.none",
+        "en_cells": 4,
+        "es_cells": 7,
+        "text": "ninguno"
+      },
+      {
+        "key": "tui.info.env.mobile_healthy",
+        "en_cells": 7,
+        "es_cells": 22,
+        "text": "funciona correctamente"
+      },
+      {
+        "key": "tui.info.env.mobile_up",
+        "en_cells": 2,
+        "es_cells": 6,
+        "text": "activo"
+      },
+      {
+        "key": "tui.info.env.credentials_unreadable",
+        "en_cells": 14,
+        "es_cells": 15,
+        "text": "no se pudo leer"
+      },
+      {
+        "key": "tui.info.env.credentials_empty",
+        "en_cells": 11,
+        "es_cells": 16,
+        "text": "ninguna guardada"
+      },
+      {
+        "key": "tui.info.report.degraded",
+        "en_cells": 8,
+        "es_cells": 9,
+        "text": "degradado"
+      },
+      {
+        "key": "tui.info.action_copy_report.loading",
+        "en_cells": 57,
+        "es_cells": 74,
+        "text": "aún se está leyendo esta instalación; vuelve a pulsar ctrl+r en un momento"
+      },
+      {
+        "key": "tui.info.latest_line.installed_unreadable",
+        "en_cells": 38,
+        "es_cells": 51,
+        "text": "desconocida (no se puede leer la versión instalada)"
+      },
+      {
+        "key": "tui.info.latest_line.never_checked",
+        "en_cells": 23,
+        "es_cells": 31,
+        "text": "desconocida (nunca se comprobó)"
+      },
+      {
+        "key": "tui.info.not_answering_clause.remedy_many",
+        "en_cells": 271,
+        "es_cells": 335,
+        "text": "'lop stop --pid N', una vez por cada pid anterior, solicita que se detenga y envía una señal si no responde; '/stop N' desde esta pantalla hace lo mismo. Para un proceso responsable que sigue enviando señales de actividad pero permanece en silencio, 'lop stop --pid N --force' lo detiene mediante una señal y descarta su turno en curso"
+      },
+      {
+        "key": "tui.info.export.heading_install",
+        "en_cells": 10,
+        "es_cells": 14,
+        "text": "## Instalación"
+      },
+      {
+        "key": "tui.info.export.sessions_unavailable",
+        "en_cells": 57,
+        "es_cells": 62,
+        "text": "  no disponibles: no se pudo consultar el registro de sesiones"
+      },
+      {
+        "key": "tui.info.export.sessions_empty",
+        "en_cells": 6,
+        "es_cells": 9,
+        "text": "  ninguna"
+      },
+      {
+        "key": "tui.info.export.tree_unreadable",
+        "en_cells": 29,
+        "es_cells": 40,
+        "text": "  no se pudo leer la lista; no hay árbol"
+      },
+      {
+        "key": "tui.info.export.tree_empty",
+        "en_cells": 39,
+        "es_cells": 46,
+        "text": "  no se han iniciado subagentes en esta sesión"
+      },
+      {
+        "key": "tui.info.export.tree_counts",
+        "en_cells": 67,
+        "es_cells": 76,
+        "text": "  (solo se muestra el árbol de esta sesión; las demás informan de recuentos)"
+      },
+      {
+        "key": "tui.info.export.tree_legacy",
+        "en_cells": 54,
+        "es_cells": 70,
+        "text": "  (las demás sesiones solo informan de ocupados, pendientes y memoria)"
+      },
+      {
+        "key": "tui.info.export.heading_degraded",
+        "en_cells": 17,
+        "es_cells": 18,
+        "text": "## No se pudo leer"
+      },
+      {
+        "key": "tui.info.state.running",
+        "en_cells": 7,
+        "es_cells": 12,
+        "text": "en ejecución"
+      },
+      {
+        "key": "tui.info.state.starting",
+        "en_cells": 8,
+        "es_cells": 9,
+        "text": "iniciando"
+      },
+      {
+        "key": "tui.info.state.queued",
+        "en_cells": 6,
+        "es_cells": 7,
+        "text": "en cola"
+      },
+      {
+        "key": "tui.info.state.pausing",
+        "en_cells": 7,
+        "es_cells": 8,
+        "text": "pausando"
+      },
+      {
+        "key": "tui.info.state.paused",
+        "en_cells": 6,
+        "es_cells": 7,
+        "text": "pausado"
+      },
+      {
+        "key": "tui.info.state.completed",
+        "en_cells": 9,
+        "es_cells": 10,
+        "text": "completado"
+      },
+      {
+        "key": "tui.info.state.failed",
+        "en_cells": 6,
+        "es_cells": 7,
+        "text": "fallido"
+      },
+      {
+        "key": "tui.info.state.gone",
+        "en_cells": 4,
+        "es_cells": 10,
+        "text": "ya no está"
+      },
+      {
+        "key": "tui.info.state.live",
+        "en_cells": 4,
+        "es_cells": 6,
+        "text": "activo"
+      },
+      {
+        "key": "tui.info.state.stale",
+        "en_cells": 5,
+        "es_cells": 19,
+        "text": "sin datos recientes"
+      },
+      {
+        "key": "tui.info.state.unknown",
+        "en_cells": 7,
+        "es_cells": 11,
+        "text": "desconocido"
+      },
+      {
+        "key": "tui.info.leaving.build",
+        "en_cells": 48,
+        "es_cells": 61,
+        "text": "saldrá al terminar su turno para usar la compilación en disco"
+      }
+    ]
+  },
+  "native_choices": {
+    "session": "sesión",
+    "runtime": "runtime/runtimes explicitly admitted by es guide; process count distinct from trayectoria",
+    "trajectory": "trayectoria; active work only, not live runtime count",
+    "queued": "en cola",
+    "settled": "finalizado; includes failed/cancelled; conservado retained-history qualifier",
+    "cwd": "directorio de trabajo, never carpeta de trabajo",
+    "cache": "caché",
+    "cost": "coste (no changed occurrence here)",
+    "treatment": "tú; Pulsa, vuelve; no usted/vosotros",
+    "terse": "rt=runtime; tr=trayectoria; ej=en ejecución; c=cola; fin.=finalizado. Considered individually; no semantic issue inferred merely from abbreviation. 2ej · 1c is 8 cells; 2rt · ≥3tr is 10 cells."
+  },
+  "source_equal_individual_assessment": {
+    "tui.info.label.python": "Python proper technology name",
+    "tui.info.label.runtimes": "runtime borrowed dev term explicitly authorized by es style guide",
+    "tui.info.label.terminal": "terminal is a native Spanish technical cognate",
+    "tui.info.import_path.editable_terse": "editable is a native Spanish adjective",
+    "tui.info.approval.auto_short": "auto is the accepted terse automatic-mode abbreviation",
+    "tui.info.sessions.pid": "pid is a protected process identifier",
+    "tui.info.export.python": "python is a technology diagnostic label",
+    "tui.info.export.pid": "pid is a protected process identifier",
+    "tui.info.export.pid_fallback": "pid is a protected process identifier",
+    "tui.info.export.terminal": "terminal is a native Spanish technical cognate; interpolation and x dimension separator retained"
+  },
+  "technical_literals_policy": "Individually recognized Python/PyPI/git, lop/lop-update,/info,/reload,/stop,--pid,--force,sys.path,MCP,API-like IDs and synthetic IDs remain protected. wheel identifies the Python distribution format (idiomatic Spanish developer usage: wheel de PyPI), not generic English prose. No blanket English exemption for runtime units; incoming duration/bound parameters are caller-owned technical values outside catalogue translation, inspected only under their contracts.",
+  "context_reader_provenance": {
+    "audited_reader": "All 277 EN and ES values; initial 22 context entries plus targeted retained/mobile contexts",
+    "limitation": "refused: catalogue is larger than 200000 characters; pass key",
+    "fallback": "Parent explicitly authorized normal ranged read/local JSON parsing of exact public English context sidecar only. Losslessly deduplicated repeated sentence metadata; read all 374 string segments and all 277 key references; decode == original object verified.",
+    "dedup_artifact": "es-context-lossless-dedup.json"
+  },
+  "commands": {
+    "main": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/es-probe-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/es-probe-home/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-info-readout /Users/damian/local-operator/.venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/audit_es_mechanical.py\"",
+    "actual": "exit 0; 277 keys; 47 plural nodes, 141 count-preserving branches, 23 selects; 1179 tr_record cases source es; 0 bidi controls; missing argument MessageFormatError, broken ICU MessageSyntaxError",
+    "semantic_counterfactuals": "es-semantic-runtime-cases.json: 9 actual production renders; dropped count, missing many, renamed argument all detected",
+    "committed_bytes": "git show pinned head bytes == current bytes for en/es/context; en/context == ea92 checkpoint; target SHA == translator mechanical receipt"
+  },
+  "not_run": [
+    "App or native process",
+    "browser",
+    "screen screenshots or rendered app geometry",
+    "full suite or full guard",
+    "dependency installs",
+    "generation",
+    "commits or target edits",
+    "CI",
+    "actual RTL shaping (not applicable to Spanish)"
+  ]
+}

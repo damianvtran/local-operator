@@ -420,6 +420,21 @@ _CREATE_SUPERSEDE_LOG = (
     "seq INTEGER PRIMARY KEY AUTOINCREMENT, conversation TEXT NOT NULL)"
 )
 _SUPERSEDE_LOG_RETENTION = 256
+
+#: The ADDITIVE columns of `completions`, in the order they shipped, with the
+#: DDL each is added with. ONE list feeds BOTH `_additive_migrations_pending`
+#: (the gate) and `_apply_additive_migrations` (the ALTERs): the gate once
+#: named only reason/cause/notify while the ALTERs also added origin and
+#: needs_user, so every pre-0.107 database was judged CURRENT, never altered,
+#: and every completion INSERT failed with "no column named origin". A column
+#: added here is therefore gated and migrated together or not at all.
+_ADDITIVE_COMPLETION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("reason", "TEXT NOT NULL DEFAULT ''"),
+    ("cause", "TEXT NOT NULL DEFAULT ''"),
+    ("notify", "INTEGER NOT NULL DEFAULT 1"),
+    ("origin", "TEXT NOT NULL DEFAULT ''"),
+    ("needs_user", "INTEGER NOT NULL DEFAULT 0"),
+)
 _APPEND_SUPERSEDE = "INSERT INTO supersede_log(conversation) VALUES(?)"
 _PRUNE_SUPERSEDE_LOG = (
     "DELETE FROM supersede_log WHERE seq <= " "(SELECT COALESCE(MAX(seq),0) FROM supersede_log) - ?"
@@ -1191,6 +1206,10 @@ def _import_transcript_outcome(
                 # written before the field (key absent) means notify=1 — its
                 # behaviour, exactly.
                 notify=bool(saved.get("notify", True)),
+                # ADR 0009: replayed verbatim; a pre-field marker reads as
+                # ``unknown`` origin and no open ask.
+                origin=str(saved.get("origin") or ""),
+                needs_user=bool(saved.get("needs_user", False)),
             )
             if kind in {"error", "retired"} and is_cut_off_cause(cause):
                 # A CUT-OFF the dying runtime could not narrate itself. Its own
@@ -1269,6 +1288,12 @@ def _import_transcript_outcome(
 #: handler — run the SAME acknowledgement below, and a validation copy that
 #: drifted would let one end accept an id the other refuses.
 _SESSION_ID_RE = re.compile(r"^[a-f0-9]{12}$")
+
+# The desktop catalogue exposes persisted directory names, not just IDs minted
+# by the current runtime. Bulk receipts accept the observed full hex form too,
+# without treating arbitrary catalogue keys as writable session identities.
+BULK_RECEIPT_SESSION_ID_PATTERN = r"^(?:[a-f0-9]{12}|[a-f0-9]{32})$"
+BULK_RECEIPT_SESSION_ID_RE = re.compile(BULK_RECEIPT_SESSION_ID_PATTERN)
 
 
 def acknowledge_session_receipt(root: Path, session_id: str, token: str) -> dict[str, Any]:
@@ -1494,7 +1519,8 @@ class AttentionStore:
             "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, "
             "anchor TEXT NOT NULL, kind TEXT NOT NULL, "
             "reason TEXT NOT NULL DEFAULT '', cause TEXT NOT NULL DEFAULT '', "
-            "notify INTEGER NOT NULL DEFAULT 1)"
+            "notify INTEGER NOT NULL DEFAULT 1, "
+            "origin TEXT NOT NULL DEFAULT '', needs_user INTEGER NOT NULL DEFAULT 0)"
         )
         conn.execute("CREATE INDEX completion_conversation ON completions(conversation, sequence)")
         conn.execute(
@@ -1532,9 +1558,10 @@ class AttentionStore:
         The fast path's price is a handful of schema reads; the apply itself is
         re-checked per statement inside the write transaction, because between
         this read and that transaction another process may have run the very
-        migration. ``deliveries``/``mutations``/``supersede_log`` and the three
-        columns are all ADDITIVE: a database that already has them is CURRENT,
-        and one that lacks any of them gets the atomic upgrade.
+        migration. ``deliveries``/``mutations``/``supersede_log`` and every column
+        in :data:`_ADDITIVE_COMPLETION_COLUMNS` are ADDITIVE: a database that
+        already has them is CURRENT, and one that lacks any gets the atomic
+        upgrade.
         """
         for name in ("deliveries", "mutations", "supersede_log"):
             if not conn.execute(
@@ -1542,7 +1569,7 @@ class AttentionStore:
             ).fetchone():
                 return True
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
-        return not {"reason", "cause", "notify"} <= columns
+        return not {name for name, _ in _ADDITIVE_COMPLETION_COLUMNS} <= columns
 
     @staticmethod
     def _apply_additive_migrations(conn: sqlite3.Connection) -> None:
@@ -1595,28 +1622,20 @@ class AttentionStore:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='supersede_log'"
         ).fetchone():
             conn.execute(_CREATE_SUPERSEDE_LOG)
-        # ``reason``/``cause`` are ADDITIVE and stay out of the probe above for
-        # the reason the two tables do: every database written before the
-        # cut-off taxonomy legitimately lacks them, and naming them in the
-        # probe would read all of them as corrupt. ``DEFAULT ''`` rather than a
-        # nullable column keeps the readers one shape: an old row's reason is
-        # the empty string, i.e. "no reason was recorded", which is exactly
-        # what it is -- never a claim that there was none to record.
+        # The completion columns are ADDITIVE and stay out of the probe above:
+        # every database written before a column shipped legitimately lacks it,
+        # and naming it in the probe would read all of them as corrupt. The
+        # ``DEFAULT`` on each keeps the readers one shape -- an old row reads as
+        # "no reason/cause recorded" (``''``), as notifying exactly as it always
+        # did (``notify`` ``1``; ``0`` is always a row some build explicitly
+        # decided to keep quiet), as ``origin`` ``''`` = ``unknown`` (routes as
+        # non-mobile, errs quiet), and as ``needs_user`` ``0`` = "no ask opened
+        # in the run's window". The list is shared with the gate; see
+        # :data:`_ADDITIVE_COMPLETION_COLUMNS`.
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
-        if "reason" not in columns:
-            conn.execute("ALTER TABLE completions ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
-        if "cause" not in columns:
-            conn.execute("ALTER TABLE completions ADD COLUMN cause TEXT NOT NULL DEFAULT ''")
-        # ``notify`` (§14's origin-aware notification flag) is ADDITIVE for the
-        # same reason the two columns above are, and stays out of the probe
-        # above for the same reason: every database written before the field
-        # legitimately lacks it, and naming it in the probe would read all of
-        # them as corrupt. ``DEFAULT 1`` rather than a nullable column keeps
-        # the readers one shape -- an old row notifies exactly as it always
-        # did, and ``0`` is always a row some build explicitly decided to keep
-        # quiet.
-        if "notify" not in columns:
-            conn.execute("ALTER TABLE completions ADD COLUMN notify INTEGER NOT NULL DEFAULT 1")
+        for name, ddl in _ADDITIVE_COMPLETION_COLUMNS:
+            if name not in columns:
+                conn.execute(f"ALTER TABLE completions ADD COLUMN {name} {ddl}")
 
     def _connect_read_only(self) -> sqlite3.Connection:
         """A ``mode=ro`` connection that waits as long as the write path does.
@@ -1689,6 +1708,9 @@ class AttentionStore:
             # row (or a database no new build has written yet) — that reads
             # True, i.e. exactly how those rows behaved.
             "notify": _optional_flag(row, "notify", default=True) if row else True,
+            # ADR 0009 routing facts; tolerant reads for a pre-field database.
+            "origin": _optional_column(row, "origin") if row else "",
+            "needs_user": _optional_flag(row, "needs_user", default=False) if row else False,
             "unseen": bool(row and row["sequence"] > acknowledged),
             "revision": [row["sequence"] if row else 0, acknowledged],
         }
@@ -1764,6 +1786,8 @@ class AttentionStore:
                 "reason": "",
                 "cause": "",
                 "notify": True,
+                "origin": "",
+                "needs_user": False,
                 "unseen": False,
                 "revision": [0, 0],
             }
@@ -1819,6 +1843,9 @@ class AttentionStore:
                     "reason": _optional_column(row, "reason"),
                     "cause": _optional_column(row, "cause"),
                     "notify": _optional_flag(row, "notify", default=True),
+                    # ADR 0009 routing facts (push worker, desktop banner).
+                    "origin": _optional_column(row, "origin"),
+                    "needs_user": _optional_flag(row, "needs_user", default=False),
                     "unseen": row["sequence"] > row["acknowledged"],
                     "revision": [row["sequence"], row["acknowledged"]],
                 }
@@ -1876,6 +1903,9 @@ class AttentionStore:
                     # ``_state_many_once`` uses, because an old database simply
                     # has no column to select.
                     "notify": _optional_flag(row, "notify", default=True),
+                    # ADR 0009: per ROW, for the reason ``notify`` is (F1).
+                    "origin": _optional_column(row, "origin"),
+                    "needs_user": _optional_flag(row, "needs_user", default=False),
                 }
                 for row in conn.execute(
                     "SELECT * FROM completions WHERE sequence > ? ORDER BY sequence",
@@ -1954,6 +1984,45 @@ class AttentionStore:
                     "SELECT conversation, MAX(acknowledged) FROM receipts GROUP BY conversation"
                 )
             }
+
+    def delivered(self, conversation: str, token: str) -> bool:
+        """Whether some surface on this machine has CLAIMED the toast for ``token``.
+
+        True when ``deliveries.delivered`` has reached the completion's sequence
+        (:meth:`claim_delivery`'s own test); a :meth:`release_delivery` rolls it
+        back below, so a handed-back claim reads False again.
+
+        Read by the mobile push worker: a completion the desktop already
+        bannered while its window was attended is one the user has been told
+        about, and pushing it to the phone when they walk away is the duplicate
+        the operator reported on 2026-11-15 ("more notifications on mobile than
+        I see pop up on desktop"). Deliberately BACKEND-AGNOSTIC: the ``backend``
+        column is diagnostics only (see ``DesktopSessionPool.claim_notification``
+        \u2014 "no decision may read it"), so this answers "was it announced here",
+        never "by whom". Never writes; an absent store or table reads False.
+        """
+        if not self.path.exists():
+            return False
+        return self._retry_read(lambda: self._delivered_once(conversation, token))
+
+    def _delivered_once(self, conversation: str, token: str) -> bool:
+        """One attempt at :meth:`delivered`'s read, on its own connection."""
+        with closing(self._connect_read_only()) as conn:
+            conn.execute("BEGIN")
+            if (
+                self._uninitialized(conn)
+                or not conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='deliveries'"
+                ).fetchone()
+            ):
+                return False
+            row = conn.execute(
+                "SELECT c.sequence, d.delivered FROM completions c "
+                "JOIN deliveries d ON d.conversation = c.conversation "
+                "WHERE c.conversation=? AND c.token=?",
+                (conversation, token),
+            ).fetchone()
+            return row is not None and int(row[1]) >= int(row[0])
 
     def _retry_contention(
         self,
@@ -2113,6 +2182,8 @@ class AttentionStore:
         reason: str = "",
         cause: str = "",
         notify: bool = True,
+        origin: str = "",
+        needs_user: bool = False,
     ) -> dict[str, Any]:
         """Import a durable outcome idempotently, including after runtime restart.
 
@@ -2210,6 +2281,8 @@ class AttentionStore:
                 reason=reason,
                 cause=cause,
                 notify=notify,
+                origin=origin,
+                needs_user=needs_user,
             )
         )
 
@@ -2224,6 +2297,8 @@ class AttentionStore:
         reason: str,
         cause: str,
         notify: bool,
+        origin: str = "",
+        needs_user: bool = False,
     ) -> dict[str, Any]:
         """One attempt at :meth:`publish`'s transaction, on its own connection."""
         with closing(self._connect()) as conn, conn:
@@ -2242,9 +2317,18 @@ class AttentionStore:
                 if not _supersedes_provisional(existing, conversation, token, anchor):
                     raise ValueError("completion token belongs to another outcome")
                 conn.execute(
-                    "UPDATE completions SET anchor=?, kind=?, reason=?, cause=?, notify=? "
-                    "WHERE token=?",
-                    (anchor, kind, reason, cause, int(bool(notify)), token),
+                    "UPDATE completions SET anchor=?, kind=?, reason=?, cause=?, notify=?, "
+                    "origin=?, needs_user=? WHERE token=?",
+                    (
+                        anchor,
+                        kind,
+                        reason,
+                        cause,
+                        int(bool(notify)),
+                        origin,
+                        int(bool(needs_user)),
+                        token,
+                    ),
                 )
                 # Inside the SAME transaction as the UPDATE: a reader must
                 # never observe a healed row whose change the detector has not
@@ -2259,8 +2343,19 @@ class AttentionStore:
                 conn.execute(_PRUNE_SUPERSEDE_LOG, (_SUPERSEDE_LOG_RETENTION,))
             conn.execute(
                 "INSERT OR IGNORE INTO completions"
-                "(conversation,token,anchor,kind,reason,cause,notify) VALUES(?,?,?,?,?,?,?)",
-                (conversation, token, anchor, kind, reason, cause, int(bool(notify))),
+                "(conversation,token,anchor,kind,reason,cause,notify,origin,needs_user) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    conversation,
+                    token,
+                    anchor,
+                    kind,
+                    reason,
+                    cause,
+                    int(bool(notify)),
+                    origin,
+                    int(bool(needs_user)),
+                ),
             )
             if baseline_seen:
                 sequence = conn.execute(

@@ -20,10 +20,12 @@ import pytest
 from local_operator.network import (
     credentials,
     definitions,
+    file_index,
     mcpdefs,
     meshupdate,
     mobility,
     relay,
+    skillsync,
     sync,
     types,
 )
@@ -65,7 +67,12 @@ def _admin_link(
         register(server_a)
     finally:
         server_a._started = started  # noqa: SLF001
-    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     return link, server_a
 
@@ -425,6 +432,8 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # whole-bundle apply into the user's mcp.json — and bounded per bundle
             # for the same reason (see ``mcpdefs.MCP_DEFS_OP_DEADLINE_S``).
             "net_mcp_defs",
+            # User skills (network/skillsync.py): one bundle extraction + fsync.
+            "net_skills",
             # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md
             # §8.2): when the member is idle the handler may run a whole install
             # inside its own bounded deadline, so it must not run on a link's
@@ -436,6 +445,9 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # The single-file pull (network/files.py; mesh-file-transfer.md S1): a
             # ``stat`` hashes up to 256 MiB, so it must not run on a link's reader.
             "net_file_get",
+            # The owner-side Files index scans disk too; files.install registers
+            # its own deadline through the same hook, never on the link reader.
+            "net_session_files",
             # The one CORE op on the lane (relay.py, not a slice): a create holds its
             # first turn for up to ``FIRST_TURN_WAIT_S``, which inline stalled the
             # whole link (#3547 review MAJOR-1/2).
@@ -451,11 +463,13 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             server.settings.op_wait_s
         )
         assert server.slow_op_deadline("net_sync") == sync.SYNC_OP_DEADLINE_S
+        assert server.slow_op_deadline("net_session_files") == file_index.INDEX_OP_DEADLINE_S
         assert server.slow_op_deadline("net_definitions") == definitions.DEFINITIONS_OP_DEADLINE_S
         # NIT (agent review round 1): the MCP slice joined the slow set but was
         # the one deadline nothing asserted — the 60 s constant could decay
         # unnoticed.
         assert server.slow_op_deadline("net_mcp_defs") == mcpdefs.MCP_DEFS_OP_DEADLINE_S
+        assert server.slow_op_deadline("net_skills") == skillsync.SKILLS_OP_DEADLINE_S
         assert server.slow_op_deadline("net_update") == meshupdate.UPDATE_OP_DEADLINE_S
         assert server.slow_op_deadline("net_broker") == credentials.BROKER_OP_DEADLINE_S
         assert server.slow_op_deadline("net_session_move") == mobility.MOVE_OP_DEADLINE_S
@@ -670,7 +684,16 @@ def test_the_session_move_contract_is_frozen() -> None:
         "engagement",
         "queue",
         "carry",
+        # The FIFTH optional member (docs/design/move-working-set.md §3.4): the
+        # session's git working set. ABSENT for every move whose manifest is empty
+        # (pinned on a document by test_workset_confirm_gate's empty-manifest cell),
+        # so a chat-only session's receipt is unchanged.
+        "working_set",
+        # The SIXTH optional member (UI #1978 QA Q-1): an offload's record of the
+        # resume it requested, since the destination's engage outcome never returns.
+        "resume_requested",
     }
+    assert set(mobility.MoveResumeRequested.__annotations__) == {"reason", "session_id"}
     # The queue block's own shape: a projection of the source's record, so a
     # reader tolerates missing keys (``total=False``) rather than re-validating
     # a file another device owns.
@@ -723,7 +746,16 @@ def test_the_session_move_contract_is_frozen() -> None:
     # ``tests/unit/network/test_engage_on_arrival.py::test_a_move_without_the_flag_still_arrives_cold``
     # is what actually pins the runtime behaviour that matters: a move that did not ask
     # for the engage carries no ``engagement`` member at all.
-    assert set(mobility.MoveEngagement.__annotations__) == {"engaged", "detail", "session_id"}
+    # ``reason``/``arrival_note`` (move-working-set.md §7.4): present only when the
+    # engage was the ACTIVE-MOVE RESUME's default, never on an ``--engage-on-arrival``
+    # engage — pinned by tests/unit/network/test_workset_arrival_resume.py.
+    assert set(mobility.MoveEngagement.__annotations__) == {
+        "engaged",
+        "detail",
+        "session_id",
+        "reason",
+        "arrival_note",
+    }
     assert set(mobility.SessionMoveRefusal.__annotations__) == {
         "ok",
         "code",
@@ -731,5 +763,9 @@ def test_the_session_move_contract_is_frozen() -> None:
         "session_id",
         "phase_reached",
         "changed",
+        # Optional, and present only on the working-set gate's own refusals.
+        "working_set",
     }
     assert {"busy", "unreachable", "deadline_exceeded"} <= mobility.MOVE_REFUSAL_CODES
+    # The working-set gate's codes are part of the vocabulary a front end branches on.
+    assert mobility.WORKSET_REFUSAL_CODES <= mobility.MOVE_REFUSAL_CODES

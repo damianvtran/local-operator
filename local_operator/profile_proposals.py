@@ -19,6 +19,13 @@ Now they are plain proposals in ``<config>/profile-proposals/pp_*.json``:
   decide_profile_proposal``), or behind the never-auto-approved
   ACCOUNT_PROFILE_GATE card otherwise.
 
+SKILLS (``kind="skill"``) use the same store, states and consent ladder. Their
+image is ``{id, name, files: {path: content}}`` (``id`` == the managed skill's
+name, its only identity), each changed FILE is one review row, and apply
+writes through the skill library's own path (``desktop_skill_writes``), whose
+local-edit journal keeps the previous bytes in ``hub/backups`` — skills have no
+definition-row backup or ``op=revert``. See :func:`skill_image`.
+
 WHAT IS KEPT from the signed path: CAS on the base commitment, the definition
 lock + write-ahead journal (``definition_transaction.transact``), a backup in
 the same format the agent/team tools write (so ``op=revert backup_id=…`` keeps
@@ -44,6 +51,8 @@ import logging
 import time
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping
+
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from local_operator.definition_transaction import (
     _durable_json,
@@ -107,6 +116,31 @@ def _path(root: Path, proposal_id: str) -> Path:
     return proposals_dir(root) / f"{proposal_id}.json"
 
 
+class SkillImage(BaseModel):
+    """The reviewable image of one managed skill: every file's text, by path.
+
+    WHY whole file set rather than only the changed files: the base commitment
+    must notice ANY move of the skill (a file added or edited elsewhere), so a
+    proposal never lands on bytes the reviewer did not see. Path/size/name rules
+    are not restated here; ``desktop_skill_writes`` enforces them at apply, as it
+    does for every other skill write.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    id: str
+    name: str
+    files: dict[str, str]
+
+    @model_validator(mode="after")
+    def _identity(self) -> "SkillImage":
+        if self.id != self.name:
+            raise ValueError("a skill image's id is its name")
+        if "SKILL.md" not in self.files:
+            raise ValueError("a skill image needs SKILL.md")
+        return self
+
+
 def _image_model(kind: str) -> Any:
     from local_operator.profile_approval import AgentImage, TeamImage
 
@@ -114,7 +148,36 @@ def _image_model(kind: str) -> Any:
         return AgentImage
     if kind == "team":
         return TeamImage
+    if kind == "skill":
+        return SkillImage
     raise ProposalError("profile_proposal_invalid", f"unknown profile kind {kind!r}")
+
+
+def _skill_read(root: Path, name: str) -> tuple[dict[str, Any] | None, str | None]:
+    """``(image, fingerprint)`` of the managed skill ``name``, read in ONE lock hold.
+
+    The fingerprint is the skill storage's own CAS token: apply hands it to
+    ``author`` so the bytes the commitment check saw are exactly the bytes the
+    write replaces (a desktop Skills-tab save does not take the definition lock).
+    ``(None, None)`` when the managed folder does not exist (a create's base).
+    """
+    from local_operator.config_writer import config_write_lock
+    from local_operator.hub_sync.skill_document import SkillDocument
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+    storage = ManagedSkillStorage(Path(root))
+    with config_write_lock(Path(root)):
+        destination = storage.path(name)
+        if not destination.is_dir():
+            return None, None
+        document = SkillDocument.from_directory(destination)
+    files = {item.path: item.content for item in document.files}
+    return {"id": name, "name": name, "files": files}, document.fingerprint
+
+
+def skill_image(root: Path, name: str) -> dict[str, Any] | None:
+    """The current :class:`SkillImage` of a managed skill, or ``None``."""
+    return _skill_read(root, name)[0]
 
 
 def _validated(kind: str, image: Any) -> dict[str, Any] | None:
@@ -123,12 +186,21 @@ def _validated(kind: str, image: Any) -> dict[str, Any] | None:
     return _image_model(kind).model_validate(image).model_dump(mode="json")
 
 
-def _changed_fields(before: dict[str, Any] | None, after: dict[str, Any]) -> list[str]:
+def _changed_fields(
+    before: dict[str, Any] | None, after: dict[str, Any], kind: str = ""
+) -> list[str]:
+    if kind == "skill":
+        # A skill: the reviewable unit is a FILE, so ``fields`` lists paths.
+        old_files = (before or {}).get("files") or {}
+        new_files = after["files"]
+        return sorted(p for p in {*old_files, *new_files} if old_files.get(p) != new_files.get(p))
     old = before or {}
     return [key for key in after if key not in {"id", "name"} and old.get(key) != after[key]]
 
 
 def _snapshot(root: Path, kind: str, target_id: str) -> dict[str, Any] | None:
+    if kind == "skill":
+        return skill_image(root, target_id)
     from local_operator.profile_approval import snapshot
 
     return snapshot(root, kind, target_id)
@@ -225,7 +297,7 @@ def file(
             "after": after_image,
             "base_commitment": base,
             "after_commitment": after_c,
-            "fields": _changed_fields(before_image, after_image),
+            "fields": _changed_fields(before_image, after_image, profile_kind),
             "origin": {
                 "session_id": session_id,
                 "tool_call_id": tool_call_id,
@@ -351,11 +423,33 @@ def _display(field: str, value: Any) -> tuple[str, str]:
 
 
 def changes(
-    before: dict[str, Any] | None, after: dict[str, Any], fields: Iterable[str]
+    before: dict[str, Any] | None,
+    after: dict[str, Any],
+    fields: Iterable[str],
+    kind: str = "",
 ) -> list[dict[str, Any]]:
-    """One display row per changed field; ``after_text`` is what Accept writes."""
+    """One display row per changed field; ``after_text`` is what Accept writes.
+
+    For a skill a "field" is a file path and both sides are that file's text
+    (``""`` when the file is new), the shape the Agents diff viewer already
+    renders for agent/team text fields.
+    """
     from local_operator.profile_scope import profile_field_label
 
+    if kind == "skill":
+        old_files = (before or {}).get("files") or {}
+        new_files = after.get("files") or {}
+        return [
+            {
+                "field": path,
+                "label": path,
+                "before_text": old_files.get(path, ""),
+                "after_text": new_files.get(path, ""),
+                "format": "text",
+                "after": new_files.get(path),
+            }
+            for path in fields
+        ]
     rows = []
     for field in fields:
         before_text, fmt = _display(field, (before or {}).get(field))
@@ -376,7 +470,9 @@ def changes(
 def detail(root: Path, record: dict[str, Any]) -> dict[str, Any]:
     """Summary and display rows; a refresh never resets the proposal's base."""
     data = summary(record)
-    data["changes"] = changes(record.get("before"), record["after"], record.get("fields") or [])
+    data["changes"] = changes(
+        record.get("before"), record["after"], record.get("fields") or [], record["kind"]
+    )
     data["base_commitment"] = record["base_commitment"]
     data["after_commitment"] = record["after_commitment"]
     return data
@@ -559,8 +655,10 @@ def save_changes_line(labels: Iterable[str]) -> str:
 
 #: Cap on the change content a DIRECT (non-proposal) save card carries below
 #: its summary. WHY it is shown at all: a direct save has no review page —
-#: skills have no proposal path and no Agents diff — so the card is the only
-#: place the approver can read what they approve (R2-2). WHY a cap: an
+#: no Agents diff exists for it — so the card is the only
+#: place the approver can read what they approve (R2-2); skill create/update
+#: from an untrusted run is a proposal now, so this card is mostly a skill
+#: DELETE (``remove_paths``) or a host with no proposal store. WHY a cap: an
 #: unbounded body was the original "card fills the conversation" report; ask
 #: cards are now height-bounded and scroll on every surface, so ~4 KB reads
 #: as a scrollable excerpt rather than a layout hazard.
@@ -615,7 +713,7 @@ def approval_card_text(record: dict[str, Any], rows: Iterable[dict[str, Any]]) -
 
 
 def counts(rows: Iterable[dict[str, Any]]) -> dict[str, dict[str, int]]:
-    out: dict[str, dict[str, int]] = {"agent": {}, "team": {}}
+    out: dict[str, dict[str, int]] = {"agent": {}, "team": {}, "skill": {}}
     for row in rows:
         bucket = out.setdefault(row["kind"], {})
         bucket[row["name"]] = bucket.get(row["name"], 0) + 1
@@ -731,7 +829,12 @@ def apply(
         record = _pending(root, proposal_id)
         kind, target_id = record["kind"], record["target_id"]
         fields = list(record.get("fields") or [])
-        current = _snapshot(root, kind, target_id)
+        fingerprint: str | None = None
+        if kind == "skill":
+            # Image AND storage CAS token from one read: see ``_skill_read``.
+            current, fingerprint = _skill_read(root, target_id)
+        else:
+            current = _snapshot(root, kind, target_id)
         base = record.get("before")
         after = dict(record["after"])
         if commitment(current) != record["base_commitment"]:
@@ -747,12 +850,21 @@ def apply(
                     "profile_proposal_invalid",
                     f"only proposed fields can be edited (not {', '.join(extra)}).",
                 )
-            for field, value in edited_after.items():
-                after[field] = value
+            if kind == "skill":
+                # An edited value replaces that FILE's text; type errors are the
+                # image model's (strict str) below, so a non-text edit is a 422.
+                after["files"] = {**after["files"], **edited_after}
+            else:
+                for field, value in edited_after.items():
+                    after[field] = value
         try:
             after = _validated(kind, after) or {}
         except Exception as exc:  # noqa: BLE001 — pydantic detail is the reason
             raise ProposalError("profile_proposal_invalid", f"invalid edit: {exc}") from exc
+        if kind == "skill":
+            return _apply_skill(
+                root, record, after, fingerprint, actor=actor, edited=bool(edited_after)
+            )
         if record["operation"] == "create":
             from local_operator.agents import AgentRegistry
             from local_operator.teams import TeamRegistry
@@ -830,6 +942,80 @@ def apply(
             "backup_id": backup.get("id"),
             "backup_path": backup_path,
         }
+
+
+def _apply_skill(
+    root: Path,
+    record: dict[str, Any],
+    after: dict[str, Any],
+    fingerprint: str | None,
+    *,
+    actor: str,
+    edited: bool,
+) -> dict[str, Any]:
+    """Write an accepted skill proposal through the skill library's ONE write path.
+
+    Called by :func:`apply` under the definition lock after the stale check.
+    WHY ``desktop_skill_writes`` and not the definition journal: that module owns
+    every skill rule (read-only roots, hub-link baselines, path/size validators)
+    and ``ManagedSkillStorage.author`` already journals the swap and keeps the
+    previous bytes in ``hub/backups`` — the same backup a direct ``skill`` tool
+    edit leaves. ``fingerprint`` (read with the base image) is author's CAS, so a
+    Skills-tab save racing this accept is refused, never overwritten.
+    """
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.skill_document import SkillValidationError
+    from local_operator.hub_sync.transactions import TransactionError
+    from local_operator.server.utils import desktop_skill_writes as writes
+
+    name = record["target_id"]
+    files = [{"path": path, "content": text} for path, text in sorted(after["files"].items())]
+    try:
+        if fingerprint is None:
+            # A create: a read-only root (built-in, external, project) supplying
+            # the name would be shadowed for every later session; refuse as the
+            # tool's own create does.
+            writes.require_unshadowed(root, name)
+            result = writes.create(root, name, files=files)
+        else:
+            result = writes.update(root, name, files, fingerprint)
+    except LinkError as exc:
+        code = getattr(exc, "code", "")
+        if code in {"local-concurrent-edit", "alias-occupied"}:
+            raise ProposalError(
+                "profile_proposal_stale",
+                f"{name} changed since this was proposed; nothing was applied. "
+                "Ask the originating conversation for a fresh proposal.",
+            ) from exc
+        raise ProposalError("profile_proposal_invalid", f"{code}: {exc}") from exc
+    except (SkillValidationError, TransactionError) as exc:
+        code = getattr(exc, "code", "")
+        raise ProposalError("profile_proposal_invalid", f"{code}: {exc}") from exc
+    now = time.time()
+    record.update(
+        after=after,
+        after_commitment=commitment(after),
+        state=STATE_ACCEPTED,
+        decided_at=now,
+        decided_by=actor,
+        applied={
+            # No definition-row backup: the previous bytes are in hub/backups.
+            "backup_id": None,
+            "backup_path": None,
+            "after_commitment": commitment(after),
+            "after_revision": result.get("fingerprint"),
+            "edited": edited,
+            "rebased": False,
+        },
+    )
+    _durable_json(_path(root, record["id"]), record)
+    _audit(root, record, "accepted", actor)
+    return {
+        "proposal": _fold(root, record, now),
+        "backup_id": None,
+        "backup_path": None,
+        "profile": result,
+    }
 
 
 def reject(root: Path, proposal_id: str, *, actor: str, note: str | None = None) -> dict[str, Any]:

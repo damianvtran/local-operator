@@ -1,0 +1,101 @@
+BEFORE en/tui.model_persistence.json sha256=4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+BEFORE en/tui.model_persistence.context.json sha256=b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+MODULE local_operator.i18n.catalogues=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE local_operator.i18n.runtime=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+MODULE local_operator.i18n.messages=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/messages.py
+MODULE scripts.i18n.check=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/check.py
+ISOLATION HOME/config in author scratch; CMUX variables absent
+OFFICIAL check.check_catalogues scoped(en,vi; tui.model_persistence): []
+KEY tui.model_persistence.persist args=() plural/select=0 NFC=true bidi-controls=0 cells=49
+KEY tui.model_persistence.settings args=() plural/select=0 NFC=true bidi-controls=0 cells=48
+KEY tui.model_persistence.saved args=() plural/select=0 NFC=true bidi-controls=0 cells=63
+KEY tui.model_persistence.with_model args=(('label', 'simple'), ('routes', 'simple')) plural/select=0 NFC=true bidi-controls=0 cells=27
+KEY ORDER / COMMAND BYTES / EXACT-ONCE SIMPLE ARGUMENTS: OK
+API en/persist: /model default saves this for new sessions
+API en/saved: switch to the boot default with /model saved
+API en/settings: /settings edits the boot default too
+API en/ordinary/x: model: x — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too
+PLAIN_RICH_WRAP locale=en state=ordinary label=x width=80 rows=2 widths=[75, 64]
+PLAIN_RICH_WRAP locale=en state=ordinary label=x width=100 rows=2 widths=[100, 38]
+PLAIN_RICH_WRAP locale=en state=ordinary label=x width=120 rows=2 widths=[119, 20]
+API en/ordinary/openai/gpt-6.1-sol: model: openai/gpt-6.1-sol — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too
+PLAIN_RICH_WRAP locale=en state=ordinary label=openai/gpt-6.1-sol width=80 rows=2 widths=[80, 76]
+PLAIN_RICH_WRAP locale=en state=ordinary label=openai/gpt-6.1-sol width=100 rows=2 widths=[100, 56]
+PLAIN_RICH_WRAP locale=en state=ordinary label=openai/gpt-6.1-sol width=120 rows=2 widths=[120, 36]
+API en/ordinary/anthropic/claude-opus-5-5-20261122:thinking-high: model: anthropic/claude-opus-5-5-20261122:thinking-high — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too
+PLAIN_RICH_WRAP locale=en state=ordinary label=anthropic/claude-opus-5-5-20261122:thinking-high width=80 rows=3 widths=[79, 80, 26]
+PLAIN_RICH_WRAP locale=en state=ordinary label=anthropic/claude-opus-5-5-20261122:thinking-high width=100 rows=2 widths=[100, 85]
+PLAIN_RICH_WRAP locale=en state=ordinary label=anthropic/claude-opus-5-5-20261122:thinking-high width=120 rows=2 widths=[117, 69]
+API en/missing-model/x: model: x — /model default saves this for new sessions · /settings edits the boot default too
+PLAIN_RICH_WRAP locale=en state=missing-model label=x width=80 rows=2 widths=[80, 11]
+PLAIN_RICH_WRAP locale=en state=missing-model label=x width=100 rows=1 widths=[92]
+PLAIN_RICH_WRAP locale=en state=missing-model label=x width=120 rows=1 widths=[92]
+API en/missing-model/openai/gpt-6.1-sol: model: openai/gpt-6.1-sol — /model default saves this for new sessions · /settings edits the boot default too
+PLAIN_RICH_WRAP locale=en state=missing-model label=openai/gpt-6.1-sol width=80 rows=2 widths=[73, 36]
+PLAIN_RICH_WRAP locale=en state=missing-model label=openai/gpt-6.1-sol width=100 rows=2 widths=[98, 11]
+PLAIN_RICH_WRAP locale=en state=missing-model label=openai/gpt-6.1-sol width=120 rows=1 widths=[109]
+API en/missing-model/anthropic/claude-opus-5-5-20261122:thinking-high: model: anthropic/claude-opus-5-5-20261122:thinking-high — /model default saves this for new sessions · /settings edits the boot default too
+PLAIN_RICH_WRAP locale=en state=missing-model label=anthropic/claude-opus-5-5-20261122:thinking-high width=80 rows=2 widths=[79, 60]
+PLAIN_RICH_WRAP locale=en state=missing-model label=anthropic/claude-opus-5-5-20261122:thinking-high width=100 rows=2 widths=[100, 38]
+PLAIN_RICH_WRAP locale=en state=missing-model label=anthropic/claude-opus-5-5-20261122:thinking-high width=120 rows=2 widths=[119, 20]
+API en/absent-hosting/x: model: x — /settings edits the boot default too
+PLAIN_RICH_WRAP locale=en state=absent-hosting label=x width=80 rows=1 widths=[47]
+PLAIN_RICH_WRAP locale=en state=absent-hosting label=x width=100 rows=1 widths=[47]
+PLAIN_RICH_WRAP locale=en state=absent-hosting label=x width=120 rows=1 widths=[47]
+API en/absent-hosting/openai/gpt-6.1-sol: model: openai/gpt-6.1-sol — /settings edits the boot default too
+PLAIN_RICH_WRAP locale=en state=absent-hosting label=openai/gpt-6.1-sol width=80 rows=1 widths=[64]
+PLAIN_RICH_WRAP locale=en state=absent-hosting label=openai/gpt-6.1-sol width=100 rows=1 widths=[64]
+PLAIN_RICH_WRAP locale=en state=absent-hosting label=openai/gpt-6.1-sol width=120 rows=1 widths=[64]
+API en/absent-hosting/anthropic/claude-opus-5-5-20261122:thinking-high: model: anthropic/claude-opus-5-5-20261122:thinking-high — /settings edits the boot default too
+PLAIN_RICH_WRAP locale=en state=absent-hosting label=anthropic/claude-opus-5-5-20261122:thinking-high width=80 rows=2 widths=[78, 16]
+PLAIN_RICH_WRAP locale=en state=absent-hosting label=anthropic/claude-opus-5-5-20261122:thinking-high width=100 rows=1 widths=[94]
+PLAIN_RICH_WRAP locale=en state=absent-hosting label=anthropic/claude-opus-5-5-20261122:thinking-high width=120 rows=1 widths=[94]
+NO_LABEL_CLAUSE_ONLY en: /settings edits the boot default too
+API vi/persist: /model default lưu lựa chọn này cho các phiên mới
+API vi/saved: chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved
+API vi/settings: /settings cũng sửa mô hình mặc định khi mở phiên
+API vi/ordinary/x: mô hình: x — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH_WRAP locale=vi state=ordinary label=x width=80 rows=3 widths=[78, 80, 21]
+PLAIN_RICH_WRAP locale=vi state=ordinary label=x width=100 rows=2 widths=[99, 80]
+PLAIN_RICH_WRAP locale=vi state=ordinary label=x width=120 rows=2 widths=[116, 63]
+API vi/ordinary/openai/gpt-6.1-sol: mô hình: openai/gpt-6.1-sol — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH_WRAP locale=vi state=ordinary label=openai/gpt-6.1-sol width=80 rows=3 widths=[80, 78, 38]
+PLAIN_RICH_WRAP locale=vi state=ordinary label=openai/gpt-6.1-sol width=100 rows=2 widths=[99, 97]
+PLAIN_RICH_WRAP locale=vi state=ordinary label=openai/gpt-6.1-sol width=120 rows=2 widths=[120, 75]
+API vi/ordinary/anthropic/claude-opus-5-5-20261122:thinking-high: mô hình: anthropic/claude-opus-5-5-20261122:thinking-high — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH_WRAP locale=vi state=ordinary label=anthropic/claude-opus-5-5-20261122:thinking-high width=80 rows=3 widths=[79, 79, 68]
+PLAIN_RICH_WRAP locale=vi state=ordinary label=anthropic/claude-opus-5-5-20261122:thinking-high width=100 rows=3 widths=[100, 100, 26]
+PLAIN_RICH_WRAP locale=vi state=ordinary label=anthropic/claude-opus-5-5-20261122:thinking-high width=120 rows=2 widths=[119, 107]
+API vi/missing-model/x: mô hình: x — /model default lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH_WRAP locale=vi state=missing-model label=x width=80 rows=2 widths=[80, 33]
+PLAIN_RICH_WRAP locale=vi state=missing-model label=x width=100 rows=2 widths=[100, 12]
+PLAIN_RICH_WRAP locale=vi state=missing-model label=x width=120 rows=1 widths=[113]
+API vi/missing-model/openai/gpt-6.1-sol: mô hình: openai/gpt-6.1-sol — /model default lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH_WRAP locale=vi state=missing-model label=openai/gpt-6.1-sol width=80 rows=2 widths=[80, 50]
+PLAIN_RICH_WRAP locale=vi state=missing-model label=openai/gpt-6.1-sol width=100 rows=2 widths=[100, 29]
+PLAIN_RICH_WRAP locale=vi state=missing-model label=openai/gpt-6.1-sol width=120 rows=2 widths=[118, 12]
+API vi/missing-model/anthropic/claude-opus-5-5-20261122:thinking-high: mô hình: anthropic/claude-opus-5-5-20261122:thinking-high — /model default lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH_WRAP locale=vi state=missing-model label=anthropic/claude-opus-5-5-20261122:thinking-high width=80 rows=3 widths=[79, 76, 5]
+PLAIN_RICH_WRAP locale=vi state=missing-model label=anthropic/claude-opus-5-5-20261122:thinking-high width=100 rows=2 widths=[100, 60]
+PLAIN_RICH_WRAP locale=vi state=missing-model label=anthropic/claude-opus-5-5-20261122:thinking-high width=120 rows=2 widths=[112, 48]
+API vi/absent-hosting/x: mô hình: x — /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH_WRAP locale=vi state=absent-hosting label=x width=80 rows=1 widths=[61]
+PLAIN_RICH_WRAP locale=vi state=absent-hosting label=x width=100 rows=1 widths=[61]
+PLAIN_RICH_WRAP locale=vi state=absent-hosting label=x width=120 rows=1 widths=[61]
+API vi/absent-hosting/openai/gpt-6.1-sol: mô hình: openai/gpt-6.1-sol — /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH_WRAP locale=vi state=absent-hosting label=openai/gpt-6.1-sol width=80 rows=1 widths=[78]
+PLAIN_RICH_WRAP locale=vi state=absent-hosting label=openai/gpt-6.1-sol width=100 rows=1 widths=[78]
+PLAIN_RICH_WRAP locale=vi state=absent-hosting label=openai/gpt-6.1-sol width=120 rows=1 widths=[78]
+API vi/absent-hosting/anthropic/claude-opus-5-5-20261122:thinking-high: mô hình: anthropic/claude-opus-5-5-20261122:thinking-high — /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH_WRAP locale=vi state=absent-hosting label=anthropic/claude-opus-5-5-20261122:thinking-high width=80 rows=2 widths=[79, 29]
+PLAIN_RICH_WRAP locale=vi state=absent-hosting label=anthropic/claude-opus-5-5-20261122:thinking-high width=100 rows=2 widths=[100, 8]
+PLAIN_RICH_WRAP locale=vi state=absent-hosting label=anthropic/claude-opus-5-5-20261122:thinking-high width=120 rows=1 widths=[108]
+NO_LABEL_CLAUSE_ONLY vi: /settings cũng sửa mô hình mặc định khi mở phiên
+NEGATIVE missing-label: MessageFormatError: message argument 'label' was not supplied (have: routes)
+NEGATIVE missing-routes: MessageFormatError: message argument 'routes' was not supplied (have: label)
+ZERO_LABEL opaque string 0 retained: mô hình: 0 — /settings cũng sửa mô hình mặc định khi mở phiên
+QUALIFICATION: plain Rich wrapping only, NOT styled NoticeBlock/native geometry or screenshots; English controls run first; no locale overflow claim; no max cap invented; no independent/self audit approval
+AFTER en/tui.model_persistence.json sha256=4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+AFTER en/tui.model_persistence.context.json sha256=b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+TARGET sha256=d6b5f00ab0a25ea2596879299e5cda07b5b5bb66bf8ea8bc9081f503719cf505
+RESULT author mechanical validation OK; status translated only; independent A/B audits and consumer integration pending

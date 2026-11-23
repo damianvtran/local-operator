@@ -7,11 +7,12 @@
         {
           "path": "local_operator/settings_io.py",
           "symbol": "settings_io._t",
-          "note": "registry label/help copy rendered into plain strings; /v1/settings carries the strings, never a code"
+          "note": "registry label/help copy rendered into plain strings; /v1/settings carries the strings, never a code. Heavy-job section title/description and setting label/help/two choice descriptions add six calls at this same _t render point, not envelope identities."
         }
       ],
       "references": {
-        "settings_io.py": 864
+        "settings_io.py": 894,
+        "tui/app.py": 1
       }
     },
     "wire.settings.hub_defaults": {
@@ -206,8 +207,11 @@
         }
       ],
       "references": {
-        "remote_compute/cli.py": 51,
-        "remote_compute/config.py": 3
+        "remote_compute/cli.py": 36,
+        "remote_compute/config.py": 3,
+        "remote_compute/messages.py": 23,
+        "remote_compute/tiers.py": 4,
+        "server/routes/desktop_remote_compute.py": 5
       }
     },
     "wire.slash": {
@@ -225,7 +229,7 @@
         }
       ],
       "references": {
-        "slash_commands.py": 54
+        "slash_commands.py": 55
       }
     },
     "wire.slash.library": {
@@ -264,7 +268,7 @@
         }
       ],
       "references": {
-        "harness/bridge_copy.py": 91
+        "harness/bridge_copy.py": 95
       }
     },
     "wire.notification_sound": {
@@ -299,16 +303,25 @@
           "path": "local_operator/settings_io.py",
           "symbol": "settings_io._keymap_copy -> settings_io._t",
           "note": "hotkey row label/help merged into the settings registry as plain strings; /v1/settings carries the strings, never a code"
-        },
-        {
-          "path": "local_operator/keymap.py",
-          "symbol": "keymap._apply_send_copy -> keymap._keymap_t",
-          "note": "send-row label/help resolved into the registry so group_conflict names the other row in-process as a plain string; no code leaves the process"
         }
       ],
       "references": {
         "keymap.py": 8,
-        "settings_io.py": 18
+        "settings_io.py": 44
+      }
+    },
+    "wire.settings.transcript_display": {
+      "reason": "transcript layout row label/help and its two choice labels/descriptions rendered by settings_io._t as plain strings; the slash command reuses the rendered label as a receipt, never a code",
+      "render_points": [
+        {
+          "path": "local_operator/settings_io.py",
+          "symbol": "settings_io._t",
+          "note": "the `display.transcript_display` row's label/help/choices merged into the settings registry as plain strings; /v1/settings carries the strings, never a code"
+        }
+      ],
+      "references": {
+        "settings_io.py": 8,
+        "tui/app.py": 4
       }
     },
     "wire.language_receipts": {
@@ -392,12 +405,211 @@
       "render_points": [
         {
           "path": "local_operator/session/catalog.py",
-          "symbol": "CatalogEntry._stop_label (render)",
-          "note": "row status label suffix rendered with the memoised label locale and printed verbatim by clients"
+          "symbol": "_terminal_label (render)",
+          "note": "complete messages selected by CatalogEntry.status (terminal rungs via _stop_label/_error_label, and since PR #4334 the live rungs: approval/answer needed, wedged heartbeat, working, unseen completion, attached, ready/exec headless, dormant, complete, recent, waiting) and rendered by _terminal_label with the memoised config-owned label locale; clients receive finished status strings, not wire.session_status envelope identities. Reviewed reference census includes the whole-message selectors at this existing in-process boundary."
+        },
+        {
+          "path": "local_operator/i18n/duration_message.py",
+          "symbol": "format_duration (render callback)",
+          "note": "Shared four-branch duration selection immediately renders each generated key through the caller-owned callback and rejects non-string results. session/catalog.status_duration supplies _terminal_label with the config-owned locale; info/copy.info_duration supplies _duration_info_text with the active Info locale and actual source provenance. Both return finished strings, never envelope identities."
         }
       ],
       "references": {
-        "session/catalog.py": 2
+        "i18n/duration_message.py": 5,
+        "session/catalog.py": 28
+      }
+    },
+    "wire.sessions": {
+      "reason": "sessions tool receipts/approval prompts rendered in-process by tools/builtin.py (_sessions_copy = tr(\"wire.sessions\")) and returned as finished tool text",
+      "render_points": [
+        {
+          "path": "local_operator/tools/builtin.py",
+          "symbol": "tools.builtin (_sessions_copy)",
+          "note": "sessions tool stop/park receipts, refusals and approval prompts; returned as ToolResult text and approval-prompt strings, never as a key"
+        }
+      ],
+      "references": {
+        "tools/builtin.py": 19
+      }
+    },
+    "wire.operator_setup": {
+      "reason": "phone-approvals setup copy rendered in-process by operator/elevate.py, tui/app.py and session/runtime/serving.py; the desktop setup route sends server-rendered text under a machine outcome code, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/operator/elevate.py",
+          "symbol": "no_password_prompt_refusal / confirm_card_copy",
+          "note": "setup/remove card title and body and the no-password-prompt refusal, rendered in-process via tr(\"wire.operator_setup\") and printed as finished text (the OS dialog sentence itself is operator.pairing.prompt.*)"
+        },
+        {
+          "path": "local_operator/operator/authority_setup.py",
+          "symbol": "outcome_message / file_only_message",
+          "note": "returns the Msg for an outcome; every caller renders it in-process (tui/app.py text(), or the desktop route's envelope text under a machine outcome code)"
+        },
+        {
+          "path": "local_operator/server/routes/desktop_operator_setup.py",
+          "symbol": "_envelope / _decorate",
+          "note": "envelope code is overridden with the machine outcome token (on, cancelled, file_only, ...); the desktop paints the server-rendered text and never resolves a wire.operator_setup key"
+        },
+        {
+          "path": "local_operator/tui/app.py",
+          "symbol": "_uninstalled_anchor_report / _mobile_approvals",
+          "note": "terminal-only report, usage and outcome notices rendered in-process with tr(\"wire.operator_setup\")"
+        },
+        {
+          "path": "local_operator/session/runtime/serving.py",
+          "symbol": "_uninstalled_anchor_report",
+          "note": "the same report line rendered in-process and returned as finished text"
+        }
+      ],
+      "references": {
+        "operator/authority_setup.py": 15,
+        "operator/elevate.py": 6,
+        "session/runtime/serving.py": 2,
+        "tui/app.py": 4
+      }
+    },
+    "wire.github": {
+      "reason": "GitHub repository-sharing copy rendered in-process through tr(\"wire.github\") by network/cli.py, network/readiness.py, network/credentials/messages.py and network/credentials/github.py; the wire and stderr carry finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/network/cli.py",
+          "symbol": "_cmd_credential_github / _designation_lines / _designation_source / _opted_out_lines / _github_ttl_words / _github_designation_now",
+          "note": "owner `repos`/share receipt lines, usage refusals and progress, rendered in-process via _github_text = tr(\"wire.github\") and printed or raised as MeshRefusal finished text"
+        },
+        {
+          "path": "local_operator/network/readiness.py",
+          "symbol": "_designation_phrase",
+          "note": "peer readiness row text rendered in-process via tr(\"wire.github\"); the readiness payload carries the sentence, never a key"
+        },
+        {
+          "path": "local_operator/network/credentials/messages.py",
+          "symbol": "render_broker_error",
+          "note": "borrower-side unset/overflow refusal sentences rendered in-process via tr(\"wire.github\") and returned as finished text"
+        },
+        {
+          "path": "local_operator/network/credentials/github.py",
+          "symbol": "Designation.reason / remedy / refusal, listed_ago, _repository_diagnostic",
+          "note": "owner refusal detail (crosses the mesh as a finished string), age wording and the git-helper's stderr notice, all rendered in-process via tr(\"wire.github\")"
+        }
+      ],
+      "references": {
+        "network/cli.py": 31,
+        "network/credentials/github.py": 29,
+        "network/credentials/messages.py": 5,
+        "network/readiness.py": 11
+      }
+    },
+    "wire.errors.bedrock": {
+      "reason": "Amazon Bedrock error remedies and connection-check results rendered in-process by providers/bedrock/errors.py and providers/bedrock/check.py (_text = render_resolved), and server/routes/auth.py renders refusal envelopes with machine-category codes; all carry finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/providers/bedrock/errors.py",
+          "symbol": "_text / _keys (no_credentials_text, *_error builders, classify_credential_error, provider_error_for)",
+          "note": "Bedrock runtime and credential-resolution remedies rendered in-process via render_resolved and raised as ProviderError text, never a key"
+        },
+        {
+          "path": "local_operator/providers/bedrock/check.py",
+          "symbol": "_text / _keys (check_connection)",
+          "note": "connection-check results rendered in-process via render_resolved and returned as KeyCheck text, never a key"
+        },
+        {
+          "path": "local_operator/server/routes/auth.py",
+          "symbol": "_bedrock_refusal / _bedrock_keys",
+          "note": "Msg.envelope renders text in-process and overrides the namespace ID with the desktop machine-category code; clients never resolve a deferred key"
+        }
+      ],
+      "references": {
+        "providers/bedrock/check.py": 2,
+        "providers/bedrock/errors.py": 2,
+        "server/routes/auth.py": 2
+      }
+    },
+    "wire.login.bedrock": {
+      "reason": "Amazon Bedrock login copy rendered in-process through render_resolved by providers/bedrock/login.py, providers/bedrock/sso_login.py, providers/auth_cli.py, server/utils/desktop_auth.py and tui/app.py; callbacks and operation snapshots carry finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/providers/bedrock/login.py",
+          "symbol": "_t / login_bedrock",
+          "note": "_t delegates to render_resolved before choices, fields, progress and LoginError text reach callbacks"
+        },
+        {
+          "path": "local_operator/providers/bedrock/sso_login.py",
+          "symbol": "_run_once",
+          "note": "render_resolved finishes URL instructions and progress before LoginCallbacks"
+        },
+        {
+          "path": "local_operator/providers/auth_cli.py",
+          "symbol": "_aws_callbacks",
+          "note": "render_resolved finishes terminal prompts and invalid-choice text"
+        },
+        {
+          "path": "local_operator/server/utils/desktop_auth.py",
+          "symbol": "DesktopAuth._run_bedrock_sso",
+          "note": "render_resolved finishes operation messages before snapshots cross the wire"
+        },
+        {
+          "path": "local_operator/tui/app.py",
+          "symbol": "OperatorApp._bedrock_login_callbacks",
+          "note": "render_resolved finishes picker title and field hint before local picker or relay serialization"
+        }
+      ],
+      "references": {
+        "providers/auth_cli.py": 1,
+        "providers/bedrock/login.py": 2,
+        "providers/bedrock/sso_login.py": 1,
+        "server/utils/desktop_auth.py": 1,
+        "tui/app.py": 1
+      }
+    },
+    "wire.providers.reauth": {
+      "reason": "Google sign-in recovery notice and login-status state words rendered in-process: providers/failover.py::sign_in_required_text (render_record) and providers/auth_cli.py::_sign_in_required_state (render_resolved); the session notice and the login-status line carry finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/providers/failover.py",
+          "symbol": "sign_in_required_text",
+          "note": "render_record finishes the sentence in-process; the English copy becomes ProviderError text and the user-locale copy (display=True) becomes a NoticeEvent text with no code"
+        },
+        {
+          "path": "local_operator/providers/auth_cli.py",
+          "symbol": "_sign_in_required_state",
+          "note": "render_resolved finishes the state word before format_logins composes the plain login-status line"
+        }
+      ],
+      "references": {
+        "providers/auth_cli.py": 1,
+        "providers/failover.py": 3
+      }
+    },
+    "wire.errors.sdk_spec": {
+      "reason": "SDK specification refusals rendered in-process by session/spec.py and sdk.py through spec_refusal_text (active locale) and raised as a one-string SessionSpecError; the exception carries finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/session/spec.py",
+          "symbol": "spec_refusal_text / SessionSpec.__post_init__",
+          "note": "every keyed refusal is wrapped in spec_refusal_text, which renders the active locale before SessionSpecError(str) is raised; the exception has no code/params attribute"
+        },
+        {
+          "path": "local_operator/sdk.py",
+          "symbol": "open_session / spawn_session / _refuse_attach_extras / _refuse_spawn_extras",
+          "note": "same spec_refusal_text wrapper; the SDK raises finished text in the embedding process and never serialises a catalogue key"
+        }
+      ],
+      "references": {
+        "sdk.py": 16,
+        "session/spec.py": 28
+      }
+    },
+    "wire.team_integrations": {
+      "reason": "Team Integrations consent-card copy rendered in-process by team_bridge/integrations.py::ask_question; the integrations tool files the finished question and option labels as plain strings, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/team_bridge/integrations.py",
+          "symbol": "ask_question",
+          "note": "tr renders every key before constructing the plain question and option labels/descriptions; integrations_tool._Run.file_ask files those finished strings and retains affirm/decline as text"
+        }
+      ],
+      "references": {
+        "team_bridge/integrations.py": 2
       }
     }
   }

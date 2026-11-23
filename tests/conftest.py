@@ -49,11 +49,32 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The community pilot switch (``community.community_enabled``). Inherited
+    # from a pilot machine's shell it would light ``/v1/desktop/community/*``,
+    # the relay door and ``features.community`` in every cell, so the dark-by-
+    # default assertions would pass the lit path; tests that need it on set it.
+    "LOCAL_OPERATOR_COMMUNITY",
+    # The loopback peer-uid check switch (``server/peer_check.py``). ``off``
+    # waives the same-user rule, so a developer exporting it would make every
+    # serve test admit what it should refuse and the enforcement assertions
+    # pass the waived path; tests that need a mode pass it explicitly.
+    "LOCAL_OPERATOR_PEER_UID_CHECK",
     # The remote-compute API override names the host that receives the
     # operator's Radient bearer. Inheriting a developer's staging value would
     # point the suite's remote-compute client at a real host; tests that cover
     # the override set their own loopback value.
     "LOP_REMOTE_COMPUTE_API_URL",
+    # The working-set probe's host allowlist (``network/workset_probe.py``)
+    # names REAL machines the probe may ssh into. A developer's value leaking
+    # in would widen the allowlist the host-policy tests assert on and could
+    # aim a probe at a real host; tests that cover the override set their own.
+    "LOCAL_OPERATOR_MOVE_PROBE_HOSTS",
+    # The working-set clone (``network/workset_transfer._run_clone``) keeps an
+    # inherited GIT_SSH_COMMAND instead of forcing ``ssh -o BatchMode=yes``. A
+    # developer's value (an agent-forwarding wrapper, a ProxyJump to a real
+    # bastion) would replace the batch-mode default under test and could reach a
+    # real machine; tests that cover the inherited case set their own.
+    "GIT_SSH_COMMAND",
     # The per-build runtime image root (``procname.runtime_root``) is resolved
     # against the PASSWD home, not ``$HOME``, so redirecting HOME above cannot
     # keep a plant out of the operator's real ``~/.local/share/lop/runtime``.
@@ -71,6 +92,26 @@ _AMBIENT_VARS = (
     # an operator's inherited ``=0`` would waive the refusal the admission cells
     # assert, so it is scrubbed; a cell that needs a floor sets its own.
     "LOCAL_OPERATOR_ADMISSION_FLOOR_MB",
+    # The heavy-job queue's node tuning knobs (``heavy_lease``): a node's
+    # inherited slot count or wait would change how many leases a cell can take
+    # and how long it queues. Scrubbed; lease cells set their own.
+    "LOCAL_OPERATOR_HEAVY_JOB_SLOTS",
+    "LOCAL_OPERATOR_HEAVY_JOB_WAIT_S",
+    # The adopted-listener boot deadline (``cli.resolve_adopt_boot_deadline_seconds``):
+    # an operator's inherited small value would make a test's adopted serve
+    # exit early, changing what the serve cells assert. Scrubbed; deadline
+    # cells set their own.
+    "LOCAL_OPERATOR_SERVE_ADOPT_BOOT_DEADLINE_SECONDS",
+    # A suite launched from a leased command (a `pytest -n 8` through the bash
+    # tool) inherits the operator's slot marker; it names the REAL lease dir, so
+    # it can only fail verification here, but a cell asserting the queue must
+    # not depend on that. Scrubbed; the re-entrancy cells set their own.
+    "LOCAL_OPERATOR_HEAVY_LEASE",
+    # The SIGINFO sensor's off-switch (``siginfo``): an inherited ``off`` would
+    # disable the sensor in every cell, silently waiving what the sensor cells
+    # assert. Scrubbed; the sensor-specific cells set it explicitly via
+    # monkeypatch.
+    "LOCAL_OPERATOR_SIGINFO_SENSOR",
     # The open-frame trace names a real output file, read once at import.
     # Inheriting it could append test timings to the operator's trace; tests
     # that exercise tracing must opt in with their own isolated output path.
@@ -230,6 +271,16 @@ _AMBIENT_VARS = (
     # and the cells would keep passing while testing a window nothing ships.
     "LOP_UPDATE_LOCK_S",
     "LOP_UPDATE_LOCK_HEARTBEAT_S",
+    # The daemon-refresh hand-off's process markers (``update._REFRESH_ROLE_ENV``
+    # and ``_REFRESH_HANDOFF_ENV``). ROLE=worker is a SWITCH: it makes
+    # ``_run_refresh_child`` skip the hand-off and run the refresh body
+    # in-process, so a value inherited from an update the operator has running
+    # would put every hand-off cell on the worker branch while it still looked
+    # like it tested the hand-off. HANDOFF_AT moves the instant a child hands off
+    # by. Cells that mean either set it through ``monkeypatch`` or an explicit
+    # env map.
+    "LOCAL_OPERATOR_REFRESH_ROLE",
+    "LOCAL_OPERATOR_REFRESH_HANDOFF_AT",
     # The runtime standby's own off switch (`session/runtime/standby.py`,
     # ``DISABLE_ENV``), which the suite SETS for the processes it starts
     # (``_PROCESS_DESKTOP_GATES`` below) and must therefore also SCRUB. An
@@ -337,6 +388,7 @@ _AMBIENT_VARS = (
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    "LOP_RUNTIME_GOAL_WAKE_DUE",
     # The wake supervisor's per-invocation ownership stamp (#3028,
     # ``wakes/owned_runtimes.OWNER_ENV``) and the flag that lets ``launch``
     # propagate it. serve() sets both in its own environment, so a suite run
@@ -487,7 +539,47 @@ _AMBIENT_VARS = (
     "GOOGLE_API_KEY",
     "GOOGLE_AI_STUDIO_API_KEY",
     "GEMINI_API_KEY",
+    # Google Vertex AI: the GCP project/location name real cloud resources a
+    # developer's shell points at, the OAuth client pair is a credential, and
+    # the token-URI overrides are ESCAPE HATCHES that waive the pinned
+    # token-endpoint check the suite asserts.
+    "GOOGLE_CLOUD_PROJECT",
+    "VERTEX_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "VERTEX_LOCATION",
+    "GOOGLE_VERTEX_OAUTH_CLIENT_ID",
+    "GOOGLE_VERTEX_OAUTH_CLIENT_SECRET",
+    "GOOGLE_VERTEX_TOKEN_URI",
+    "GOOGLE_VERTEX_OAUTH_TOKEN_URI",
+    "GOOGLE_VERTEX_ALLOW_CUSTOM_TOKEN_URI",
     "XAI_API_KEY",
+    # Amazon Bedrock (``providers/bedrock``). The bearer token is a live
+    # credential; ``LOP_BEDROCK_AUTH`` is an ESCAPE HATCH that forces the auth
+    # mode (bearer vs SigV4), so inheriting it would push every resolution cell
+    # down one branch while it looked like it tested the selection; and
+    # ``LOP_BEDROCK_ENDPOINT_URL`` names the host that receives signed requests,
+    # so a developer's staging/VPC value would aim the suite at a real endpoint.
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "LOP_BEDROCK_AUTH",
+    "LOP_BEDROCK_ENDPOINT_URL",
+    # botocore's default credential chain, which the Bedrock SigV4 path
+    # resolves through. Production code does not read these by name (botocore
+    # does), so the walker cannot demand them — but a developer's exported AWS
+    # identity would otherwise sign a test's request with real keys or pick a
+    # real profile/region. Tests that cover the chain set their own values.
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
     "KIMI_API_KEY",
     "MOONSHOT_API_KEY",
     "ALIBABA_CLOUD_API_KEY",
@@ -570,6 +662,15 @@ _AMBIENT_VARS = (
     # than explained.
     "GH_TOKEN",
     "GITHUB_TOKEN",
+    # Its companion: the diagnostic scope the same injection writes beside the
+    # bearer (a sha256 of that token plus the designation digest). It authorizes
+    # nothing, but it is CREDENTIAL-DERIVED and it moves the helper's stderr:
+    # `_repository_diagnostic` prints the denied-repo hint only when the value
+    # matches the token/list in play. Inherited from a lop session's bash child
+    # it would ride along with a live bearer and let a "no context → no hint"
+    # cell read the shell's value instead of the one it sets. Scrubbed, like
+    # the bearer it describes.
+    "LOCAL_OPERATOR_GITHUB_DIAGNOSTIC_SCOPE",
     # The OSC 8 hyperlink capability markers of the REAL terminal the suite is
     # run from (``terminals.py::is_hyperlinked``, the supplement file callouts'
     # paint decision): ``VTE_VERSION`` is exported by every VTE-based terminal
@@ -1344,6 +1445,24 @@ def restore_active_locale() -> Iterator[None]:
         text.set_active_locale("en")
 
 
+@pytest.fixture(autouse=True)
+def no_real_pkexec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may launch the machine's real pkexec.
+
+    ``elevate.pkexec_path`` resolves pkexec from FIXED system paths, not ``PATH``
+    (agent review R1-5 on #3950), so the old way of hiding it — patching
+    ``shutil.which`` — no longer does, and on a host with ``/usr/bin/pkexec`` (and
+    passwordless sudo) a test that reached ``run_elevated`` would raise a real
+    privileged prompt. The test-launcher-only seam is pinned to a path that does
+    not exist; a test that wants a pkexec host points it at a shim of its own.
+    """
+    from local_operator.operator import elevate
+
+    monkeypatch.setattr(
+        elevate, "_PKEXEC_CANDIDATES_OVERRIDE", ("/nonexistent/lop-test-no-real-pkexec",)
+    )
+
+
 @pytest.fixture
 def monkeypatch(restore_active_locale: None) -> Iterator[pytest.MonkeyPatch]:
     """Keep pytest's standard patch API, but declare locale teardown ordering.
@@ -1432,6 +1551,27 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     if escaped:
         del _RUNTIME_ROOT_ESCAPES[escapes_before:]
         pytest.fail("test reached the operator's real runtime root:\n" + "\n".join(escaped))
+
+
+@pytest.fixture(autouse=True)
+def neutralise_runtime_path_prime(monkeypatch):
+    """Keep ``launch._runtime_env`` from priming PATH through a real login shell.
+
+    ``_runtime_env`` primes the operator's login PATH (``launch._prime_login_path``)
+    because launchd/systemd daemons engage runtimes with a bare PATH. The suite
+    scrubs ``LOCAL_OPERATOR_PATH_PRIMED`` (see ``isolate_environment``), so
+    every cell that builds a runtime env would otherwise run a login shell AND
+    have ``os.environ["PATH"]`` rewritten under it, unrestored at teardown:
+    a cell that set a fake bin dir on PATH would silently lose it. Cells that
+    assert the prime itself put the real function back (the module attribute
+    captured at import time; ``test_runtime_env_login_path.py``).
+
+    Importing ``launch`` here costs about half a second ONCE per worker process
+    (measured with ``-X importtime``), not per test.
+    """
+    from local_operator.session.runtime import launch
+
+    monkeypatch.setattr(launch, "_prime_login_path", lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -1538,10 +1678,14 @@ def refuse_real_secret_broker_spawn(request, monkeypatch):
         return
     from local_operator.secrets import client as secrets_client
 
+    # Match the explicit broker budget keywords: secret access forwards its
+    # shared deadline even when this guard selects the keyfile fallback. Accepting
+    # that budget must never start a daemon or change the fallback result; avoid
+    # **kwargs so future API drift still fails rather than silently going untested.
     monkeypatch.setattr(
         secrets_client,
         "ensure_broker",
-        lambda base=None, *, timeout=None: False,
+        lambda base=None, *, timeout=None, deadline=None: False,
     )
 
 

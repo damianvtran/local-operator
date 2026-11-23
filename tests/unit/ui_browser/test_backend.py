@@ -455,7 +455,7 @@ async def test_modern_ui_delayed_timeout_after_delivery_never_replays(
     delay past the budget: exactly ONE dispatch, no replay.
 
     Distinct from the immediate-transport-failure test above: here the POST is
-    accepted (a 200 arrives) but the response is DELAYED past the outer budget,
+    accepted by the transport but its response is DELAYED past the outer budget,
     and the record rotates before the retry branch could run. The outer
     `asyncio.timeout` must fire first and land as `BridgeUnreachable` with the
     transport never sending a second request — the pre-delivery retry branch is
@@ -464,6 +464,20 @@ async def test_modern_ui_delayed_timeout_after_delivery_never_replays(
     """
     publish(tmp_path, instance_id="instance-a")
     posts = 0
+    operation_timeout: asyncio.Timeout | None = None
+    real_timeout = asyncio.timeout
+
+    def timeout_after_delivery(delay: float | None) -> asyncio.Timeout:
+        nonlocal operation_timeout
+        if operation_timeout is None:
+            # Capture the operation's outer context, but arm it only after POST
+            # arrives. A tiny wall-clock budget can expire during healthy preflight
+            # on a busy runner, never reaching the delivered-action state we test.
+            operation_timeout = real_timeout(None)
+            return operation_timeout
+        # Health probes retain their real contexts; only the operation's expiry
+        # is driven by the delivery handshake rather than runner scheduling.
+        return real_timeout(delay)
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal posts
@@ -474,13 +488,18 @@ async def test_modern_ui_delayed_timeout_after_delivery_never_replays(
         posts += 1
         # A second incarnation is advertised while our request is in flight.
         publish(tmp_path, instance_id="instance-b")
-        await asyncio.sleep(2.0)  # outlives the tiny budget below
-        return httpx.Response(200, json={"ok": True})
+        assert operation_timeout is not None
+        operation_timeout.reschedule(asyncio.get_running_loop().time())
+        # Withhold the response until the real outer timeout cancels this POST.
+        # No sleep or enlarged budget can accidentally buy a pre-delivery pass.
+        await asyncio.Event().wait()
+        raise AssertionError("the delivered POST must be cancelled by the outer timeout")
 
     client = _client_with_transport(tmp_path, monkeypatch, handler)
-    client.timeout_for = lambda method, params: 0.1  # type: ignore[assignment]
+    monkeypatch.setattr(asyncio, "timeout", timeout_after_delivery)
     with pytest.raises(BridgeUnreachable):
         await client.call("open", {"url": "https://example.test"})
+    assert operation_timeout is not None and operation_timeout.expired()
     assert posts == 1, "a possibly-delivered action is never replayed after a record rotation"
 
 
@@ -742,6 +761,73 @@ def test_ui_host_copy_never_sends_the_user_to_the_extension(
         assert fragment not in rendered, rendered
 
 
+# The origin_not_allowed hint exactly as an app WITHOUT ``opens_on_approval``
+# renders it. Pinned as a literal (not "flag off == default") so a change to the
+# old text cannot hide behind both sides moving together.
+_UI_NOT_ALLOWED_LEGACY = (
+    "site https://example.com is not allowed yet. Call browser "
+    "action='request_access' url=https://example.com/login?next=%2Fhome to raise the "
+    "approval prompt, then NOTIFY THE USER (via the ask tool or a message) to approve "
+    "it in the Local Operator desktop app's browser tab — the popup badge alone is not "
+    "reliably seen — and only then action='await_access' "
+    "url=https://example.com/login?next=%2Fhome to wait for the decision."
+)
+
+
+def test_origin_not_allowed_without_opens_on_approval_is_unchanged() -> None:
+    data = {"origin": "https://example.com", "url": "https://example.com/login?next=%2Fhome"}
+    rendered = format_error(_error(ErrorCode.ORIGIN_NOT_ALLOWED, data), action="open", host="ui")
+    assert rendered == _UI_NOT_ALLOWED_LEGACY
+
+
+def test_origin_not_allowed_with_opens_on_approval_asks_for_one_round_trip() -> None:
+    """An app that opens the page on Allow lets the agent ask ONCE: approve,
+    sign in in the tab that opens, reply (operator report, 2026-11-17)."""
+    data = {
+        "origin": "https://example.com",
+        "url": "https://example.com/login?next=%2Fhome",
+        "opens_on_approval": True,
+    }
+    rendered = format_error(_error(ErrorCode.ORIGIN_NOT_ALLOWED, data), action="open", host="ui")
+    # The legacy steps survive verbatim, with the full url, ahead of the new clause.
+    assert rendered.startswith(_UI_NOT_ALLOWED_LEGACY)
+    assert rendered.endswith(
+        " Approving opens this page in the app's Browser. If the site needs a "
+        "sign-in, ask once: approve, sign in on the page that opens in the app's "
+        "Browser, then reply here."
+    )
+    assert "sign in in" not in rendered  # U4: relayable to the operator as-is
+
+
+def test_origin_not_allowed_with_opened_tab_says_approve_again_no_new_sign_in() -> None:
+    """U1: the allow-once grant lapsed before the agent's open, but the page the
+    operator signed in on is still open. The agent must ask for approval only,
+    not a second sign-in; the url stays the agent's own (never the tab's)."""
+    data = {
+        "origin": "https://example.com",
+        "url": "https://example.com/login?next=%2Fhome",
+        "opens_on_approval": True,
+        "opened_tab": True,
+    }
+    rendered = format_error(_error(ErrorCode.ORIGIN_NOT_ALLOWED, data), action="open", host="ui")
+    assert rendered.startswith(_UI_NOT_ALLOWED_LEGACY)
+    assert rendered.endswith(
+        " The page from an earlier approval is still open in the app's Browser: ask the "
+        "user to approve again; the page they already used comes back, so there is no "
+        "need to sign in again."
+    )
+    assert "ask once" not in rendered
+
+
+def test_opens_on_approval_is_ignored_on_the_extension_host() -> None:
+    """The flag is the desktop app's; the extension opens nothing on Allow."""
+    data = {"origin": "https://example.com", "url": "https://example.com/a"}
+    flagged = {**data, "opens_on_approval": True, "opened_tab": True}
+    assert format_error(
+        _error(ErrorCode.ORIGIN_NOT_ALLOWED, flagged), action="open", host="extension"
+    ) == format_error(_error(ErrorCode.ORIGIN_NOT_ALLOWED, data), action="open", host="extension")
+
+
 def test_shared_codes_keep_one_spelling_for_every_host() -> None:
     """Codes whose copy names no process must not fork, or the two drift."""
     for code, data in (
@@ -809,8 +895,12 @@ class _Host:
     by that many seconds before answering with the healthy body, ``"hang"`` holds
     the connection open and never answers, and ``"until_retry"`` holds it until a
     SECOND GET arrives (so the first attempt is late by construction, whatever the
-    machine load, rather than by a sleep the load can shorten or stretch). After
-    the script runs out it answers instantly. ``/rpc`` always succeeds and is
+    machine load, rather than by a sleep the load can shorten or stretch). A
+    ``("until_retry", s)`` step does the same and then waits ``s`` more seconds;
+    scripting it for BOTH GETs makes the retry's reply late by ``s`` whichever
+    handler happens to pop first (under load the first attempt's GET can reach
+    the handler after the retry's). After the script runs out it answers
+    instantly. ``/rpc`` always succeeds and is
     counted, so a test can prove the command was (or was not) dispatched.
     """
 
@@ -865,10 +955,15 @@ class _Host:
                 if step == "hang":
                     host._release.wait(timeout=10)
                     return
+                if isinstance(step, tuple):
+                    step, after = step
+                else:
+                    after = 0.0
                 if step == "until_retry":
                     deadline = time.monotonic() + 10
                     while host.gets < 2 and time.monotonic() < deadline:
                         time.sleep(0.01)
+                    step = after
                 if step:
                     time.sleep(float(step))
                 self._reply({"host": "ui", "pid": host.pid, "instance_id": host.instance_id})
@@ -926,7 +1021,10 @@ def short_first_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def small_budget(monkeypatch: pytest.MonkeyPatch) -> float:
+    # Both budgets shrink together so a hung host still costs ~2 * _BUDGET here;
+    # the longer production retry budget has its own tests below.
     monkeypatch.setattr(backend, "HEALTH_PROBE_TIMEOUT_S", _BUDGET)
+    monkeypatch.setattr(backend, "HEALTH_RETRY_TIMEOUT_S", _BUDGET)
     return _BUDGET
 
 
@@ -1372,3 +1470,213 @@ async def test_the_copy_is_exact_when_the_deadline_shortens_the_second_attempt(
         assert f"within {_BUDGET:.1f}s over" not in message
     finally:
         host.close()
+
+
+# --- The longer retry budget (2026-11-15 busy-machine failures) ------------------
+#
+# Measured: on a load-45 machine both 1.5 s attempts expired while the host
+# answered in 0-1 ms, because the retry was no longer than the attempt that had
+# just starved. These pin the policy: first attempt unchanged, retry longer and
+# deadline-clamped, a real backoff between them, and a failure that survives the
+# shared runtime.log's two-minute rotation in its own file.
+
+
+@pytest.fixture
+def health_log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point log_dir() at a scratch directory so the durable failure file is ours."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    from local_operator.paths import log_dir
+
+    return log_dir()
+
+
+def _recording_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace the GET with an instant TIMEOUT that records the budget it was given."""
+    budgets: list[float] = []
+
+    async def probe_once(current: Any, budget: float) -> Any:
+        budgets.append(budget)
+        return backend.HealthVerdict.TIMEOUT, "TimeoutError", ""
+
+    monkeypatch.setattr(backend, "_probe_once", probe_once)
+    return budgets
+
+
+@pytest.mark.asyncio
+async def test_a_retry_slower_than_the_first_budget_but_inside_the_retry_budget_is_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    """The defect itself: an answer later than ONE first budget must still acquit.
+
+    Under the old policy the retry also got the first budget, so a reply 1.0 s
+    late to a 0.3 s retry window failed exactly as the field incidents did.
+    """
+    monkeypatch.setattr(backend, "HEALTH_PROBE_TIMEOUT_S", 0.3)
+    # Generous on purpose: this fleet runs at load 70+, which stretches a 1.0 s
+    # reply well past 4 s; the assertion is "longer than the first budget acquits".
+    monkeypatch.setattr(backend, "HEALTH_RETRY_TIMEOUT_S", 20.0)
+    # Order-independent (R1/Q2): a plain ["hang", 1.0] let the RETRY pop "hang"
+    # whenever the 0.3 s first attempt expired before its GET reached the handler,
+    # which failed 4/4 under load. Both steps wait for the second GET, then 1.0 s,
+    # so the retry's reply is 1.0 s late however the two GETs are ordered.
+    late = ("until_retry", 1.0)
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=[late, late])
+    try:
+        current = publish(tmp_path, port=host.port, instance_id="instance-a")
+        probe = await backend.probe_health(current, site="preflight")
+        assert probe.ok, probe
+        assert probe.attempts == 2 and host.gets == 2
+        assert probe.retry_budget_s == pytest.approx(20.0)
+        assert probe.elapsed_s > 1.0, "the acquitting reply came later than the first budget"
+        # Healthy: nothing logged, nothing persisted.
+        assert not (health_log_dir / backend.HEALTH_FAILURE_LOG_NAME).exists()
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_the_retry_gets_the_longer_budget_after_the_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    budgets = _recording_timeouts(monkeypatch)
+    current = publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    started = time.monotonic()
+    probe = await backend.probe_health(current, site="preflight")
+    elapsed = time.monotonic() - started
+    assert budgets == [backend.HEALTH_PROBE_TIMEOUT_S, backend.HEALTH_RETRY_TIMEOUT_S]
+    assert budgets == [1.5, 5.0], "production constants changed without new measurements"
+    assert probe.verdict is backend.HealthVerdict.TIMEOUT and probe.attempts == 2
+    assert probe.budget_s == 1.5 and probe.retry_budget_s == 5.0 and not probe.clamped
+    assert elapsed >= backend.HEALTH_RETRY_BACKOFF_S, "the backoff must actually be slept"
+
+
+@pytest.mark.asyncio
+async def test_the_longer_retry_budget_is_clamped_to_the_callers_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    budgets = _recording_timeouts(monkeypatch)
+    current = publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 2.0
+    probe = await backend.probe_health(
+        current, first_budget=1.5, deadline=deadline, site="preflight"
+    )
+    assert budgets[0] == 1.5
+    # Whatever time is left after the (instant) first attempt and the backoff,
+    # never the full 5 s: the deadline is a hard ceiling.
+    assert len(budgets) == 2
+    assert budgets[1] <= 2.0 - backend.HEALTH_RETRY_BACKOFF_S + 0.01
+    assert budgets[1] < backend.HEALTH_RETRY_TIMEOUT_S
+    assert probe.clamped and probe.retry_budget_s == budgets[1]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_probe_is_persisted_outside_the_rotating_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    """runtime.log rolls in ~2 minutes across the fleet; this file must keep the line."""
+    _recording_timeouts(monkeypatch)
+    current = publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    await backend.probe_health(current, site="preflight")
+    await backend.probe_health(current, site="preflight")
+    path = health_log_dir / backend.HEALTH_FAILURE_LOG_NAME
+    lines = path.read_text().splitlines()
+    assert len(lines) == 2, lines
+    for field in (
+        f"pid={os.getpid()} ui_host_health_probe_failed",
+        "site=preflight",
+        "outcome=timeout",
+        "budget_s=1.500",
+        "retry_budget_s=5.000",
+        "attempts=2",
+        "loop_lag_ms=",
+        "elapsed_s=",
+    ):
+        assert field in lines[0], (field, lines[0])
+    assert current.session_key not in path.read_text()
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_the_durable_failure_log_rolls_to_one_backup_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    _recording_timeouts(monkeypatch)
+    monkeypatch.setattr(backend, "HEALTH_FAILURE_LOG_MAX_BYTES", 10)
+    current = publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    await backend.probe_health(current, site="preflight")
+    await backend.probe_health(current, site="preflight")
+    path = health_log_dir / backend.HEALTH_FAILURE_LOG_NAME
+    assert len(path.read_text().splitlines()) == 1
+    assert len(path.with_name(path.name + ".1").read_text().splitlines()) == 1
+    # An unwritable destination degrades to "not persisted", never to an error.
+    monkeypatch.setattr("local_operator.paths.ensure_log_dir", lambda: tmp_path / "missing" / "x")
+    probe = await backend.probe_health(current, site="preflight")
+    assert probe.verdict is backend.HealthVerdict.TIMEOUT
+
+
+def test_an_unclamped_retry_reports_the_measured_wait_not_the_first_budget(
+    tmp_path: Path,
+) -> None:
+    """R2/Q3: with the 5 s retry, "within 1.5s over 2 attempts" understated ~7 s.
+
+    Uses the PRODUCTION budgets (no ``HEALTH_RETRY_TIMEOUT_S = _BUDGET`` override),
+    which is exactly the configuration where the first budget stopped describing
+    the wait.
+    """
+    current = publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    probe = backend.HealthProbe(
+        verdict=backend.HealthVerdict.TIMEOUT,
+        elapsed_s=7.02,
+        attempts=2,
+        budget_s=backend.HEALTH_PROBE_TIMEOUT_S,
+        retry_budget_s=backend.HEALTH_RETRY_TIMEOUT_S,
+        clamped=False,
+    )
+    message = backend._failure_copy(probe, current, None)
+    assert "within 7.0s over 2 attempts" in message, message
+    assert f"within {backend.HEALTH_PROBE_TIMEOUT_S:.1f}s" not in message
+    # A single attempt still states its own budget (that sentence was always true).
+    single = backend.HealthProbe(
+        verdict=backend.HealthVerdict.TIMEOUT,
+        elapsed_s=1.51,
+        attempts=1,
+        budget_s=backend.HEALTH_PROBE_TIMEOUT_S,
+    )
+    assert "within 1.5s over 1 attempt;" in backend._failure_copy(single, current, None)
+
+
+def test_a_writer_that_waited_on_a_roll_appends_to_the_fresh_file_not_the_backup(
+    monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    """R4: two writers rolling together must not rename a fresh file over the backup.
+
+    Deterministic stand-in for the race: while this writer waits on the lock,
+    "writer B" rolls the full log and starts a fresh one. This writer then holds
+    a descriptor to what is now ``.1``; it must notice, reopen the path, and
+    neither roll again (which would clobber B's full backup) nor append to it.
+    """
+    import fcntl
+
+    monkeypatch.setattr(backend, "HEALTH_FAILURE_LOG_MAX_BYTES", 100)
+    health_log_dir.mkdir(parents=True, exist_ok=True)
+    path = health_log_dir / backend.HEALTH_FAILURE_LOG_NAME
+    backup = path.with_name(path.name + ".1")
+    full = b"x" * 200 + b"\n"
+    path.write_bytes(full)
+    real_flock = fcntl.flock
+    rolled: list[bool] = []
+
+    def flock(fd: int, op: int) -> None:
+        if not rolled:
+            rolled.append(True)
+            os.replace(path, backup)  # writer B's roll ...
+            path.write_bytes(b"B\n")  # ... and B's record in the fresh file
+        real_flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", flock)
+    backend._persist_probe_failure("ui_host_health_probe_failed site=preflight")
+    assert backup.read_bytes() == full, "the full backup was clobbered or appended to"
+    lines = path.read_text().splitlines()
+    assert lines[0] == "B" and len(lines) == 2 and "site=preflight" in lines[1], lines

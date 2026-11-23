@@ -1,0 +1,78 @@
+{
+  "locale": "fr",
+  "namespace": "wire.settings",
+  "audit_date": "2026-11-15T14:25:17.302082+00:00",
+  "key_count": 1,
+  "scoped_keys": [
+    "wire.settings.network_credentials_github_repositories.help"
+  ],
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "dbf144330553",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "df4617d39efa",
+    "independent_from_primary_auditor_session": "91d1e05d2d82",
+    "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+      "sha256": "e773ea8aedb8b87586a4e0c8d72ed6e32cac39d6b522fd0f4b5ae34ac7315037"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s1/report.md",
+      "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s1/runner.py.txt",
+      "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s1/audit.log",
+      "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s1/execution.json",
+      "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s1/rendered.txt",
+      "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only.",
+  "source_audit_revision": "0b754ce89567ae158fe91db3ec0ed0b4a621f312",
+  "preservation": {
+    "original_record": {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s1/original-record.json",
+      "sha256": "c4be466b99c8320b91b6c131478871dc4c6a93e3824e2ce1f0caea2201db04fd"
+    },
+    "original_receipt": {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s1/original-receipt.json",
+      "sha256": "b0c1d86d7992ed7c83bcf029bd4817dec277c432cdc0cbfb729933084554086c"
+    },
+    "original_scope": "95fff90559ae..0b754ce89567",
+    "relocation_only_by": "91d1e05d2d82",
+    "no_new_audit_claim": true
+  }
+}

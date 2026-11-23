@@ -408,9 +408,13 @@ def test_membership_converges_over_links_that_were_already_up(
         assert _join(joiner, inviter=c, monkeypatch=monkeypatch)["device_id"] == joiner.device_id
 
     # THE LINKS THAT WILL STILL EXIST WHEN THE LATE MEMBER ARRIVES: A–C and B–C.
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
-    link, reason = b.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
     # A CONTACT ON A LINK THAT ALREADY EXISTS ESTABLISHES NOTHING, which is the
     # mechanism round 2's fix rested on and the reason it could never run again: it
@@ -560,7 +564,9 @@ def test_a_member_count_reports_what_it_could_and_could_not_verify(
     record = _init_network(c.server)
     assert _join(b, inviter=c, monkeypatch=monkeypatch)["device_id"] == b.device_id
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
 
     rows = a.server._ctl_ls({})  # noqa: SLF001 — the CLI's own control op
@@ -627,7 +633,9 @@ def test_the_removal_frame_is_applied_by_the_device_it_removes(
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
 
     # A live link, so the rotation has somewhere to be delivered.
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
 
     before = store.load_secrets(record.network_id, b.root).secret
@@ -700,6 +708,15 @@ def test_a_silently_refused_handshake_is_named_locally(
     a.server._ctl_member_rm(  # noqa: SLF001 — the CLI's own control op
         {"network": record.network_id, "device_id": b.device_id}
     )
+    # SILENCE IS STILL THE ANSWER PAST THE NOTICE WINDOW (G9-B). Inside
+    # ``relay.REMOVAL_NOTICE_WINDOW_S`` a removed device that proves its own key is
+    # told "membership ended" instead (test_removed_member_notice.py); this cell pins
+    # the silent path, so the removal is aged past that window first.
+    with store.mutate(record.network_id, a.root) as aged:
+        tomb = aged.member(b.device_id)
+        assert tomb is not None and tomb.removed_at is not None
+        tomb.removed_at -= relay.REMOVAL_NOTICE_WINDOW_S + 60
+        store.save(aged, a.root)
     # ...AND IT COMES BACK: a fresh relay on the existing root — the durable state is
     # on disk, the process is not (the process that paired is not the process that
     # later dials). Dial-only, per the rule the fresh-relay helper in
@@ -716,7 +733,9 @@ def test_a_silently_refused_handshake_is_named_locally(
     refused.stale = ""
     store.save(refused, b.root)
 
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is None
     assert reason.startswith("handshake_refused:"), reason
 
@@ -853,7 +872,9 @@ def test_a_frame_queued_immediately_before_a_close_reaches_the_peer(
     b = _make(devices, "b", mode=HUB)
     record = _init_network(a.server)
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
 
     # WATCHED ON THE RECEIVING LINK'S OWN DISPATCH, not on a class attribute: the
@@ -983,7 +1004,9 @@ def test_a_pulled_rotation_table_leaves_one_row_for_the_rotated_device(
     new_id = rotated.self_device_id
     assert new_id != old_id, "the verb did not rotate the device id"
 
-    link, reason = peer.server.dial(record.network_id, host=f"{hub.host}:{hub.port}", epoch=1)
+    link, reason = peer.server.dial(
+        record.network_id, host=f"{hub.host}:{hub.port}", epoch=1, expected_device=hub.device_id
+    )
     assert link is not None, reason
     assert peer.server._pull_members(link) == ""  # noqa: SLF001
     view = store.load(record.network_id, peer.root)
@@ -999,6 +1022,497 @@ def test_a_pulled_rotation_table_leaves_one_row_for_the_rotated_device(
     surviving = view.member(new_id)
     assert surviving is not None
     assert surviving.rotation_proof.get("sig_old")
+
+
+class _ForegroundHopTableGate:
+    """Keep this cell's stale-row precondition until a handshake applies the hop.
+
+    Table adoption is a separate route, covered by the adjacent table-first cell.
+    Install before this peer starts so acquiring the gate drains any in-flight
+    adoption too. Only this peer's table merges are held through foreground apply.
+    Native rotation helpers wait only for foreground ENTRY, not its completion:
+    after entry a competing dial may still win the commit and publish later.
+    Release table adoption after foreground apply, BEFORE dial's own table pull.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+        self._lock = threading.RLock()
+        self._held = False
+        self.foreground_entered = threading.Event()
+        original = relay.RelayServer._adopt_member_rows
+
+        def adopt(server: Any, link: Any, rows: Any, **kwargs: Any) -> bool:
+            if server.root != root:
+                return original(server, link, rows, **kwargs)
+            assert self._lock.acquire(
+                timeout=net_fixtures.NET_WAIT_BUDGET_S
+            ), "foreground hop never released table adoption"
+            try:
+                return original(server, link, rows, **kwargs)
+            finally:
+                self._lock.release()
+
+        monkeypatch.setattr(relay.RelayServer, "_adopt_member_rows", adopt)
+
+    def wait_for_foreground(self) -> None:
+        # A native dial can reach the helper before the test snapshots the old
+        # row, or before dial normalizes expected_device. Hold ONLY initial
+        # entry, never commit/audit completion: the competitor is free to win
+        # as soon as the foreground has entered its own rotation helper.
+        assert self.foreground_entered.wait(
+            net_fixtures.NET_WAIT_BUDGET_S
+        ), "foreground never entered the hop helper"
+
+    def hold(self) -> None:
+        assert self._lock.acquire(
+            timeout=net_fixtures.NET_WAIT_BUDGET_S
+        ), "an in-flight table adoption never completed"
+        self._held = True
+
+    def release(self) -> None:
+        # Only the foreground thread owns/releases the setup gate. Idempotence
+        # allows both the apply boundary and the scenario's failure cleanup.
+        if self._held:
+            self._held = False
+            self._lock.release()
+
+
+def test_a_peer_holding_the_pre_rotation_row_follows_the_hop_when_it_dials(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G1D-1 / PR #4179 S-1: a rotation must not split the mesh.
+
+    The cell above passes only because the hub's RUNNING relay still holds its
+    pre-rotation identity in memory. Here the relay runs under the NEW identity (the
+    state after a relay-path rotate or a restart), and the peer still holds the OLD
+    row and never saw the queued ``net_identity_rotate``. The hub's challenge carries
+    its rotation statement; the peer verifies it against the stored old key, the
+    welcome proof under the new key, applies the hop, and links.
+
+    RED before round 1: ``peer->hub None peer_identity_mismatch``, the hub's only
+    address removed from the peer's row, and ``hub->peer`` refused (the security
+    review's repro, verbatim setup).
+    """
+    table_gate = _ForegroundHopTableGate(monkeypatch, devices[1] / "peer")
+    hub = _make(devices, "hub")
+    peer = _make(devices, "peer")
+    record = _init_network(hub.server)
+    _join(peer, inviter=hub, monkeypatch=monkeypatch)
+    foreground = threading.current_thread()
+    applied_on_dial: list[bool] = []
+    apply_rotation = peer.server._apply_rotation_statement
+
+    def observe_apply(network_id: str, statement: dict[str, Any]) -> Any:
+        if threading.current_thread() is foreground:
+            table_gate.foreground_entered.set()
+        else:
+            table_gate.wait_for_foreground()
+        try:
+            outcome = apply_rotation(network_id, statement)
+            if threading.current_thread() is foreground:
+                applied_on_dial.append(outcome.applied)
+            return outcome
+        finally:
+            if threading.current_thread() is foreground:
+                table_gate.release()
+
+    monkeypatch.setattr(peer.server, "_apply_rotation_statement", observe_apply)
+    table_gate.hold()
+    try:
+        old_id = hub.device_id
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(hub.root))
+        monkeypatch.setattr(relay, "health", lambda *args, **kwargs: None)
+        assert net_cli._cmd_identity_rotate(Namespace(json=True)) == 0  # noqa: SLF001
+        new_id = store.load(record.network_id, hub.root).self_device_id
+        assert new_id != old_id
+        hub.server.identity = identity.load_or_mint(hub.root)
+        assert hub.server.identity.device_id == new_id
+        held = store.load(record.network_id, peer.root).member(old_id)
+        assert held is not None
+        assert held.device_id == old_id, "the table overtook the foreground-hop precondition"
+        assert held.public_key != hub.server.identity.public_key
+        before = list(held.endpoints)
+        assert before, "the rig gave the peer no address for the hub"
+
+        link, reason = peer.server.dial(
+            record.network_id, host=before[0], epoch=1, expected_device=old_id
+        )
+        assert link is not None, f"peer->hub {reason}"
+        assert link.device_id == new_id and link.peer_verified
+        view = store.load(record.network_id, peer.root)
+        row = view.member(new_id)
+        assert row is not None and view.member(old_id) is row
+        assert row.endpoints, "the rotated hub's address was demoted"
+        assert set(before) <= set(row.endpoints)
+        assert [r.device_id for r in view.active_members() if r.device_id != peer.device_id] == [
+            new_id
+        ]
+        assert (
+            len(applied_on_dial) == 1
+        ), "the foreground handshake must check one rotation statement"
+        # True means THIS invocation already called audit.record; keep that immediate
+        # contract. False may observe another producer's committed row before that
+        # producer enters audit.record, so wait for the actual observable event.
+        if applied_on_dial[0]:
+            assert "device_rotated" in _events(peer), "the hop applied by the dial was not audited"
+        else:
+            assert _recorded(peer, "device_rotated"), "the hop applied by the dial was not audited"
+
+        # The other half: with the hop applied, the hub's NEW id is a member on the peer.
+        back, back_reason = hub.server.dial(
+            record.network_id,
+            host=f"{peer.host}:{peer.port}",
+            epoch=1,
+            expected_device=peer.device_id,
+        )
+        assert back is not None, f"hub->peer {back_reason}"
+    finally:
+        # Release pre-entry native waiters before devices.stop(), even when
+        # setup or the foreground handshake fails before entering the helper.
+        table_gate.foreground_entered.set()
+        table_gate.release()
+
+
+@pytest.mark.parametrize(
+    "ordering", ["audit_after", "audit_before", "audit_lost", "pre_entry_after"]
+)
+def test_foreground_hop_audit_observation_keeps_competing_dials(
+    devices: Any, monkeypatch: pytest.MonkeyPatch, ordering: str
+) -> None:
+    """Force the observed race with two REAL handshakes, not fabricated outcomes.
+
+    The actual True producer commits the row, then stops at audit.record ENTRY.
+    It may be the injected dial or a native background dial. The foreground
+    must take applied=False. Late publication is released only when the corrected
+    observer is reached; reverting to the original immediate assertion therefore
+    fails before that release. Reverse ordering proves False is not itself a loss.
+    Dropping that same audit permanently must still fail the ORIGINAL assertion.
+    pre_entry_after starts the real worker before the held-row snapshot; it must
+    wait at initial helper entry, then compete for commit after foreground entry.
+    """
+    foreground = threading.current_thread()
+    entered = threading.Event()
+    release = threading.Event()
+    published = threading.Event()
+    producer_completed = threading.Event()
+    incidental_release = threading.Event()
+    audit_producers: list[threading.Thread] = []
+    results: list[tuple[Any, str]] = []
+    errors: list[BaseException] = []
+    order: list[str] = []
+    workers: list[threading.Thread] = []
+    peers: list[Device] = []
+    expected_ids: list[str] = []
+    hubs: list[Device] = []
+    pre_entry_waiting = threading.Event()
+    load = store.load
+    wait_for_foreground = _ForegroundHopTableGate.wait_for_foreground
+    make = _make
+    recorded = _recorded
+
+    def finish() -> None:
+        release.set()
+        # The actual True producer may be a native relay-loop thread, not the
+        # injected dial. Observe its helper completion, never join that loop.
+        assert producer_completed.wait(
+            net_fixtures.NET_WAIT_BUDGET_S
+        ), "the actual rotation producer never completed its helper"
+        order.append("actual_producer_completion_observed")
+        incidental_release.set()
+        for worker in workers:
+            worker.join(net_fixtures.NET_WAIT_BUDGET_S)
+            assert not worker.is_alive(), "competing real dial did not terminate"
+        assert not errors, errors
+        assert len(results) == 1
+        link, reason = results[0]
+        assert link is not None and reason == "ok", f"competing dial: {reason}"
+        assert link.peer_verified and link.device_id == expected_ids[0]
+        row = store.load(link.network_id, peers[0].root).member(link.device_id)
+        assert row is not None and row.device_id == link.device_id
+
+    def start_worker(network_id: str, old_id: str) -> None:
+        assert not workers, "the control started more than one competing dial"
+        device = peers[0]
+        old = load(network_id, device.root).member(old_id)
+        assert old is not None and old.device_id == old_id
+        assert old.endpoints
+
+        def compete() -> None:
+            try:
+                results.append(
+                    device.server.dial(
+                        network_id, host=old.endpoints[0], epoch=1, expected_device=old_id
+                    )
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        worker = threading.Thread(target=compete, name="competing-hop", daemon=True)
+        workers.append(worker)
+        worker.start()
+
+    def before_foreground(gate: Any) -> None:
+        # ONLY these controlled cells exclude incidental third producers. The
+        # foreground and the designated real competing dial remain concurrent;
+        # releasing every native helper at main entry would let a third producer
+        # invalidate this control's old-row setup before either intended dial acts.
+        if workers and threading.current_thread() is workers[0]:
+            if ordering == "pre_entry_after":
+                assert not gate.foreground_entered.is_set()
+                order.append("worker_entered_before_foreground")
+                pre_entry_waiting.set()
+        else:
+            assert incidental_release.wait(
+                net_fixtures.NET_WAIT_BUDGET_S
+            ), "controlled hop never released an incidental native helper"
+        wait_for_foreground(gate)
+
+    def before_snapshot(network_id: str, root: Path | None = None) -> Any:
+        record = load(network_id, root)
+        if (
+            ordering == "pre_entry_after"
+            and not workers
+            and peers
+            and hubs
+            and threading.current_thread() is foreground
+            and root == peers[0].root
+            and hubs[0].server.identity.device_id != hubs[0].device_id
+        ):
+            old_id = hubs[0].device_id
+            row = record.member(old_id)
+            assert row is not None and row.device_id == old_id
+            start_worker(network_id, old_id)
+            assert pre_entry_waiting.wait(
+                net_fixtures.NET_WAIT_BUDGET_S
+            ), "the real competing dial never reached the pre-foreground helper barrier"
+            # Read the actual durable state again, not a cached/fabricated row.
+            record = load(network_id, root)
+            current = record.member(old_id)
+            assert current is not None and current.device_id == old_id
+            assert "device_rotated" not in _events(peers[0])
+            order.append("snapshot_still_old_before_foreground")
+        return record
+
+    def instrument(devices: Any, name: str, *, mode: str = HUB) -> Device:
+        device = make(devices, name, mode=mode)
+        if name == "hub":
+            hubs.append(device)
+        if name != "peer":
+            return device
+        peers.append(device)
+        apply = device.server._apply_rotation_statement
+        audit = device.server.audit.record
+
+        def at_audit(event: Any) -> None:
+            if event.event == "device_rotated":
+                assert threading.current_thread() is not foreground
+                audit_producers.append(threading.current_thread())
+                assert len(audit_producers) == 1, "more than one producer audited this rotation"
+                order.append("actual_producer_committed_audit_entry")
+                entered.set()
+                assert release.wait(
+                    net_fixtures.NET_WAIT_BUDGET_S
+                ), "observer never released the competing audit producer"
+                if ordering == "audit_lost":
+                    order.append("actual_producer_audit_dropped")
+                    return
+                audit(event)
+                order.append("actual_producer_audit_published")
+                published.set()
+                return
+            audit(event)
+
+        def at_apply(network_id: str, statement: dict[str, Any]) -> Any:
+            if threading.current_thread() is not foreground:
+                outcome = apply(network_id, statement)
+                if outcome.applied:
+                    assert audit_producers == [threading.current_thread()]
+                    order.append("actual_true_producer_helper_completed")
+                    producer_completed.set()
+                return outcome
+            old_id = str(statement["old_device_id"])
+            expected_ids.append(str(statement["new_device_id"]))
+            if ordering != "pre_entry_after":
+                old = load(network_id, device.root).member(old_id)
+                assert old is not None and old.device_id == old_id
+                assert old.public_key != statement["new_public_key"]
+                start_worker(network_id, old_id)
+            else:
+                assert pre_entry_waiting.is_set()
+                order.append("foreground_entered_releasing_worker")
+            assert entered.wait(
+                net_fixtures.NET_WAIT_BUDGET_S
+            ), "competing real handshake never reached its rotation audit"
+            # The row is genuinely committed while its audit has NOT entered the
+            # real recorder. No disk/cache state or helper outcome is synthesized.
+            successor = store.load(network_id, device.root).member(old_id)
+            assert successor is not None and successor.device_id == statement["new_device_id"]
+            assert successor.rotation_proof == statement
+            assert "device_rotated" not in _events(device)
+            order.append("foreground_sees_committed_row_without_audit")
+            if ordering == "audit_before":
+                release.set()
+                assert published.wait(net_fixtures.NET_WAIT_BUDGET_S)
+            outcome = apply(network_id, statement)
+            assert outcome.applied is False
+            order.append("foreground_false_return")
+            return outcome
+
+        monkeypatch.setattr(device.server.audit, "record", at_audit)
+        monkeypatch.setattr(device.server, "_apply_rotation_statement", at_apply)
+        return device
+
+    def observe(device: Device, word: str, **kwargs: Any) -> Any:
+        if device in peers and word == "device_rotated":
+            assert "foreground_false_return" in order
+            if ordering != "audit_before":
+                assert "device_rotated" not in _events(device)
+            order.append("corrected_observation")
+            finish()  # Actual producer completion, not a sleep or a fake wait result.
+            if ordering == "audit_lost":
+                # This producer has permanently returned without recording. A
+                # zero-budget predicate read tests that loss without a 60 s hang;
+                # the production observation retains the shared default budget.
+                assert producer_completed.is_set()
+                order.append("permanent_loss_predicate_read")
+                return recorded(device, word, timeout_s=0)
+        return recorded(device, word, **kwargs)
+
+    monkeypatch.setattr(_ForegroundHopTableGate, "wait_for_foreground", before_foreground)
+    monkeypatch.setattr(store, "load", before_snapshot)
+    monkeypatch.setitem(globals(), "_make", instrument)
+    monkeypatch.setitem(globals(), "_recorded", observe)
+    try:
+        if ordering == "audit_lost":
+            with pytest.raises(
+                AssertionError, match="^the hop applied by the dial was not audited"
+            ):
+                test_a_peer_holding_the_pre_rotation_row_follows_the_hop_when_it_dials(
+                    devices, monkeypatch
+                )
+        else:
+            test_a_peer_holding_the_pre_rotation_row_follows_the_hop_when_it_dials(
+                devices, monkeypatch
+            )
+        assert order.index("actual_producer_committed_audit_entry") < order.index(
+            "foreground_false_return"
+        )
+        if ordering == "audit_before":
+            # Also valid with the OLD observer: publication really preceded the
+            # foreground return, regardless of which observer spells the read.
+            finish()
+            assert order.index("actual_producer_audit_published") < order.index(
+                "foreground_false_return"
+            )
+        elif ordering in ("audit_after", "pre_entry_after"):
+            assert order.index("foreground_false_return") < order.index("corrected_observation")
+            assert order.index("corrected_observation") < order.index(
+                "actual_producer_audit_published"
+            )
+        else:
+            assert "actual_producer_audit_published" not in order
+            assert order.index("foreground_false_return") < order.index("corrected_observation")
+            assert order.index("corrected_observation") < order.index(
+                "actual_producer_audit_dropped"
+            )
+            assert order.index("actual_producer_audit_dropped") < order.index(
+                "actual_true_producer_helper_completed"
+            )
+            assert order.index("actual_true_producer_helper_completed") < order.index(
+                "permanent_loss_predicate_read"
+            )
+            assert order.index("actual_producer_completion_observed") < order.index(
+                "permanent_loss_predicate_read"
+            )
+        if ordering == "pre_entry_after":
+            assert order.index("worker_entered_before_foreground") < order.index(
+                "snapshot_still_old_before_foreground"
+            )
+            assert order.index("snapshot_still_old_before_foreground") < order.index(
+                "foreground_entered_releasing_worker"
+            )
+        print(
+            json.dumps({"hop_control": ordering, "order": order, "competing_link_verified": True})
+        )
+    finally:
+        # Release every incidental waiter on failure too, before fixture shutdown.
+        # The scenario finally already opens the foreground-entry/table gates.
+        # A native producer owns a perpetual loop; never join that loop.
+        incidental_release.set()
+        release.set()
+        if audit_producers:
+            assert producer_completed.wait(
+                net_fixtures.NET_WAIT_BUDGET_S
+            ), "actual rotation producer did not complete during cleanup"
+        for worker in workers:
+            worker.join(net_fixtures.NET_WAIT_BUDGET_S)
+            assert not worker.is_alive(), "competing-hop cleanup did not terminate"
+
+
+def test_foreground_hop_own_producer_audit_loss_still_fails_immediately(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The corrected duplicate observer must not weaken the synchronous True path."""
+    foreground = threading.current_thread()
+    make = _make
+    observed_waits: list[str] = []
+    recorded = _recorded
+    dropped: list[Any] = []
+    own_helper_completed = threading.Event()
+    own_outcomes: list[bool] = []
+
+    def instrument(devices: Any, name: str, *, mode: str = HUB) -> Device:
+        device = make(devices, name, mode=mode)
+        if name == "peer":
+            audit = device.server.audit.record
+            apply = device.server._apply_rotation_statement
+
+            def require_own_producer(network_id: str, statement: dict[str, Any]) -> Any:
+                # ONLY this own-True negative cell defers other producers. The
+                # competing-dial cells above still release them at main ENTRY.
+                # Otherwise a native True winner tests the duplicate contract,
+                # not the immediate audit contract this cell must discriminate.
+                if threading.current_thread() is not foreground:
+                    assert own_helper_completed.wait(
+                        net_fixtures.NET_WAIT_BUDGET_S
+                    ), "own-producer negative cell never completed its foreground helper"
+                    return apply(network_id, statement)
+                try:
+                    outcome = apply(network_id, statement)
+                    own_outcomes.append(outcome.applied)
+                    return outcome
+                finally:
+                    own_helper_completed.set()
+
+            def lose(event: Any) -> None:
+                if event.event == "device_rotated":
+                    assert threading.current_thread() is foreground
+                    dropped.append(event)
+                    return
+                audit(event)
+
+            monkeypatch.setattr(device.server.audit, "record", lose)
+            monkeypatch.setattr(device.server, "_apply_rotation_statement", require_own_producer)
+        return device
+
+    def observe(device: Device, word: str, **kwargs: Any) -> Any:
+        observed_waits.append(word)
+        return recorded(device, word, **kwargs)
+
+    monkeypatch.setitem(globals(), "_make", instrument)
+    monkeypatch.setitem(globals(), "_recorded", observe)
+    try:
+        with pytest.raises(AssertionError, match="^the hop applied by the dial was not audited"):
+            test_a_peer_holding_the_pre_rotation_row_follows_the_hop_when_it_dials(
+                devices, monkeypatch
+            )
+    finally:
+        # An earlier setup failure must release native waiters BEFORE the devices
+        # fixture stops their relays, even if foreground never entered its helper.
+        own_helper_completed.set()
+    assert own_outcomes == [True], "the own-True negative control did not exercise a real True"
+    assert len(dropped) == 1
+    assert not observed_waits, "own-producer audit loss was hidden behind a publication wait"
 
 
 def test_the_announced_rotation_carries_its_statement_on_the_row(
@@ -1350,7 +1864,9 @@ def test_a_status_read_asks_for_the_pass_it_reports(
     record = _init_network(a.server)
     admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
 
     def _row(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1431,7 +1947,9 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     # the dial.
     admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
 
     a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
@@ -1550,7 +2068,9 @@ def test_a_status_read_with_a_pass_still_running_says_so_not_the_last_failure(
     record = _init_network(a.server)
     admit_seq = a.server._membership_seq  # noqa: SLF001
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
     a_link = a.server._link_for(b.device_id)  # noqa: SLF001
     assert a_link is not None
@@ -1714,7 +2234,9 @@ def _status_pair_after_admit(
     record = _init_network(a.server)
     admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
-    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    link, reason = b.server.dial(
+        record.network_id, host=f"{a.host}:{a.port}", epoch=1, expected_device=a.device_id
+    )
     assert link is not None, reason
 
     # The ambient root is what `health()` scans for the relay's record; a's own
@@ -2229,7 +2751,9 @@ def test_a_settled_link_pulls_no_rows_and_every_change_still_lands(
     c = _make(devices, "c", mode=HUB)
     record = _init_network(c.server)
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
     assert wire.MEMBER_LIST_DIGEST_V1 in link.capabilities
 
@@ -2279,7 +2803,9 @@ def test_a_settled_link_pulls_no_rows_and_every_change_still_lands(
         for item in list(server.links.values()):  # noqa: SLF001
             item.close()
     count = len(seen)
-    relinked, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    relinked, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert relinked is not None, reason
     assert net_fixtures.wait_for(
         lambda: any(r["asker"] == a.device_id and r["server"] == c.device_id for r in seen[count:])
@@ -2317,7 +2843,9 @@ def test_a_share_to_a_drive_device_still_settles_to_unchanged(
     record = _init_network(c.server)
     joined = _join(a, inviter=c, monkeypatch=monkeypatch, role="drive")
     assert joined["device_id"] == a.device_id
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
 
     with store.mutate(record.network_id, c.root) as copy:
@@ -2432,7 +2960,9 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
     monkeypatch.setattr(relay.PeerLink, "send", record_send)
     record = _init_network(c.server)
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
     assert net_fixtures.wait_for(lambda: c.server._link_for(a.device_id) is not None)
     reverse = c.server._link_for(a.device_id)
@@ -2500,7 +3030,9 @@ def _settled_pair(devices: Any, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, A
     c = _make(devices, "c", mode=HUB)
     record = _init_network(c.server)
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
-    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        record.network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
     return a, c, record.network_id, link
 
@@ -2738,7 +3270,9 @@ def test_a_peer_without_the_digest_capability_never_backs_off(
     record = _init_network(c.server)
     network_id = record.network_id
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
-    link, reason = a.server.dial(network_id, host=f"{c.host}:{c.port}", epoch=1)
+    link, reason = a.server.dial(
+        network_id, host=f"{c.host}:{c.port}", epoch=1, expected_device=c.device_id
+    )
     assert link is not None, reason
     assert wire.MEMBER_LIST_DIGEST_V1 not in link.capabilities
     assert net_fixtures.wait_for(

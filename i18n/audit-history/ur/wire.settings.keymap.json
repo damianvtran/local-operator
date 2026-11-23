@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings.keymap",
-  "history_sha256": "6e84bd522a06d50e04c2d8c2e520437959dd47977be9661024d01fb2aa3ba128",
+  "history_sha256": "5b92bb926a916013009ad42aa4430d69ea2521ed26db5a5b6b291fcf0915e7cc",
   "entries": [
     {
       "locale": "ur",
@@ -40,6 +40,42 @@
       },
       "status": "passed",
       "note": "Round-1 locale-level verdict was `fail` because of a major in tui.chrome.remote_park (since fixed and delta re-audited clean of blocker/major); no blocker/major was located in this namespace, so this row passes on the round-1 audit. The per-namespace attribution of the major is derived by the coder from the key(s) the manager named, not from the auditor's per-namespace verdict. target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "029002bb07d8a2534091ce337ce670258836aef32f49f8d6a1bd7a620f01c582",
+      "context_sha256": "4d2bdc69dc5612b0cd14bb25c37a0a8dfc92256a3ad9e0ecc5f3e8b9d2efc5fc",
+      "target_sha256": "9202019231a268db4d1dde6ed0f2ad036af335e30077db2b73d3a15cc9128852",
+      "translator": {
+        "agent": "task subagent (general), translator role for 26 new keymap keys",
+        "session": "44d121050e07",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none reported: the subagent self-reported anthropic/claude-sonnet-5-5; no provider fallback disclosed; the lopdev manager inspected no harness route log"
+      },
+      "auditor": {
+        "agent": "reviewer subagent acting as independent i18n auditor; distinct from the translator",
+        "session": "dfea959a1287",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none reported: the subagent self-reported anthropic/claude-sonnet-5-5; no provider fallback disclosed; the lopdev manager inspected no harness route log",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 1 minor, 1 nit",
+        "independent_from_translator": true,
+        "translator_session": "44d121050e07",
+        "scope": "the 26 new wire.settings.keymap keys (13 actions x label/help) added by feat/tui-configurable-keybinds"
+      },
+      "status": "passed",
+      "note": "Suffix receipt for 26 new keys. Round 1 (auditor job c333abde6e84) FAILED with 2 majors (aside/fork_aside terminology: 'ضمنی سوال' vs the existing product noun 'ضمنی نوٹ') plus 4 minors; the manager applied the auditor's replacements verbatim, then a fresh independent auditor (job dfea959a1287) re-audited all 26 keys: PASS. No dedicated i18n-translator/i18n-auditor profile was available in this session; general task and reviewer subagents were used with the repo's glossary/style-guide brief. target_sha256 is the namespace file SHA-256 at recording time. Dates are the day recorded."
     },
     {
       "locale": "ur",
@@ -144,6 +180,31 @@
       },
       "status": "passed",
       "note": "Fold2 wording fold-in, backend (branch feat/tui-send-chords, the commit that carries these rows, translated strings and rows both dated 2026-11-13): 3 keys in this namespace: wire.settings.keymap.send_steer.help, wire.settings.keymap.send_queue.help, wire.settings.keymap.send_both.help (changed). Translator: task subagent coder-tr-converge (lopdev coder subagent in manager session 2405ebc40b47; applied the independent auditor's suggested replacements to these strings; the originals were written by the tr8-ur translator agents); served model not recorded because the coder subagent's model is not independently verifiable here; the originals were anthropic/claude-sonnet-5-5 as recorded in the tr8-ur rows. Auditor: codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt); model gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered). The same audit prompts also carried the matching desktop (local-operator-ui) keys; only backend keys are recorded in this row. Audit: audited again after the final wording in fold2 round 3 (audit-fold2-r3): 0 blocker/major on these backend keys, 1 minor. The same audit round failed overall on a desktop key (ui.chat.composer.placeholder.waiting_both, major); that finding is about the desktop catalogue in local-operator-ui's companion PR, not about these backend keys, and is not attributed to this row. Per these backend keys the verdict is clean-with-findings: the one minor is wire.settings.keymap.send_steer.help ('مرحلہ روک دیتا ہے' states that the step stops, where the English says it is interrupted); it is recorded and deferred, not fixed here. `status: passed` is the shipping-gate field (no blocker/major), and the clean-with-findings verdict lives in auditor.result, as in the 2026-11-07 row of this namespace. keys_audited counts only this wave's keys. This is an independent cross-family audit of exactly these keys, not a full-file audit and not a human review; `status: passed` records the auditor's verdict. No second independent audit: copy is not high-visibility/safety; no second_audit field. Receipt instance 2405ebc40b47-fold2-ur."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "8e7be10120f99c1307f7e6c8b20b7514dc06dc69e4b2dd40c238b55728216b83",
+      "context_sha256": "b00b31c4087525cbcaec23da6eec1ee04e1dca4a7790ba6e18d80531bd9a1625",
+      "target_sha256": "0fb7649c9be1a1dd00cd15a7193b30e3c6e88baf0146e6ae040bfdb86694bc74",
+      "keys_audited": 6,
+      "round": "r4",
+      "translator": {
+        "agent": "upstream (origin/main's rows above) and this branch's per-locale translators (rows above); not re-translated here",
+        "model": "see the rows above",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "no new audit: union of independent audits already recorded above (origin/main's receipts, and this branch's receipts audited by the codex MCP server, gpt-5.6-sol requested)",
+        "model": "see the rows above",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings.keymap (origin/main: 26 keys added since the merge-base; branch: 6 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 6 added/changed keys; origin/main's 36 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
     }
   ]
 }

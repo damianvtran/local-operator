@@ -63,6 +63,9 @@ ACTIONS = (
     # the servers an offloaded workload assumes — push is the form an operator
     # reaches for after "the pod has no GitLab server", state is the local ledger.
     "mcp",
+    # User skills (skillsync.py): the same push/state pair for the skills a peer's
+    # sessions load via `skill://NAME`.
+    "skills",
     # The credential broker's surfaces (mesh-credentials.md §2.2): the READ of what
     # this device owns and borrows, and the ACT of sharing or revoking one. Both are
     # design verbs, which is why they belong in this list rather than beside it.
@@ -304,14 +307,16 @@ def test_every_leaf_action_accepts_json() -> None:
         # LEAF rather than on the group (a bare group prints usage): the mesh slice's
         # own ``definitions`` group, plus ``member``, ``identity`` and ``credential``
         # (the last from the credential broker's surfaces), and ``mcp`` (the
-        # definitions pair's shape for the user-scope MCP servers), and ``files`` (mesh
-        # file transfer: ``pull`` now, ``push`` in S2).
+        # definitions pair's shape for the user-scope MCP servers), ``skills`` (the
+        # same pair for user skills), and ``files`` (mesh file transfer: ``pull``
+        # now, ``push`` in S2).
         if name in (
             "member",
             "identity",
             "definitions",
             "credential",
             "mcp",
+            "skills",
             "approvals",
             "files",
         ):

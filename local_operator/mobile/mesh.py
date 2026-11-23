@@ -144,6 +144,7 @@ def remote_session_rows(
     *,
     pinned: Collection[str],
     catalog: object | None = None,
+    ttl_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Every session another device holds, as rows the PHONE's list paints.
 
@@ -187,14 +188,28 @@ def remote_session_rows(
     BELOW the local page by the caller, mirroring the desktop's "page first,
     then the extras" order.
     """
+    from local_operator.network.types import peer_number
     from local_operator.resume import peer_reason_words
     from local_operator.session.catalog import entry_for
     from local_operator.session.peer_rows import peer_session_rows
 
     ranked: list[tuple[tuple[int, int, float, str], dict[str, Any]]] = []
-    for row in peer_session_rows(config_dir, catalog=catalog):
+    # ``ttl_s=None`` keeps the listing's own TTL (a stale cache dials). The relay
+    # passes ``math.inf`` to project whatever is cached without dialling, having
+    # scheduled the refresh itself (``daemon._PeerRowsRefresher``).
+    listing_kwargs: dict[str, Any] = {} if ttl_s is None else {"ttl_s": ttl_s}
+    for row in peer_session_rows(config_dir, catalog=catalog, **listing_kwargs):
         entry = entry_for(row, None)
         reachable = bool(getattr(row, "reachable", True))
+        # The PEER's claim of its person's last message (``peer_rows`` carries
+        # it). Remote rows file into the same Running bin as local rows, so
+        # without this clock a mixed section orders local rows by
+        # ``last_user_at`` and remote rows by the ``created_at`` fallback.
+        # ``peer_number`` refuses absent/bool/garbage/non-finite (answering
+        # the 0.0 default); unlike the desktop mirror, which OMITS the key,
+        # this route's contract is "always present, null when unknown"
+        # (see the local rows in ``daemon._merge_summaries``).
+        peer_last_user = peer_number(getattr(row, "last_user_at", None), default=0.0)
         ranked.append(
             (
                 entry.rank,
@@ -208,6 +223,7 @@ def remote_session_rows(
                     "conversation_name": str(getattr(row, "name", "") or ""),
                     "mtime": float(getattr(row, "mtime", 0.0) or 0.0),
                     "created_at": float(getattr(row, "created_at", 0.0) or 0.0),
+                    "last_user_at": peer_last_user if peer_last_user > 0 else None,
                     # The transport's own pair, verbatim (no flattening into a
                     # third vocabulary): ``live_state`` is one of the four
                     # words the rank reads, ``pending`` the gate kind

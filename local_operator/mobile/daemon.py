@@ -39,6 +39,7 @@ import html
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -54,7 +55,6 @@ from typing import (
     Any,
     Awaitable,
     Callable,
-    Iterable,
     Literal,
     NamedTuple,
     Protocol,
@@ -103,6 +103,7 @@ from local_operator.mobile.auth import (
     sign_cookie,
     verify_cookie,
 )
+from local_operator.mobile.community import community_routes
 from local_operator.mobile.start_receipts import CAPABILITY as START_CAPABILITY
 from local_operator.mobile.start_receipts import (
     START_BODY_MAX_BYTES,
@@ -110,6 +111,7 @@ from local_operator.mobile.start_receipts import (
     StartRefusal,
     canonical_request,
     start_effort,
+    start_target,
 )
 from local_operator.mobile.transfer_receipts import (
     ReceiptsUnreadable,
@@ -125,6 +127,8 @@ from local_operator.mobile.types import (
 )
 from local_operator.network.types import MeshRefusal
 from local_operator.session.creation import session_created_at
+from local_operator.session.media import SUPPLEMENT_FILE_TYPES as _SUPPLEMENT_FILE_TYPES
+from local_operator.session.media import SUPPLEMENT_JOB as _SUPPLEMENT_JOB
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import ENGAGED_ENV, reported_subagent_count
 
@@ -145,6 +149,9 @@ from local_operator.session.runtime.types import (
 )
 from local_operator.session.store_failures import store_failure
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
+
+# stdlib-only module (no httpx/starlette), unlike `tunnels.gateway` below.
+from local_operator.tunnels.request_log import note_reason
 
 logger = logging.getLogger(__name__)
 #: The gateway's own spelling (``tunnels.gateway.STREAM_CLEANUP_FAILED``): one
@@ -298,6 +305,30 @@ MAX_RETAINED_SESSION_PROJECTIONS = 64
 #: ``notify_list_changed``, so the TTL is only what a quiet machine pays.
 SUMMARIES_CACHE_TTL_S = 1.0
 
+#: How long ONE built ``GET /api/models`` answer is reused outright.
+#:
+#: Every call used to open the credential store, build a ``ProviderController``,
+#: read each provider's cached catalogue, rank ~1,455 entries and serialise
+#: ~234 KB -- 140-500 ms of GIL-holding work per request on the operator's
+#: machine (tunnel request log, 2026-11-14: p50 281 ms, n=17), and the app asks
+#: twice per screen open (pairs logged 10-30 ms apart). Those pairs, and the
+#: re-opens minutes apart, are what this bound answers; the credential/config
+#: fingerprint (:func:`_models_fingerprint`) still rebuilds at once on a login,
+#: logout or default change, so the TTL is only a provider-side freshness bound.
+MODELS_FRESH_S = 60.0
+
+#: Past :data:`MODELS_FRESH_S`, an UNCHANGED fingerprint is answered from the
+#: last build while ONE background rebuild refreshes it (stale-while-revalidate).
+#:
+#: The build's live pass refetches a provider listing older than
+#: ``PICKER_TTL_S`` (15 min) ON THE REQUEST PATH, so the first sheet open after
+#: any 15-minute idle paid the provider round trips: 1,360 ms and 1,452 ms in
+#: the operator's log, both first-after-idle, against 140-500 ms otherwise.
+#: The bound is the catalogue's own discovery TTL
+#: (``model.catalogue.DEFAULT_TTL_S``, 24 h): older than that, the listing is
+#: rebuilt before answering, exactly as before.
+MODELS_STALE_S = 24 * 60 * 60.0
+
 #: The bound on ONE bulk receipt call (``POST /api/attention/seen``).
 #:
 #: 1..500, the desktop contract's own bound (``SeenMany``'s ``max_length``):
@@ -356,6 +387,49 @@ STT_TOO_LARGE_ERROR = (
     f"Recording is too large — the limit is {STT_MAX_UPLOAD_BYTES // (1024 * 1024)} MB. "
     "Try a shorter clip."
 )
+
+#: The client classes the transcribe log line may name. The web client and the
+#: phone app declare themselves with a multipart ``client`` field; anything else
+#: (an older client, a probe, a hand-rolled curl) is classified coarsely from
+#: the User-Agent instead of being echoed, because that field is caller input
+#: and this value lands in a log line.
+STT_CLIENT_KINDS = frozenset({"web", "app"})
+
+
+def _stt_log_text(value: str, limit: int = 200) -> str:
+    """Caller-influenced text made safe to place in ONE log record.
+
+    ``media_type`` is the uploaded part's own ``Content-Type`` and ``detail`` is
+    a transport failure's sentence: both are caller text. A newline inside one
+    forges a second record — python-multipart accepts a bare LF in a part-header
+    value, so ``Content-Type: audio/x\\nFAKE status=200`` used to render as two
+    lines, the second reading as a successful call in a grep of ``mobile.log``.
+    Non-printables become spaces rather than escapes: a log file is read, never
+    round-tripped, so a literal ``\\n`` would be noise, not fidelity.
+    """
+    printable = "".join(ch if ch.isprintable() else " " for ch in value)
+    return printable.strip()[:limit]
+
+
+def _stt_client_kind(declared: Any, user_agent: str) -> str:
+    """The coarse client class for the transcription refusal line.
+
+    ``declared`` is the request's own ``client`` field when the body parsed (a
+    pre-parse refusal has none). The User-Agent fallback exists so a 413 that
+    never read the body still says which surface hit the cap; React Native's
+    fetch sends ``okhttp``/``CFNetwork`` and a browser sends ``Mozilla/5.0``,
+    so two substrings separate the shipped surfaces without a UA database.
+    """
+    value = declared.strip().lower() if isinstance(declared, str) else ""
+    if value in STT_CLIENT_KINDS:
+        return value
+    agent = user_agent.lower()
+    if "okhttp" in agent or "cfnetwork" in agent or "expo" in agent:
+        return "app"
+    if "mozilla" in agent or "applewebkit" in agent:
+        return "web"
+    return "unknown"
+
 
 #: Memo for the STATIC half of the lifted feature-flag dict
 #: (``capabilities.features``). Only ``server.features.static_feature_flags``
@@ -968,6 +1042,12 @@ class SessionTable:
         #: OFF the loop beside ``_avatar_fields``: the model, effort and cwd a row
         #: shows when no runtime is attached (see ``_DurableIdentity``).
         self._durable_identities: dict[str, _DurableIdentity] = {}
+        #: ``{session_id: epoch seconds}`` of the person's own last message, for
+        #: the RUNNING rows only, resolved OFF the loop by ``summaries``' build
+        #: just before each merge (``_read_last_user_times``). A row absent from
+        #: it carries ``last_user_at: None``. See ``_buys_last_user`` for which
+        #: rows pay the transcript read and why the rest do not.
+        self._last_user_times: dict[str, float] = {}
         #: The sidebar's durable pinned session ids, newest pin first, read by
         #: ``_merge_summaries``. Kept as table state rather than read per row so
         #: a pin change made in the terminal reaches the phone through exactly
@@ -1289,6 +1369,17 @@ class SessionTable:
             # one store walk only when something really changed); the merge
             # below is then in-memory for tags like it is for pins.
             tags = await asyncio.to_thread(self.tags_snapshot)
+            # The RUNNING clock, read off the loop like the tags above. The
+            # candidate ids are taken HERE, on the loop, so the worker thread
+            # never iterates ``self.entries`` while a dial mutates it.
+            self._last_user_times = await asyncio.to_thread(
+                _read_last_user_times,
+                [
+                    entry.record.session_id
+                    for entry in self.entries.values()
+                    if _buys_last_user(entry)
+                ],
+            )
             out = self._merge_summaries(rows, tags)
             # The rows and the aggregate leave the build TOGETHER and are
             # published by the caller in ONE assignment (review round 1,
@@ -1460,6 +1551,36 @@ class SessionTable:
 
             return {"degraded": [DECORATION_ATTENTION]}
         return snapshot
+
+    def listing_unread_count(self) -> int | None:
+        """The listing's unread count for the push lane, or ``None`` when unknown.
+
+        THE BADGE'S NUMBER, read from the same snapshot :meth:`unread_block`
+        serves, so a push banner's "N conversations need you" equals the phone's
+        badge (ADR 0006 §1.4/§3.2). The lane used to fall back to the worker's
+        store census instead, and on 2026-11-14 the operator's first real push
+        read "Task complete · 47502 conversations need you" — lifetime history,
+        not his handful of unread conversations.
+
+        ``None`` is the degraded shape (``count`` absent: a failed read, or no
+        build yet). The census is deliberately NOT the fallback — it is the
+        defect — and neither is 0, which this module already refuses to claim
+        for a store it could not read; the payload drops the count term instead
+        (``push_payload.wire_count``).
+
+        THREADING: the push worker calls this from its ``to_thread`` pass, off
+        the loop. It is a plain attribute read and nothing else: the snapshot is
+        published by ONE reference assignment in :meth:`summaries` and never
+        mutated afterwards, so a worker thread sees either the old dict or the
+        new one, whole. No lock, no I/O and no loop hop — keeping it fresh is the
+        scan's job (``MobileDaemon._refresh_push_count``), on the loop, before
+        the worker's pass starts.
+        """
+        snapshot = self.unread_snapshot()
+        count = snapshot.get("count")
+        if snapshot.get("degraded") or not isinstance(count, int) or isinstance(count, bool):
+            return None
+        return count
 
     def unread_block(self) -> dict[str, Any]:
         """The list payload's ``unread`` block: the aggregate minus its rows.
@@ -1753,6 +1874,21 @@ class SessionTable:
                     # cannot disagree about a row's birth (see the resolution
                     # note above).
                     "created_at": created_at,
+                    # THE PERSON'S OWN LAST MESSAGE, epoch seconds (the same
+                    # unit as ``created_at``/``mtime``), so the phone's drawer
+                    # can order RUNNING rows the way the desktop sidebar does
+                    # (``chat-list-sections.ts``: ``last_user_at``, falling back
+                    # to ``created_at``). ``mtime`` cannot serve: it moves on
+                    # every streamed reply and re-sorts the section under the
+                    # thumb (``session/last_user.py`` has the measurement).
+                    # ALWAYS PRESENT; ``None`` is "unknown" -- no user message
+                    # yet, an unreadable transcript, or a row that is not
+                    # running and so never paid the read -- and the client's
+                    # fallback runs on it, never a minted epoch. Only a live,
+                    # non-ended entry can carry a value (``_buys_last_user``).
+                    "last_user_at": (
+                        self._last_user_times.get(session_id) if entry is not None else None
+                    ),
                     "completion_kind": attention.get("kind") or "",
                     # Shared completion receipts, not transcript activity or
                     # heartbeat freshness, decide whether an outcome is unread.
@@ -1889,12 +2025,44 @@ def _bootstrap_mobile_attention() -> None:
     # Match the relay's bounded recent-history surface. Older conversations are
     # imported when a real Session loads them, avoiding an unbounded boot scan.
     live = {record.session_id for record, state in registry.scan() if state == "live"}
-    directories = sorted(root.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True)
+
+    def _mtime(path: Path) -> float:
+        # A directory deleted between ``iterdir`` and ``stat`` would otherwise
+        # raise out of ``sorted`` and abort the sweep the same way an
+        # unreadable transcript did; it sorts last and is skipped below.
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    directories = sorted(root.iterdir(), key=_mtime, reverse=True)
+    skipped = 0
     for directory in directories[:100]:
         if directory.name in live:
             continue
-        if _durable_user_session_dir(directory.name) is not None:
-            bootstrap_transcript(Transcript(directory, defer_materialise=True))
+        # ONE unreadable session must never abort the sweep. The caller marks
+        # ``_attention_bootstrapped`` only after this returns, so a raise here
+        # re-ran the whole sweep on every 2 s scan forever (57k+ warnings in
+        # the field, phone stuck on "Not answering"). The field case was a
+        # ``.zst`` archive written by a 3.14 runtime and read by a 3.13 daemon
+        # (``ArchiveUnavailable``), but a truncated archive, a permission
+        # error or a malformed journal line fail the same way, so the guard is
+        # deliberately broad: a skipped session is still migrated later when a
+        # real Session opens it. The log names only the session id and the
+        # exception class — never transcript content — and is one line per
+        # skipped session, bounded by the 100-directory window above.
+        try:
+            if _durable_user_session_dir(directory.name) is not None:
+                bootstrap_transcript(Transcript(directory, defer_materialise=True))
+        except Exception as exc:  # noqa: BLE001 — see the comment above
+            skipped += 1
+            logger.warning(
+                "mobile attention bootstrap skipped session %s: %s",
+                directory.name,
+                type(exc).__name__,
+            )
+    if skipped:
+        logger.info("mobile attention bootstrap finished with %d skipped session(s)", skipped)
 
 
 #: The outcome types the runtime NAMES as a completed mutation, and therefore the
@@ -2218,7 +2386,7 @@ def _temporary_deleted_response(session_id: str) -> "JSONResponse | None":
     return _temporary_refusal(CODE_DELETED, session_id, deleted_at=stamp)
 
 
-def _durable_user_session_dir(session_id: str) -> Path | None:
+def _durable_user_session_dir(session_id: str, *, root: Path | None = None) -> Path | None:
     """Return a strictly addressed durable user conversation, if it exists.
 
     Mobile routes are public identifiers, not filesystem paths. Checking the
@@ -2230,7 +2398,7 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
 
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None
-    directory = config_dir() / "sessions" / session_id
+    directory = (root if root is not None else config_dir()) / "sessions" / session_id
     from local_operator.session import compression
 
     # Both forms: judging only the plain name hid every compressed session from
@@ -2404,6 +2572,48 @@ def _read_durable_identity(directory: Path, *, journal_readable: bool = True) ->
     return _DurableIdentity(selector=selector, cwd=cwd, effort=effort)
 
 
+def _buys_last_user(entry: SessionEntry) -> bool:
+    """Whether this live entry's row pays a ``last_user_at`` transcript read.
+
+    RUNNING ROWS ONLY, mirroring the two sibling listings
+    (``server/utils/desktop_sessions.py``: ``entry.running``;
+    ``network/relay.py``: busy, wedged or a pending gate): the value orders the
+    Running section and nothing else, and a cold read can walk up to
+    ``last_user.COLD_SCAN_CAP_BYTES`` of transcript, so paying it for every
+    idle resident runtime would buy a number no reader consumes. "Running" here
+    is what the phone itself can see: the record says busy or holds a gate, or
+    the live projection is streaming or waiting on an approval. An ended entry
+    never pays -- its row is not live.
+    """
+    if entry.ended:
+        return False
+    record = entry.record
+    if record.busy or record.pending:
+        return True
+    projection = entry.projection
+    return bool(projection and (projection.streaming or projection.pending))
+
+
+def _read_last_user_times(session_ids: list[str]) -> dict[str, float]:
+    """``{session_id: last_user_at}`` for ``session_ids``; unknowns are omitted.
+
+    Blocking (a memoised transcript tail read per id), so the listing build
+    calls it through ``asyncio.to_thread``. ``last_user_at`` never raises and
+    answers ``None`` for a transcript with no user message, which the row then
+    reports as ``None`` by absence from this map.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.session.last_user import last_user_at
+
+    root = config_dir() / "sessions"
+    out: dict[str, float] = {}
+    for session_id in dict.fromkeys(session_ids):
+        value = last_user_at(root / session_id)
+        if value is not None:
+            out[session_id] = value
+    return out
+
+
 def _live_generation_is_user_facing(session_id: str) -> bool:
     """Whether a LIVE session id names a conversation the user can be shown.
 
@@ -2441,7 +2651,7 @@ _COLD_TODO_CHILD_LIMIT = 96
 
 
 def _durable_projection(
-    session_id: str, *, lapsed_visible_ms: int | None = None
+    session_id: str, *, lapsed_visible_ms: int | None = None, root: Path | None = None
 ) -> SessionProjection | None:
     """Fold a user conversation and its routable child lineage from disk.
 
@@ -2478,7 +2688,7 @@ def _durable_projection(
     from local_operator.session.attention import AttentionStore
     from local_operator.tools.builtin import todo_snapshot
 
-    directory = _durable_user_session_dir(session_id)
+    directory = _durable_user_session_dir(session_id, root=root)
     if directory is None:
         return None
     try:
@@ -2508,7 +2718,9 @@ def _durable_projection(
         pid=0,
         kind="daemon",
         conversation_name=stored_session_title(directory),
-        attention=AttentionStore().state(f"session/{session_id}"),
+        attention=AttentionStore(root / "attention.db" if root is not None else None).state(
+            f"session/{session_id}"
+        ),
     )
     # Model/effort/cwd from the journal, so a session with no attached runtime
     # opens with the same identity its list row shows instead of ``n/a``. A live
@@ -2659,14 +2871,13 @@ def _durable_projection(
     from local_operator.asks.visibility import lapsed_visible_ms as _lapsed_visible_ms
     from local_operator.paths import config_dir
 
-    window = (
-        lapsed_visible_ms if lapsed_visible_ms is not None else _lapsed_visible_ms(config_dir())
-    )
-    ask_rows = ask_store.session_asks(config_dir(), session_id, lapsed_visible_ms=window)
+    read_root = root if root is not None else config_dir()
+    window = lapsed_visible_ms if lapsed_visible_ms is not None else _lapsed_visible_ms(read_root)
+    ask_rows = ask_store.session_asks(read_root, session_id, lapsed_visible_ms=window)
     if ask_rows:
         outstanding = sum(1 for row in ask_rows if ask_store.is_outstanding(row.get("status")))
         fold.set_asks(ask_rows[:PROJECTION_CAP], outstanding)
-    elif ask_store.read_entry(config_dir(), session_id) is not None:
+    elif ask_store.read_entry(read_root, session_id) is not None:
         # AN ENTRY WHOSE ROWS ARE ALL HIDDEN still installs its (empty) fold.
         # Skipping ``set_asks`` here left this frame one version BELOW the frame
         # a viewed screen retained when it still had rows, and
@@ -3038,7 +3249,15 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         entry.operator_nonce = operator_nonce() if entry.operator_cap is not None else ""
         entry.operator_salt = ""
         entry.authority_bearing = False
-        auth: dict[str, Any] = {"key": record.control_key, "locality": "remote"}
+        # ADR 0009: ``origin: "mobile"`` on every dial that carries the phone's
+        # human input, so the runtime routes the completion of work started or
+        # steered here back to the phone. The runtime reads it once at auth time
+        # and never from a frame; the mesh relay never forwards it.
+        auth: dict[str, Any] = {
+            "key": record.control_key,
+            "locality": "remote",
+            "origin": "mobile",
+        }
         if entry.operator_nonce:
             # A nonce, never the capability: see ``harness/approval._proof``.
             auth["operator_nonce"] = entry.operator_nonce
@@ -3770,11 +3989,167 @@ def _history_response(page: list[Any], has_more: bool) -> dict[str, Any]:
     return body
 
 
+class _ResetPage(list[Any]):
+    """An EMPTY forward page that means "your cursor is gone; read from scratch".
+
+    The forward cursor (``?after=``, delta-sync Phase 2b) answers "the rows
+    newer than the newest one I hold". When that row cannot be placed — the id
+    was never this conversation's, the journal was replaced, a compaction moved
+    it into the injected prefix, or the transcript is not readable — an empty
+    list would read as "you are already current", which is the one answer that
+    silently loses rows. This type is still a list (so the page plumbing stays
+    one shape) and carries the reason the route turns into ``409`` +
+    ``{"reset": true}``: the client drops its cursor and takes a full read.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self.reset = reason
+
+
+def _forward_page(state: Any, after: str, limit: int) -> tuple[list[Any], bool] | None:
+    """The render rows strictly NEWER than ``after``, oldest first, or ``None``.
+
+    WHY THE RENDER AND NOT THE JOURNAL (the backward cursor's source). A forward
+    cursor is the newest row a phone holds, so the rows newer than it are the
+    conversation's TAIL — exactly the stretch the render replays in journal
+    order (the kept window after the newest compaction). The render's only
+    out-of-journal-order stretch is its HEAD: the compaction marker, the
+    preserved user turns re-injected under their original ids, and the carried
+    tier (``DurableFoldState.prefix_ids``). A cursor naming one of those means a
+    compaction landed after the phone's newest row; slicing after it would hand
+    back older kept-window rows as "newer", so it answers ``None`` (reset)
+    instead, and so does an id the render does not hold at all. ``None`` is
+    always safe: it costs the client one full read, never a lost row.
+
+    ``has_more`` is true when rows beyond this page remain; the client pages on
+    with the id of the last row it was given. The cursor row itself is not
+    re-served: its newer state (a tool call that finished) rides the live
+    projection the client opens beside this read.
+    """
+    from local_operator.mobile.durable import _cursor_candidates
+
+    render = state.render
+    # From the tail: a forward cursor is, by construction, near the newest end.
+    index = next((i for i in range(len(render) - 1, -1, -1) if render[i].id == after), None)
+    if index is None:
+        return None
+    prefix_ids = getattr(state, "prefix_ids", frozenset())
+    if prefix_ids and any(candidate in prefix_ids for candidate in _cursor_candidates(after)):
+        return None
+    start = index + 1
+    page = list(render[start : start + limit])
+    return page, len(render) > start + limit
+
+
+#: Top-level projection fields that move with the CLOCK rather than with the
+#: conversation: ``version`` bumps on every repaint, ``activity_started_s`` is
+#: an age re-dated at every serialization (``advance_received_age``). Hashing
+#: them would make a digest that never matches, so they are left out of the
+#: digest and carried on the ``unchanged`` frame instead — the client patches
+#: them onto the copy it keeps, and its version rule keeps working.
+_PROJECTION_CLOCK_FIELDS: tuple[str, ...] = ("version", "activity_started_s")
+
+
+def _frame_digest(frame: dict[str, Any], clock_fields: tuple[str, ...] = ()) -> str:
+    """The seed-elision digest (delta-sync Phase 2a): cheap and deterministic.
+
+    sha256 over the frame's canonical JSON (sorted keys, compact separators),
+    minus ``clock_fields``, truncated to 128 bits (32 hex). Canonical rather
+    than the wire bytes because the same projection reaches this function from
+    two producers (a live registrant's dict and a durable rebuild) whose key
+    ORDER can differ while the content does not. Computed from the CAPPED frame
+    — the one the phone actually holds — so a digest match means the phone's
+    copy equals what would have been sent. One extra serialization per frame,
+    and only on connections that opted in with ``?have=``.
+    """
+    body = {key: value for key, value in frame.items() if key not in clock_fields}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+def _projection_seed_event(frame: dict[str, Any], have: str | None) -> str:
+    """The first SSE event of a session stream, honouring ``?have=``.
+
+    ``have`` is ``None`` when the client did not send the parameter: a legacy
+    phone, which receives the byte-identical ``projection`` event it always
+    did. Any value (including empty, the opt-in with nothing cached) puts the
+    ``digest`` on the frame; a value EQUAL to the current digest is answered
+    with the tiny ``unchanged`` event instead of the full snapshot.
+    """
+    if have is None:
+        return _sse("projection", frame)
+    digest = _frame_digest(frame, _PROJECTION_CLOCK_FIELDS)
+    if have == digest:
+        unchanged: dict[str, Any] = {"digest": digest}
+        for key in _PROJECTION_CLOCK_FIELDS:
+            if key in frame:
+                unchanged[key] = frame[key]
+        return _sse("unchanged", unchanged)
+    return _sse("projection", {**frame, "digest": digest})
+
+
+def _projection_live_event(frame: dict[str, Any], have: str | None) -> str:
+    """A live repaint: unchanged for legacy streams, digest-stamped for opted-in
+    ones so the client always knows the digest of the copy it holds."""
+    if have is None:
+        return _sse("projection", frame)
+    return _sse(
+        "projection",
+        {**frame, "digest": _frame_digest(frame, _PROJECTION_CLOCK_FIELDS)},
+    )
+
+
+class _ListEvent:
+    """One shared session-list build: the legacy wire event plus a lazily
+    built digest-stamped twin for streams that opted in with ``?have=``.
+
+    Shared across subscribers like the string it replaces (see
+    ``_shared_list_event``), so the digest is computed at most once per ring,
+    and never at all while only legacy phones are connected.
+    """
+
+    __slots__ = ("_digest", "event", "frame")
+
+    def __init__(self, frame: dict[str, Any]) -> None:
+        self.frame = frame
+        self.event = _sse("sessions", frame)
+        self._digest: str | None = None
+
+    @property
+    def digest(self) -> str:
+        if self._digest is None:
+            self._digest = _frame_digest(self.frame)
+        return self._digest
+
+    def for_have(self, have: str | None, *, seed: bool) -> str:
+        """The event for a subscriber: legacy bytes without ``have``; on the
+        seed, ``unchanged`` when ``have`` matches; else the stamped frame."""
+        if have is None:
+            return self.event
+        digest = self.digest
+        if seed and have == digest:
+            return _sse("unchanged", {"digest": digest})
+        return _sse("sessions", {**self.frame, "digest": digest})
+
+
 def _history_page(
-    session_id: str, before: str | None, limit: int, *, durable_only: bool = True
+    session_id: str,
+    before: str | None,
+    limit: int,
+    *,
+    durable_only: bool = True,
+    after: str | None = None,
+    root: Path | None = None,
 ) -> tuple[list[Any], bool]:
     """Return the page of folded entries immediately OLDER than ``before``
     (chronological within the page) plus whether more history exists beyond it.
+
+    With ``after`` instead (the forward cursor, delta-sync Phase 2b) it is the
+    page immediately NEWER than that row (:func:`_forward_page`), and every way
+    of not answering — no transcript, an unreadable fold, an unplaceable id —
+    is a :class:`_ResetPage`, never a plain empty list: for a forward reader an
+    empty page means "already current".
 
     THE EMPTINESS IS SPELLED WHEN IT IS A FAILURE (review round 3, m-3). A page
     that could not be read is an :class:`_UnavailablePage` — empty, like an honest
@@ -3814,7 +4189,7 @@ def _history_page(
     position, in journal order.
     """
     if durable_only:
-        directory = _durable_user_session_dir(session_id)
+        directory = _durable_user_session_dir(session_id, root=root)
     else:
         # A live SessionEntry already established the route's identity. Keep
         # the pre-existing live behavior (including non-user hosts) while still
@@ -3829,7 +4204,7 @@ def _history_page(
     from local_operator.session import compression
 
     if directory is None or not compression.has_transcript(directory):
-        return [], False
+        return (_ResetPage("no transcript") if after else []), False
     try:
         state = _durable_fold_cache().load(directory)
     except compression.ArchiveError as exc:
@@ -3841,11 +4216,14 @@ def _history_page(
         )
         return _UnavailablePage(str(exc)), False
     except FileNotFoundError:
-        return [], False
+        return (_ResetPage("no transcript") if after else []), False
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
         logger.exception("history fold failed for session %s", session_id)
-        return [], False
+        return (_ResetPage("fold failed") if after else []), False
 
+    if after:
+        forward = _forward_page(state, after, limit)
+        return forward if forward is not None else (_ResetPage("cursor not found"), False)
     if before:
         # Every cursor page comes from the journal: the render's order is not the
         # journal's, and its head re-serves rows whose originals sit below the
@@ -4004,22 +4382,33 @@ def _range_window(header: str, size: int) -> tuple[int, int] | Literal["unsatisf
     if match is None:
         return None
     first_txt, last_txt = match.groups()
+
+    def number(text: str) -> int:
+        # HTTP coordinates never need exceed the representation's length.
+        # Compare decimal strings before int(): a huge valid Range must yield
+        # its normal 206/416, not Python's integer-string-limit ValueError/500.
+        digits = text.lstrip("0") or "0"
+        ceiling = str(size)
+        if len(digits) > len(ceiling) or (len(digits) == len(ceiling) and digits > ceiling):
+            return size
+        return int(digits)
+
     if not first_txt and not last_txt:
         return None  # ``bytes=-``: not one of the grammar's forms; ignore.
     if first_txt:
-        first = int(first_txt)
+        first = number(first_txt)
         if first >= size:
             return "unsatisfiable"
         if not last_txt:
             return (first, size - 1)
-        last = int(last_txt)
+        last = number(last_txt)
         if last < first:
             return None  # An inverted pair is invalid; ignore the header.
         return (first, min(last, size - 1))
     # Suffix form: the LAST N bytes. A suffix at or past EOF is the whole
     # representation (206 with everything), never an error; ``-0`` selects
     # nothing and is unsatisfiable by definition.
-    length = int(last_txt)
+    length = number(last_txt)
     if length == 0:
         return "unsatisfiable"
     if length >= size:
@@ -4220,10 +4609,16 @@ class MobileDaemon:
         dial_registrants: bool = True,
         push_worker: PushWorker | None = None,
         push_lane: PushLane | None = None,
+        push_lane_factory: Callable[[], PushLane | None] | None = None,
+        table: SessionTable | None = None,
     ) -> None:
         self.port = port
         self.password = password
-        self.table = SessionTable()
+        # Injectable because the push lane is built BEFORE the daemon (service
+        # ``amain``) and needs this table's ``listing_unread_count`` at
+        # construction: the service makes the table, hands its reader to the
+        # lane and the table itself here, so both read one snapshot.
+        self.table = table if table is not None else SessionTable()
         #: Subscribers to ``/api/config/events`` (wave-5 slice D, the relay's
         #: half of the settings doorbell): one queue per open SSE response.
         #: Doorbell-style — a watcher listener hands the change over, the
@@ -4252,6 +4647,19 @@ class MobileDaemon:
         self.push_lane = push_lane
         if push_lane is not None:
             self.push_worker = push_lane.worker
+        # Late arming (follow-up to #3875): ``lop tunnel create`` after the
+        # daemon started used to leave push dark until a restart, because the
+        # lane was only ever built in ``service.amain``. With a factory (the
+        # same ``build_push_lane`` gating: live tunnel id, integer credential
+        # id, not revoked; ``service.amain`` passes none to a no-dial observer)
+        # the scan retries the build while no lane exists. ``None`` — every
+        # test and every embedder that did not ask for it — never reads the
+        # tunnel config from the scan.
+        self._push_lane_factory = push_lane_factory
+        self._push_lane_tried_at: float | None = None
+        #: The attention revision the push count's listing snapshot was last
+        #: rebuilt at (``_refresh_push_count``); ``None`` forces the first one.
+        self._push_count_revision: Any = None
         # Stamp the build THIS process loaded, before any lazy import can meet a
         # replaced tree: every later comparison in ``_log_import_failure`` is
         # against this value.
@@ -5091,8 +5499,10 @@ class MobileDaemon:
         # this pass, and caught locally: the scan loop's own guard would log it
         # too, but only after the exception unwound out of this pass, and a push
         # fault is not a reason to skip anything else the scan does.
+        await self._maybe_arm_push_lane()
         push_worker = self.push_worker
         if push_worker is not None:
+            await self._refresh_push_count()
             try:
                 # BOUNDED (review round 1, m3). The transport is required to
                 # bound its own call — that is stated where the Protocol is — and
@@ -5123,6 +5533,86 @@ class MobileDaemon:
                 )
             except Exception:  # noqa: BLE001 — a push fault must not cost the tick
                 logger.warning("push heartbeat failed", exc_info=True)
+
+    async def _refresh_push_count(self) -> None:
+        """Rebuild the listing snapshot the push count reads, when it can have moved.
+
+        The push worker's count is ``SessionTable.listing_unread_count``, a read
+        of the snapshot the LAST listing build published — and nothing builds
+        the listing while no phone is looking, which is exactly when pushes go
+        out. So the scan rebuilds it here, on the loop and before the worker's
+        off-loop pass, whenever the attention revision differs from the one the
+        snapshot was last built at (and once on the first armed scan). The
+        invariant: unread state is a function of the attention store, so a
+        snapshot built at the current revision is current for every emit this
+        pass composes — a deferred digest included — without a rebuild per
+        scan. The build is ``summaries()`` itself (its disk work is already off
+        the loop), never a second implementation of the count.
+
+        A failed build is logged and leaves the revision unrecorded, so the next
+        scan retries; the worker then reads whatever the table holds, and a
+        degraded snapshot drops the count term rather than inventing one.
+
+        The revision is read FRESH here, immediately before the worker's tick,
+        not taken from the start of the scan pass (PR #3989 review R1): the
+        registry scan and projection captures sit between the two, and a
+        completion published in that window would otherwise be counted against
+        a snapshot that predates it. The window left (this read to the tick's
+        collect) is closed by the worker flooring a completion's count at 1.
+
+        The revision read sits INSIDE the guard (#3989 review m1): the store can
+        answer ``AttentionReadDeferred`` while a writer holds it, and that must
+        only skip this refresh to the next scan, never escape into the scan
+        loop. The listing cache is invalidated before the rebuild (#3989 QA
+        Q-1): ``summaries()`` answers from its ``SUMMARIES_CACHE_TTL_S`` cache,
+        so a rebuild "at" the new revision could otherwise return a listing
+        built before it, and the push count would lag the badge by up to a
+        second while this method records the new revision as done.
+        """
+        from local_operator.session.attention import AttentionStore
+
+        try:
+            revision = await asyncio.to_thread(AttentionStore().revision)
+            if revision == self._push_count_revision:
+                return
+            self.table.invalidate_summaries_cache()
+            await self.table.summaries()
+        except Exception:  # noqa: BLE001 — a push fault must not cost the tick
+            logger.warning("push count refresh failed", exc_info=True)
+            return
+        self._push_count_revision = revision
+
+    async def _maybe_arm_push_lane(self) -> None:
+        """Build the push lane once a tunnel appears after start (late arming).
+
+        Spaced to one attempt per ``EMIT_RETRY_INTERVAL_S`` (the disarmed
+        lane's own re-check spacing) rather than every 2 s scan, and run off the
+        loop because the build reads the tunnel config file and opens the
+        attention store. A lane is never rebuilt once set: a disarmed lane
+        re-arms itself (``push_transport`` RE-ARM), and a different tunnel id
+        still needs a restart, as before. An injected bare worker is kept.
+        """
+        factory = self._push_lane_factory
+        if factory is None or self.push_lane is not None:
+            return
+        from local_operator.mobile.push_worker import EMIT_RETRY_INTERVAL_S
+
+        now = time.monotonic()
+        tried = self._push_lane_tried_at
+        if tried is not None and now - tried < EMIT_RETRY_INTERVAL_S:
+            return
+        self._push_lane_tried_at = now
+        try:
+            lane = await asyncio.to_thread(factory)
+        except Exception:  # noqa: BLE001 — a push fault must not cost the tick
+            logger.warning("push lane build failed", exc_info=True)
+            return
+        if lane is None:
+            return
+        self.push_lane = lane
+        if self.push_worker is None:
+            self.push_worker = lane.worker
+        logger.info("mobile push armed for tunnel %s (tunnel appeared)", lane.transport.computer)
 
     async def _refresh_notifications_if_changed(self) -> None:
         """Wake the list stream when the INBOX store moved.
@@ -5676,6 +6166,9 @@ class MobileDaemon:
             repaint,
             lambda _reason: None,
             locality="remote",
+            # ADR 0009: this viewer carries the phone's input (see the control
+            # socket's auth frame).
+            origin="mobile",
             # A PROMPT RAISED FOR A RELAY'S OWN SIGNATURE NAMES THE SESSION IN THE
             # LOG (UX round 6, U3 = design round 6, D3). There is no human at this
             # process's terminal — the person who asked is on the phone, and the
@@ -5930,7 +6423,14 @@ class MobileDaemon:
         # bearer from its launch environment as ``session.runtime.launch`` does
         # (PR #3022 QA round 1, Q1). Lazy for the same import-path reason.
         from local_operator.agent_shell import without_daemon_bearer
+        from local_operator.session.runtime.launch import _prime_login_path
 
+        # This hand-built spawn bypasses ``launch._runtime_env``, so it takes
+        # that builder's PATH prime explicitly: launchd starts this daemon with
+        # a bare PATH, and the child's bash tool must see the operator's login
+        # PATH (Homebrew ``gh`` et al.). Free once the daemon's lineage is
+        # primed; a thread because the first call runs a login shell.
+        await asyncio.to_thread(_prime_login_path)
         env = dict(os.environ)
         without_daemon_bearer(env)
         env["LOP_MOBILE_CHILD_CWD"] = cwd
@@ -6292,44 +6792,12 @@ async def _wait_for_owner_to_unpublish(session_id: str, retired_pid: int, timeou
 # Turn supplements (memo §2.7) -- the relay's read routes
 # ---------------------------------------------------------------------------
 
-#: A supplement JOB id: ``persistence.new_job_id`` mints 12 lowercase hex, and the
-#: file route keys on it. Shape-checked before any lookup so a crafted job segment
-#: can never be anything but a miss (it is a lookup key, never a path).
-_SUPPLEMENT_JOB = re.compile(r"^[a-f0-9]{12}$")
-
-#: The file route's per-request byte cap (memo §2.7: "a 10 MB cap"), re-applied here
-#: rather than trusted from the decision, because the bytes on disk are what is read.
-SUPPLEMENT_FILE_MAX_BYTES = 10 * 1024 * 1024
-
-#: The SUFFIX -> Content-Type allowlist for the file route. Never ``text/html``,
-#: ``image/svg+xml``, ``application/xhtml+xml``, or any ``+xml`` (memo §2.7, S15):
-#: the served type is decided by this table alone, never by the bytes, so a ``.txt``
-#: whose body opens with ``<script>`` is still served as ``text/plain`` under
-#: ``nosniff`` and cannot execute. ``svg`` and ``xml`` are deliberately absent.
-_SUPPLEMENT_FILE_TYPES: dict[str, str] = {
-    ".txt": "text/plain",
-    ".log": "text/plain",
-    ".md": "text/markdown",
-    ".markdown": "text/markdown",
-    ".csv": "text/csv",
-    ".tsv": "text/tab-separated-values",
-    ".json": "application/json",
-    ".pdf": "application/pdf",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp",
-    ".heic": "image/heic",
-    ".heif": "image/heif",
-    ".avif": "image/avif",
-    # Video for the written-video preview tile. Inert media types (the player decodes;
-    # nothing executes), still under the 10 MB cap and ``nosniff`` like every entry.
-    ".mp4": "video/mp4",
-    ".webm": "video/webm",
-    ".mov": "video/quicktime",
-}
+# The job shape (``_SUPPLEMENT_JOB``), the 10 MB cap and the suffix allowlist
+# (``_SUPPLEMENT_FILE_TYPES``) are imported from
+# ``session/media.py``: they belong to the ONE featured-file resolver
+# (``resolve_supplement_file``) that this relay's local file route and a mesh owner
+# answering a remote viewer both run. The private aliases keep existing readers on
+# one spelling.
 
 #: The read family's response policy (file-serving RFC D5; memo §2.7): the pair rides
 #: EVERY response of both routes, errors included -- #2134 R4's lesson is that a policy
@@ -6440,6 +6908,277 @@ def build_app(daemon: MobileDaemon):
                 await _cleanup_stream(getattr(self.body_iterator, "aclose", None))
                 await _cleanup_stream(self._release)
 
+    from local_operator.mobile.remote_sessions import RemoteSessionError, RemoteViews
+    from local_operator.mobile.remote_sessions import (
+        admit_command as admit_remote_command,
+    )
+    from local_operator.mobile.remote_sessions import mesh_read as remote_read
+    from local_operator.mobile.remote_sessions import (
+        public_error as remote_public_error,
+    )
+    from local_operator.mobile.remote_sessions import (
+        resolve_owner as resolve_remote_owner,
+    )
+    from local_operator.paths import config_dir as _relay_config_dir
+
+    relay_root = _relay_config_dir()
+    remote_views = RemoteViews()
+
+    async def remote_row(session_id: str) -> Any:
+        # Existing local identity wins. Never place a peer's PID in SessionTable:
+        # PIDs are device-local and would alias an unrelated local conversation.
+        if _entry_for_session(daemon, session_id) is not None:
+            return None
+        if (
+            await asyncio.to_thread(_durable_user_session_dir, session_id, root=relay_root)
+            is not None
+        ):
+            return None
+        return await asyncio.to_thread(resolve_remote_owner, relay_root, session_id)
+
+    def remote_failure(error: Exception, *, command: bool = False) -> Response:
+        failure = remote_public_error(error, command=command)
+        return JSONResponse(failure.payload(), status_code=failure.status)
+
+    async def remote_ranged_response(
+        request: Request,
+        fetch: Callable[..., Awaitable[tuple[dict[str, Any], bytes]]],
+        headers: dict[str, str],
+        *,
+        mime: Callable[[str], str] = lambda declared: declared,
+        buffer_cap: int | None = None,
+    ) -> Response:
+        """Stream one owner blob to HTTP with Range, one bounded mesh chunk at a time.
+
+        ``fetch(offset=, length=, expected_media_id=)`` is the purpose's chunk call
+        (retained media or a supplement); ``headers`` is the route family's policy;
+        ``mime`` maps the PEER'S declared type to the one this viewer will serve —
+        the supplement routes never let a peer choose ``text/html`` at this origin.
+        Refusals raise; callers map them through ``remote_failure``.
+
+        ``buffer_cap`` switches to collect-then-send for a body with a known cap
+        (featured files, 10 MB): a streamed body has already sent ``200`` before a
+        later chunk can be refused, so a mid-transfer mutation or grant revoke would
+        reach the phone as a short read, not the ``409``/``403`` the contract names.
+        Collecting the requested window first (every chunk still its own
+        re-authorized, identity-checked frame) lets those refusals be real statuses.
+        A peer-declared ``total`` over the cap is ``413 remote_too_large`` HERE: the
+        owner applies the same cap, but the viewer does not trust the owner to.
+        Uncapped bodies (retained media, sounds) keep streaming; there a mid-stream
+        refusal is a truncated body (docs/mobile.md).
+        """
+        from local_operator.network.sync import SYNC_CHUNK_BYTES
+
+        metadata, first_byte = await fetch(offset=0, length=1, expected_media_id=None)
+        total = metadata["total"]
+        if buffer_cap is not None and total > buffer_cap:
+            raise RemoteSessionError("remote_too_large", 413)
+        served_mime = mime(metadata["mime"])
+        window = _range_window(request.headers.get("range", ""), total)
+        headers = {"Accept-Ranges": "bytes", **headers}
+        if window == "unsatisfiable":
+            headers["Content-Range"] = f"bytes */{total}"
+            return Response(status_code=416, headers=headers)
+        start, end = window if window is not None else (0, total - 1)
+        if window is not None:
+            headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        headers["Content-Length"] = str(max(0, end - start + 1))
+
+        async def chunks():
+            offset = start
+            if offset == 0 and first_byte and end >= 0:
+                yield first_byte
+                offset = 1
+            while offset <= end:
+                # One bounded request at a time. Cancellation closes this
+                # coroutine-owned courier socket, not an uncancellable worker
+                # thread; no next byte window is requested after disconnect.
+                # Each chunk is its own mesh frame, so the owner re-authorizes
+                # the view grant before every one (a revoke stops the next).
+                reply, data = await fetch(
+                    offset=offset,
+                    length=min(SYNC_CHUNK_BYTES, end - offset + 1),
+                    expected_media_id=metadata["media_id"],
+                )
+                if reply["total"] != total or reply["mime"] != metadata["mime"]:
+                    raise RemoteSessionError("remote_media_changed", 409)
+                if buffer_cap is not None and not data:
+                    # A hostile/broken owner answering empty would spin forever
+                    # while nothing has been sent; refuse instead.
+                    raise RemoteSessionError("remote_media_changed", 409)
+                yield data
+                offset += len(data)
+
+        if buffer_cap is not None:
+            # Bounded by buffer_cap (checked above); any refusal raises before a
+            # single header leaves, so the caller answers a real status.
+            body = bytearray()
+            async for part in chunks():
+                body.extend(part)
+                if len(body) > buffer_cap:
+                    raise RemoteSessionError("remote_too_large", 413)
+            if len(body) != max(0, end - start + 1):
+                # Over/under-long replies would contradict Content-Length.
+                raise RemoteSessionError("remote_media_changed", 409)
+            return Response(
+                bytes(body),
+                status_code=206 if window is not None else 200,
+                media_type=served_mime,
+                headers=headers,
+            )
+        return SessionEventResponse(
+            chunks(),
+            status_code=206 if window is not None else 200,
+            media_type=served_mime,
+            headers=headers,
+        )
+
+    async def remote_media_response(request: Request, owner_row: Any, kind: str) -> Response:
+        from local_operator.mobile.remote_sessions import async_media_chunk
+
+        entry_id = request.query_params.get("entry", "")
+        if not entry_id or kind not in ("image", "video", "file"):
+            return JSONResponse({"error": "invalid_media_reference"}, status_code=400)
+        try:
+            index = int(request.query_params.get("i", "0"))
+            if index < 0:
+                raise ValueError
+        except ValueError:
+            return JSONResponse({"error": "invalid_media_index"}, status_code=400)
+        headers = {
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        }
+        if kind == "file":
+            headers["Content-Disposition"] = "attachment"
+
+        def fetch(**window: Any) -> Awaitable[tuple[dict[str, Any], bytes]]:
+            return async_media_chunk(
+                relay_root, owner_row, entry_id=entry_id, index=index, kind=kind, **window
+            )
+
+        try:
+            return await remote_ranged_response(request, fetch, headers)
+        except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
+            return remote_failure(exc)
+
+    async def remote_supplement_response(
+        request: Request, owner_row: Any, kind: str, ref: str, index: int
+    ) -> Response:
+        """A remote Highlight's featured file (``file``) or sound (``sound``) bytes.
+
+        Same Range streaming as retained media, but the supplement family's policy:
+        ``no-store`` (a featured file is read as it is NOW on the owner, so it must
+        not be cached as immutable) plus ``nosniff`` and a sandbox CSP. The served
+        type is re-derived HERE from the peer's declaration: a file must be one of
+        the local allowlist's own types (``_SUPPLEMENT_FILE_TYPES``) and a sound
+        must be ``audio/*``; anything else is ``application/octet-stream`` /
+        refused, so no owner — buggy or hostile — gets ``text/html`` served from
+        this relay's cookie-bearing origin.
+        """
+        from local_operator.mobile.remote_sessions import async_supplement_chunk
+        from local_operator.session.media import SUPPLEMENT_FILE_MAX_BYTES
+
+        headers = {
+            **_SUPPLEMENT_POLICY,
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        }
+        allowed_files = frozenset(_SUPPLEMENT_FILE_TYPES.values())
+
+        def served(declared: str) -> str:
+            if kind == "sound":
+                if not declared.startswith("audio/"):
+                    raise RemoteSessionError("remote_media_missing", 404)
+                return declared
+            chosen = declared if declared in allowed_files else "application/octet-stream"
+            if not chosen.startswith("image/"):
+                headers["Content-Disposition"] = "attachment"
+            return chosen
+
+        def fetch(**window: Any) -> Awaitable[tuple[dict[str, Any], bytes]]:
+            return async_supplement_chunk(
+                relay_root, owner_row, kind=kind, ref=ref, index=index, **window
+            )
+
+        try:
+            return _supplement_response(
+                await remote_ranged_response(
+                    request,
+                    fetch,
+                    headers,
+                    mime=served,
+                    # Featured files have the local 10 MB cap, so they are collected
+                    # before sending (refusals stay statuses); sounds have no cap and
+                    # keep streaming, as retained media does.
+                    buffer_cap=SUPPLEMENT_FILE_MAX_BYTES if kind == "file" else None,
+                )
+            )
+        except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
+            return _supplement_response(remote_failure(exc))
+
+    async def remote_supplement_document(owner_row: Any, digest: str) -> Response:
+        """A remote Highlight component, assembled HERE, answered as JSON ``{html}``.
+
+        The viewer collects the owner's RAW component (capped at
+        ``SUPPLEMENT_DOCUMENT_MAX_BYTES``) and runs its own
+        ``assemble_stored_component``, so the document's CSP comes from the build
+        serving this phone, never from the peer. Still JSON, never ``text/html``.
+        """
+        from local_operator.mobile.remote_sessions import async_supplement_chunk
+        from local_operator.network.sync import SYNC_CHUNK_BYTES
+        from local_operator.session.media import SUPPLEMENT_DOCUMENT_MAX_BYTES
+        from local_operator.supplements.document import assemble_stored_component
+
+        collected = bytearray()
+        try:
+            metadata, data = await async_supplement_chunk(
+                relay_root,
+                owner_row,
+                kind="document",
+                ref=digest,
+                index=0,
+                offset=0,
+                length=SYNC_CHUNK_BYTES,
+            )
+            total: int = metadata["total"]
+            identity: str = metadata["media_id"]
+            # Re-applied HERE, not trusted from the owner: this relay buffers the
+            # blob to assemble it, so its own cap bounds its own memory.
+            if total > SUPPLEMENT_DOCUMENT_MAX_BYTES:
+                raise RemoteSessionError("remote_too_large", 413)
+            collected.extend(data)
+            while len(collected) < total:
+                metadata, data = await async_supplement_chunk(
+                    relay_root,
+                    owner_row,
+                    kind="document",
+                    ref=digest,
+                    index=0,
+                    offset=len(collected),
+                    length=SYNC_CHUNK_BYTES,
+                    expected_media_id=identity,
+                )
+                if metadata["total"] != total or not data:
+                    raise RemoteSessionError("remote_media_changed", 409)
+                collected.extend(data)
+        except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
+            return _supplement_response(remote_failure(exc))
+        try:
+            html_document = assemble_stored_component(bytes(collected).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return _supplement_response(
+                JSONResponse({"error": "no such supplement"}, status_code=404)
+            )
+        return JSONResponse({"html": html_document}, headers=dict(_SUPPLEMENT_POLICY))
+
+    # One per app: the memo holds the model sheet's last build for THIS daemon,
+    # and a fresh app (every test's) starts cold.
+    models_memo = _ModelsMemo(_models_payload, _models_fingerprint)
+    # A finished background peer read rings the list, so an open stream repaints
+    # with the fresh remote rows instead of waiting for an unrelated ring.
+    peer_rows_refresher = _PeerRowsRefresher(daemon.table.notify_list_changed)
+
     # -- auth helpers -----------------------------------------------------------
 
     def authed(request: Request) -> bool:
@@ -6463,6 +7202,7 @@ def build_app(daemon: MobileDaemon):
         if (
             origin is not None and origin not in {f"http://{host}", f"https://{host}"}
         ) or request.headers.get("sec-fetch-site") == "cross-site":
+            note_reason(request.scope, "cross_origin")
             return JSONResponse({"error": "same-origin request required"}, status_code=403)
         return None
 
@@ -6475,6 +7215,9 @@ def build_app(daemon: MobileDaemon):
         if authed(request):
             return None
         if request.url.path.startswith("/api/"):
+            # A reason code on the request log's entry (QA round 1, Q3): a 401
+            # with an empty reason could not be told apart from a handler's own.
+            note_reason(request.scope, "unauthorized")
             return JSONResponse({"error": "authentication required"}, status_code=401)
         return RedirectResponse("/login", status_code=303)
 
@@ -6510,6 +7253,7 @@ def build_app(daemon: MobileDaemon):
         form = await request.form()
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
+            note_reason(request.scope, "login_failed")
             return HTMLResponse(
                 await asyncio.to_thread(_render_login_html, error=True),
                 status_code=401,
@@ -6641,11 +7385,10 @@ def build_app(daemon: MobileDaemon):
         if not include_temporary:
             sessions = [row for row in sessions if row.get("temporary") is None]
         if include_peers:
-            peers = await asyncio.to_thread(
-                mobile_mesh.remote_session_rows,
-                config_dir(),
-                pinned=set(daemon.table.pins),
-            )
+            # Never waits on the mesh fan-out once a listing exists: see
+            # ``_PeerRowsRefresher`` (the 1.1-2.8 s read that made the phone's
+            # every resume wait).
+            peers = await peer_rows_refresher.rows(config_dir(), set(daemon.table.pins))
             for row in peers:
                 # Remote rows carry the local row's ALWAYS-PRESENT shape with
                 # the empty values, not an omitted key. Their assignment lives
@@ -6685,6 +7428,28 @@ def build_app(daemon: MobileDaemon):
                 # contract, not this app's routing table (see the i18n note
                 # above), and the two must not be conflated.
                 "session_tags": {"available": True},
+                # Rollout requires the complete remote baseline. Partial backend
+                # builds explicitly declare their operations; old phones ignore
+                # this object, new ones do not mistake local support for mesh.
+                "remote_sessions": {
+                    "available": True,
+                    "version": 1,
+                    "view": True,
+                    "history": True,
+                    "supported_command_ops": ["prompt", "steer"],
+                    "media": True,
+                    "supported_media_kinds": ["image", "video", "file"],
+                    "file_sources": ["retained_document"],
+                    "document_upload": False,
+                    "audio_upload": False,
+                    "skill_invocation": False,
+                    # This relay serves remote Highlight bytes on the SAME URLs as
+                    # local ones. Per-owner support is negotiated on the mesh
+                    # (``mobile-session-supplements-v1``): an owner without it is a
+                    # 409 ``remote_unsupported`` ("Update <owner>"), never a guess.
+                    "supplements": True,
+                    "supplement_kinds": ["document", "file", "sound"],
+                },
                 # THE ``$skill`` CONTRACT (SKM-D3). Three things travel together
                 # and this key gates all of them: the catalogue route
                 # (``GET /api/skills``), the ``expand_skills`` body flag on
@@ -6701,6 +7466,49 @@ def build_app(daemon: MobileDaemon):
                 # Authenticated build support, not a claim that receipt storage
                 # is writable right now. Typed refusals preserve the same key.
                 "session_start": dict(START_CAPABILITY),
+                # DELTA RESUME (delta-sync Phase 2, docs/mobile.md "Delta
+                # resume"). RELAY capabilities like ``session_tags``: an older
+                # daemon lacks the keys, and on it ``?after=`` is IGNORED (it
+                # answers the newest page) and ``?have=`` is ignored (it sends
+                # the full seed) — so a client must feature-detect, never probe.
+                "history_after": {"available": True},
+                "seed_digest": {"available": True},
+                # STEER JOURNAL ORDER: ``?steer_journal_order=1`` on a session
+                # events stream moves each delivered phone steer to its journal
+                # slot (as a ``user`` row), so the live frame agrees with
+                # ``/history``. A RELAY capability like ``seed_digest``: an older
+                # relay ignores the parameter and keeps the send-time slot, so a
+                # client must feature-detect rather than assume the order.
+                "steer_journal_order": {"available": True},
+                # Per-device push preferences (Settings → Notifications): the
+                # register body accepts ``preferences`` and the push worker
+                # gates emits on them (``push_devices.PREFERENCE_KEYS``). A
+                # RELAY capability like ``notification_sounds``, and it is what
+                # an app MUST check before sending the field: ``POST
+                # /api/push/register`` refuses unknown fields, so an older
+                # daemon would refuse the whole registration.
+                "push_preferences": {"available": True},
+                # ``preferences.previews`` (session name + reply preview in the
+                # completion banner) is accepted. Separate from
+                # ``push_preferences`` because a daemon that shipped that
+                # capability without this key refuses ``previews`` as an
+                # unknown field, failing the whole registration; the app sends
+                # the key only when this capability is present.
+                "push_previews": {"available": True},
+                # ADR 0009 routing by origin: the register body accepts the
+                # enum keys ``preferences.completions_scope`` (phone | all) and
+                # ``preferences.attention`` (away | always | never). Its own key
+                # for the reason ``push_previews`` has one: an older daemon
+                # refuses either as an unknown field and would fail the whole
+                # registration, so the app sends them only when this is present.
+                "push_routing": {"available": True},
+                # ADR 0008 desk presence: ``GET/PATCH
+                # /api/settings/phone-away-after`` reads and writes this
+                # computer's ``notifications.phone_away_after_s`` ("send to
+                # phone when I'm away for N"). The phone shows its
+                # per-computer row only when this key is present; an older
+                # relay 404s the route.
+                "phone_away_after": {"available": True},
                 # Conditional because this build may predate the Library module:
                 # the phone's footer shows the destination iff the key is here,
                 # and a missing key means "this relay cannot serve it".
@@ -6794,6 +7602,7 @@ def build_app(daemon: MobileDaemon):
         if origin_denied is not None:
             return origin_denied
         if not authed(request):
+            note_reason(request.scope, "unauthorized")
             return JSONResponse({"error": "authentication required"}, status_code=401)
         from local_operator import agent_avatar
         from local_operator.i18n.http import etag_matches
@@ -6912,12 +7721,85 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         session_id = str(request.path_params["session_id"])
+        # STEER JOURNAL ORDER (``capabilities.steer_journal_order``): a client
+        # that declares it gets each delivered phone steer at its journal slot,
+        # so the live frame agrees with ``/history``. Absent, the frame is the
+        # byte-identical legacy one — installed phones from before
+        # local-operator-mobile #359 mis-place a held row that moves, so the
+        # move must never reach a client that did not ask for it. Resolved per
+        # stream because the frame is shared by every subscriber.
+        # Local import, like ``_projection_frame``'s: the fold module is heavy
+        # and the daemon keeps it off its import path.
+        from local_operator.mobile.projection import (
+            STEER_JOURNAL_ORDER_PARAM,
+            steer_journal_order_frame,
+        )
+
+        steer_order = request.query_params.get(STEER_JOURNAL_ORDER_PARAM) == "1"
+
+        def client_frame(frame: dict[str, Any]) -> dict[str, Any]:
+            return steer_journal_order_frame(frame, declared=steer_order)
+
+        try:
+            owner_row = await remote_row(session_id)
+            if owner_row is not None:
+                view, remote_queue = await remote_views.acquire(relay_root, owner_row)
+
+                def release_remote() -> None:
+                    remote_views.release(view, remote_queue)
+
+                async def remote_stream():
+                    try:
+                        if view.frame is not None:
+                            yield _projection_seed_event(
+                                client_frame(view.frame), request.query_params.get("have")
+                            )
+                        while True:
+                            try:
+                                frame = await asyncio.wait_for(remote_queue.get(), SSE_KEEPALIVE_S)
+                            except TimeoutError:
+                                # locate observes a runtime started elsewhere;
+                                # reading never calls the peer's engage door.
+                                try:
+                                    await view.connect()
+                                except (
+                                    RemoteSessionError,
+                                    MeshRefusal,
+                                    ConnectionError,
+                                    TimeoutError,
+                                ) as exc:
+                                    view.publish(remote_public_error(exc).payload())
+                                yield ": keepalive\n\n"
+                                continue
+                            if frame.get("remote"):
+                                yield "event: remote_error\ndata: " + json.dumps(frame) + "\n\n"
+                            else:
+                                yield _projection_live_event(
+                                    client_frame(frame), request.query_params.get("have")
+                                )
+                    finally:
+                        release_remote()
+
+                return SessionEventResponse(
+                    remote_stream(),
+                    release=release_remote,
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+                )
+        except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
+            return remote_failure(exc)
         # A DELETED TEMPORARY CHAT closes the stream with its own 404, so the
         # phone shows the tombstone screen instead of an endless reconnect.
         if _entry_for_session(daemon, session_id) is None:
             gone = await asyncio.to_thread(_temporary_deleted_response, session_id)
             if gone is not None:
                 return gone
+        # SEED ELISION (delta-sync Phase 2a, ``capabilities.seed_digest``): the
+        # digest of the frame the phone already holds. A query parameter, not
+        # ``If-None-Match``, because header pass-through on an SSE request via
+        # the gateway and every RN fetch path is unverified. ``None`` (absent)
+        # keeps the legacy byte-identical stream.
+        have = request.query_params.get("have")
 
         # A response whose headers fail to send never began viewing. Own the
         # queue only inside the iterator — registration happens on the first
@@ -7005,7 +7887,15 @@ def build_app(daemon: MobileDaemon):
                 loop = asyncio.get_running_loop()
                 sent_at: float | None = None
                 if projection is not None:
-                    yield _sse("projection", stamp_temporary(_projection_frame(projection)))
+                    # Stamp FIRST, digest SECOND (convergence with #3832): the
+                    # phone holds the ``temporary``-stamped frame, so the seed
+                    # digest must cover it. ``temporary`` carries absolute times
+                    # (``marked_at``/``deletes_at``), not a countdown, so it is
+                    # stable between repaints; a mark, Keep or activity that
+                    # moves it is a real change the phone must receive in full.
+                    yield _projection_seed_event(
+                        client_frame(stamp_temporary(_projection_frame(projection))), have
+                    )
                     sent_at = loop.time()
                 while True:
                     try:
@@ -7022,8 +7912,9 @@ def build_app(daemon: MobileDaemon):
                         wait = PROJECTION_FRAME_INTERVAL_S - (loop.time() - sent_at)
                         if wait > 0:
                             await asyncio.sleep(wait)
-                    yield _sse(
-                        "projection", stamp_temporary(_latest_projection_frame(queue, frame))
+                    yield _projection_live_event(
+                        client_frame(stamp_temporary(_latest_projection_frame(queue, frame))),
+                        have,
                     )
                     sent_at = loop.time()
             finally:
@@ -7078,6 +7969,62 @@ def build_app(daemon: MobileDaemon):
         try:
             payload = await asyncio.to_thread(
                 policy_payload, config_dir(), patch, write=request.method == "PATCH"
+            )
+        except AccountRoutingError as exc:
+            return JSONResponse(
+                {"code": exc.code, "error": str(exc)},
+                status_code=exc.status,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    async def api_phone_away_after(request: Request) -> Response:
+        """ADR 0008: the phone edits THIS computer's "away for N" threshold.
+
+        One named key, through the same projection as account routing
+        (``account_routing.setting_payload``): the phone can never reach an
+        arbitrary config path. It is a computer setting because it describes
+        the desk; the desktop app reads it and sends it on its presence beat.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.i18n.keys import wire_settings_account_policy as _ap
+        from local_operator.mobile.account_routing import (
+            PHONE_AWAY_AFTER_CAPABILITY,
+            PHONE_AWAY_AFTER_KEY,
+            AccountRoutingError,
+            setting_payload,
+        )
+        from local_operator.paths import config_dir
+
+        patch = None
+        if request.method == "PATCH":
+            try:
+                patch = await request.json()
+            except (ValueError, UnicodeDecodeError):
+                return JSONResponse(
+                    {
+                        "code": "invalid_setting",
+                        "error": _ap.error_invalid_json().envelope(locale=resolve_language())[
+                            "text"
+                        ],
+                    },
+                    status_code=422,
+                )
+        try:
+            payload = await asyncio.to_thread(
+                setting_payload,
+                config_dir(),
+                PHONE_AWAY_AFTER_KEY,
+                PHONE_AWAY_AFTER_CAPABILITY,
+                patch,
+                write=request.method == "PATCH",
+                unavailable_code="setting_unavailable",
+                # Unreachable in practice: the key is registered in this same
+                # build (pinned by test_phone_away_routes). The generic
+                # "could not be saved" copy is the honest fallback.
+                unavailable=_ap.error_write_failed(),
             )
         except AccountRoutingError as exc:
             return JSONResponse(
@@ -7162,15 +8109,17 @@ def build_app(daemon: MobileDaemon):
     #: The newest serialized list event per ``include_peers`` flag, with the
     #: ring revision observed BEFORE its build began: ``(revision, event)``.
     # Keyed by the subscriber's flags ``(include_peers, include_temporary)``:
-    # each combination is its own serialized answer.
-    list_events: dict[tuple[bool, bool], tuple[int, str]] = {}
+    # each combination is its own serialized answer. The cached value is a
+    # ``_ListEvent`` (delta-sync Phase 2a), so the per-``have`` digest twin is
+    # also built once per flag combination, never per subscriber.
+    list_events: dict[tuple[bool, bool], tuple[int, _ListEvent]] = {}
     list_event_locks = {
         (peers, temp): asyncio.Lock() for peers in (False, True) for temp in (False, True)
     }
 
     async def _shared_list_event(
         include_peers: bool, needed: int | None, include_temporary: bool = False
-    ) -> str:
+    ) -> _ListEvent:
         """One serialized ``sessions`` event that reflects ring ``needed``.
 
         A cached build is reusable iff its build began at or after that ring
@@ -7192,9 +8141,8 @@ def build_app(daemon: MobileDaemon):
             if needed is not None and cached is not None and cached[0] >= needed:
                 return cached[1]
             revision = daemon.table.list_revision
-            event = _sse(
-                "sessions",
-                await _list_frame(include_peers=include_peers, include_temporary=include_temporary),
+            event = _ListEvent(
+                await _list_frame(include_peers=include_peers, include_temporary=include_temporary)
             )
             newest = list_events.get(flags)
             if newest is None or newest[0] <= revision:
@@ -7215,6 +8163,9 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         include_peers = _query_flag(request, "include_peers")
+        # Seed elision for the list (delta-sync Phase 2a): the same ``have``
+        # contract as the session stream; see ``api_session_events``.
+        have = request.query_params.get("have")
         # Read once at open, like ``include_peers`` and for the same reason.
         include_temporary = _query_flag(request, "include_temporary")
         queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
@@ -7228,7 +8179,7 @@ def build_app(daemon: MobileDaemon):
             try:
                 loop = asyncio.get_running_loop()
                 last = await _shared_list_event(include_peers, None, include_temporary)
-                yield last
+                yield last.for_have(have, seed=True)
                 sent_at = wrote_at = loop.time()
                 while True:
                     # The keepalive clock runs from the last WRITE, not from
@@ -7256,12 +8207,12 @@ def build_app(daemon: MobileDaemon):
                         include_peers, daemon.table.list_revision, include_temporary
                     )
                     sent_at = loop.time()
-                    if event == last:
+                    if event.event == last.event:
                         # A ring is "something MAY have changed"; most rings
                         # during streaming move nothing the list renders.
                         continue
                     last = event
-                    yield event
+                    yield event.for_have(have, seed=False)
                     wrote_at = loop.time()
             finally:
                 await _cleanup_stream(release)
@@ -8049,18 +9000,58 @@ def build_app(daemon: MobileDaemon):
         # the same public route and page directly from their durable transcript.
         # Live sessions retain the existing eligibility path; durable-only
         # routes must prove they are user sessions before any filesystem read.
-        if entry is None and _durable_user_session_dir(session_id) is None:
+        try:
+            owner_row = await remote_row(session_id) if entry is None else None
+        except (RemoteSessionError, MeshRefusal) as exc:
+            return remote_failure(exc)
+        if entry is None and owner_row is None and _durable_user_session_dir(session_id) is None:
             return _temporary_deleted_response(session_id) or JSONResponse(
                 {"error": "unknown session"}, status_code=404
             )
         before = request.query_params.get("before")
+        # FORWARD CURSOR (delta-sync Phase 2b, ``capabilities.history_after``):
+        # the rows NEWER than the newest one the phone holds, so a resume reads
+        # one forward page instead of healing backwards from the live tail.
+        after = request.query_params.get("after")
+        if before and after:
+            return JSONResponse({"error": "before and after are exclusive"}, status_code=400)
         try:
             limit = max(1, min(int(request.query_params.get("limit", "80")), 200))
         except ValueError:
             limit = 80
+        if owner_row is not None:
+            try:
+                result = await asyncio.to_thread(
+                    remote_read,
+                    relay_root,
+                    owner_row,
+                    "history",
+                    before_id=before,
+                    after_id=after,
+                    limit=limit,
+                )
+            except (RemoteSessionError, MeshRefusal) as exc:
+                return remote_failure(exc)
+            result.pop("mobile_session_read", None)
+            return JSONResponse(result, status_code=409 if result.get("reset") else 200)
         page, has_more = await asyncio.to_thread(
-            _history_page, session_id, before, limit, durable_only=entry is None
+            _history_page,
+            session_id,
+            before,
+            limit,
+            durable_only=entry is None,
+            after=after,
         )
+        reset = getattr(page, "reset", "")
+        if reset:
+            # 409, not an empty 200: the cursor no longer names a row this
+            # conversation can continue from, and the client's only correct
+            # move is a full (cursor-less) read. ``reset`` is in the body too so
+            # a client that reads bodies before statuses sees the same answer.
+            return JSONResponse(
+                {"error": "history cursor not found", "reset": True, "reason": reset},
+                status_code=409,
+            )
         return JSONResponse(_history_response(page, has_more))
 
     async def api_session_checkpoints(request: Request) -> Response:
@@ -8174,6 +9165,12 @@ def build_app(daemon: MobileDaemon):
         session_id = str(request.path_params["session_id"])
         entry = _entry_for_session(daemon, session_id)
         if entry is None:
+            try:
+                owner_row = await remote_row(session_id)
+                if owner_row is not None:
+                    return await remote_media_response(request, owner_row, "image")
+            except (RemoteSessionError, MeshRefusal) as exc:
+                return remote_failure(exc)
             return JSONResponse({"error": "unknown session"}, status_code=404)
         entry_id = request.query_params.get("entry", "")
         try:
@@ -8191,6 +9188,37 @@ def build_app(daemon: MobileDaemon):
             media_type=mime_type,
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
+
+    async def api_session_bridge_card_body(request: Request) -> Response:
+        """The admitted body behind one inbound Team Bridge card (design §4).
+
+        The relay twin of ``GET /v1/desktop/sessions/{id}/bridge-cards/{entry}/body``:
+        both call ``team_bridge.card_body.resolve_card_body`` so a phone and a
+        desktop can never disagree about what a card may show. Keyed by the
+        transcript row the phone can already read, never by a message id, and
+        only for a durable user conversation on THIS machine. Bodies are
+        untrusted third-party text: private, never cached.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry_id = str(request.path_params["entry_id"])
+        directory = await asyncio.to_thread(_durable_user_session_dir, session_id, root=relay_root)
+        if directory is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        from local_operator.team_bridge.card_body import (
+            CardBodyNotFound,
+            resolve_card_body,
+        )
+
+        try:
+            answer = await resolve_card_body(
+                relay_root, session_id, entry_id, sessions_root=directory.parent
+            )
+        except CardBodyNotFound:
+            return JSONResponse({"error": "no such bridge card"}, status_code=404)
+        return JSONResponse(answer, headers={"Cache-Control": "private, no-store"})
 
     async def api_session_attachment(request: Request) -> Response:
         """One attachment's bytes, with byte-Range (206) support.
@@ -8213,7 +9241,47 @@ def build_app(daemon: MobileDaemon):
             return denied
         session_id = str(request.path_params["session_id"])
         entry = _entry_for_session(daemon, session_id)
+        # File references are shared by local/remote mobile projections. Keep
+        # the local half routable too, using the same retained-row resolver;
+        # no client-supplied origin or stored path becomes a byte authority.
+        if request.query_params.get("kind") == "file":
+            directory = await asyncio.to_thread(
+                _durable_user_session_dir, session_id, root=relay_root
+            )
+            if directory is not None:
+                from local_operator.session.media import session_media
+
+                try:
+                    index = int(request.query_params.get("i", "0"))
+                except ValueError:
+                    return JSONResponse({"error": "invalid_media_index"}, status_code=400)
+                source = await asyncio.to_thread(
+                    session_media,
+                    relay_root,
+                    session_id,
+                    request.query_params.get("entry", ""),
+                    index,
+                    "file",
+                )
+                if source is None:
+                    return JSONResponse({"error": "media_missing"}, status_code=404)
+                headers = {
+                    "Cache-Control": "private, max-age=31536000, immutable",
+                    "X-Content-Type-Options": "nosniff",
+                    "Content-Disposition": "attachment",
+                }
+                if source.path is not None:
+                    return FileResponse(source.path, media_type=source.mime, headers=headers)
+                return _ranged_media_response(request, source.data or b"", source.mime, headers)
         if entry is None:
+            try:
+                owner_row = await remote_row(session_id)
+                if owner_row is not None:
+                    return await remote_media_response(
+                        request, owner_row, request.query_params.get("kind", "")
+                    )
+            except (RemoteSessionError, MeshRefusal) as exc:
+                return remote_failure(exc)
             return JSONResponse({"error": "unknown session"}, status_code=404)
         entry_id = request.query_params.get("entry", "")
         if not entry_id:
@@ -8276,6 +9344,17 @@ def build_app(daemon: MobileDaemon):
 
         if not is_digest(digest):
             return _sound_response(JSONResponse({"error": "bad digest"}, status_code=400))
+        # A peer-hosted conversation (``remote_row``: a local live entry or durable
+        # directory always wins): the owner authorises by the same reference rule
+        # (``session/media.supplement_digest_media``) and this relay streams it.
+        try:
+            owner_row = await remote_row(session_id)
+        except (RemoteSessionError, MeshRefusal) as exc:
+            return _sound_response(_supplement_response(remote_failure(exc)))
+        if owner_row is not None:
+            return _sound_response(
+                await remote_supplement_response(request, owner_row, "sound", digest, 0)
+            )
 
         def load() -> tuple[bytes, str] | None:
             from local_operator.session import compression
@@ -8386,39 +9465,15 @@ def build_app(daemon: MobileDaemon):
             response.headers[name] = value
         return response
 
-    def _journal_references_digest(payload: bytes, digest: str) -> bool:
-        """Whether a ``supplement_v1`` row of this journal references ``digest``.
-
-        §2.7's letter for the document route: the reference is read per
-        ``supplement_v1`` row. Deliberately narrower than a raw session-wide scan
-        with sync's byte grammar -- the grammar also matches ``"attachment"``
-        references on other row types (message media carries the same key today),
-        and a future text-mime producer must not become servable through this door
-        without the authorisation being reconsidered (round-1 review R4). The cheap
-        pre-filter keeps JSON parsing to the lines that can be supplement rows.
-        """
-        from local_operator.network.sync import _ATTACHMENT_REF
-        from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
-
-        marker = SUPPLEMENT_CUSTOM_TYPE.encode("ascii")
-        needle = digest.encode("ascii")
-        for line in payload.splitlines():
-            if marker not in line:
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(row, dict):
-                continue
-            row_payload = row.get("payload")
-            if not isinstance(row_payload, dict):
-                continue
-            if row_payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
-                continue
-            if any(match == needle for match in _ATTACHMENT_REF.findall(line)):
-                return True
-        return False
+    # The two journal-reference readers are module-level in ``session/media.py`` so a
+    # mesh owner authorises a remote supplement read by the SAME rule as these routes;
+    # their docstrings carry the authorisation reasoning (round-1 review R4, B1).
+    from local_operator.session.media import (
+        journal_references_component as _journal_references_digest,
+    )
+    from local_operator.session.media import (
+        journal_references_sound as _journal_references_sound,
+    )
 
     def _sound_response(response: Response) -> Response:
         """Stamp the sound family's policy on EVERY answer, refusals included.
@@ -8432,56 +9487,6 @@ def build_app(daemon: MobileDaemon):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         return response
-
-    def _journal_references_sound(lines: Iterable[str], digest: str) -> bool:
-        """Whether a ``supplement_v1`` row's ``sounds[]`` names ``digest``.
-
-        THE SOUND ROUTES' THIRD AUTHORISATION FACT, and deliberately a PRECISE
-        reader rather than ``_journal_references_digest`` above: that helper
-        matches any ``attachment`` reference on a supplement row, which includes
-        the COMPONENT document digests. Serving an audio route off a component
-        digest would let the bytes family be reached through a reference that
-        never meant it — the round-1 review's own distinction (B1's sibling).
-
-        Lines, not bytes: after #2798 a settled transcript may be archived, so
-        every caller passes ``session.compression.iter_lines(directory)``. A
-        plain ``transcript.jsonl`` probe would read a compressed session as
-        "no reference" and 404 its own sounds — the guard
-        ``test_no_plain_name_probe_outside_the_resolver`` exists for exactly
-        this.
-
-        Read per row, with the same cheap pre-filter (the marker and the digest
-        must both appear on the line before a parse is worth doing). A beat that
-        has not yet been journaled references nothing yet; the live projection
-        only paints a settled beat, whose row the job writes at settle.
-        """
-        from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
-
-        marker = SUPPLEMENT_CUSTOM_TYPE
-        for line in lines:
-            if marker not in line or digest not in line:
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(row, dict):
-                continue
-            row_payload = row.get("payload")
-            if not isinstance(row_payload, dict):
-                continue
-            if row_payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
-                continue
-            details = row_payload.get("details")
-            if not isinstance(details, dict):
-                continue
-            sounds = details.get("sounds")
-            if not isinstance(sounds, list):
-                continue
-            for sound in sounds:
-                if isinstance(sound, dict) and sound.get("attachment") == digest:
-                    return True
-        return False
 
     async def api_session_supplement_document(request: Request) -> Response:
         """One stored supplement component, assembled to a document, as ``{html}``.
@@ -8523,6 +9528,18 @@ def build_app(daemon: MobileDaemon):
             return _supplement_response(denied)
         session_id = str(request.path_params["session_id"])
         digest = str(request.path_params["digest"])
+        from local_operator.supplements.contract import is_digest as _is_digest
+
+        if _is_digest(digest):
+            # A peer-hosted conversation (``remote_row``): the owner checks the
+            # supplement-row reference, this relay assembles the document itself
+            # (``remote_supplement_document``).
+            try:
+                owner_row = await remote_row(session_id)
+            except (RemoteSessionError, MeshRefusal) as exc:
+                return _supplement_response(remote_failure(exc))
+            if owner_row is not None:
+                return await remote_supplement_document(owner_row, digest)
 
         def load() -> str | None:
             import base64
@@ -8595,10 +9612,13 @@ def build_app(daemon: MobileDaemon):
         ``Content-Disposition: attachment`` rides every non-image class, and nothing
         navigates a browsing context to this route (S-R6; bytes are rendered in-app).
 
-        An ended session's cwd is NOT recorded durably (the daemon's own resume notes
-        this), so a cwd-relative path without a live record is refused rather than
-        resolved against a guess; ``~``-relative paths serve in either case. A
-        peer-hosted conversation has no local directory and is refused the same way.
+        An ended session's cwd IS recorded durably (``_durable_identity``: marker,
+        frontend checkpoint, wake index), but only as a recollection: a cwd-relative
+        path without a live record is joined against it only when the file still
+        matches the row's recorded size and mtime (``resolve_supplement_file``'s
+        ``fallback_cwd``), else refused rather than resolved against a guess;
+        ``~``-relative paths serve in either case. A peer-hosted conversation has no
+        local directory and is refused the same way.
         """
         denied = gate(request)
         if denied is not None:
@@ -8610,96 +9630,42 @@ def build_app(daemon: MobileDaemon):
             index = int(raw_index)
         except ValueError:
             return _supplement_response(JSONResponse({"error": "bad file index"}, status_code=400))
+        if index >= 0 and _SUPPLEMENT_JOB.fullmatch(job):
+            # A peer-hosted conversation (``remote_row``): the OWNER runs
+            # ``resolve_supplement_file`` -- this route's own policy -- with its own
+            # live cwd; this relay streams the bytes with Range.
+            try:
+                owner_row = await remote_row(session_id)
+            except (RemoteSessionError, MeshRefusal) as exc:
+                return _supplement_response(remote_failure(exc))
+            if owner_row is not None:
+                return await remote_supplement_response(request, owner_row, "file", job, index)
 
         def load() -> tuple[bytes, str] | str:
-            """``(bytes, mime)``, or a refusal token the route maps to a status."""
-            import os
+            """``(bytes, mime)``, or a refusal token the route maps to a status.
 
-            from local_operator.session.transcript import Transcript
-            from local_operator.supplements import denylist
+            The policy itself is ``session/media.resolve_supplement_file`` -- the one
+            definition a mesh owner also runs for a remote viewer -- fed this relay's
+            LIVE record's cwd (``""`` when the conversation has no runtime here).
+            """
+            from local_operator.session.media import resolve_supplement_file
 
             directory = _durable_user_session_dir(session_id)
             if directory is None or not _SUPPLEMENT_JOB.fullmatch(job):
                 return "missing"
-            try:
-                entries = Transcript(directory).entries()
-            except Exception:  # noqa: BLE001 -- an odd transcript serves no file
-                return "missing"
-            newest: dict[str, Any] | None = None
-            for entry in entries:
-                if entry.type != "custom":
-                    continue
-                payload = entry.payload if isinstance(entry.payload, dict) else {}
-                details = payload.get("details")
-                if not isinstance(details, dict) or details.get("job") != job:
-                    continue
-                version = details.get("version")
-                if not isinstance(version, int) or isinstance(version, bool):
-                    continue
-                if newest is None or version >= int(newest.get("version", -1)):
-                    newest = details
-            if newest is None:
-                return "missing"
-            files = newest.get("files")
-            if not isinstance(files, list) or not 0 <= index < len(files):
-                return "missing"
-            recorded = files[index] if isinstance(files[index], dict) else {}
-            raw = recorded.get("path")
-            if not isinstance(raw, str) or not raw:
-                return "missing"
-
-            home = str(Path.home())
             entry = _entry_for_session(daemon, session_id)
-            cwd = entry.record.cwd if entry is not None else ""
-            expanded = os.path.expanduser(raw)
-            if not os.path.isabs(expanded):
-                if not cwd:
-                    # No live record: a cwd-relative path has no root we can
-                    # vouch for, and resolving it against a guess is the class
-                    # of silent wrong-directory this codebase refuses.
-                    return "no-cwd"
-                expanded = os.path.join(cwd, expanded)
-            resolved_path = Path(os.path.realpath(expanded))
-            # The row's own session scratchpad is a root beside cwd/home (a relocated config
-            # dir may sit outside ``~``), mirroring the prefilter that admitted the path.
-            from local_operator.scratchpad import scratchpad_root
-
-            own_pad = scratchpad_root(directory)
-            allowed_roots = [
-                Path(os.path.realpath(root))
-                for root in (cwd, home, str(own_pad) if own_pad is not None else "")
-                if root
-            ]
-            if not any(
-                resolved_path == root or resolved_path.is_relative_to(root)
-                for root in allowed_roots
-            ):
-                return "missing"
-            # The row's own session scratchpad is servable (the prefilter admitted it under
-            # the same carve-out); every credential rule and every OTHER session's store
-            # stay refused. Derived from the requested session's directory, never the env.
-            if denylist.is_sensitive_for_supplements(
-                str(resolved_path),
-                cwd=cwd or home,
-                session_scratchpad=str(own_pad) if own_pad is not None else None,
-            ):
-                logger.info("supplement file refused by the denylist for %s", session_id)
-                return "missing"
-            try:
-                if not resolved_path.is_file():
-                    return "missing"
-                size = resolved_path.stat().st_size
-                if size > SUPPLEMENT_FILE_MAX_BYTES:
-                    return "too-large"
-                data = resolved_path.read_bytes()
-            except OSError:
-                return "missing"
-            if len(data) > SUPPLEMENT_FILE_MAX_BYTES:
-                return "too-large"
-            mime = _SUPPLEMENT_FILE_TYPES.get(resolved_path.suffix.lower())
-            if mime is None:
-                return "missing"
-            return data, mime
+            resolved = resolve_supplement_file(
+                directory,
+                job,
+                index,
+                cwd=entry.record.cwd if entry is not None else "",
+                # An ended session has no live record: its durable cwd may join a
+                # relative path when the file matches the row's fingerprint.
+                fallback_cwd="" if entry is not None else _durable_identity(directory).cwd,
+            )
+            if isinstance(resolved, str):
+                return resolved
+            return resolved.data or b"", resolved.mime
 
         outcome = await asyncio.to_thread(load)
         if outcome == "missing":
@@ -8744,6 +9710,28 @@ def build_app(daemon: MobileDaemon):
         # sends one learns nothing about the field's shape — and so the
         # endpoint's error surface is unchanged for every ordinary request.
         body.pop("operator_cap", None)
+        # Remote commands go to the resolved owner before any local continuation
+        # admission. In particular an unresolved mesh id can NEVER enter spawn.
+        try:
+            owner_row = await remote_row(session_id)
+            if owner_row is not None:
+                remote_op = body.pop("op", None)
+                if not isinstance(remote_op, str) or not remote_op:
+                    return JSONResponse({"error": "invalid_op"}, status_code=422)
+                denied = _device_refusal(body.get("operator_cert"))
+                if denied is not None:
+                    return denied
+                if body.pop("expand_skills", False):
+                    return remote_failure(RemoteSessionError("remote_unsupported", 409))
+                try:
+                    answer = await admit_remote_command(relay_root, owner_row, remote_op, body)
+                except ValueError:
+                    return JSONResponse({"error": "invalid_command"}, status_code=422)
+                except Exception as exc:
+                    return remote_failure(exc, command=True)
+                return JSONResponse(answer)
+        except (RemoteSessionError, MeshRefusal) as exc:
+            return remote_failure(exc, command=True)
         # ...AND THE SIGNATURE FIELDS ARE ADMITTED (stage D, revision 2 §2.4,
         # §4.2). This is the NARROWING the earlier revision's comment marked as
         # its own reversal point, and the direction is the whole design: the
@@ -8885,7 +9873,9 @@ def build_app(daemon: MobileDaemon):
                 )
 
                 async def _deliver_prompt() -> str:
-                    client, detail = await continue_command(config_dir(), command)
+                    # ADR 0009: a phone prompt that wakes a cold conversation
+                    # keeps the phone's origin (``PromptErrand.origin``).
+                    client, detail = await continue_command(config_dir(), command, origin="mobile")
                     client.close()
                     return detail
 
@@ -8985,7 +9975,12 @@ def build_app(daemon: MobileDaemon):
                 from local_operator.session.runtime.launch import AskErrand
 
                 ask_id = str(body.get("ask_id") or "")
-                by = str(body.get("by") or "")
+                # The body's ``by`` is NOT forwarded: anyone holding the portal
+                # cookie writes this body, and the runtime stamps the surface
+                # itself (``asks/surfaces``). This client never opts into the
+                # operator proof either, so a portal answer is recorded, never
+                # read as a local operator's consent.
+                by = ""
                 answers = {
                     str(key): [str(item) for item in (value or [])]
                     for key, value in (body.get("answers") or {}).items()
@@ -9005,8 +10000,16 @@ def build_app(daemon: MobileDaemon):
                     # nothing here may shorten it by dropping the engage, because
                     # a refusal that arrives without a runtime is the bug this
                     # arm exists to fix.
+                    # ``remote``: a portal answer is a relayed answer, so the
+                    # runtime records it as ``remote`` (``asks.surfaces``), the
+                    # label the live daemon route already gets — not consent.
                     client, _ = await engage_session_client(
-                        config_dir(), session_id, AskErrand(ask_id=ask_id)
+                        config_dir(),
+                        session_id,
+                        AskErrand(ask_id=ask_id),
+                        locality="remote",
+                        # ADR 0009: the cold answer is the phone's input.
+                        origin="mobile",
                     )
                     try:
                         if op == "ask_respond":
@@ -9235,7 +10238,13 @@ def build_app(daemon: MobileDaemon):
             # which is the documented way to revoke a device whose certificate
             # this machine still holds — left the local record silent. Measured
             # before the fix: that device re-paired on a fresh code with HTTP 200.
-            return JSONResponse({"error": "this device has been revoked"}, status_code=403)
+            # The typed ``code`` (round-1 R5) is what the PWA keys its re-key on: it
+            # deletes the device key and certificate, so it must never fire on prose.
+            # ``error`` keeps its exact sentence for builds that match it.
+            return JSONResponse(
+                {"error": "this device has been revoked", "code": "pair_device_revoked"},
+                status_code=403,
+            )
         name = str(body.get("name") or "")[:64]
         devices.write_pending(
             root,
@@ -9250,10 +10259,87 @@ def build_app(daemon: MobileDaemon):
         """File a typed phone pairing request; never decide or apply one.
 
         The imported filer reaches only ``approvals.create_request``. There is no
-        approve, deny, signer, or apply route here: the person on the desktop must
-        enter the SAS through the typed engine, whose persistent three-strike burn
-        and ``pair_code_required`` decision guard remain the only approval path.
+        approve, deny, signer, or apply route here: the person on the desktop
+        decides through the typed engine (the six-digit code, or -- on an
+        edge-attested request only -- "Codes match" after comparing both screens),
+        and ``pair_op.require_acked`` stays the decision guard either way.
+
+        THE ROUTE IS EVIDENCE NOW (pairing design v2 §1): the gateway forwards the
+        Radient edge's verified assertion under ``x-lop-radient-assertion`` for this
+        one path, and ``pair_requests.attested_route`` re-verifies it against the raw
+        body bytes. Anything that does not verify files as the custom route.
         """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        raw = await request.body()
+        try:
+            body = json.loads(raw or b"null")
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        from local_operator.mobile import pair_requests
+        from local_operator.paths import config_dir
+
+        route = None
+        if "np" in body:
+            route = await pair_requests.attested_route(
+                request.headers.get(pair_requests.ASSERTION_HEADER),
+                host=request.headers.get("host", ""),
+                body=raw,
+            )
+        try:
+            record = await pair_requests.file_request(body, config_dir(), route=route)
+        except MeshRefusal as exc:
+            status = 422
+            if exc.code == "pair_filing_rate_limited":
+                status = 429
+            elif exc.code == "pair_request_pending":
+                status = 409
+            payload: dict[str, Any] = {"error": str(exc), "code": exc.code}
+            payload.update(getattr(exc, "extras", {}) or {})
+            return JSONResponse(payload, status_code=status)
+        return JSONResponse(record, status_code=201 if "approval_id" in record else 200)
+
+    async def api_pair_availability(request: Request) -> Response:
+        """Whether this computer can take a phone pairing request at all (design v2 §2.2).
+
+        Registered BEFORE ``/api/pair/{device_id}`` so ``availability`` is never read
+        as a device id. A pre-C2 daemon 404s here, which the phone reads as "do not
+        offer pairing" -- so no claim is ever made against a computer that has no
+        operator authority to issue a certificate with.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.mobile import pair_requests
+
+        return JSONResponse(pair_requests.availability())
+
+    async def api_pair_request_status(request: Request) -> Response:
+        """The phone's poll of ONE filed request: ``{state, reason, mode, ...}``.
+
+        Keyed by the phone-chosen ``request_id`` it already holds; the answer names
+        nothing the filer did not send or cannot already derive, and decides
+        nothing.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.mobile import pair_requests
+        from local_operator.paths import config_dir
+
+        answer = pair_requests.request_status(str(request.path_params["request_id"]), config_dir())
+        if answer is None:
+            return JSONResponse(
+                {"error": "no pairing request with that id", "code": "unknown_request"},
+                status_code=404,
+            )
+        return JSONResponse(answer)
+
+    async def api_pair_request_withdraw(request: Request) -> Response:
+        """The phone's Cancel (U6): a key-signed, idempotent withdraw of its OWN request."""
         denied = gate(request)
         if denied is not None:
             return denied
@@ -9267,15 +10353,17 @@ def build_app(daemon: MobileDaemon):
         from local_operator.paths import config_dir
 
         try:
-            record = await pair_requests.file_request(body, config_dir())
+            answer = pair_requests.withdraw_request(
+                str(request.path_params["request_id"]), body, config_dir()
+            )
         except MeshRefusal as exc:
-            status = 422
-            if exc.code == "pair_filing_rate_limited":
-                status = 429
-            elif exc.code == "pair_request_pending":
-                status = 409
+            status = {
+                "unknown_request": 404,
+                "pair_withdraw_forbidden": 403,
+                "approval_in_progress": 409,
+            }.get(exc.code, 422)
             return JSONResponse({"error": str(exc), "code": exc.code}, status_code=status)
-        return JSONResponse(record, status_code=201 if "approval_id" in record else 200)
+        return JSONResponse(answer)
 
     async def api_pair_status(request: Request) -> Response:
         """Whether the operator has approved a claimed code yet.
@@ -9421,6 +10509,7 @@ def build_app(daemon: MobileDaemon):
                 limit=query.limit,
                 lapsed_visible_ms=window,
                 through_seq=query.through_seq,
+                include_session_counts=query.include_session_counts,
             )
         except ValueError:
             return JSONResponse({"error": "invalid cursor"}, status_code=422)
@@ -9764,6 +10853,14 @@ def build_app(daemon: MobileDaemon):
                         chosen["effort"] = intent["effort"]
                     if intent.get("temporary"):
                         chosen["temporary"] = "1"
+                    # Already off the loop (the receipt store runs ``resolve``
+                    # in a thread). The CANONICAL name is frozen under the same
+                    # key the intent used, keeping ``set(chosen)==set(intent)``;
+                    # ``_resolve_start_target`` raises typed refusals so the
+                    # store's handler cannot misreport them as a broken store.
+                    for kind in ("agent", "team"):
+                        if intent.get(kind):
+                            chosen[kind] = _resolve_start_target(kind, intent[kind])
                     return chosen
 
                 async def spawn_start(chosen: dict[str, str], sid: str) -> int:
@@ -9774,6 +10871,16 @@ def build_app(daemon: MobileDaemon):
                             # its refusal carries the same code/status/sid body.
                             code = json.loads(bytes(refused.body))["code"]
                             raise StartRefusal(code, refused.status_code, session_id=sid)
+                    # Bound HERE, on the fresh start only: a completed replay
+                    # never reaches ``spawn_start``, so it cannot clobber a
+                    # later ``/team clear`` the user made in that chat.
+                    for kind in ("agent", "team"):
+                        if chosen.get(kind):
+                            bound = await asyncio.to_thread(
+                                _bind_started_session, sid, kind, chosen[kind]
+                            )
+                            if not bound:
+                                raise StartRefusal("start_target_unsaved", 503, session_id=sid)
                     return await daemon.spawn_session(
                         chosen["cwd"],
                         provider=chosen["provider"],
@@ -9786,7 +10893,7 @@ def build_app(daemon: MobileDaemon):
                     body, resolve_start, spawn_start, daemon.recover_started_session
                 )
             except StartRefusal as exc:
-                payload: dict[str, Any] = {"error": exc.code, "code": exc.code}
+                payload: dict[str, Any] = {"error": exc.code, "code": exc.code, **exc.detail}
                 if exc.session_id is not None:
                     payload["session_id"] = exc.session_id
                 return JSONResponse(payload, status_code=exc.status)
@@ -9800,8 +10907,25 @@ def build_app(daemon: MobileDaemon):
         # the same validator the keyed path applies inside ``canonical_request``.
         try:
             effort = start_effort(body.get("effort"))
+            target = start_target(body)
         except StartRefusal as exc:
             return JSONResponse({"error": exc.code, "code": exc.code}, status_code=exc.status)
+        # Validated BEFORE the session id is minted, so every refusal leaves
+        # nothing on disk. Off the loop: it builds both registries and walks a
+        # team's roster. The capability flags (``session_start.agent/team``)
+        # exist because THIS path, on an older relay, drops unknown fields: a
+        # phone that sent ``team`` blind would get an unbound chat.
+        canonical_target: tuple[str, str] | None = None
+        if target is not None:
+            try:
+                canonical_target = (
+                    target[0],
+                    await asyncio.to_thread(_resolve_start_target, *target),
+                )
+            except StartRefusal as exc:
+                return JSONResponse(
+                    {"error": exc.code, "code": exc.code, **exc.detail}, status_code=exc.status
+                )
         # NO DIRECTORY NAMED MEANS "WHERE THE USER HAS BEEN WORKING LATELY".
         # The one-tap start posts no cwd at all, so the resolution lives here,
         # server-side, and is the SAME function ``GET /api/directories``
@@ -9835,6 +10959,14 @@ def build_app(daemon: MobileDaemon):
             refused = await _mark_started_temporary(session_id)
             if refused is not None:
                 return refused
+        if canonical_target is not None:
+            # Sidecar before spawn: the child's restore binds the persona at
+            # construction, so the first turn already runs as the chosen one.
+            if not await asyncio.to_thread(_bind_started_session, session_id, *canonical_target):
+                return JSONResponse(
+                    {"error": "start_target_unsaved", "code": "start_target_unsaved"},
+                    status_code=503,
+                )
         try:
             pid = await daemon.spawn_session(
                 cwd,
@@ -10083,6 +11215,7 @@ def build_app(daemon: MobileDaemon):
                 lambda _projection: None,
                 lambda _reason: None,
                 locality="remote",
+                origin="mobile",
                 on_operator_prompt=lambda copy: logger.warning(
                     "mobile session move: owner prompts an operator: %s", copy
                 ),
@@ -10480,14 +11613,24 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         try:
-            models = await asyncio.to_thread(_list_models)
+            # Memoised, single-flight and stale-while-revalidate (see
+            # ``_ModelsMemo``); the payload is the same two keys as before, and
+            # a failed build is never memoised, so the 502 path is unchanged.
+            payload = await models_memo.get()
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
-        # Resolved after the listing, off the loop, and never able to fail the
-        # sheet: ``_configured_default`` answers ``None`` for any config it
-        # cannot resolve, which is what the phone renders as "unavailable".
-        default = await asyncio.to_thread(_configured_default)
-        return _maybe_gzip(request, JSONResponse({"models": models, "default": default}))
+        return _maybe_gzip(request, JSONResponse(payload))
+
+    async def api_start_targets(request: Request) -> Response:
+        """What a new chat may be bound to: agents and teams, for the phone's
+        start picker. Licensed by ``capabilities.session_start.agent/team``.
+        Built off the loop (two registries, ~0.3 s); never 500s -- a registry
+        failure answers ``degraded: true`` with empty lists."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        payload = await asyncio.to_thread(_start_targets_payload)
+        return _maybe_gzip(request, JSONResponse(payload))
 
     async def api_transcribe(request: Request) -> Response:
         """Record-then-upload speech-to-text for the phone's voice mic.
@@ -10517,6 +11660,74 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
+        # The refusal line's fields, filled in as the request is read: locals a
+        # ``refusal`` closure reads at call time, so each arm below stays the
+        # one-line answer it was instead of nine copies of the same log call.
+        user_agent = str(request.headers.get("user-agent") or "")
+        client_kind = _stt_client_kind(None, user_agent)
+        session_ref: str | None = None
+        audio_bytes: int | None = None
+        media_type = ""
+        provider = ""
+
+        def refusal(
+            status: int,
+            code: str,
+            body: dict[str, str],
+            *,
+            upstream: str = "-",
+            detail: str = "",
+        ) -> Response:
+            """Answer a transcription refusal with ONE operator log line.
+
+            WHY one line, and this shape: a phone report says "transcription
+            failed" and this route used to answer with a status and nothing
+            else, so afterwards nobody could name the hop (ours, Radient's, the
+            provider's) or the reason. These are the fields that split that
+            question: our status and code (also the request log's ``reason``,
+            through ``note_reason``), the provider label, the upstream status
+            or exception class, the client class, the session, the size and
+            the media type.
+
+            WHAT IS NEVER HERE: the audio, the Authorization header, the
+            upstream body (it can carry a credential or an account name, and
+            the classifier has already read it), any header value or cookie.
+            ``detail`` is the ONE tolerated free text — a transport failure's
+            own sentence ("connection refused"), truncated; it never carries a
+            response body. Both fields below are caller text: ``media`` is
+            allowlisted and ``detail`` goes through ``_stt_log_text`` before
+            this ONE record is written.
+            """
+            note_reason(request.scope, code)
+            # The part's Content-Type is whatever the client sent, and it lands
+            # in a log line: only an allowlisted media type is echoed, anything
+            # else is the literal ``other`` (a pre-parse arm has none: ``-``).
+            # Logged raw, ``audio/x\nFAKE status=200`` forged a second record
+            # that reads as a successful call — see ``_stt_log_text``.
+            if not media_type:
+                media_log = "-"
+            elif media_type in STT_MIME_ALLOWLIST:
+                media_log = media_type
+            else:
+                media_log = "other"
+            detail_log = _stt_log_text(detail) if detail else ""
+            logger.warning(
+                "mobile transcription refused: status=%s code=%s provider=%s upstream=%s "
+                "client=%s session=%s bytes=%s media=%s%s",
+                status,
+                code,
+                provider or "-",
+                upstream,
+                client_kind,
+                session_ref or "-",
+                # The audio part's own size once it was read; the declared body
+                # length when the header refused it before the parse.
+                "-" if audio_bytes is None else audio_bytes,
+                media_log,
+                f" detail={detail_log}" if detail_log else "",
+            )
+            return JSONResponse(body, status_code=status)
+
         declared = request.headers.get("content-length")
         if declared is not None and declared.isdigit():
             # Multipart framing costs a few hundred bytes; the 1 MB of slack
@@ -10524,35 +11735,55 @@ def build_app(daemon: MobileDaemon):
             # admitting a sizeably larger one (the post-read check is the real
             # bound).
             if int(declared) > STT_MAX_UPLOAD_BYTES + (1 << 20):
-                return JSONResponse({"error": STT_TOO_LARGE_ERROR}, status_code=413)
+                audio_bytes = int(declared)
+                return refusal(413, "stt_too_large", {"error": STT_TOO_LARGE_ERROR})
         try:
             form = await request.form()
-        except Exception:  # noqa: BLE001 — a malformed multipart body is a 422, not a 500
-            return JSONResponse({"error": "invalid multipart body"}, status_code=422)
-        from starlette.datastructures import UploadFile as StarletteUploadFile
-
-        audio = form.get("audio")
-        if not isinstance(audio, StarletteUploadFile):
-            return JSONResponse({"error": "audio file is required"}, status_code=422)
-        try:
-            payload = await audio.read()
-        finally:
-            await audio.close()
-        if not payload:
-            return JSONResponse({"error": "audio file is empty"}, status_code=422)
-        if len(payload) > STT_MAX_UPLOAD_BYTES:
-            return JSONResponse({"error": STT_TOO_LARGE_ERROR}, status_code=413)
-        media_type = str(audio.content_type or "").split(";", 1)[0].strip().lower()
-        if media_type not in STT_MIME_ALLOWLIST:
-            return JSONResponse(
-                {"error": f"Unsupported audio format: {media_type or 'unknown'}."},
-                status_code=422,
+        except Exception as exc:  # noqa: BLE001 — a malformed multipart body is a 422, not a 500
+            return refusal(
+                422,
+                "stt_invalid_multipart",
+                {"error": "invalid multipart body"},
+                upstream=type(exc).__name__,
             )
+        from starlette.datastructures import UploadFile as StarletteUploadFile
 
         def _optional_field(name: str) -> str | None:
             """A form text field, or None when absent/blank (forward-compat)."""
             value = form.get(name)
             return value if isinstance(value, str) and value.strip() else None
+
+        # WHO is calling, for the log line only: an allowlisted ``client`` word
+        # (never echoed) and the session, kept only when it matches the daemon's
+        # own id shape — anything else is dropped rather than written out. Read
+        # here, before the audio checks, so a 413/422 still names its caller.
+        client_kind = _stt_client_kind(_optional_field("client"), user_agent)
+        declared_session = _optional_field("session_id")
+        if declared_session is not None:
+            from local_operator.session.attention import _SESSION_ID_RE
+
+            if _SESSION_ID_RE.fullmatch(declared_session):
+                session_ref = declared_session
+
+        audio = form.get("audio")
+        if not isinstance(audio, StarletteUploadFile):
+            return refusal(422, "stt_audio_missing", {"error": "audio file is required"})
+        try:
+            payload = await audio.read()
+        finally:
+            await audio.close()
+        audio_bytes = len(payload)
+        media_type = str(audio.content_type or "").split(";", 1)[0].strip().lower()
+        if not payload:
+            return refusal(422, "stt_audio_empty", {"error": "audio file is empty"})
+        if len(payload) > STT_MAX_UPLOAD_BYTES:
+            return refusal(413, "stt_too_large", {"error": STT_TOO_LARGE_ERROR})
+        if media_type not in STT_MIME_ALLOWLIST:
+            return refusal(
+                422,
+                "stt_unsupported_media",
+                {"error": f"Unsupported audio format: {media_type or 'unknown'}."},
+            )
 
         from local_operator.clients._http import APIError
         from local_operator.clients.stt import SttBackendUnavailable
@@ -10579,6 +11810,7 @@ def build_app(daemon: MobileDaemon):
         # provider label and the dispatch both use is the SAME read (the module
         # caches anyway; passing it makes the route's view internally coherent).
         answer = await stt_availability()
+        provider = path_provider_label(answer.get("path"))
         try:
             outcome = await transcribe_audio(
                 payload,
@@ -10589,34 +11821,59 @@ def build_app(daemon: MobileDaemon):
                 cleanup=requested_cleanup or default_cleanup,
                 availability=answer,
             )
-        except SttBackendUnavailable:
+        except SttBackendUnavailable as exc:
             # Defence in depth: availability said available a moment ago (or the
             # caller raced a cache expiry); the fixed sentence keeps the phone's
             # copy stable whatever the rung-level reason was.
-            return JSONResponse(
+            return refusal(
+                503,
+                "stt_unavailable",
                 {
                     "error": "Voice input isn't available on this machine.",
                     "code": "stt_unavailable",
                 },
-                status_code=503,
+                upstream=type(exc).__name__,
             )
         except APIError as exc:
-            status, body = describe_stt_failure(
-                exc, provider=path_provider_label(answer.get("path"))
+            status, body = describe_stt_failure(exc, provider=provider)
+            # A transport failure (no status) never reached the upstream: its own
+            # sentence is the diagnostic and carries no body. A statused refusal
+            # is named by the NUMBER only — its body can carry an account name.
+            transport = exc.status_code is None
+            return refusal(
+                status,
+                str(body.get("code") or "stt_upstream"),
+                body,
+                upstream=str(exc.status_code) if not transport else type(exc).__name__,
+                detail=str(exc) if transport else "",
             )
-            return JSONResponse(body, status_code=status)
         except ValueError as exc:
             # A pre-admission refusal from the client's own validators (prompt
             # length, language shape): 422, the daemon's shape-refusal status.
-            return JSONResponse({"error": str(exc)}, status_code=422)
+            return refusal(
+                422,
+                "stt_invalid_request",
+                {"error": str(exc)},
+                upstream=type(exc).__name__,
+            )
         except RuntimeError as exc:
             # A plain RuntimeError is OURS: the clients raise one only for a
             # server-side configuration fault (no Radient key) or an unforeseen
             # internal error; every upstream failure arrives typed (above).
-            return JSONResponse({"error": str(exc)}, status_code=500)
-        except Exception:  # noqa: BLE001 — an unforeseen fault stays a 500
+            return refusal(
+                500,
+                "stt_internal",
+                {"error": str(exc)},
+                upstream=type(exc).__name__,
+            )
+        except Exception as exc:  # noqa: BLE001 — an unforeseen fault stays a 500
             logger.exception("mobile transcription failed unexpectedly")
-            return JSONResponse({"error": "Voice input failed unexpectedly."}, status_code=500)
+            return refusal(
+                500,
+                "stt_internal",
+                {"error": "Voice input failed unexpectedly."},
+                upstream=type(exc).__name__,
+            )
         return JSONResponse(
             {
                 "text": outcome.text,
@@ -11014,6 +12271,17 @@ def build_app(daemon: MobileDaemon):
             credential_expires_at=presented_cookie_expiry(request),
         )
         await _forward_registration(body, response)
+        lane = daemon.push_lane
+        if response.status_code == 200 and lane is not None:
+            # Old clients ignore the additive field. Only the authoritative
+            # bound emit transport may supply it: local registry IDs do not
+            # identify the computer in attention/completion pushes. A stale or
+            # disarmed lane deliberately leaves it absent, never guessed.
+            handle = await asyncio.to_thread(lane.transport.registration_computer_handle)
+            if handle is not None:
+                response = JSONResponse(
+                    {**json.loads(bytes(response.body)), "computer_handle": handle}
+                )
         return response
 
     async def _forward_registration(body: object, response: Response) -> None:
@@ -11453,6 +12721,11 @@ def build_app(daemon: MobileDaemon):
             # subresource it might try to load; keeping the disposition inline
             # preserves the phone's image preview (an <img> never executes it).
             headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+        if getattr(ref, "remote", False):
+            # Another device's file, already typed by ``mobile.library._as_served``:
+            # the phone opens it top-level on this origin (``target=_blank``), so it
+            # is sandboxed whatever its type (#3872 R3-1).
+            headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
         if download:
             headers["Cache-Control"] = "no-store"
         else:
@@ -11615,6 +12888,10 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route("/api/sessions/{session_id:str}/attachment", api_session_attachment),
+        Route(
+            "/api/sessions/{session_id:str}/bridge-cards/{entry_id:str}/body",
+            api_session_bridge_card_body,
+        ),
         # The supplement sound family (sound parity, lane C): digest-addressed audio
         # bytes with Range support, and the peaks sidecar beside them. Both are
         # keyed by the beat's own ``sounds[].attachment`` rather than a message
@@ -11637,6 +12914,16 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/pair", api_pair, methods=["POST"]),
         Route("/api/pair/request", api_pair_request, methods=["POST"]),
+        # Literal paths BEFORE the ``{device_id}`` capture (design v2 §2.2): Starlette
+        # matches in order, so ``/api/pair/availability`` placed after it would be a
+        # certificate lookup for a device named "availability".
+        Route("/api/pair/availability", api_pair_availability),
+        Route("/api/pair/request/{request_id:str}", api_pair_request_status),
+        Route(
+            "/api/pair/request/{request_id:str}/withdraw",
+            api_pair_request_withdraw,
+            methods=["POST"],
+        ),
         Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/asks", api_asks),
         # The inbox (docs/design/notifications-inbox.md §5.4): the reel, one
@@ -11658,6 +12945,9 @@ def build_app(daemon: MobileDaemon):
         # needs it BEFORE the composer is usable, and it is a pure read.
         Route("/api/skills", api_skills),
         Route("/api/models", api_models),
+        # The new-chat target picker's listing (agents + teams); gated by the
+        # ``session_start.agent/team`` capability flags.
+        Route("/api/start-targets", api_start_targets),
         Route("/api/usage", api_usage),
         # The ONLY phone usage path that reaches vendors and writes the cache;
         # GET /api/usage above stays write-free (see PAID_USAGE.md "Refresh").
@@ -11667,6 +12957,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/usage/reset", api_usage_reset, methods=["POST"]),
         Route("/api/config/events", api_config_events),
         Route("/api/settings/account-routing", api_account_routing, methods=["GET", "PATCH"]),
+        Route("/api/settings/phone-away-after", api_phone_away_after, methods=["GET", "PATCH"]),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),
@@ -11737,6 +13028,12 @@ def build_app(daemon: MobileDaemon):
             api_push_device_unrevoke,
             methods=["POST"],
         ),
+        # Relay web's community door (RFC v2.4 §7.2): exactly the member
+        # operations of `community.member_ops.MEMBER_OPERATIONS`, behind this
+        # daemon's own `gate`; no staff operation is reachable over relay.
+        # Every template starts with the literal `/api/community/communities`,
+        # which nothing above declares. See `mobile/community.py`.
+        *community_routes(gate),
         Route("/mark.png", mark_png),
         Route("/manifest.webmanifest", manifest),
         Route("/", index),
@@ -11987,20 +13284,10 @@ def _recent_directories(limit: int = 8) -> list[str]:
     the dead-tap property is a property of the SUGGESTION, not of the registry.
     """
     try:
-        from local_operator.agents import AgentRegistry
-        from local_operator.paths import config_dir
-
-        registry = AgentRegistry(config_dir=config_dir())
-        agents = sorted(
-            registry.list_agents(),
-            key=lambda agent: agent.last_message_datetime or "",
-            reverse=True,
-        )
         seen: list[str] = []
-        for agent in agents:
-            cwd = agent.current_working_directory
-            if not cwd or cwd in seen:
-                continue
+        # Filtered per call, never memoised: a directory deleted or moved since
+        # the registry was read must stop being offered at once.
+        for cwd in _ranked_agent_cwds():
             # The gate reads RESOLVED paths (the same way
             # ``api_start_session`` resolves what it is handed), while the list
             # keeps the registry's own spelling so the picker shows the
@@ -12013,6 +13300,76 @@ def _recent_directories(limit: int = 8) -> list[str]:
         return seen
     except Exception:  # noqa: BLE001
         return []
+
+
+#: ``(fingerprint, ranked cwds)`` of the last agent-registry read; see
+#: :func:`_ranked_agent_cwds`. Guarded by the lock because every caller runs on
+#: a worker thread (``asyncio.to_thread``) and two may overlap.
+_AGENT_CWDS_MEMO: tuple[Any, tuple[str, ...]] | None = None
+_AGENT_CWDS_LOCK = threading.Lock()
+
+
+def _agent_definitions_fingerprint(agents_dir: Path) -> tuple[Any, ...]:
+    """Every input ``AgentRegistry._scan_agents_metadata`` reads, by ``stat``.
+
+    The scan reads exactly one file per agent directory (``agent.yml``), and an
+    agent's cwd and ``last_message_datetime`` are both written there, so the
+    directory names plus each manifest's inode/mtime/size change whenever the
+    ranking could. A few ``stat`` calls, against ~290 ms for the YAML scan.
+    """
+    parts: list[Any] = [str(agents_dir)]
+    try:
+        children = sorted(os.scandir(agents_dir), key=lambda entry: entry.name)
+    except OSError:
+        return (str(agents_dir), None)
+    for child in children:
+        try:
+            if not child.is_dir():
+                continue
+            st = os.stat(Path(child.path) / "agent.yml")
+        except OSError:
+            parts.append((child.name, None))
+        else:
+            parts.append((child.name, st.st_ino, st.st_mtime_ns, st.st_size))
+    return tuple(parts)
+
+
+def _ranked_agent_cwds() -> tuple[str, ...]:
+    """Distinct agent cwds, most recently active agent first, UNFILTERED.
+
+    WHY MEMOISED: constructing ``AgentRegistry`` parses every ``agent.yml``
+    (measured ~290-430 ms for 74 agents in an isolated store), and
+    ``GET /api/directories`` paid it twice per request -- once for ``recent``
+    and again inside ``_default_start_cwd`` -- on a worker thread holding the
+    GIL against every other route of a phone's resume burst (the operator's
+    log: p50 269 ms, max 597 ms). The memo is keyed on
+    :func:`_agent_definitions_fingerprint`, so it is exact rather than
+    time-bounded: any manifest write is seen by the next call. The spawn-gate
+    and ``is_dir`` filtering stays in :func:`_recent_directories`, per call.
+    """
+    global _AGENT_CWDS_MEMO
+    from local_operator.agents import AgentRegistry
+    from local_operator.paths import config_dir
+
+    root = config_dir()
+    key = _agent_definitions_fingerprint(root / "agents")
+    with _AGENT_CWDS_LOCK:
+        memo = _AGENT_CWDS_MEMO
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        registry = AgentRegistry(config_dir=root)
+        agents = sorted(
+            registry.list_agents(),
+            key=lambda agent: agent.last_message_datetime or "",
+            reverse=True,
+        )
+        ranked: list[str] = []
+        for agent in agents:
+            cwd = agent.current_working_directory
+            if cwd and cwd not in ranked:
+                ranked.append(cwd)
+        _AGENT_CWDS_MEMO = (key, tuple(ranked))
+        return _AGENT_CWDS_MEMO[1]
 
 
 def _default_start_cwd() -> str:
@@ -12034,6 +13391,139 @@ def _default_start_cwd() -> str:
         if path.is_dir() and _spawn_dir_allowed(path):
             return str(path)
     return str(Path.home())
+
+
+def _resolve_start_target(kind: str, name: str) -> str:
+    """The canonical name of a Start request's ``agent``/``team``, or a typed refusal.
+
+    BLOCKING (it builds both registries and walks a team's whole roster graph,
+    ~0.3 s on a populated machine), so callers run it via ``asyncio.to_thread``.
+    The SAME validator the desktop create uses (``validate_target``), against the
+    same global registries, so a target one surface accepts the other does too,
+    and validation canonicalises case (``LOPDEV`` -> ``lopdev``).
+
+    It raises :class:`StartRefusal` ITSELF rather than letting ``KeyError`` /
+    ``ValueError`` escape, and that is load-bearing on the keyed path: the
+    receipt store's ``_database`` handler turns any ``KeyError``/``ValueError``
+    raised inside ``resolve()`` into ``create_receipts_unavailable`` -- which
+    would tell the phone its store is broken when the user simply picked a
+    deleted team. ``ProfileRegistryUnavailable`` IS a ``ValueError``, so it is
+    caught first.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.paths import config_dir
+    from local_operator.server.utils.desktop_profiles import (
+        UnresolvedTarget,
+        validate_target,
+    )
+    from local_operator.session.errors import ProfileRegistryUnavailable
+    from local_operator.teams import TeamRegistry
+
+    try:
+        root = config_dir()
+        return validate_target(AgentRegistry(root), TeamRegistry(root), kind, name)
+    except UnresolvedTarget as exc:
+        raise StartRefusal("unknown_start_target", 404, detail=exc.wire_fields()) from exc
+    except KeyError as exc:
+        raise StartRefusal("unknown_start_target", 404) from exc
+    except (ProfileRegistryUnavailable, OSError) as exc:
+        raise StartRefusal("start_target_registry_unavailable", 503) from exc
+    except ValueError as exc:
+        # A roster cycle or one past the nesting limit: the request named a
+        # team that can never launch, which is the caller's answer (400).
+        raise StartRefusal("invalid_start_target", 400) from exc
+
+
+def _bind_started_session(session_id: str, kind: str, name: str) -> bool:
+    """Write and read back ``attachment.json`` for a not-yet-spawned session.
+
+    BLOCKING; run via ``asyncio.to_thread``. The sidecar must exist BEFORE the
+    child spawns: ``Session.__init__`` restores it unconditionally, so the
+    manager role, the team briefs and the roster are bound at construction and
+    the first turn already runs as the chosen identity. The child adopts this
+    directory (``resume=<sid>`` under ``config_dir()/sessions``), as it adopts
+    the temporary mark's. ``False`` means "do not spawn".
+    """
+    from local_operator.paths import config_dir
+    from local_operator.resume import bind_session_attachment
+
+    if not session_id or Path(session_id).name != session_id:
+        return False
+    directory = config_dir() / "sessions" / session_id
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return bind_session_attachment(
+        directory,
+        agent=name if kind == "agent" else "",
+        team=name if kind == "team" else "",
+    )
+
+
+def _start_targets_payload() -> dict[str, Any]:
+    """The body of ``GET /api/start-targets``: what a new chat may be bound to.
+
+    BLOCKING; run via ``asyncio.to_thread``. Projected from the desktop menu's
+    OWN catalogues (``profile_catalogue`` / ``team_catalogue``), never a second
+    listing, so the phone offers exactly the names the desktop offers and the
+    start route will accept. ``label`` is pre-painted through the shared display
+    rules so the phone never reimplements them; ``avatar_sha256`` comes from the
+    same ``agent_avatar.agent_index`` session rows use, so the image is fetched
+    through the existing ``/v1/agents/{agent_id}/avatar?v=`` route.
+
+    A registry failure answers ``degraded: true`` with empty lists (the listing
+    convention), so the picker can say "couldn't load" instead of "you have no
+    agents".
+    """
+    from local_operator import display_labels
+    from local_operator import teams as teams_module
+    from local_operator.agent_avatar import agent_index
+    from local_operator.agents import AgentRegistry
+    from local_operator.paths import config_dir
+    from local_operator.server.utils.desktop_profiles import (
+        profile_catalogue,
+        team_catalogue,
+    )
+    from local_operator.teams import TeamRegistry
+
+    root = config_dir()
+    try:
+        profiles = profile_catalogue(AgentRegistry(root))
+        team_rows = team_catalogue(TeamRegistry(root))
+    except Exception:  # noqa: BLE001 -- a degraded listing, never a 500
+        logger.warning("start targets: registry unreadable", exc_info=True)
+        return {"agents": [], "teams": [], "degraded": True}
+    try:
+        avatars = agent_index(root)
+    except Exception:  # noqa: BLE001 -- avatars are decoration; names still list
+        avatars = {}
+    agents = []
+    for row in profiles:
+        name = str(row["name"])
+        identity = avatars.get(name)
+        agents.append(
+            {
+                "name": name,
+                "label": display_labels.display_form(name, str(row.get("label") or "")),
+                "kind": row.get("kind"),
+                "source": row.get("source"),
+                "description": str(row.get("description") or ""),
+                "agent_id": row.get("agent_id"),
+                "avatar_sha256": identity.avatar_sha256 if identity is not None else None,
+            }
+        )
+    teams = [
+        {
+            "name": str(row["name"]),
+            "label": teams_module.display_form(str(row["name"]), str(row.get("label") or "")),
+            "description": str(row.get("description") or ""),
+            "manager": str(row.get("manager") or ""),
+            "member_count": len(row.get("members") or []),
+        }
+        for row in team_rows
+    ]
+    return {"agents": agents, "teams": teams, "degraded": False}
 
 
 class _PhoneResetLogin(NamedTuple):
@@ -12894,6 +14384,266 @@ def _shipped_describes(key: str, model_id: str, shipped_ids: "frozenset[str]") -
     return wanted is not None and any(_anthropic_family(row) == wanted for row in shipped_ids)
 
 
+def _models_payload() -> dict[str, Any]:
+    """The whole ``GET /api/models`` body: the rows, then the default marker.
+
+    The default is resolved after the listing and can never fail the sheet:
+    ``_configured_default`` answers ``None`` for any config it cannot resolve,
+    which the phone renders as "unavailable". Raises whatever ``_list_models``
+    raises, which the route answers as a 502.
+    """
+    models, provider_status = _list_models()
+    payload: dict[str, Any] = {"models": models, "default": _configured_default()}
+    if provider_status:
+        # ADDITIVE and omitted when empty, the ``efforts`` convention: an older
+        # relay never sends it, so a client already has to read absence as
+        # "nothing to act on", and a healthy owner's body stays byte-identical.
+        payload["provider_status"] = provider_status
+    return payload
+
+
+def _file_stat(path: Path) -> tuple[int, int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+#: ``(config root, auth.db stats) -> credential digest`` for the last read, so
+#: an untouched database answers from a stat. One entry: there is one config
+#: root per daemon. Written from worker threads; a whole-tuple assignment is
+#: atomic, and the worst race is one extra read-only query.
+_CREDENTIAL_DIGEST_MEMO: tuple[Any, Any] | None = None
+
+
+def _credential_digest(root: Path) -> tuple[Any, ...] | None:
+    """:meth:`AuthStore.credential_identity_digest` over a read-only open.
+
+    The stat pre-check only skips the query: the stats move on every lease
+    and block write (that is R1's whole problem), but the digest under them
+    then comes back equal, which is what keeps the memo key still.
+    """
+    global _CREDENTIAL_DIGEST_MEMO
+    db = root / "auth.db"
+    stats = (str(root), _file_stat(db), _file_stat(root / "auth.db-wal"))
+    memo = _CREDENTIAL_DIGEST_MEMO
+    if memo is not None and memo[0] == stats:
+        return memo[1]
+    from local_operator.providers.auth_store import AuthStore
+
+    try:
+        # ``open_read_only``: no mkdir, no O_CREAT, no WAL pragma, no DDL -- a
+        # key read on every request must never write the operator's store.
+        store = AuthStore.open_read_only(db)
+    except Exception:
+        logger.debug("mobile models: credential digest unreadable", exc_info=True)
+        return None
+    try:
+        digest = store.credential_identity_digest()
+    finally:
+        store.close()
+    if digest is not None:
+        _CREDENTIAL_DIGEST_MEMO = (stats, digest)
+    return digest
+
+
+def _models_fingerprint() -> tuple[Any, ...]:
+    """What, having changed, makes a memoised model sheet WRONG rather than old.
+
+    The listing is authorized by the persisted credentials and its default
+    comes from ``config.yml``. The credentials half is the digest of WHICH
+    credentials exist and can authorize (:func:`_credential_digest`), not the
+    ``auth.db`` file stats: the same database takes refresh leases, blocks and
+    token refreshes from every concurrent session, and keying on its bytes
+    rebuilt the sheet on nearly every open (PR #4020 agent review, R1). A
+    login, logout, disable or default change is still visible to the very next
+    request; only provider-side catalogue drift waits on the TTLs above.
+
+    When the digest cannot be read, the key falls back to the file stats --
+    churny, but never a reason to serve a sheet built under other credentials.
+    """
+    from local_operator.paths import config_dir
+
+    root = config_dir()
+    config = _file_stat(root / "config.yml")
+    digest = _credential_digest(root)
+    if digest is None:
+        auth = (_file_stat(root / "auth.db"), _file_stat(root / "auth.db-wal"))
+        return (str(root), "stat", auth, config)
+    return (str(root), "digest", digest, config)
+
+
+class _PeerRowsRefresher:
+    """Answer ``include_peers`` from the cached mesh listing; refresh it off-path.
+
+    WHY: the phone asks ``include_peers=true`` on BOTH list transports
+    (local-operator-mobile ``connection-provider``), and the federated listing
+    behind it (``session.peer_rows.read_listing``) is a blocking fan-out to
+    every peer device, cached for ``LISTING_TTL_S`` (20 s). Measured on the
+    operator's mesh, read-only, through that exact function: 2,796 / 1,187 /
+    1,098 / 1,296 ms for 202 rows. Every resume after 20 s of quiet therefore
+    waited on it inside ``GET /api/sessions`` (the operator's log: 1,974 ms and
+    3,930 ms, both on a resume), and an open stream stalled one repaint per TTL.
+
+    WHAT CHANGES, and the compatibility argument: the frame shape is untouched;
+    only WHEN remote rows are fresh moves. With a listing cached (any age), the
+    frame projects it at once and ONE background read refreshes it; when that
+    read lands it rings the list (``notify_list_changed``), so every open
+    ``/api/sessions/events`` stream -- which the phone opens beside the GET --
+    repaints with the fresh rows within the fan-out's own duration. A shipped
+    client already treats each frame as a full repaint, so an older-then-newer
+    pair of frames is the ordinary case for it. With NO listing yet (first
+    read since the daemon started, or only a seeded row), the frame waits for
+    the read exactly as before: there is nothing honest to show instead.
+
+    A refresh rings ONLY when its rows or unanswered set differ from the entry
+    it replaced (agent review R2). The entry is stamped with the read's start,
+    so a fan-out that takes the TTL (a black-holed member spends
+    ``LISTING_CLIENT_TIMEOUT_S`` = the TTL) lands already stale; an
+    unconditional ring made the open stream rebuild, see a stale entry and
+    start the next read -- back-to-back fan-outs on an idle machine.
+
+    One task per config root (R3): production has one root per daemon, but a
+    read for another root must never be answered by the first root's task.
+
+    SHUTDOWN (QA round 1, Q1 -- documented, not changed): a stop that lands
+    while a background refresh is in flight waits for that fan-out (at most
+    ``LISTING_CLIENT_TIMEOUT_S``), because ``asyncio.run`` joins the default
+    executor the read runs on. The task itself is cancelled cleanly and nothing
+    leaks. Not joining would mean a daemon thread abandoned mid-read at
+    interpreter exit; before this class an in-flight request's inline read
+    held exit the same way, so the bounded wait is the safer trade.
+
+    Loop-confined; the read and the projection run on worker threads.
+    """
+
+    def __init__(self, on_refreshed: Callable[[], None]) -> None:
+        self._on_refreshed = on_refreshed
+        self._tasks: dict[str, asyncio.Future[None]] = {}
+
+    async def rows(self, root: Path, pinned: set[str]) -> list[dict[str, Any]]:
+        from local_operator.session import peer_rows
+
+        age = peer_rows.listing_age_s(root)
+        if age is None or not math.isfinite(age):
+            # Cold: share one read with every concurrent frame (the phone's GET
+            # and its stream arrive together), shielded so a hung-up client
+            # cannot cancel the read the others wait on.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._start(root))
+        elif age >= peer_rows.LISTING_TTL_S:
+            self._start(root)
+        # ``inf``: project the cache, never dial here. If the cold read failed
+        # and left no entry, this falls back to the listing's own inline read.
+        return await asyncio.to_thread(
+            mobile_mesh.remote_session_rows, root, pinned=pinned, ttl_s=math.inf
+        )
+
+    def _start(self, root: Path) -> "asyncio.Future[None]":
+        task = self._tasks.get(str(root))
+        if task is None or task.done():
+            task = asyncio.ensure_future(self._run(root))
+            task.add_done_callback(lambda done: done.cancelled() or done.exception())
+            self._tasks[str(root)] = task
+        return task
+
+    async def _run(self, root: Path) -> None:
+        from local_operator.session import peer_rows
+
+        before = peer_rows.cached_listing(root)
+        try:
+            # ``ttl_s=0``: the forced read; the age check above already decided.
+            after = await asyncio.to_thread(peer_rows.read_listing, root, ttl_s=0)
+        except Exception:
+            logger.warning("mobile list: peer listing refresh failed", exc_info=True)
+            raise
+        if after != before:
+            self._on_refreshed()
+
+
+class _ModelsMemo:
+    """Single-flight, stale-while-revalidate memo for the model sheet's body.
+
+    WHY: the build is 140-500 ms of GIL-holding work, plus provider round trips
+    when a listing is past ``PICKER_TTL_S`` (see :data:`MODELS_FRESH_S` and
+    :data:`MODELS_STALE_S` for the measurements). It ran per request, the app
+    asks twice per open, and the burst of a phone resuming (sessions list,
+    streams, asks, models, directories at once) contended for the same GIL, so
+    the whole resume -- not just this sheet -- paid it.
+
+    THE INVARIANT: a served body was built under the CURRENT fingerprint
+    (credentials + config, :func:`_models_fingerprint`). Within that, a body
+    younger than ``fresh_s`` is served outright; one younger than ``stale_s`` is
+    served while ONE background rebuild runs; anything else (no body, another
+    fingerprint, too old) waits for a build. Concurrent waiters share one
+    build, and a failed build is never stored, so an error stays a per-request
+    502 exactly as before and the next request retries.
+
+    Loop-confined: every method runs on the daemon's event loop; only the
+    builder and the fingerprint run on worker threads.
+    """
+
+    def __init__(
+        self,
+        build: Callable[[], dict[str, Any]],
+        fingerprint: Callable[[], Any],
+        *,
+        fresh_s: float | None = None,
+        stale_s: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._build = build
+        self._fingerprint = fingerprint
+        # Read at call time, not import time, so a test can patch the module
+        # constants without reaching into an instance.
+        self._fresh_s = fresh_s
+        self._stale_s = stale_s
+        self._clock = clock
+        self._value: dict[str, Any] | None = None
+        self._value_key: Any = None
+        self._value_at = 0.0
+        self._task: asyncio.Future[dict[str, Any]] | None = None
+        self._task_key: Any = None
+
+    async def get(self) -> dict[str, Any]:
+        key = await asyncio.to_thread(self._fingerprint)
+        fresh_s = MODELS_FRESH_S if self._fresh_s is None else self._fresh_s
+        stale_s = MODELS_STALE_S if self._stale_s is None else self._stale_s
+        if self._value is not None and self._value_key == key:
+            age = self._clock() - self._value_at
+            if age < fresh_s:
+                return self._value
+            if age < stale_s:
+                self._start(key)
+                return self._value
+        # Shielded: a phone that hangs up must not cancel the build every other
+        # waiter (and the memo) is sharing.
+        return await asyncio.shield(self._start(key))
+
+    def _start(self, key: Any) -> "asyncio.Future[dict[str, Any]]":
+        task = self._task
+        if task is not None and not task.done() and self._task_key == key:
+            return task
+        task = asyncio.ensure_future(self._run(key))
+        # A background refresh nobody awaits must not log "exception never
+        # retrieved"; the failure is already logged in ``_run``.
+        task.add_done_callback(lambda done: done.cancelled() or done.exception())
+        self._task, self._task_key = task, key
+        return task
+
+    async def _run(self, key: Any) -> dict[str, Any]:
+        try:
+            value = await asyncio.to_thread(self._build)
+        except Exception:
+            logger.warning("mobile models: catalogue build failed", exc_info=True)
+            raise
+        # The build began under ``key``; a credential change during it shows up
+        # as a different fingerprint on the next request, which rebuilds.
+        self._value, self._value_key, self._value_at = value, key, self._clock()
+        return value
+
+
 def _configured_default() -> dict[str, Any] | None:
     """The model and effort a Start with no selection births on, or ``None``.
 
@@ -13010,8 +14760,16 @@ def _efforts_field(
     return {} if ladder is None else {"efforts": ladder}
 
 
-def _list_models() -> list[dict[str, Any]]:
+def _list_models() -> tuple[list[dict[str, Any]], dict[str, dict[str, str]]]:
     """The model sheet's rows: what the owner can run, ranked exactly as ``/model``.
+
+    Returns ``(rows, provider_status)``. ``provider_status`` is
+    :meth:`ProviderController.provider_notices` over the live pass's statuses
+    -- provider id -> ``{"status", "name"}`` for a state the owner must act on
+    (today only ``reauth_required``: a stored sign-in whose grant the IdP
+    refused for good). It is the same map the desktop route publishes, so the
+    phone and the desktop say "sign in again" from one fact; it carries no
+    credential detail because it crosses the tunnel.
 
     THE SAME CATALOGUE AND THE SAME ORDER AS THE DESKTOP, by construction rather
     than by convention. This used to walk ``model/registry.SupportedHostingProviders``
@@ -13092,7 +14850,8 @@ def _list_models() -> list[dict[str, Any]]:
             usable=None,
             use_max_context=use_max_context,
         )
-        return _model_rows(cached_rows)
+        # No live pass ran, so there are no statuses to report.
+        return _model_rows(cached_rows), {}
     with closing(store):
         controller = ProviderController(store, directory)
         admitted = controller.persisted_providers()
@@ -13139,7 +14898,7 @@ def _list_models() -> list[dict[str, Any]]:
                 f"Model catalogue unavailable for {', '.join(unavailable)}; "
                 "retry or log in again"
             )
-    return _model_rows(rows)
+    return _model_rows(rows), ProviderController.provider_notices(statuses)
 
 
 #: The login page is server-rendered (not part of the SPA) so the auth gate

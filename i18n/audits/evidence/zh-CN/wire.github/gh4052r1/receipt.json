@@ -1,0 +1,53 @@
+{
+  "record": {
+    "path": "i18n/audits/evidence/zh-CN/wire.github/gh4052r1/record.json",
+    "sha256": "bba71ab8719a5fa313e5f91334b842c997e4699cab61eb5054a9c26c76e8773c"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.github/gh4052r1/report.md",
+      "sha256": "688c74c506b83248d4694b57acfb8f8e58a4a36fab29ce5924a03a404ff1a421"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/summary.json",
+      "sha256": "5dd38a3b2de460a0a7bb0bd54accb505529491d649de69eba025eb6b990b0069"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/pseudo.json",
+      "sha256": "0d6674491d447684236a83994df405e80e6ab0511fdb34c6dceb8406dba8ae55"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/rtl-probe.json",
+      "sha256": "dec3cc1968d5230a630bf9484f22e633e7c59b5d15358c1aead1b79238db2b1c"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/runner.py.txt",
+      "sha256": "486ab27058b188ce14e5453ba52bf45b5d91cf1e0d9b9f60033d7c70899827c0"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/audit.log",
+      "sha256": "0eb30433c336853aaee7180e2d1c1cc7de79d3d0094f0f8f4d1227f864911a8d"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/findings.json",
+      "sha256": "5be4404a25e560245d148a589b0178325f3128734dd515b9156c54434ab5e6d3"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.github/gh4052s1/record.json",
+      "sha256": "89728d7a786dd42aa2d62fea104ca48e894fe63dcef70dbf239b7261b2bed571"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.github/gh4052r1/zh-CN-renders.json",
+      "sha256": "528570c311ca56ac11a5e90e05d7a4c4335ced512181a5730782cef3396191fd"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.github/gh4052r1/zh-CN.svg",
+      "sha256": "d807f298b046648f77dc1d1c020ce94da756066c7210b76838c66bd1645c7120"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.github/gh4052r1/zh-CN.png",
+      "sha256": "b996b813ef690d97b34dbd4ffbfa7c13ca1ed08529324782847b82c6a2c69deb"
+    }
+  ],
+  "record_reference": "i18n/audits/evidence/zh-CN/wire.github/gh4052r1/record.json"
+}

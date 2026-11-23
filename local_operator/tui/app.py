@@ -83,6 +83,10 @@ from textual.worker import Worker
 from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
 
+# ``bridge_decision_target`` lives in ``asks/decision.py`` so the desktop answer
+# route can share it without importing the TUI; re-exported for existing callers.
+from local_operator.asks.decision import bridge_decision_target
+
 # The cross-session view filter's single predicate, shared with the phone fold
 # (`mobile/projection.py`). Import-cheap by construction — its only heavy
 # import, `tui.settings`, is function-local — so the boot path this module's
@@ -133,6 +137,7 @@ from local_operator.harness.types import (
     FAULT_KEY,
     INTERRUPTED_FAULTS,
     AgentMessage,
+    AskOption,
     AskQuestion,
     ImageContent,
     Message,
@@ -142,20 +147,24 @@ from local_operator.harness.types import (
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
+from local_operator.i18n.keys import tui_boot_prompt as _boot_prompt_keys
 from local_operator.i18n.keys import tui_busy_delivery as _busy_keys
 from local_operator.i18n.keys import tui_library
+from local_operator.i18n.keys import tui_model_persistence as _model_persistence_keys
 from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
+from local_operator.i18n.keys import tui_session_move_workset as _wsc_keys
 from local_operator.i18n.keys import tui_setup_cues as _setup_keys
 from local_operator.i18n.keys import tui_small as _small_keys
 from local_operator.i18n.keys import tui_sound as _sound_keys
 from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.keys import tui_update as _upd
+from local_operator.i18n.keys import tui_welcome
 from local_operator.i18n.keys import wire_language_receipts as _lang_keys
 from local_operator.i18n.messages import Msg
-from local_operator.i18n.text import register_refresh, tr
+from local_operator.i18n.text import active_locale, register_refresh, tr
 from local_operator.logger import current_log_file
 
 # The `/mcp` verb helpers live with the verbs they serve, so the terminal and
@@ -254,6 +263,7 @@ from local_operator.tui.ask_open_policy import (
     read_queue,
 )
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.bridge_card_body import card_body_loader, card_conversation
 from local_operator.tui.busy_delivery import busy_delivery_mode
 from local_operator.tui.command_palette import (
     OperatorCommandPalette,
@@ -311,6 +321,7 @@ from local_operator.tui.events import (
     WakeDelivered,
 )
 from local_operator.tui.glyphs import display_name
+from local_operator.tui.i18n_status import display_tr
 from local_operator.tui.link_targets import (
     LinkTarget,
     build_link_targets,
@@ -352,6 +363,7 @@ from local_operator.tui.notify import (
     remote_park_banner,
     remote_park_card,
 )
+from local_operator.tui.provider_state import ProviderStateRow, provider_state_label
 from local_operator.tui.quota_notice import await_prewarm, start_prewarm
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
@@ -366,6 +378,8 @@ from local_operator.tui.session_move import (
     MoveTo,
     parse_move_to,
     run_session_move,
+    run_session_move_preflight,
+    stale_relay_message,
 )
 from local_operator.tui.session_navigation import SessionNavigation
 from local_operator.tui.session_presentation import (
@@ -381,7 +395,7 @@ from local_operator.tui.session_presentation import (
     tool_result_image_blocks,
 )
 from local_operator.tui.session_workspace import SessionWorkspace
-from local_operator.tui.settings import settings_get
+from local_operator.tui.settings import settings_get, transcript_display_mode
 from local_operator.tui.terminal_modes import (
     InBandResizeReclaimer,
     pixel_mouse_gate_installed,
@@ -410,7 +424,6 @@ from local_operator.tui.widgets.ask_picker import (
     AskPickerScreen,
 )
 from local_operator.tui.widgets.ask_queue import (
-    ASK_TOGGLE_KEY,
     SCOPE_FLEET,
     SCOPE_SESSION,
     STATUS_OPEN,
@@ -429,7 +442,6 @@ from local_operator.tui.widgets.command_picker import (
 from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
-    READ_ONLY_PLACEHOLDER,
     SHELL_PLACEHOLDER,
     ArgumentHighlightChanged,
     ArgumentQueryOpened,
@@ -456,6 +468,7 @@ from local_operator.tui.widgets.editor import (
     StopRequested,
     credential_payloads,
     expand_pastes,
+    read_only_placeholder,
     resolve_markers,
     substitute_credentials,
 )
@@ -480,8 +493,9 @@ from local_operator.tui.widgets.library_view import (
     LibraryViewLibrarianRequested,
 )
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
-from local_operator.tui.widgets.model_picker import ModelRow
+from local_operator.tui.widgets.model_picker import PERSIST_CLAUSE_MARKER, ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
+from local_operator.tui.widgets.move_workset_confirm import MoveWorkingSetConfirmScreen
 from local_operator.tui.widgets.network_panel import NetworkCommandRequested
 from local_operator.tui.widgets.notifications_view import (
     NotificationsView,
@@ -625,10 +639,13 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
+#: The `/move --to` working-set card's own copy (design §11.3, §12).
+_wsc_render = tr("tui.session_move_workset")
 #: The `/language` receipts live in a deferred wire namespace so the phone-sheet
 #: twin (`session/runtime/serving.py`) renders the SAME words; resolved per call.
 _lang_t = tr("wire.language_receipts")
 _kind_t = tr("tui.notification_kinds")
+_boot_prompt_t = tr("tui.boot_prompt")
 #: `/update`'s progress notices. Their own namespace because they carry the
 #: reassurance the operator asked for (2026-11-03): an update does not stop a
 #: running session. Session runtimes are detached processes
@@ -656,6 +673,14 @@ _t_busy = tr("tui.busy_delivery")
 #: through the binding at every use, never copied: ``_reload_setup_cues`` re-points
 #: the two module constants below on a live language move.
 _t_setup = tr("tui.setup_cues")
+#: The welcome screen's audited "not logged in — /login {provider}" line, reused by
+#: the model picker's footer for a provider whose STORED sign-in is dead
+#: (`_reauth_status`): the same remedy in the same words on both screens.
+#: Resolved through ``display_tr`` with the SAME command island the welcome
+#: screen declares (``widgets/welcome.py``): RTL prose (``ur`` ships) orders
+#: neighbouring LTR runs right-to-left, so a raw ``tr`` would paint
+#: ``google-vertex /login`` there (code review round 1, R1-3).
+_t_welcome = display_tr("tui.welcome", technical_commands=("/login {provider}",))
 #: Fixed-width, non-colour membership markers. Width is the point: six rows with
 #: `[x]`/`[ ]` line up in monochrome and in an ASCII fallback, where a bullet or
 #: a coloured dot would carry the only copy of the state.
@@ -706,6 +731,7 @@ _te_projects = tr("tui.projects")
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
+    from local_operator.agent_profiles import AgentFacts
     from local_operator.herdr import HerdrReporter
     from local_operator.info.collect import LiveState
     from local_operator.multiplexer import SessionBroadcast
@@ -1825,6 +1851,28 @@ def remote_park_notice_owner(device_id: str, session_id: str) -> tuple[str, str,
 #: reason needs no entry to be told to the user honestly.
 TUNNEL_CARD_COMMANDS = {"lop login radient": "/login radient"}
 
+#: Shell commands whose WHOLE family maps to one in-app verb (U12): every
+#: `lop tunnel setup …` remedy (bare, `apply`, with a credential id) is what
+#: `/mobile enable` runs here, and printing the shell spelling would send a TUI
+#: user to a terminal for something this app does itself.
+TUNNEL_CARD_COMMAND_PREFIXES = (("lop tunnel setup", "/mobile enable"),)
+
+
+def tunnel_card_command(command: str) -> str:
+    """The in-app spelling of a tunnel remedy command, or the command as it stands.
+
+    Exact entries first (`TUNNEL_CARD_COMMANDS`), then the prefix families; a
+    command in neither is returned unchanged, which keeps the table's rule that
+    a new remedy needs no entry to be told honestly.
+    """
+    if command in TUNNEL_CARD_COMMANDS:
+        return TUNNEL_CARD_COMMANDS[command]
+    for prefix, verb in TUNNEL_CARD_COMMAND_PREFIXES:
+        if command == prefix or command.startswith(prefix + " "):
+            return verb
+    return command
+
+
 #: What the card calls each parked reason, as the TAIL of the line.
 #:
 #: The card leads with the COMMAND and puts the reason after it, which is the
@@ -1862,23 +1910,51 @@ def tunnel_park_card(reason: str, command: str) -> str:
     same mark, which is what makes the card findable at a glance rather than only
     readable once it has been found.
     """
-    mapped = TUNNEL_CARD_COMMANDS.get(command, command)
-    tail = TUNNEL_CARD_REASONS.get(reason) or _park_reason_label(reason)
+    tail = TUNNEL_CARD_REASONS.get(reason)
+    if tail is None:
+        return _kind_card(reason, command)
+    # The three park reasons keep their own wording and command, and import
+    # nothing heavy onto the poll's loop (`test_a_poll_tick_imports_nothing…`).
+    mapped = tunnel_card_command(command)
     if not mapped:
         return f"{ICON_APPROVALS} {tail}"
     return f"{ICON_APPROVALS} {mapped} — {tail}"
 
 
-def _park_reason_label(reason: str) -> str:
-    """`gateway.reason_label` for a code this app has no card wording for.
+def _kind_card(reason: str, command: str) -> str:
+    """The card for a reason with no hand-written tail, keyed on its remedy KIND.
 
-    A lazy import for the reason the poll's own import is lazy: `tunnels.gateway`
-    drags httpx and starlette, and this module is on the boot path of every
-    session — including the ones that will never see a park.
+    Keyed on the kind, not on the command or the reason (#3945 round 1,
+    D4/Q2): a console fix names the console and NO command (setup can neither
+    add credit nor override an owner's switch-off), and a wait names nothing to
+    run. Only the action kinds keep a command, mapped to the in-app verb; a
+    retrying notice carries none, so the reason's `TERMINAL_REMEDY` supplies it.
+    `gateway` is imported here, once a card for such a reason is actually
+    raised, never on an idle poll tick.
     """
+    from local_operator.i18n.keys import tunnel_status as _ts_keys
+    from local_operator.i18n.text import tr
     from local_operator.tunnels import gateway
 
-    return gateway.reason_label(reason)
+    kind = gateway.remedy_kind(reason)
+    status = tr("tunnel.status")
+    if kind == "add_credit":
+        return f"{ICON_APPROVALS} {status(_ts_keys.card_add_credit())}"
+    if kind == "open_console":
+        return f"{ICON_APPROVALS} {status(_ts_keys.card_open_console())}"
+    if kind in gateway.WAITING_KINDS:
+        mapped = ""
+    else:
+        mapped = tunnel_card_command(command or gateway.TERMINAL_REMEDY.get(reason, ""))
+    if reason == gateway.TUNNEL_INACTIVE:
+        # Its label ("paused by Radient — reconnecting") is a status-line phrase
+        # and one cell over the card's 50; the card's own tail says the cause.
+        tail = status(_ts_keys.card_paused())
+    else:
+        tail = gateway.reason_label(reason)
+    if not mapped:
+        return f"{ICON_APPROVALS} {tail}"
+    return f"{ICON_APPROVALS} {mapped} — {tail}"
 
 
 #: Bucket the dock's expiry clock to this many seconds. Rows whose settle
@@ -2035,6 +2111,15 @@ RETITLE_MIN_GAP_S = 30.0
 #: TUI diagnostics go to the log FILE, never the terminal — stderr belongs to
 #: the rendered app (see ``local_operator.logger.file_logging``).
 logger = logging.getLogger("local_operator.tui.app")
+
+#: The community page's slash words (dark; see ``_dispatchable_slash``).
+_COMMUNITY_SLASHES = frozenset({"/community", "/orgs"})
+
+
+def _community_enabled() -> bool:
+    from local_operator.community import community_enabled
+
+    return community_enabled()
 
 
 def _has_transcript(directory: "Path") -> bool:
@@ -4717,45 +4802,6 @@ def _reload_setup_cues() -> None:
 register_refresh(_reload_setup_cues)
 
 
-def bridge_decision_target(
-    row: AskRow, answers: Mapping[str, Sequence[str]]
-) -> tuple[str, str, str] | None:
-    """The ``(ask_id, question_id, word)`` a BRIDGE card answer decides.
-
-    ``None`` for every ordinary ask: a decision exists only for a request whose
-    question carries the producer's ``question_id`` AND whose picked value
-    resolves to one of that question's own option ids. The word sent on the
-    wire is the OPTION ID (``approve``/``deny``), never the drawn label — the
-    door validates the word against the request's closed set, and a label is
-    display copy that can be re-worded without touching the decision.
-
-    Ambiguity is ``None`` rather than a guess: two picked request questions, or
-    a value that maps to no option id, must fall back to the ordinary door and
-    its refusal rather than decide something the human did not choose.
-    """
-
-    picked: list[tuple[str, str]] = []
-    for question in row.questions:
-        if not isinstance(question, Mapping):
-            continue
-        question_id = str(question.get("question_id") or "")
-        if not question_id:
-            continue
-        selected = answers.get(str(question.get("id") or "")) or ()
-        if len(selected) != 1:
-            continue
-        options = {
-            str(option.get("label") or "").strip().lower(): str(option.get("id") or "")
-            for option in (question.get("options") or ())
-            if isinstance(option, Mapping)
-        }
-        value = str(selected[0]).strip()
-        picked.append((question_id, options.get(value.lower()) or value.lower()))
-    if len(picked) != 1:
-        return None
-    return (row.ask_id, picked[0][0], picked[0][1])
-
-
 def _is_bridge_ask_row(row: Any) -> bool:
     """Whether an ask row is a Team Bridge carriage (D2).
 
@@ -4774,6 +4820,22 @@ def _is_bridge_ask_row(row: Any) -> bool:
         if str(question.get("question_id") or "").strip():
             return True
     return False
+
+
+def _is_site_ask_row(row: Any) -> bool:
+    """Whether an ask row is a headless node's per-site browser approval.
+
+    Structural, like :func:`_is_bridge_ask_row`: the ``site:v1:`` question id
+    is stamped only by the browser tool's node path (``site_approval.py``). It
+    rides the bridge DECISION door (signed ``bridge_decide``), so it is also a
+    "bridge row" for routing — this predicate only changes the words.
+    """
+    from local_operator.browser_bridge.site_approval import is_site_question_id
+
+    return any(
+        isinstance(question, Mapping) and is_site_question_id(question.get("question_id"))
+        for question in (getattr(row, "questions", ()) or ())
+    )
 
 
 def _carry_dict(result: dict[str, Any]) -> dict[str, Any]:
@@ -4946,7 +5008,6 @@ class OperatorApp(App[None]):
 
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", show=False),
-        Binding("ctrl+l", "clear_transcript", "Clear transcript", show=False),
         # The two REMAPPABLE bindings. Their `id` is deliberately the same
         # string as the config key and the tip lookup — see
         # `local_operator.keymap`, which owns that vocabulary and from which
@@ -4973,7 +5034,14 @@ class OperatorApp(App[None]):
         # rather than destructive — and the settings page warns about that
         # class of key at the moment of the decision.
         *(
-            Binding(action.default, action.action, action.label, show=False, id=action.id)
+            Binding(
+                action.default,
+                action.action,
+                action.label,
+                show=False,
+                priority=action.priority,
+                id=action.id,
+            )
             for action in _keymap.KEY_ACTIONS
             # `scope == "app"` ONLY. A desktop-scoped action is not a Textual
             # binding — it has no `action_*` method and its key is an Electron
@@ -4982,42 +5050,27 @@ class OperatorApp(App[None]):
             # break the anti-drift test's "desktop ids are not bindings" half
             # (`test_keymap.py`). The registry is generic over scope; THIS is
             # the one place the app says which half it drives.
+            #
+            # `priority` comes from the ROW, not from a literal here: a remap
+            # re-keys the Binding but must not change its precedence, and the
+            # registry is the only place both halves survive a `set_keymap`.
             if action.scope == "app"
         ),
-        # Open the aside WITHOUT spending the composer's contents, which is the
-        # gesture `/btw <question>` cannot offer: submitting a slash command
-        # consumes the whole line, so a user who is half way through a prompt
-        # when the side question occurs to them would have to delete their
-        # draft to ask it. The draft is stashed and Esc puts it back.
+        # `keymap.command_palette` above is deliberately PRIORITY and the only
+        # declaration of that action, which is what makes ctrl+p remappable:
+        # Textual injects its own `Binding(COMMAND_PALETTE_BINDING, ...,
+        # priority=True)` at App construction only while NO binding carries
+        # the action (textual 8.2.8 `App.__init__`, measured). Declaring ours
+        # suppresses the injection, and `action_command_palette` overrides the
+        # framework action with the keyed palette screen. Before this, the
+        # comment here said an app binding on ctrl+p could never fire; that
+        # was true only of a binding that did NOT name this action.
         #
-        # Ctrl+B is navigation across platforms; F8 keeps Aside independent of
-        # terminal modifier encoding and leaves every TextArea editing key alone.
-        # Queued asks, on a FUNCTION key for the same reason as f8/f9/f10
-        # below: every `ctrl+<letter>` is spoken for. The bar's own Enter
-        # binding cannot be the only route, because nothing focuses a bar the
-        # user cannot see is focusable — measured in round 1, tab six times and
-        # shift+tab all stayed in the Editor, so a keyboard-only user could not
-        # answer a queued ask at all (UX U5). Non-priority, so a live picker
-        # keeps first refusal on the key.
-        #
-        # The key is NOT f7, which is the neighbour this row would suggest:
-        # TextArea binds f6/f7 itself (measured in Textual 8.2.8), so the one
-        # surface that most needs the route — the focused composer — swallowed
-        # it. `ASK_TOGGLE_KEY` is the single spelling, shared with the bar's own
-        # copy so the two cannot drift onto different keys.
-        Binding(ASK_TOGGLE_KEY, "toggle_asks", "Queued asks", show=False),
-        Binding("f8", "aside", "Aside", show=False),
-        Binding("ctrl+b", "toggle_sidebar", "Sessions", show=False),
-        Binding("f9", "focus_sidebar", "Focus sessions", show=False),
-        # Pin/unpin the session under the pointer (else under the sidebar's
-        # cursor). A FUNCTION key, continuing f8/f9: `ctrl+p` is NOT free —
-        # Textual's App injects `Binding(COMMAND_PALETTE_BINDING, ...,
-        # priority=True)` and that constant is `ctrl+p` on textual 8.2.8, so an
-        # app binding there never fires and the palette opens instead (measured
-        # in a pilot; see docs/design/keymap.md §E.4 clause 5). Every
-        # `ctrl+<letter>` is claimed. Non-priority, so a focused picker keeps
-        # first refusal.
-        Binding("f10", "toggle_pin", "Pin session", show=False),
+        # The remaining app-scope chords (f8 aside, ctrl+b sidebar, f9 focus,
+        # f10 pin, f4 queued asks, ctrl+t todos, ctrl+g subagents, ctrl+f fork)
+        # are registry rows now too; their audits — why a FUNCTION key, why
+        # every `ctrl+<letter>` was spoken for, why f4 is not f7 — live on the
+        # rows in `local_operator/keymap.py`.
         # The `? Keys` legend (issue #1944). NON-PRIORITY, and that is the
         # design: a focused typist keeps first refusal on the character — the
         # composer's TextArea stops every printable before any non-priority
@@ -5044,13 +5097,12 @@ class OperatorApp(App[None]):
         # leaves `ctrl+shift+up`/`ctrl+shift+down`, which nothing in
         # `local_operator/` binds and `TextArea` does not claim. `priority`
         # because the composer holds focus in the common case and must not
-        # swallow them.
-        Binding(
-            "ctrl+shift+up", "switch_session(-1)", "Previous session", show=False, priority=True
-        ),
-        Binding("ctrl+shift+down", "switch_session(1)", "Next session", show=False, priority=True),
+        # swallow them. The pair and their `priority` are `keymap.prev_session`
+        # / `keymap.next_session` rows now.
         # Textual decodes Kitty's Super modifier. Terminals that intercept Cmd+B
         # never deliver it, so Ctrl+B and /sidebar remain unconditional routes.
+        # This extra is DELIBERATELY not remappable: it is an alternate for the
+        # same action, and the registry stores one value per action.
         *(
             [Binding("super+b", "toggle_sidebar", "Sessions", show=False)]
             if sys.platform == "darwin"
@@ -5059,8 +5111,9 @@ class OperatorApp(App[None]):
         # Promote the aside exchange into the conversation. Only meaningful
         # while the card is open, and the action says so rather than the
         # binding: a key that silently does nothing elsewhere is worse than one
-        # that explains itself.
-        Binding("ctrl+f", "fork_aside", "Fork aside into the chat", show=False),
+        # that explains itself. `keymap.fork_aside` (ctrl+f) is a registry row;
+        # its old soft warning against ctrl+f is gone because TextArea binds no
+        # ctrl+f (measured, textual 8.2.8).
         # Esc is the key a user reaches for to make the agent stop, so it is the
         # same stop as Ctrl+C rather than a second, weaker notion of "pause" the
         # engine has no concept of.
@@ -5088,7 +5141,10 @@ class OperatorApp(App[None]):
         # moves by Tab, by click, and by the `ToolCard` actions that call
         # `screen.focus_next`/`focus_previous` directly rather than through the
         # key.
-        Binding("shift+tab", "cycle_effort", "Cycle reasoning effort", show=False, priority=True),
+        #
+        # `priority` and the key itself are the `keymap.cycle_effort` row's;
+        # the delegation to `_team_form`/`_agent_form` is dispatch INSIDE the
+        # action, unchanged by whichever key the user picks.
         # Expand/collapse the dock's todo list between the current-work preview
         # (active phase + a few following, settled phases auto-hidden) and every
         # phase and item. `ctrl+t` mnemonic: todos.
@@ -5099,11 +5155,11 @@ class OperatorApp(App[None]):
         # in `local_operator/tui/`, and Textual's `TextArea` binds
         # ctrl+a/e/w/d/x/k/f/u but not ctrl+t, so the composer keeps every
         # editing key it had.
-        Binding("ctrl+t", "toggle_todos", "Expand/collapse todos", show=False),
-        # The subagent dock's density cycle (full → summary → hidden, with the
-        # overflow roster as a stop inside full). `ctrl+g` is free in the app
-        # and TextArea, and bubbles so an active picker keeps first refusal.
-        Binding("ctrl+g", "toggle_subagents", "Cycle the subagent panel", show=False),
+        #
+        # Both chords below are registry rows now (`keymap.toggle_todos`,
+        # `keymap.toggle_subagents`); the audits above still describe the
+        # shipped defaults, and `priority=False` on those rows keeps the
+        # bubbling behaviour the paragraphs argue for.
         Binding("p", "subagent_parent", "Parent subagent", show=False),
         Binding("left_square_bracket", "subagent_peer(-1)", "Previous peer", show=False),
         Binding("right_square_bracket", "subagent_peer(1)", "Next peer", show=False),
@@ -6164,6 +6220,17 @@ class OperatorApp(App[None]):
         #: here so the seam's consumption is a no-op on an app that never ran
         #: ``/aida``; without it the FIRST adoption of any kind raised.
         self._pending_aida_prompt: tuple[str, str, Any] | None = None
+        #: Bumped by EVERY ``_adopt_session`` — the one place a session becomes
+        #: current. ``_boot_session`` reads it before construction and steps
+        #: aside when it moved, because boot's sidebar ``navigation_generation``
+        #: fence never sees a ``/resume``: a ``/resume <id>`` typed while boot
+        #: was still building used to land and then be OVERWRITTEN by boot's
+        #: fresh session, so the user's next prompt went to the wrong
+        #: conversation (architect's in-process reproduction on d0301a22fba2).
+        #: An epoch rather than another generation bump at each resume site
+        #: because adoption is the single seam every transition funnels through;
+        #: a counter at the seam cannot miss a path the way per-caller bumps can.
+        self._adoption_epoch = 0
         #: The scheduled first-run Aida ensure `run_tui` starts — never awaited
         #: there (see `_schedule_aida_boot_ensure`). Held so the task cannot be
         #: garbage-collected mid-flight; ``None`` until a CLI boot starts one.
@@ -6693,6 +6760,9 @@ class OperatorApp(App[None]):
         self._library_focus_restore: Any | None = None
         #: The ``/notifications`` page (lane L2): a sibling of the library mode.
         self._notifications_view: Any | None = None
+        #: The ``/community`` page (``widgets/community_view.py``) while it is up.
+        self._community_view: Any | None = None
+        self._community_focus_restore: Any | None = None
         self._notifications_focus_restore: Any | None = None
         # The projects mode (``/project show``), a fourth sibling of the same
         # MODE contract: it replaces the transcript region, so it is held here
@@ -6982,6 +7052,7 @@ class OperatorApp(App[None]):
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
         self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(JOB_POLL_INTERVAL_S, self._poll_goal_recovery)
         self.set_interval(TEMPORARY_BAND_TICK_S, self._tick_temporary_band)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
@@ -11231,14 +11302,6 @@ class OperatorApp(App[None]):
         state ever reached, which is an infinite reconnect loop rather than a
         shortened one. The distinction is what makes the reset safe.
         """
-        if source.connection_task is not None and not source.connection_task.done():
-            return
-        source.connection_error = ""
-        # Cleared with the error text it qualifies, never independently: a stale
-        # verdict here would keep the band saying "this session was stopped" over
-        # a source whose next verdict is an ordinary retryable one (U3's class of
-        # stale verdict, one surface over).
-        source.can_never_bind = False
         if not continues_retry:
             # THE BUDGET BELONGS TO AN ATTEMPT THE USER ASKED FOR. A source that
             # was navigated away from mid-retry keeps its spent counter — the
@@ -11251,7 +11314,29 @@ class OperatorApp(App[None]):
             # independently by review (F2) and QA (Q1), the latter reproducing a
             # real eviction that failed on a carried budget where the same
             # eviction healed from a fresh one.
+            #
+            # BEFORE THE IN-FLIGHT RETURN BELOW, NOT AFTER IT. A user who comes
+            # back while the old chain still has a round in flight (its backoff
+            # is still sleeping, or a bind is still out) hits that early return;
+            # with the refill after it, the round then saw the source current
+            # again and re-armed `continues_retry` on the SPENT counter — the
+            # same inherited budget through a shorter window (up to one backoff,
+            # 3 s at the ceiling). Surfaced by the flaky
+            # `test_a_reselect_after_navigating_away_gets_a_full_budget`, pinned
+            # by `test_a_reselect_while_a_round_is_in_flight_refills_the_budget`.
+            # Safe against the unexhaustible-budget loop because every caller
+            # that omits `continues_retry` is user intent (a sidebar click, a
+            # navigation commit, a notification open); the loop's own re-arm
+            # passes the flag and never lands here.
             source.connect_attempts = 0
+        if source.connection_task is not None and not source.connection_task.done():
+            return
+        source.connection_error = ""
+        # Cleared with the error text it qualifies, never independently: a stale
+        # verdict here would keep the band saying "this session was stopped" over
+        # a source whose next verdict is an ordinary retryable one (U3's class of
+        # stale verdict, one surface over).
+        source.can_never_bind = False
         source.connection_task = asyncio.create_task(self._connect_sidebar_source(source))
 
         def settled(task: asyncio.Task[None]) -> None:
@@ -12905,6 +12990,12 @@ class OperatorApp(App[None]):
         # then removed. Straight after the band exists, before the first
         # session is asked for.
         self._apply_composer_settings()
+        # The stored transcript layout, for the same reason and at the same
+        # point: the view starts on the class default, and until now only a
+        # CHANGE reached it. A setting that says "By response" survived on disk
+        # but the transcript drew By turn until the next `/transcript` press —
+        # the page and the command each stated a mode the boot frame ignored.
+        self._apply_transcript_display()
         # Attached AFTER the first `update`, so the first STABLE title already
         # carries the working directory it falls back to while the conversation
         # is unnamed. Attaching first would leave a bare `lo ›` on screen for
@@ -12946,6 +13037,7 @@ class OperatorApp(App[None]):
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
         self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(JOB_POLL_INTERVAL_S, self._poll_goal_recovery)
         self.set_interval(TEMPORARY_BAND_TICK_S, self._tick_temporary_band)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
@@ -13023,7 +13115,7 @@ class OperatorApp(App[None]):
         if loaded and self._welcome is not None:
             self._welcome.refresh_info()
 
-    async def _construct_session(self) -> Any:
+    async def _construct_session(self, factory: Callable[[], Awaitable[Any]] | None = None) -> Any:
         """Apply the factory's import policy and await it. RAISES; adopts nothing.
 
         Split from :meth:`_adopt_session` because the two halves want to happen
@@ -13038,9 +13130,15 @@ class OperatorApp(App[None]):
         # itself never raises, but the import that reaches it and the thread hop
         # around it can, and anything that escapes the boot worker leaves the
         # user with a splash and no explanation.
+        #
+        # The factory is read before the warm-up's await, never after it: a
+        # `/resume` landing during the warm rebinds `_session_factory`, and
+        # reading it late would build the resumed session a second time (see
+        # `_boot_session`). Boot passes the factory it snapshotted.
+        build = factory if factory is not None else self._session_factory
         if self._warm_factory_imports:
             await self._warm_session_imports()
-        return await self._session_factory()
+        return await build()
 
     def _adopt_session(
         self, session: Any, *, replay_history: bool = True, reuse_controller: bool = False
@@ -13056,6 +13154,8 @@ class OperatorApp(App[None]):
         precondition. Anything genuinely slow belongs in a worker, the way
         :meth:`_measure_preloaded_context` already puts its measurement in one.
         """
+        # See `_adoption_epoch`: boot's step-aside fence reads this.
+        self._adoption_epoch += 1
         self._invalidate_pending_frontend_state()
         # A new conversation's supplement registries start empty: the previous
         # session's blocks went with the cleared ledger, and its read/seen sets
@@ -13075,7 +13175,6 @@ class OperatorApp(App[None]):
             # Adopted from the boot default / machine setting: global scope
             # (team-bridge-egress.md: "Grants"). A conversation record read below re-scopes it.
             source.draft.approve_scope = "global"
-            source.draft.approve_granted_while_latched = False
         self._interaction = source
         # Load THIS conversation's recorded approval choice (or its absence)
         # on every adoption. Doing it here rather than at boot is what stops
@@ -14445,6 +14544,68 @@ class OperatorApp(App[None]):
         if text.strip():
             self._submit_prompt(text)
 
+    def _return_unsent_boot_prompts(self, session: Any) -> None:
+        """Hand back the prompts a stepped-aside boot would have sent.
+
+        Boot steps aside (see `_boot_session`) when the user navigated or
+        resumed elsewhere while it was building; an in-process swap
+        (`_reload_session`) steps aside the same way on a sidebar click, and
+        hands its replacement's prompts back through here too. Its stashed
+        prompts — a ``/fork``'s opening message (the sidecar
+        `_submit_boot_prompt` consumes) and an ``/aida <request>`` stashed for
+        boot's own session — were written for a conversation that is no
+        longer on screen.
+
+        PRODUCT DECISION (Team Bridge manager, session 2c6111e02b16): NEVER
+        send such a prompt — sending into the conversation the user switched
+        to would be a turn they did not ask for — and NEVER drop it silently,
+        which is what this branch did before. If the current composer is empty
+        the prompt becomes an UNSENT draft there plus one notice; if the user
+        already typed something, their draft is left untouched and the
+        prompt's text rides the notice so it is not lost.
+
+        The sidecar is consumed here on purpose: left on disk it would fire
+        on that fork's next resume, breaking the restore-and-idle rule
+        `fork.consume_boot_prompt` exists to keep.
+        """
+        texts: list[str] = []
+        session_id = getattr(session, "session_id", "") or ""
+        if session_id:
+            try:
+                from local_operator.fork import consume_boot_prompt
+                from local_operator.paths import config_dir
+
+                texts.append(consume_boot_prompt(config_dir() / "sessions" / session_id))
+            except Exception:
+                # Same best-effort rule as `_submit_boot_prompt`: an unreadable
+                # sidecar must not fail the step-aside.
+                logger.debug("boot step-aside: boot prompt unreadable", exc_info=True)
+        pending = self._pending_aida_prompt
+        # Only HER stash for boot's OWN session belongs to this boot; a stash
+        # for another id belongs to a transition still in flight and stays.
+        if pending is not None and session_id and pending[0] == session_id:
+            self._pending_aida_prompt = None
+            texts.append(pending[1])
+        text = "\n\n".join(part for part in texts if part.strip())
+        if not text:
+            return
+        editor = self._editor()
+        if not editor.text.strip() and not editor.attachments():
+            # The restore funnel, so the caret lands AFTER the text the way a
+            # returned draft does: the gesture is "read, edit, Enter".
+            self._load_editor_draft(SessionDraft(text=text))
+            self._system_notice(_boot_prompt_t(_boot_prompt_keys.returned_to_composer()), "warning")
+            return
+        # Quoted in FULL, never truncated: the sidecar is already consumed and
+        # the user's draft wins the composer, so this notice is the prompt's
+        # ONLY remaining copy. Any cap would drop its tail for good — exactly
+        # the silent loss the product rule forbids. A long notice scrolls in
+        # the transcript like any other long row; that cost is recoverable,
+        # lost text is not.
+        self._system_notice(
+            _boot_prompt_t(_boot_prompt_keys.not_sent_kept_draft(prompt=text)), "warning"
+        )
+
     async def _preflight_usage(self, session: Any) -> None:
         """Warm the provider's quota reading once the app is already painted.
 
@@ -14542,9 +14703,30 @@ class OperatorApp(App[None]):
         # that opens her conversation never ran and they met an empty chat.
         # Rebinding the factory HERE, before construction, makes the first
         # thing on screen her conversation, exactly as the setup exit does.
-        await self._route_first_run_boot()
+        #
+        # The factory is read HERE, before the first await, and not when
+        # `_construct_session` finally calls it (QA Q12 on #3787). `/resume`
+        # rebinds `_session_factory` to the session it opens and then reloads
+        # through it; a resume dispatched while boot was still awaiting the
+        # route below (which can wait out the launch hook's aida task) or the
+        # import warm-up made boot call the RESUME factory too. That built the
+        # resumed session twice: the first-adopted copy was replaced and never
+        # disposed, and when the second build lost the transcript lease the
+        # first already held, the user read `session failed to start` over a
+        # conversation that was working. Boot builds the session it was
+        # launched for; a resume that lands first makes it step aside through
+        # the adoption-epoch fence below, exactly as one landing mid-build does.
+        # The fence's own snapshot moves up with the factory for the same
+        # reason: taken after the route, it already counted a resume that
+        # landed during it, and boot then adopted over the resumed session.
+        factory = self._session_factory
         navigation_generation = self._sidebar_navigation.generation
-        built = asyncio.ensure_future(self._construct_session())
+        adoption_epoch = self._adoption_epoch
+        if await self._route_first_run_boot():
+            # The route's own rebind IS boot's decision (her conversation on a
+            # first attended run), so it replaces the snapshot.
+            factory = self._session_factory
+        built = asyncio.ensure_future(self._construct_session(factory))
         try:
             session = await built
         except asyncio.CancelledError:
@@ -14555,36 +14737,31 @@ class OperatorApp(App[None]):
             self._temporary_pending = None
             self._on_boot_failed(error)
             return
-        if navigation_generation != self._sidebar_navigation.generation:
+        # STEP ASIDE when the user moved while boot was building: a sidebar
+        # click bumps `navigation_generation`, and a `/resume` (or any other
+        # transition) that already LANDED bumps `_adoption_epoch`. Either way
+        # the conversation on screen is the one the user chose, and adopting
+        # boot's session now would replace it. A `/resume` still dialling when
+        # boot finishes has not adopted, so boot adopts as before and the
+        # resume replaces it through its own swap path.
+        if (
+            navigation_generation != self._sidebar_navigation.generation
+            or adoption_epoch != self._adoption_epoch
+        ):
+            # ``lop --temporary`` armed the mark for THIS boot's session only;
+            # boot is discarding that session, so the mark must not land on
+            # the conversation the user moved to instead.
             self._temporary_pending = None
             if session is not self._session:
+                self._return_unsent_boot_prompts(session)
                 await session.dispose()
             return
         self._adopt_session(session)
         self._report_degraded_attach(session)
         self._submit_boot_prompt(session)
         self._submit_aida_prompt(session)
-        # TRIGGER 3, on the other owning host: a goal whose continuation was in
-        # flight when this terminal closed is re-engaged ONCE, here, where the
-        # restored record is readable and the session is current.
-        #
-        # Why this host needed its own wiring rather than inheriting the
-        # runtime's: `GoalJudge.rearm_on_resume` was called from exactly one
-        # place (`ServingSessionHandle.rearm_goal_judge`, wired once per boot in
-        # `server.py`), and the TUI builds its own driver whose ONLY caller was
-        # the turn-end hook. So a local session killed mid-continuation reopened
-        # with the goal reading `active` and the judge reading `continuing` and
-        # nothing to re-engage it until the user happened to type — the
-        # "silently sitting inert" case, in exactly the app-reopened shape the
-        # operator named (agent review round 1, MAJOR-1; reproduced: `judge_calls
-        # after boot = 0`, no prompt admitted).
-        #
-        # Once per BOOT and not per adoption: a sidebar switch re-adopts, and the
-        # record's state has moved on by then in every settled case — this is the
-        # restart prologue the runtime runs, not a rule about focus. The driver's
-        # own guard (RULINGS R3) refuses anything but `continuing`/`judging`, and
-        # its in-flight claim refuses a second run, so a re-arm that lands on a
-        # goal nothing was spending on is a no-op by construction.
+        # Only the local owner can spend; an attached TUI leaves retries to
+        # the runtime, including on boot.
         self._rearm_goal_judge_on_boot(session)
         # Bring the runtime up NOW rather than on the first keystroke. A cold
         # viewer can only paint what it reads off disk — the cwd and the
@@ -16134,7 +16311,12 @@ class OperatorApp(App[None]):
         return bool(self._resume_pending_head)
 
     def _project_settled_rows(
-        self, history: list[Any], *, bound: int | None = None, start: int | None = None
+        self,
+        history: list[Any],
+        *,
+        bound: int | None = None,
+        start: int | None = None,
+        follow: bool = True,
     ) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
 
@@ -16245,6 +16427,7 @@ class OperatorApp(App[None]):
                 display_records=self._peer_display_records_for(history, bound=bound, start=start),
                 proof_history=proof_history,
                 proof_transcript=local_transcript,
+                follow=follow,
             )
             # The visible transcript, so the app's own registry is the right
             # owner: a row this repaints live is one `_retire_live_tool_cards`
@@ -18063,6 +18246,16 @@ class OperatorApp(App[None]):
             else:
                 if navigation_generation != self._sidebar_navigation.generation:
                     if session is not self._session:
+                        # Same step-aside class as `_boot_session`: the
+                        # replacement this swap built (a `/fork <message>`
+                        # in switch mode, or a `/resume` carrying an `/aida
+                        # <request>`) holds a prompt the success branch below
+                        # would submit. Disposing it bare dropped that prompt
+                        # silently and left the fork sidecar to fire on the
+                        # fork's next resume. The requester's decision (see
+                        # `_return_unsent_boot_prompts`) covers every such
+                        # branch: never send it, never drop it — hand it back.
+                        self._return_unsent_boot_prompts(session)
                         await session.dispose()
                     return
                 carried_spend = self._reset_ledger_for_swap()
@@ -18717,6 +18910,14 @@ class OperatorApp(App[None]):
                 self._system_notice(warning.removeprefix("warning: "), "warning")
             if mobile.kind == "restarted":
                 self._system_notice("mobile daemon restarted — refresh the phone UI")
+            elif mobile.kind == "restarting":
+                # Slow, not failed: the refresh child handed the bounce to a
+                # background worker that outlives this update (update.py's
+                # ``_hand_off_when_slow``); `lop services status` reports its end.
+                self._system_notice(
+                    "mobile daemon still restarting — finishing in the background; "
+                    "lop services status shows when it lands"
+                )
             elif mobile.kind == "failed":
                 self._system_notice(
                     "updated, but the mobile daemon did not restart — run lop mobile restart",
@@ -20156,7 +20357,20 @@ class OperatorApp(App[None]):
         """
         session_id = self._resumable_session_id()
         archived = session_id in self._archived_ids() if session_id else False
-        return [entry for entry in SLASH_COMMANDS if entry.name != "unarchive" or archived]
+        offered = [entry for entry in SLASH_COMMANDS if entry.name != "unarchive" or archived]
+        # The registry's descriptions are rendered ONCE (at import, or on a
+        # locale move) and some name a hotkey — `/effort` says "shift+tab
+        # cycles". The picker must not keep naming a key the user remapped, so
+        # the rows handed to the composer carry the live spelling; a row whose
+        # text does not change is returned as the SAME object, because the
+        # frozen dataclass is compared by value in several tests (R2).
+        live: list[SlashCommand] = []
+        for entry in offered:
+            text = _keymap.substitute_keys(entry.description, self._keymap)
+            live.append(
+                entry if text == entry.description else dataclasses.replace(entry, description=text)
+            )
+        return live
 
     def _refresh_offered_commands(self) -> None:
         """Re-hand the composer the filtered list. Silent when there is no editor."""
@@ -20563,7 +20777,11 @@ class OperatorApp(App[None]):
         # names it or the owner's own auto-namer titles the first substantive
         # turn. Nothing is lost by it — the `↗` mark and the tooltip carry the
         # device, which is what the bogus name was duplicating.
-        argv = ["sessions", "--peer", addressing, "--create"]
+        # ``--origin user``: the operator's own gesture, stated rather than
+        # inferred from the environment, so the owner stamps the session
+        # ``started_by: operator`` and its ``notify`` items keep reaching the
+        # inbox under the default-deny rule (``remote_attention.STARTED_BY_FIELD``).
+        argv = ["sessions", "--peer", addressing, "--create", "--origin", "user"]
         if prompt:
             argv += ["--prompt", prompt]
         self._run_network_cli(
@@ -22622,8 +22840,9 @@ class OperatorApp(App[None]):
         routed ``/agent`` must send the same rows: a session with no TUI had
         only the ``noop`` the terminal's own resolver drew, so the phone's sheet
         offered ``/agent`` and the tap delivered nothing (review round 1,
-        R1-2/U2). This method stays as the app's seam — the settings pane and the
-        picker read it — and is a delegate rather than a copy.
+        R1-2/U2). This stays as the app's legacy string seam for listings and
+        the picker. Settings instead retains unrendered facts from that same
+        enumeration so a language repaint never needs to reread the registry.
         """
         session = self._session
         registry = getattr(session, "agent_registry", None) if session is not None else None
@@ -26128,6 +26347,12 @@ class OperatorApp(App[None]):
         token = text.split(maxsplit=1)[0].lower() if text.strip() else ""
         if not token.startswith("/"):
             return False
+        if token in _COMMUNITY_SLASHES and _community_enabled():
+            # The community page's two words (RFC v2.4, TUI frames T1/T9) are
+            # NOT registry rows while the community ships dark: a row would
+            # show in /help, the picker and every desktop/mobile slash list.
+            # They are commands only on a machine with the pilot switch on.
+            return True
         # Matched on the same key the dispatch builds its map with, so the two
         # cannot disagree about spelling: `f"/{cap.command}"` there, the typed
         # first token here, both case-folded.
@@ -27778,6 +28003,24 @@ class OperatorApp(App[None]):
         session_dir = config_dir() / "sessions" / session_id
         return session_id if _has_transcript(session_dir) else ""
 
+    def diff_archive_directory(self) -> Path | None:
+        """The parent conversation's directory, for a card's whole-diff read.
+
+        Asked by a :class:`ToolCard` in the main transcript (a subagent page
+        answers first for its own cards). The same layout ``_session_directory``
+        composes, from the config root rather than the session object; the id
+        is shape-checked so it can only name a directory under ``sessions/``.
+        The archive read then proves the call is a row of THAT transcript.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.tui.session_catalog import session_directory_name
+
+        session = self._session
+        session_id = str(getattr(session, "session_id", "") or "") if session else ""
+        if not session_directory_name(session_id):
+            return None
+        return config_dir() / "sessions" / session_id
+
     def resume_hint(self) -> str:
         """``lop --resume <id>`` for this session, or "" when there is none.
 
@@ -28457,12 +28700,13 @@ class OperatorApp(App[None]):
             return False
         # Approve-all never covers an account profile save (see
         # ``harness.approval.never_auto_approved``): that card always shows.
-        # Nor does a SESSION approve-all granted before the conversation held
-        # Team Bridge content (team-bridge-egress.md: "Grants"): the call falls through to the
-        # card. The source's own latch is read too (fail-closed), so a card
-        # whose raiser passed no flag is still person-only.
+        # It DOES cover a latched session whichever scope it came from -- a
+        # conversation's own auto exactly as the machine default (#3928,
+        # team-bridge-egress.md: "Grants"). The source's own latch is read for
+        # the CARD (fail-closed), so a card whose raiser passed no flag is
+        # still person-only.
         latched = bool(bridge_latched) or self._source_bridge_latched(source)
-        if session_grant_covers(self._draft_grant(source), title=tool_name, bridge_latched=latched):
+        if session_grant_covers(self._draft_grant(source), title=tool_name):
             return True
         # ADOPT THE CARD THE REVEAL ALREADY MOUNTED FOR THIS GATE, if there is
         # one. It is not a competing prompt — it IS this gate's card, built by
@@ -28501,12 +28745,10 @@ class OperatorApp(App[None]):
             # denied on waking by a latch that has nothing to do with it.
             if job_id is None and self._source_approvals_are_denied(source, epoch):
                 return False
-            # The queued asker's waking re-check: the same grant rule, so a
-            # pre-latch approve-all cannot answer a card queued in a latched
-            # session (T22g).
-            if session_grant_covers(
-                self._draft_grant(source), title=tool_name, bridge_latched=latched
-            ):
+            # The queued asker's waking re-check: the same grant rule as the
+            # front of this method, so an approve-all set while it waited
+            # answers it exactly as it would answer a fresh call.
+            if session_grant_covers(self._draft_grant(source), title=tool_name):
                 return True
         # The prompt is a transcript block, and the subagent page hides the
         # transcript — mounted behind it the question was invisible while
@@ -28555,6 +28797,11 @@ class OperatorApp(App[None]):
                 taint_raised=taint_raised,
             )
             self._approval = prompt
+            # The LIVE transcript card for this call is still `running`, so the
+            # fold's derive can only learn about the gate by re-reading the
+            # session's pending ids. Ask it to, at BOTH edges: a collapse while
+            # the prompt is open must never hide the row the prompt names.
+            self._refresh_tool_fold()
             # The QUESTION goes in the dock, where it cannot scroll away from
             # the turn it is blocking and where it reliably owns its own answer
             # keys. The transcript gets a RECEIPT instead, and only once the
@@ -28584,6 +28831,7 @@ class OperatorApp(App[None]):
             if self._approval is prompt:
                 self._approval = None
             self._unmount_prompt(prompt)
+            self._refresh_tool_fold()
             if self._is_current(source):
                 self._notify_mobile_approval_settled(prompt)
                 # THE BAND SAID WHICH SENTENCE THE CARD OWED; the card is gone
@@ -28651,7 +28899,11 @@ class OperatorApp(App[None]):
 
     # -- the agent's own questions --------------------------------------------
     async def request_user_choice(
-        self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
+        self,
+        questions: list[AskQuestion],
+        *,
+        source: SessionInteraction | None = None,
+        card_options: dict[str, Any] | None = None,
     ) -> dict[str, list[str]] | None:
         """The ``ask`` tool's surface while this app owns the terminal.
 
@@ -28664,6 +28916,13 @@ class OperatorApp(App[None]):
         answered nothing. Both are ANSWERS, not failures: the tool reports the
         empty case as "the user did not answer" so the model falls back to its
         own recommendation.
+
+        ``card_options``: host keywords for :class:`AskPickerScreen`
+        (``allow_free_text``, ``title``, ``exit_hint``, ``initial_rows``) for a
+        caller that is NOT the agent's ``ask`` — the Bedrock login reuses this
+        card and must not be headed "the agent needs your decision" or offer a
+        free-text row its answer cannot use (#4270 D2/D3/D5). The ``ask`` tool
+        passes none, so its card is unchanged.
 
         A future rather than ``push_screen_wait``, which requires a worker: this
         coroutine is the tool call, and moving it into a worker would put the
@@ -28708,7 +28967,7 @@ class OperatorApp(App[None]):
         self._close_team_form()
         self._close_projects_view()
         self._close_aside()
-        card = AskPickerScreen(questions, answered)
+        card = AskPickerScreen(questions, answered, **(card_options or {}))
         # Same hint as the approval card, for the same reason — the copy
         # differs by kind because an ask is answerable from here (see
         # `AskPickerScreen.set_remote_device`).
@@ -29690,7 +29949,7 @@ class OperatorApp(App[None]):
         state that genuinely changes what Enter does has one place to go.
         """
         if editor.read_only:
-            return READ_ONLY_PLACEHOLDER
+            return read_only_placeholder()
         if self._aside_is_open():
             return ASIDE_PLACEHOLDER
         if editor.shell_mode:
@@ -29780,7 +30039,11 @@ class OperatorApp(App[None]):
             return ASK_SECRET_REFUSAL_OPEN_CARD
         if self._ask_list is not None:
             return ASK_SECRET_REFUSAL_OPEN_LIST
-        return ASK_SECRET_REFUSAL_CLOSED
+        # The closed surface advertises the toggle's key; the two open-surface
+        # sentences name no chord. Substituted HERE rather than templated so the
+        # shipped sentence is byte-identical at the default (the test that pins
+        # "f4" keeps passing) and only a remap changes it (R2).
+        return _keymap.substitute_keys(ASK_SECRET_REFUSAL_CLOSED, self._keymap)
 
     def _say_ask_secret_refusal(self) -> None:
         """Say where a credential goes — ONE row, restated while the state lasts."""
@@ -30129,6 +30392,7 @@ class OperatorApp(App[None]):
         from local_operator.asks.render import NOT_IN_QUEUE
         from local_operator.mobile.attach_client import engage_session_client
         from local_operator.paths import config_dir
+        from local_operator.session.attached import operator_ask_kwargs
         from local_operator.session.runtime.launch import AskErrand
 
         failed = ""
@@ -30161,11 +30425,23 @@ class OperatorApp(App[None]):
                             # answer (TB-02 wiring, PR #2378).
                             await client.bridge_decide(*target)
                         else:
-                            await client.ask_respond(row.ask_id, answers or {}, by="terminal")
+                            await client.ask_respond(
+                                row.ask_id,
+                                answers or {},
+                                by="terminal",
+                                **operator_ask_kwargs(client.ask_respond),
+                            )
                     elif op == "decline":
-                        await client.ask_decline(row.ask_id, by="terminal")
+                        await client.ask_decline(
+                            row.ask_id, by="terminal", **operator_ask_kwargs(client.ask_decline)
+                        )
                     else:
-                        await client.ask_dismiss(row.ask_id, by="terminal", reason=reason)
+                        await client.ask_dismiss(
+                            row.ask_id,
+                            by="terminal",
+                            reason=reason,
+                            **operator_ask_kwargs(client.ask_dismiss),
+                        )
                 finally:
                     client.close()
         except Exception as exc:  # noqa: BLE001 — the refusal is the message
@@ -30329,6 +30605,7 @@ class OperatorApp(App[None]):
         card = AskPickerScreen(
             questions,
             self._ask_settle_callback(row),
+            allow_free_text=self._ask_card_allows_free_text(row),
             widget_id=f"ask-queue-card-{row.ask_id}",
             title=self._ask_card_title(row),
             exit_hint=("esc", "collapse"),
@@ -30373,6 +30650,17 @@ class OperatorApp(App[None]):
             self._collapse_asks()
 
     @staticmethod
+    def _ask_card_allows_free_text(row: AskRow) -> bool:
+        """Whether the card offers its "Other (type your own)" row.
+
+        Not for a headless node's site card: it is a closed Approve/Deny
+        decision, a typed answer is refused downstream, and a dead-end row in a
+        security prompt costs a line at 80x24 (design D3) — the approval gate's
+        own rule. Every other ask keeps the row.
+        """
+        return not _is_site_ask_row(row)
+
+    @staticmethod
     def _ask_card_title(row: AskRow) -> str:
         """What the card says above the questions — honest about the agent.
 
@@ -30390,6 +30678,29 @@ class OperatorApp(App[None]):
         """
         from local_operator.tui.widgets.ask_queue import ASK_MARKER
 
+        if _is_site_ask_row(row):
+            # A headless node's per-site browser approval: not another member's
+            # request (the bridge copy below would say so), and the answer is
+            # verified by the node's browser, not merely delivered to an agent.
+            # The machine is named as THIS computer's mesh knows it, or as the
+            # node claims it, marked unconfirmed (review R2-1) — the node drew
+            # the question, the title is the signer's own words. A lapsed card
+            # has its own line: nothing was allowed, and there is no "sender"
+            # (design D4 / UX U13).
+            from local_operator.browser_bridge.site_approval import signer_node_label
+            from local_operator.i18n.keys import browser_site_approval as _site_copy
+            from local_operator.i18n.messages import render_resolved
+
+            if row.lapsed:
+                return f"{ASK_MARKER} {render_resolved(_site_copy.card_title_lapsed())}"
+            site: Mapping[str, Any] = {}
+            for question in row.questions:
+                block = question.get("site")
+                if isinstance(block, Mapping):
+                    site = block
+                    break
+            device = signer_node_label(site)
+            return f"{ASK_MARKER} {render_resolved(_site_copy.card_title(device=device))}"
         bridge = _is_bridge_ask_row(row)
         if row.lapsed:
             # D10: a lapsed card is READ-ONLY, so the title stops promising that an
@@ -30508,7 +30819,17 @@ class OperatorApp(App[None]):
         hands either to ``_handle_ask_outcome``, which reports an awaitable from
         the worker it raises rather than blocking the key.
         """
-        target = bridge_decision_target(row, answers or {}) if row is not None else None
+        try:
+            target = bridge_decision_target(row, answers or {}) if row is not None else None
+        except ValueError as refusal:
+            # The signer refused a site card it could not rebuild (R1-1,
+            # ``site_approval.verify_site_card``): nothing is signed or sent,
+            # and the refusal reaches the user in its own keyed words.
+            return {
+                "ok": False,
+                "error": str(refusal),
+                "code": str(getattr(refusal, "code", "") or "decision_refused"),
+            }
         decider: Any = getattr(session, "bridge_decide", None)
         if target is not None and callable(decider):
             try:
@@ -31472,11 +31793,12 @@ class OperatorApp(App[None]):
             return True
 
     def _watch_bridge_latch(self, session: Any, source: SessionInteraction) -> None:
-        """Announce once, in this pane, that a pre-latch session auto stopped covering calls.
+        """Redraw ``source``'s parked cards as latched cards when its session latches.
 
-        A session this app hosts has the real latch; a viewer facade has a
-        MIRROR of the owner's (``mirror=True``), which only redraws parked
-        cards -- the owner announces through its own notice stream.
+        Until #3928 this also announced that a pre-latch session auto had
+        stopped covering calls; the latch suspends no grant now, so it only
+        redraws. A session this app hosts has the real latch; a viewer facade
+        has a MIRROR of the owner's (``mirror=True``).
 
         Installed once PER LATCH, not once per source: a source's session is
         replaced on takeover (viewer facade -> hosted ``Session``), and the new
@@ -31488,13 +31810,9 @@ class OperatorApp(App[None]):
         source._bridge_watch_latch = latch  # type: ignore[attr-defined]
 
         def announce() -> None:
-            # A viewer's MIRROR latch (``AttachedSession.bridge_taint_latch``)
-            # fires only to redraw parked cards: the owner already announced
-            # the suspension on its own notice stream, so a second notice here
-            # would say it twice.
-            suspended = not getattr(latch, "mirror", False) and self._draft_grant_suspended(source)
-            from local_operator.harness.bridge_egress import grant_suspended_notice
-
+            # Redraw only: since #3928 the latch suspends no grant, so there is
+            # no "auto is paused" notice to announce (it would contradict the
+            # gate and the band), on the owner's latch or a viewer's mirror.
             def paint() -> None:
                 # A card parked while the session was clean was built with
                 # Allow all and the S/G escapes; it becomes the latched card
@@ -31502,9 +31820,6 @@ class OperatorApp(App[None]):
                 # the guarantee; this keeps the card from offering keys it
                 # would refuse.
                 self._latch_parked_cards(source)
-                if suspended and source is self._interaction:
-                    self._append_block(NoticeBlock(grant_suspended_notice(latch), "warning"))
-                    self._set_approve_all(self._approve_all, scope="keep")
 
             try:
                 self.call_later(paint)
@@ -31551,10 +31866,11 @@ class OperatorApp(App[None]):
         Why at PRESS time (QA Q-11): the callbacks are bound when a card is
         built (``None`` on a latched card), so a card parked before the latch
         still holds them. Pressing one then reached ``_set_approve_all`` while
-        latched, which stamps ``granted_while_latched`` -- the marker only a
-        typed ``/approvals auto`` may carry -- and the next egress ran with no
-        card. Mirrors the ``A`` check in ``_latch_approval_answer``. Writes
-        nothing; the card is turned into the latched card in the same gesture.
+        latched, a loosening a latched card must not offer (one keypress on a
+        card a teammate's agent prompted is not the typed ``/approvals auto``
+        the latch asks for), and the next egress ran with no card. Mirrors the
+        ``A`` check in ``_latch_approval_answer``. Writes nothing; the card is
+        turned into the latched card in the same gesture.
         """
         card = self._approval
         card_latched = (
@@ -31579,18 +31895,6 @@ class OperatorApp(App[None]):
         return ApprovalGrant(
             auto=bool(draft.approve_all),
             scope="global" if draft.approve_scope == "global" else "session",
-            granted_while_latched=draft.approve_granted_while_latched is True,
-        )
-
-    def _draft_grant_suspended(self, source: SessionInteraction) -> bool:
-        """Whether a live session approve-all is void because the session latched."""
-        from local_operator.harness.bridge_egress import session_grant_covers
-
-        grant = self._draft_grant(source)
-        if not grant.auto or grant.scope != "session":
-            return False
-        return not session_grant_covers(
-            grant, title="", bridge_latched=self._source_bridge_latched(source)
         )
 
     def _latch_approval_answer(self, answer: str) -> None:
@@ -31636,12 +31940,11 @@ class OperatorApp(App[None]):
         true is decided by the pair of flags this method owns.
         """
         self._approve_all = approve_all
-        # The grant's scope and latch stamp ride the same assignment
-        # (team-bridge-egress.md: "Grants"). ``scope`` defaults to ``session`` -- the fail-closed
-        # reading;
-        # only the machine-default adoptions pass ``global``, and a re-assertion
-        # of the band passes ``keep``. Stamped only when granted while the
-        # conversation ALREADY holds Team Bridge content.
+        # The grant's scope rides the same assignment (team-bridge-egress.md:
+        # "Grants"). ``scope`` defaults to ``session``; only the machine-default
+        # adoptions pass ``global``, and a re-assertion of the band passes
+        # ``keep``. It is provenance only since #3928: the latch treats both
+        # scopes alike, so there is no post-latch stamp to take.
         draft = self._interaction.draft
         if not approve_all:
             draft.approve_global_issued_here = False
@@ -31651,16 +31954,11 @@ class OperatorApp(App[None]):
             scope = "session"
         if scope != "keep":
             draft.approve_scope = scope if scope in ("session", "global") else "session"
-            draft.approve_granted_while_latched = bool(
-                approve_all
-                and draft.approve_scope == "session"
-                and self._source_bridge_latched(self._interaction)
-            )
         if self._status is not None:
-            # The band reports the EFFECTIVE mode: a suspended pre-latch
-            # session auto asks, so the band must not claim auto.
+            # The band reports the mode, which IS the effect: since #3928 the
+            # Team Bridge latch suspends no grant, so there is no fold here.
             self._status.update(
-                approvals_auto=approve_all and not self._draft_grant_suspended(self._interaction),
+                approvals_auto=approve_all,
                 approvals_always=self._approvals_default_auto,
             )
 
@@ -32032,10 +32330,10 @@ class OperatorApp(App[None]):
         return remedy
 
     @staticmethod
-    def _uninstalled_anchor_clause() -> str:
-        """The missing-anchor remedy, or ``""`` when this host has an anchor.
+    def _uninstalled_anchor_report(live: str, saved: str) -> str | None:
+        """The whole report line for a host with no usable anchor, else ``None``.
 
-        The mirror of ``ServingSessionHandle._uninstalled_anchor_clause``, in the
+        The mirror of ``ServingSessionHandle._uninstalled_anchor_report``, in the
         same words, for the reason the two reports are written to match: one
         reader must not meet two rules. It replaces the deleted "retire and reopen
         the session here" clause with the state that made that clause look
@@ -32045,12 +32343,23 @@ class OperatorApp(App[None]):
         from local_operator.operator import operator_authority_unusable
 
         if not operator_authority_unusable():
-            return ""
-        return (
-            "; but operator authority is not installed on this machine yet: neither can run "
-            "until it is set up here — ask Local Operator to set up operator authority for "
-            "you (one approval and one admin password prompt)"
-        )
+            return None
+        # U17 (design v2 A2): the remedy names where a person turns approvals on —
+        # Settings → Phone access in the desktop app, `/mobile approvals on` in the
+        # terminal app — instead of "ask Local Operator to set up operator
+        # authority", which sent a non-technical user to a terminal-only verb.
+        #
+        # THE WHOLE LINE IS ONE KEY (design round 1 on #3950, D2/D3). It used to be
+        # a keyed clause appended to the English report, so every other locale got
+        # a sentence that switched language halfway. Only this state's line is
+        # keyed; its only caller reaches it with the session asking (`live` is
+        # "ask"), which is why the effect words are part of the message. ONE key for
+        # both mirrors so they cannot drift apart.
+        from local_operator.i18n.keys import wire_operator_setup as _ws
+        from local_operator.i18n.text import tr
+
+        report = _ws.tui_approvals_report_not_set_up(live=live, saved=saved)
+        return tr("wire.operator_setup")(report)
 
     def _configured_approvals_mode(self) -> str | None:
         """``tool_approval_mode`` as the WATCHER last read it, or ``None``.
@@ -32219,15 +32528,6 @@ class OperatorApp(App[None]):
         self._explicit_approvals_mode = override
         if not attached and first_adoption:
             self._set_approve_all(override == "auto")
-            # The record's latch stamp, absent = False (team-bridge-egress.md: "Grants"): a
-            # pre-latch record is void once the conversation latches.
-            from local_operator.session.approval_policy import (
-                read_granted_while_latched,
-            )
-
-            source.draft.approve_granted_while_latched = (
-                override == "auto" and read_granted_while_latched(directory)
-            )
 
     def _persist_approval_override(self, source: SessionInteraction, mode: str | None) -> str:
         """Record (or clear) this conversation's choice; ``""`` on success.
@@ -32245,13 +32545,7 @@ class OperatorApp(App[None]):
         try:
             from local_operator.session.approval_policy import write_override
 
-            write_override(
-                directory,
-                mode,
-                # Stamped when chosen while the conversation already holds Team
-                # Bridge content, so a resume keeps that deliberate grant.
-                granted_while_latched=mode == "auto" and self._source_bridge_latched(source),
-            )
+            write_override(directory, mode)
         except Exception as error:  # noqa: BLE001 — surfaced in the receipt, never fatal
             logger.warning("could not save the approval override", exc_info=True)
             return error.__class__.__name__
@@ -33294,11 +33588,15 @@ class OperatorApp(App[None]):
             # the budgets; this method only forwards what it produced.
             #
             # INLINE, NOT IN A WORKER, and that is measured rather than
-            # assumed: `compose` reads a bounded transcript tail, and over a
-            # 42 MB transcript it runs in 0.19 ms median / 0.31 ms worst of 20
-            # runs on the maintainer's machine. That is two orders of magnitude
-            # under a frame, so posting it to a thread would buy nothing and
-            # cost the turn-end toast a scheduling hop.
+            # assumed: `compose` reads a bounded transcript tail and credential-
+            # scrubs only the head a banner can show plus a 4 KiB margin
+            # (`compose._scrubbed_snippet`). Measured 2026-11-15 with timeit,
+            # 20 runs, on a last reply of technical prose: 8.5 ms median /
+            # 14.6 ms worst at 30 k chars, 6.5 ms / 12.4 ms at 60 k. Scrubbing
+            # the whole reply instead cost 88 ms / 222 ms and 189 ms / 429 ms
+            # (PR #3990 review r3, N-3) — the reason the scrub is bounded rather
+            # than moved to a thread: well under a frame now, and a thread hop
+            # would only delay the turn-end toast.
             composed = self._composed_notification(kind, label)
             body = composed.body if composed is not None else ""
             if kind == "complete":
@@ -37501,6 +37799,74 @@ class OperatorApp(App[None]):
                     drop_checking()
                     self._system_notice(refusal, "warning")
                     return
+                # THE WORKING-SET GATE, BEFORE THE LEAVE (docs/design/move-working-
+                # set.md §11.3): a conversation that worked in git worktrees needs
+                # the user's explicit approval, so the preflight runs while the
+                # check row is still up and a non-empty manifest pushes the card.
+                # Cancelled → nothing left, nothing moved. A failed preflight is
+                # not a stop — the move is asked next and the owner's gate refuses
+                # an unconfirmed working set by itself — EXCEPT a stale relay
+                # (``relay_restart_required``, below), which cannot run the gate.
+                # ``--keep`` is not gated (the source keeps everything); its
+                # receipt says what it lacks.
+                confirm_digest = ""
+                without_working_set = bool(request.without_working_set)
+                if without_working_set:
+                    # NO PREFLIGHT ON THIS PATH, SO ASK THE RELAY DIRECTLY (review
+                    # M1, round 3): ``request_move`` refuses a stale relay for
+                    # ``--without-working-set`` too, and without this check that
+                    # refusal arrived only after the user had been moved off the
+                    # conversation. Same sentence, same stop-before-the-leave as R9.
+                    # NOT GATED ON ``--keep`` (review m1, round 4): a kept copy of the
+                    # current conversation still leaves it first, and the CLI still
+                    # sends the flag, so the stale relay refuses that form too.
+                    stale = await asyncio.to_thread(stale_relay_message)
+                    if stale:
+                        drop_checking()
+                        self._system_notice(stale, "warning")
+                        return
+                if not request.keep and not without_working_set:
+                    preflight = await asyncio.to_thread(
+                        run_session_move_preflight, target_id, request.to
+                    )
+                    block = preflight.get("working_set")
+                    # EXCEPT A PLAIN RECALL (review M1, round 9): ``request_move``
+                    # refuses only its dry run — the stale relay would run that as a
+                    # real recall — and forwards the plain recall, which the remote
+                    # owner gates on its own (``working_set_unsupported`` for anything
+                    # to carry). Stopping here would refuse a chat-only recall that
+                    # moved before the gate existed. A queued recall is still refused
+                    # by ``request_move``, so it stops here as before.
+                    plain_recall = request.to == "local" and not request.queue
+                    if preflight.get("code") == "relay_restart_required" and not plain_recall:
+                        # A STALE RELAY IS A STOP, NOT A FALL-THROUGH (review R9): it
+                        # cannot run the gate, and ``request_move`` refuses the move
+                        # itself for the same reason — so stop BEFORE the leave, with
+                        # the refusal's own "restart the relay" remedy, rather than
+                        # detach the user and only then report it.
+                        drop_checking()
+                        self._system_notice(str(preflight.get("message") or ""), "warning")
+                        return
+                    if (
+                        preflight.get("ok")
+                        and preflight.get("confirmation_required")
+                        and isinstance(block, dict)
+                    ):
+                        drop_checking()
+                        decision = await self.push_screen_wait(
+                            MoveWorkingSetConfirmScreen(
+                                block, session_id=target_id, device=request.to
+                            )
+                        )
+                        if decision == "without":
+                            without_working_set = True
+                        elif decision == "confirm":
+                            confirm_digest = str(block.get("scope_digest") or "")
+                        else:
+                            # A deliberate Cancel is not a failure (review D7): a
+                            # neutral note, never the CLI's "not confirmed" refusal.
+                            self._system_notice(_wsc_render(_wsc_keys.cancelled()), "note")
+                            return
                 # WITHDRAWN BEFORE THE LEAVE: the check row belongs to the
                 # transcript the leave is about to replace (U1), so leaving it
                 # mounted would paint "checking …" into a session that is gone.
@@ -37525,12 +37891,30 @@ class OperatorApp(App[None]):
                     keep=request.keep,
                     queue=request.queue,
                     drop_session_roles=request.drop_session_roles,
+                    confirm_working_set=confirm_digest,
+                    without_working_set=without_working_set,
                 )
             finally:
                 self._move_in_flight = False
             self._publish_move_result(
                 target_id, request, result, phase_notice, left=leaving, home=home_label
             )
+            # WHAT THE MOVE DID NOT CARRY, stated on the receipt (design §11.2): a
+            # confirmed move in this build leaves the worktrees on the source, and a
+            # keep copy arrives without them. Rendered from the owner's block.
+            block = result.get("working_set") if isinstance(result, dict) else None
+            if isinstance(block, dict) and result.get("ok"):
+                from local_operator.network import workset_text
+
+                source = result.get("from_device") or {}
+                lines = workset_text.receipt_lines(
+                    block,
+                    source=str(source.get("name") or source.get("device_id") or ""),
+                )
+                if lines:
+                    # ONE notice: the headline and its indented rows (QA Q-2) read as
+                    # one receipt, not a stack of separate warnings.
+                    self._system_notice("\n".join(lines), "warning")
 
         self.run_worker(run(), thread=False, group="session-move", exit_on_error=False)
 
@@ -38935,7 +39319,12 @@ class OperatorApp(App[None]):
         """
         from local_operator.tunnels import state
 
-        notice = state.nag()
+        # The inactive-tunnel causes never park (they clear from outside this
+        # machine), so the park file alone left the card unreachable for them
+        # (#3945 round 1, D4). A current retrying exit for one of them raises the
+        # same card: a bounded local tail read in `state`, never the network and
+        # nothing heavy imported onto this loop.
+        notice = state.nag() or state.retrying_notice()
         reason = str(notice.get("reason") or "") if notice else ""
         self._assert_tunnel_band(bool(reason))
         if not reason:
@@ -40684,6 +41073,84 @@ class OperatorApp(App[None]):
         self._close_library_view()
         self._cmd_librarian("open", self._system_notice)
 
+    # -- the community page (``/community``, ``/orgs``; dark) ----------------
+
+    def _cmd_community(self, command: str, arg: str) -> None:
+        """``/community [browse|settings|join]`` opens the page; ``/orgs`` the switcher.
+
+        The switcher opens AS the page's overlay so it has the page's org
+        data and keys; ``esc`` from it closes the whole page when ``/orgs``
+        was the reason it opened (TUI frames, "Org switching is not leaving").
+        """
+        word = arg.strip().lower()
+        if command == "/orgs":
+            mode = "orgs"
+        else:
+            mode = {"browse": "browse", "settings": "settings", "join": "join"}.get(word, "page")
+        if self._community_view is not None:
+            self._community_view.open_mode(mode)
+            return
+        self._open_community_view(mode)
+
+    def _open_community_view(self, mode: str = "page") -> None:
+        """Enter the full-page community mode: the notifications page's contract."""
+        from local_operator.paths import config_dir as _config_dir
+        from local_operator.tui.community_backend import LiveCommunityBackend
+        from local_operator.tui.widgets.community_view import CommunityView
+
+        self._close_file_viewer()
+        self._close_notifications_view()
+        self._close_agent_form()
+        self._close_team_form()
+        self._close_settings_view()
+        self._community_focus_restore = self.focused
+        view = CommunityView(LiveCommunityBackend(_config_dir()), mode=mode)
+        self._community_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_community_view(self) -> bool:
+        """Leave the community mode and restore the conversation. True if open."""
+        view = self._community_view
+        if view is None:
+            return False
+        self._community_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._community_focus_restore
+        self._community_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_community_view_dismissed(self, message: Any) -> None:
+        message.stop()
+        self._close_community_view()
+
+    def on_community_org_selected(self, message: Any) -> None:
+        """A private org was picked: record-only; the bridge's private flow is unchanged."""
+        message.stop()
+        self._close_community_view()
+        from local_operator.i18n.keys import tui_community as _ck
+        from local_operator.tui.i18n_status import display_tr as _dtr
+
+        self._system_notice(_dtr("tui.community")(_ck.orgs_switched(name=message.name)), "info")
+
     # -- the notifications page (``/notifications``) -----------------------
 
     def _cmd_notifications_page(self, arg: str, notice: NoticeFn) -> None:
@@ -40943,7 +41410,7 @@ class OperatorApp(App[None]):
         self._open_settings_view()
 
     def action_command_palette(self) -> None:
-        """Open the app's command palette (``ctrl+p``).
+        """Open the app's command palette (``ctrl+p`` by default).
 
         Overrides Textual's action of the same name for one reason: the
         framework pushes a bare ``CommandPalette``, whose placeholder and
@@ -40952,9 +41419,11 @@ class OperatorApp(App[None]):
         catalogue; every other behaviour (keys, list, selection, dismissal) is
         inherited unchanged.
 
-        The binding itself is Textual's ``COMMAND_PALETTE_BINDING`` (``ctrl+p``
-        on 8.2.8), injected at runtime — see ``docs/design/keymap.md`` §E.4
-        clause 5 for why an app binding cannot claim that key.
+        The binding is the app's OWN `keymap.command_palette` row (`ctrl+p`
+        shipped). Declaring that action in ``BINDINGS`` is what suppresses
+        Textual's injected `COMMAND_PALETTE_BINDING` binding — the injection
+        runs only while no binding carries the action — so the key is now
+        remappable; see ``docs/design/keymap.md`` §L.
         """
         if self.use_command_palette and not palette_is_open(self):
             self.push_screen(OperatorCommandPalette(id="--command-palette"))
@@ -41138,7 +41607,7 @@ class OperatorApp(App[None]):
         view.load(
             teams=self._settings_team_rows(),
             agents=self._settings_agent_rows(),
-            providers=self._settings_provider_rows(),
+            provider_states=self._settings_provider_rows(),
             provider_catalogue=self._settings_provider_catalogue(),
             model_catalogue=self._settings_model_catalogue(),
         )
@@ -41191,36 +41660,41 @@ class OperatorApp(App[None]):
             logger.debug("settings: team rows unavailable", exc_info=True)
         return rows
 
-    def _settings_agent_rows(self) -> list[tuple[str, str, str]]:
+    def _settings_agent_rows(self) -> list[tuple[str, AgentFacts, str]]:
         """Agents as ``(display, facts, summary)`` for the settings pane.
 
-        The SAME shape ``_settings_team_rows`` returns, so the pane renders
-        both listings through one row renderer rather than carrying a second
-        layout for a second registry. The display form is UNBOUNDED here
+        Keep stable agent facts in this in-process snapshot: settings resolves
+        labels at paint time on language switches, without registry I/O. Teams
+        retain their legacy string adapter and the shared row layout.
+        The display form is UNBOUNDED here
         (mirroring the team pane): the pane truncates cells itself and the
         composed form is what a reader compares against the picker. Never
         raises: a broken registry renders as an empty list, and a settings
         page that crashed on a bad row would be unreachable exactly when it is
         needed.
         """
-        rows: list[tuple[str, str, str]] = []
+        from local_operator.agent_profiles import agent_listing_facts
+
+        rows: list[tuple[str, AgentFacts, str]] = []
         try:
-            for name, label, facts, summary in self._agent_profile_rows():
+            session = self._session
+            registry = getattr(session, "agent_registry", None) if session is not None else None
+            for name, label, facts, summary in agent_listing_facts(registry):
                 rows.append((self._agent_display_form(name, label), facts, summary))
         except Exception:  # noqa: BLE001 — a bad registry must not break the page
             logger.debug("settings: agent rows unavailable", exc_info=True)
         return rows
 
-    def _settings_provider_rows(self) -> list[tuple[str, str]]:
-        """Logged-in providers as ``(id, state)`` for the settings pane.
+    def _settings_provider_rows(self) -> list[ProviderStateRow]:
+        """Logged-in providers as immutable coded rows for the settings pane.
 
         The states come from the controller's ONE view (``view_rows``, through
-        :data:`_VIEW_STATE_COPY`) rather than a locally-invented vocabulary, so
+        the presentation resolver) rather than a locally-invented vocabulary, so
         this pane, ``/provider``, the ``/login`` picker and the desktop's census
         keep describing one situation with one set of words — the drift this
         surface already records having had.
         """
-        rows: list[tuple[str, str]] = []
+        rows: list[ProviderStateRow] = []
         providers = self._providers
         if providers is None:
             return rows
@@ -41234,7 +41708,7 @@ class OperatorApp(App[None]):
                     # the narrower "who am I logged in as", which is the half
                     # that bears on which default model will work.
                     continue
-                rows.append((definition.id, _VIEW_STATE_COPY[row.state]))
+                rows.append(ProviderStateRow(definition.id, row.state))
         except Exception:  # noqa: BLE001 — never crash the page on a store read
             logger.debug("settings: provider rows unavailable", exc_info=True)
         return rows
@@ -43772,6 +44246,13 @@ class OperatorApp(App[None]):
                 # `display` flags and the repaint are owed — the segments
                 # re-read themselves on it.
                 self._apply_composer_settings()
+            if "display.transcript_display" in changed:
+                # The /settings row's and `/transcript`'s live half, silent like
+                # the other local applies: both surfaces already showed their
+                # own result. NOT folded into the composer arm above — the
+                # transcript mode is not a band widget and must also apply from
+                # the disk branch below.
+                self._apply_transcript_display()
             if "language" in changed:
                 # The /settings row's live half. Silent, like the other local
                 # applies: the page (or the /language command, whose echo this
@@ -43944,6 +44425,11 @@ class OperatorApp(App[None]):
             self._apply_sidebar_settings()
         if "display.dock" in changed:
             self._apply_dock_density()
+        if "display.transcript_display" in changed:
+            # After the `settings_reload` above, deliberately: the mode is read
+            # through `tui.settings`, whose cache that reload just dropped, so
+            # applying before it would hand the view the PREVIOUS mode.
+            self._apply_transcript_display()
         if any(key.startswith(_keymap.KEYMAP_PREFIX) for key in changed):
             # The other half of the pair above: a write from ANOTHER pane or
             # from `lop config edit`. Announces, because this user did not act
@@ -44246,7 +44732,9 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a note is never worth a broken prompt
             logger.debug("the parked approval card could not be annotated", exc_info=True)
 
-    def _system_notice(self, body: str, kind: NoticeKind = "info") -> None:
+    def _system_notice(
+        self, body: str, kind: NoticeKind = "info", *, wrap_atoms: tuple[str, ...] = ()
+    ) -> None:
         """A notice about the HARNESS that leaves the empty state intact.
 
         Separate from :meth:`_notice` because the two answer different questions.
@@ -44262,10 +44750,15 @@ class OperatorApp(App[None]):
         (``NoticeFn``); a caller that must keep the block calls
         :meth:`_system_notice_block` instead.
         """
-        self._system_notice_block(body, kind)
+        self._system_notice_block(body, kind, wrap_atoms=wrap_atoms)
 
     def _system_notice_block(
-        self, body: str, kind: NoticeKind = "info", *, fold_width: int = 0
+        self,
+        body: str,
+        kind: NoticeKind = "info",
+        *,
+        fold_width: int = 0,
+        wrap_atoms: tuple[str, ...] = (),
     ) -> NoticeBlock:
         """The same notice, handing back the block it created.
 
@@ -44286,7 +44779,7 @@ class OperatorApp(App[None]):
         1, Q1 measured it on the real fixture: nine rows at ``[2,1,2,2,1,1,1,2,2]``
         with ``gap-above`` on all of them, then all 1 row with one gap.
         """
-        block = NoticeBlock(body, kind, fold_width=fold_width)
+        block = NoticeBlock(body, kind, fold_width=fold_width, wrap_atoms=wrap_atoms)
         # While the boot CARD is up the notice is part of a centred composition;
         # below the card threshold the input is a full-width bar and the spine is
         # the axis everything shares. `_append_block` recomputes the boot layout
@@ -45105,6 +45598,13 @@ class OperatorApp(App[None]):
         prompt_arg = expand_pastes(arg, attachments) if attachments else arg
         notice = self._notice
 
+        if command in _COMMUNITY_SLASHES and _community_enabled():
+            # Frontend-LOCAL, like `/notifications`: the page reads this
+            # machine's community client, and the page is the receipt. Never
+            # routed to an owner (an older owner has no such command).
+            self._cmd_community(command, arg)
+            return
+
         # Authoring is a frontend-owned page, never a slash sent to an owner
         # on another device. Refuse here before its capability table can route
         # these two words as attach requests (or an older class subcommand).
@@ -45479,6 +45979,8 @@ class OperatorApp(App[None]):
             self._cmd_theme(arg, notice)
         elif command == "/language":
             self._cmd_language(arg, notice)
+        elif command == "/transcript":
+            self._cmd_transcript(arg, notice)
         elif command == "/provider":
             self._cmd_providers(notice)
         elif command == "/sidebar":
@@ -47574,7 +48076,7 @@ class OperatorApp(App[None]):
         self._run_session_transition(self._boot_after_setup())
 
     def _footer_persist_hint(self) -> str:
-        """``PERSIST_HINT`` for the picker footer, or "" where it cannot be run.
+        """The persistence clause HANDLE for the picker footer, or "" where it cannot run.
 
         The footer's half of U12. The notice above the list stops naming
         `/model default` in the no-hosting and unknown-hosting setup variants
@@ -47595,12 +48097,29 @@ class OperatorApp(App[None]):
         whose launches it should govern" refusal. That case is pre-existing and
         outside #641's scope — recorded here rather than fixed so the next
         reader does not take the coupling for wider than it is.
+
+        THE RETURN VALUE IS A MARKER, NOT THE SENTENCE. The clause is copy with
+        an audited key in every shipped locale (``tui.model_persistence.persist``),
+        and this method's string is only ever handed to
+        ``ModelPicker.set_rows(status=…)``, whose consumer is the WIDGET's paint.
+        The app composes the status when it populates the list; the footer is
+        repainted later on events the app never sees (a resize, a scroll, a
+        keystroke, a locale move), so an English sentence baked in here kept
+        painting English after a language switch — the last authored-English
+        surface behind a localized interface. The marker defers the resolution to
+        that paint, in the active locale; see ``model_picker.PERSIST_CLAUSE_MARKER``.
+
+        ``PERSIST_HINT`` is untouched and still the ENGLISH adapter for the legacy
+        CLI/help/receipt consumers (the catalogue's own note names them), and
+        ``PERSIST_HINT_PREFIX`` still recognises a string that carries it. Neither
+        is fed to, nor fed by, this marker: the prefix parser never sees the
+        marker or a translated clause.
         """
         if self._setup_state and not self._model_missing_for:
             return ""
-        return PERSIST_HINT
+        return PERSIST_CLAUSE_MARKER
 
-    def _persist_hint_notice(self) -> str:
+    def _persist_hint_notice(self, *, label: str | None = None) -> str:
         """The line a bare ``/model`` prints above the list.
 
         It says the one thing the picker cannot: that a pick is session-scoped
@@ -47619,6 +48138,17 @@ class OperatorApp(App[None]):
         names is one the user has to already know), and that the default is
         also editable on the settings page, which is the discoverable route for
         a user who did not arrive with a command in mind.
+
+        THAT PARAGRAPH IS NOW HISTORY, AND STILL THE RIGHT REASON (the footer
+        localization slice). The picker footer no longer prints ``PERSIST_HINT``:
+        it prints ``tui.model_persistence.persist``, resolved at paint time from
+        the marker ``model_picker.PERSIST_CLAUSE_MARKER``, and in several shipped
+        locales that clause is LONGER than the English one. So the 43-cell
+        arithmetic below describes the English adapter this notice used to
+        duplicate, not today's footer row — and the conclusion stands unweakened:
+        the footer is a fixed-width row that truncates, the notice is the surface
+        that wraps, so the pair belongs here. ``PERSIST_HINT`` itself is unchanged
+        for the legacy CLI/help/receipt consumers.
 
         The measurement above is about the NOTICE's own last row and about
         command names spanning a fold — nothing stronger (QA round 1, Q1). An
@@ -47731,11 +48261,16 @@ class OperatorApp(App[None]):
         the primary next step it always was. Pinned by
         `test_the_model_notice_in_dead_end_setup_variants_names_only_settings`.
         """
-        session = self._session
-        label = session.model_label if session is not None else ""
-        # Named once: it is the one clause every variant below shares, and the
-        # wrap analysis above measured this exact string.
-        settings_clause = "/settings edits the boot default too"
+        if label is None:
+            session = self._session
+            label = session.model_label if session is not None else ""
+        # Resolve only this new opening, never historical transcript content.
+        # One locale snapshot keeps the clauses and their carrier consistent;
+        # the next opening follows a live language change without translating
+        # import-time PERSIST_HINT, which legacy CLI/footer parsers still own.
+        locale = active_locale()
+        settings_clause = _model_persistence_keys.settings().envelope(locale=locale)["text"]
+        persist_clause = _model_persistence_keys.persist().envelope(locale=locale)["text"]
         # `/model saved` sits at its clause's END, which is what removes the
         # split: as the clause's FIRST word it sat one word from the `·` seam
         # and broke across the fold at 4 of the 27 rendered label x width
@@ -47753,18 +48288,23 @@ class OperatorApp(App[None]):
         # naming an occasion to use it (UX review round 2, U6), and it measures
         # better on both width families, not worse: pristine C3 3 -> 2 and
         # non-empty C2 5 -> 3, with C1 and pristine C2 still 0.
-        saved_clause = "switch to the boot default with /model saved"
+        saved_clause = _model_persistence_keys.saved().envelope(locale=locale)["text"]
         if self._setup_state and not self._model_missing_for:
             # No hosting / unknown hosting: every `/model` route refuses here,
             # so the notice must not name one. `/settings` is the live escape.
             routes = settings_clause
         elif self._setup_state:
-            routes = f"{PERSIST_HINT} · {settings_clause}"
+            routes = f"{persist_clause} · {settings_clause}"
         else:
-            routes = f"{PERSIST_HINT} · {saved_clause} · {settings_clause}"
+            routes = f"{persist_clause} · {saved_clause} · {settings_clause}"
         if not label:
             return routes
-        return f"model: {label} — {routes}"
+        # The model label is an opaque machine identifier, not markup or copy.
+        # Keep it unchanged inside the existing plain-text notice envelope;
+        # dedup still compares rendered text and skips the pinned working tail.
+        return _model_persistence_keys.with_model(label=label, routes=routes).envelope(
+            locale=locale
+        )["text"]
 
     # -- reasoning effort ---------------------------------------------------
     def _effort_levels(self) -> tuple[str, ...]:
@@ -48174,7 +48714,8 @@ class OperatorApp(App[None]):
         rendered = " ".join(
             f"{self.EFFORT_MARK}{name}" if name == marked else name for name in rungs
         )
-        return f"reasoning effort: {rendered} — shift+tab cycles, this conversation"
+        cycle_key = _keymap.painted_key("keymap.cycle_effort", self._keymap)
+        return f"reasoning effort: {rendered} — {cycle_key} cycles, this conversation"
 
     def _cmd_effort(self, arg: str, notice: NoticeFn) -> None:
         """``/effort`` — list this model's levels; ``/effort <level>`` — set one.
@@ -48518,6 +49059,68 @@ class OperatorApp(App[None]):
         # Composed AFTER the switch, so the receipt itself is in the new language.
         notice(_lang_t(_lang_keys.saved(key=key, tag=active, name=language_native_name(active))))
 
+    def _cmd_transcript(self, arg: str, notice: NoticeFn) -> None:
+        """``/transcript`` — show the layout mode; ``/transcript <mode>`` — set it.
+
+        The command is the DISCOVERABLE half of the ``display.transcript_display``
+        setting; the ``/settings`` row (Appearance) is the other, and both write
+        the same config key through ``settings_io.write_setting`` — one truth, so
+        the row, this command and the transcript layer cannot disagree. A switch
+        PERSISTS and applies live: ``_apply_transcript_display`` runs here for
+        the no-watcher case (a headless test, a CLI-hosted app) and again from
+        ``_on_config_change``'s local branch, where being handed the same value
+        twice is a no-op.
+
+        The receipt names the mode's LABEL ("By response"), never the stored
+        token: the label is the words the settings row paints, so the two
+        surfaces spell a mode the same way in every language. A value outside
+        the enum gets the two accepted tokens rather than a traceback, the same
+        shape ``/language`` uses for an unknown tag.
+        """
+        from local_operator import settings_io
+        from local_operator.i18n.keys import tui_transcript_display as display_copy
+        from local_operator.i18n.keys import (
+            wire_settings_transcript_display as setting_copy,
+        )
+        from local_operator.tui.settings import (
+            TRANSCRIPT_DISPLAY_MODES,
+            transcript_display_mode,
+        )
+
+        say = tr("tui.transcript_display")
+        # The setting's own child namespace, not its parent: a `tr` resolver
+        # reads ONE catalogue file, so `tr("wire.settings")` would not see a
+        # key that lives in `wire.settings.transcript_display`.
+        describe_mode = tr("wire.settings.transcript_display")
+        labels = {
+            "by-turn": describe_mode(setting_copy.choice_by_turn_label()),
+            "by-response": describe_mode(setting_copy.choice_by_response_label()),
+        }
+        wanted = arg.strip().casefold()
+        if not wanted:
+            notice(say(display_copy.usage(mode=str(labels[transcript_display_mode()]))))
+            return
+        if wanted not in TRANSCRIPT_DISPLAY_MODES:
+            notice(
+                say(display_copy.unknown(echo=_quoted_echo_within_cells(arg.strip()))),
+                "warning",
+            )
+            return
+        setting = settings_io.resolve_key("display.transcript_display")
+        if setting is None:  # pragma: no cover - the registry owns the key
+            notice(say(display_copy.save_failed(reason="unregistered key")), "warning")
+            return
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            settings_io.write_setting(ConfigManager(config_dir()), setting, wanted)
+        except Exception as error:  # noqa: BLE001 - reported to the user verbatim
+            notice(say(display_copy.save_failed(reason=str(error))), "warning")
+            return
+        self._apply_transcript_display()
+        notice(say(display_copy.set(mode=str(labels[wanted]))))
+
     def _apply_language(self, locale: str) -> None:
         """Point every rendering surface at ``locale``, live (slice C).
 
@@ -48542,16 +49145,17 @@ class OperatorApp(App[None]):
         # The composer's PAINTED placeholder is a property on the widget, not a
         # render-time lookup, so a locale move leaves it in the old language. It
         # is a SHARED channel (bang-mode, the aside, read-only, the credential
-        # prompt and the setup cue all write it), so only a composer still
-        # showing the RESTING invitation is repainted: comparing against the
-        # pre-switch resting text keeps another mode's placeholder untouched.
+        # prompt and the setup cue all write it). Repaint the read-only hint as
+        # well as the RESTING invitation: its keyed prose must follow a locale
+        # move even while the page owns focus. Other modes retain their copy;
+        # comparing the resting text avoids overwriting a credential prompt.
         try:
             composer = self.query_one(Editor)
         except Exception:  # noqa: BLE001 — not mounted yet (boot, teardown)
             composer = None
         resting_before = composer.resting_placeholder if composer is not None else ""
         i18n_text.set_active_locale(locale)
-        if composer is not None and composer.placeholder == resting_before:
+        if composer is not None and (composer.read_only or composer.placeholder == resting_before):
             composer.placeholder = self._composer_placeholder_for(composer)
         # The slash registry re-materialises its own descriptions in place (its
         # ``register_refresh`` hook), which reaches ``/help`` because that block
@@ -48562,6 +49166,18 @@ class OperatorApp(App[None]):
         # call, so the rows on screen repaint rather than waiting for the next
         # keystroke (QA round 1, Q1). Silent when no editor is mounted.
         self._refresh_offered_commands()
+        # The model picker's FOOTER is painted text too, and its persistence
+        # clause is resolved by the WIDGET at paint time
+        # (``model_picker.PERSIST_CLAUSE_MARKER``) rather than baked into the
+        # status the app hands it — so an open `/model` list has to be repainted
+        # here or it keeps the previous language until an unrelated event
+        # redraws it. `refresh_locale` re-renders only what the widget already
+        # holds: no catalogue read (that is ``_populate_model_picker``, which
+        # also dispatches the live-refresh worker) and no provider request, so a
+        # locale move still costs one paint.
+        picker = composer.model_picker if composer is not None else None
+        if picker is not None and picker.is_open():
+            picker.refresh_locale()
         # Localized transcript furniture is baked into finalized blocks just as
         # theme ink is. Reuse that same rebuild sweep so a locale move repaints
         # mounted rows at their CURRENT width, with no resize or stale cache.
@@ -48589,6 +49205,16 @@ class OperatorApp(App[None]):
         settings_view = self._settings_view
         if settings_view is not None:
             settings_view._repaint()
+        # /info owns painted Statics, not render-time lookups. Repaint the
+        # existing presentation through this shared command/config-watch hook:
+        # re-opening it would lose its snapshot/scroll and re-run costly probes.
+        # Walking the mounted stack also covers an InfoScreen under a modal;
+        # no process-global listener retains a dismissed presentation.
+        from local_operator.tui.widgets.info_panel import InfoScreen
+
+        for screen in self.screen_stack:
+            if isinstance(screen, InfoScreen):
+                screen._repaint()
 
     def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.
@@ -48753,6 +49379,36 @@ class OperatorApp(App[None]):
             for spec in (theme_mod.theme_spec(name) for name in theme_mod.available_themes())
         ]
 
+    def _transcript_choices(self) -> list[ArgumentChoice]:
+        """The two transcript layouts, the one in force marked.
+
+        Sourced from ``tui.settings.TRANSCRIPT_DISPLAY_MODES`` — the same tuple
+        the setting's own choices and the command's validation read — so the
+        list can never offer a token the handler refuses. The description is
+        the settings row's for that mode (one spelling per mode in every
+        language) and ``detail`` carries the current marker only; the value a
+        selection writes is the row's name.
+        """
+        from local_operator.i18n.keys import (
+            wire_settings_transcript_display as setting_copy,
+        )
+        from local_operator.tui.settings import TRANSCRIPT_DISPLAY_MODES
+
+        descriptions = {
+            "by-turn": setting_copy.choice_by_turn_description(),
+            "by-response": setting_copy.choice_by_response_description(),
+        }
+        describe = tr("wire.settings.transcript_display")
+        current = transcript_display_mode()
+        return [
+            ArgumentChoice(
+                mode,
+                str(describe(descriptions[mode])),
+                detail="← current" if mode == current else "",
+            )
+            for mode in TRANSCRIPT_DISPLAY_MODES
+        ]
+
     def on_argument_highlight_changed(self, message: ArgumentHighlightChanged) -> None:
         """Live-preview the highlighted theme; restore when the list closes.
 
@@ -48861,6 +49517,36 @@ class OperatorApp(App[None]):
             logger.debug("display.dock live apply failed", exc_info=True)
             return
         self._refresh_band()
+
+    def _apply_transcript_display(self) -> None:
+        """Hand a changed ``display.transcript_display`` to the transcript view.
+
+        LIVE for the same reason ``display.dock`` is: the `/settings` row, the
+        `/transcript` command and an edit from another process all repaint
+        without a relaunch. The mode is read through ``tui.settings`` (which
+        maps anything unrecognised to the shipped layout) rather than off the
+        change payload, so a hand-edited file and a registry write take the one
+        path. What the mode then DOES is the fold layer's (slice 4); this hook
+        only stops the view holding the previous mode.
+        """
+        try:
+            self._transcript_view().set_display_mode(transcript_display_mode())
+        except Exception:  # noqa: BLE001 — the write landed; the apply is a bonus
+            logger.debug("display.transcript_display live apply failed", exc_info=True)
+
+    def _refresh_tool_fold(self) -> None:
+        """Re-derive the transcript fold after a fact outside the rows moved.
+
+        The one such fact today is the approval gate: the live card stays
+        `running` while the question is open, so the layer reads the session's
+        pending ids — and only a re-derive notices them changing. Called at both
+        edges of ``request_tool_approval``; a failure to reach the view (an
+        unmounted transcript) is not worth failing the gate over.
+        """
+        try:
+            self._transcript_view().invalidate_tool_fold()
+        except Exception:  # noqa: BLE001 — the gate itself is what matters
+            logger.debug("tool fold approval refresh failed", exc_info=True)
 
     def _apply_composer_settings(self) -> None:
         """Apply the ``display.composer.*`` widget-visibility flags.
@@ -49196,6 +49882,50 @@ class OperatorApp(App[None]):
                 "using the default key",
                 "warning",
             )
+        # Widgets that cache paint-once text keep an equality guard, so a
+        # `set_keymap` alone leaves the OLD chord on screen until an unrelated
+        # event repaints them (R1: measured on the dock header, the todo footer
+        # and the ask bar). Each widget owns the cheapest way to forget.
+        self._refresh_keymap_hints()
+
+    def _refresh_keymap_hints(self) -> None:
+        """Repaint every hint that NAMES a hotkey, after a live remap (R1).
+
+        Called from `_apply_keymap` only. The widgets listed here paint text
+        that embeds a chord and some of them guard it with an equality cache
+        (`SubagentPanel._paint_header` keeps `(shown, compact, hint, scope)`;
+        `_paint_summary` a summary key; the todo footer lives in a `Static` and
+        only moves on a rebuild; the ask bar budgets its tail by key width; the
+        sidebar composes its chip per render), so moving the bindings without
+        this is a frame that keeps naming the key the user just replaced.
+
+        Duck-typed on `keymap_hints_changed` rather than a type list: a widget
+        that starts painting a chord opts in by defining the method, and this
+        stays correct as panels come and go. Safe before mount — the band
+        refresh tolerates a session-less app and the query is guarded.
+        """
+        from textual.css.query import NoMatches
+
+        try:
+            widgets = list(self.query("*"))
+        except Exception:  # noqa: BLE001 — not mounted yet (boot, teardown)
+            return
+        for widget in widgets:
+            hook = getattr(widget, "keymap_hints_changed", None)
+            if callable(hook):
+                try:
+                    hook()
+                except NoMatches:
+                    continue
+        # The dock panel's header is rebuilt by the band's own sync pass, so it
+        # runs AFTER every cache was dropped rather than before.
+        self._refresh_band()
+        # The `/` picker holds a COPY of the registry rows (`Editor.set_commands`
+        # is handed a plain list), and a row's description names a hotkey
+        # (`/effort … (shift+tab cycles)`). Without this, boot with a saved
+        # override and every live remap left the picker painting the SHIPPED
+        # chord while `_offered_commands()` returned the live one (Q10).
+        self._refresh_offered_commands()
 
     def action_toggle_todos(self) -> None:
         """``ctrl+t`` — flip the dock todo list between collapsed and expanded.
@@ -49385,24 +50115,37 @@ class OperatorApp(App[None]):
         # projects create form could therefore never see the chord. Delegating
         # the ONE key to the page keeps every other binding — including ctrl+c
         # — exactly where disarming the app's hotkeys would have moved them.
-        if self._team_form is not None:
-            self._team_form.action_previous_field()
-            return
-        if self._agent_form is not None:
-            self._agent_form.action_previous_field()
-            return
-        page = self._projects_view
-        if page is not None and getattr(page, "wants_field_tab", False):
-            page.form_focus_previous()
-            return
-        # The schedule form is the second page that owns a shift+tab meaning.
-        # Without this delegation the app-wide priority handler ran BEFORE the
-        # focused field and changed the conversation's reasoning effort (and its
-        # billable setting) while navigating the form (round-1 UX U1).
-        schedule = self._schedule_view
-        if schedule is not None and getattr(schedule, "wants_field_tab", False):
-            schedule.form_focus_previous()
-            return
+        #
+        # ONLY WHILE THE SHIPPED CHORD IS STILL ONE OF THIS ACTION'S KEYS (R5).
+        # Once `keymap.cycle_effort` is remapped to, say, `f12`, the app no
+        # longer holds `shift+tab` as a priority binding and the forms' own
+        # non-priority `shift+tab` bindings work again — so delegating would
+        # steal the chord the form just regained (and cycle a billable setting
+        # from `f12` while a form is open, which is exactly what the remap
+        # asked for). Alternates count: `f12,shift+tab` keeps the delegation.
+        live_keys = {
+            part.strip()
+            for part in _keymap.painted_key("keymap.cycle_effort", self._keymap).split(",")
+        }
+        if "shift+tab" in live_keys:
+            if self._team_form is not None:
+                self._team_form.action_previous_field()
+                return
+            if self._agent_form is not None:
+                self._agent_form.action_previous_field()
+                return
+            page = self._projects_view
+            if page is not None and getattr(page, "wants_field_tab", False):
+                page.form_focus_previous()
+                return
+            # The schedule form is the second page that owns a shift+tab meaning.
+            # Without this delegation the app-wide priority handler ran BEFORE the
+            # focused field and changed the conversation's reasoning effort (and its
+            # billable setting) while navigating the form (round-1 UX U1).
+            schedule = self._schedule_view
+            if schedule is not None and getattr(schedule, "wants_field_tab", False):
+                schedule.form_focus_previous()
+                return
         if self._session is None:
             # Not "this model has no levels": there is no model yet, and naming
             # the wrong reason is worse than naming none.
@@ -49453,7 +50196,7 @@ class OperatorApp(App[None]):
         message worth reading.
 
         The states are the controller's ONE view (``view_rows``, through
-        :data:`_VIEW_STATE_COPY`), not a fourth vocabulary invented here, so
+        :func:`provider_state_label`), not a fourth vocabulary invented here, so
         `/model`, `/provider`, the settings pane and the `/login` picker keep
         describing one situation with one set of words.
         """
@@ -49473,10 +50216,10 @@ class OperatorApp(App[None]):
         # A provider the registry does not know is ``needs login``: no env var
         # resolves for it and no login flow exists, which is exactly what the
         # old per-provider derivation answered for an unknown id.
-        state = _VIEW_STATE_COPY[row.state] if row is not None else _VIEW_STATE_COPY["needs_login"]
-        if state == "needs login":
+        state_code = row.state if row is not None else "needs_login"
+        if state_code == "needs_login":
             return "", f"{provider} needs login — /login {provider}"
-        return f" · {provider} {state}", None
+        return f" · {provider} {provider_state_label(state_code)}", None
 
     # -- model picker -------------------------------------------------------
     def on_model_query_opened(self, message: ModelQueryOpened) -> None:
@@ -49522,7 +50265,11 @@ class OperatorApp(App[None]):
         must both print.
         """
         message.stop()
-        hint = self._persist_hint_notice()
+        # Snapshot opaque identity once for both text and layout metadata. An ID
+        # may itself contain command-looking text; never parse it out of copy.
+        session = self._session
+        label = session.model_label if session is not None else ""
+        hint = self._persist_hint_notice(label=label)
         transcript = self._transcript_view()
         blocks = transcript.blocks()
         pinned = transcript.pinned_tail()
@@ -49530,7 +50277,9 @@ class OperatorApp(App[None]):
         # mid-turn append actually lands.
         last = next((b for b in reversed(blocks) if b is not pinned), None)
         if not (isinstance(last, NoticeBlock) and last.text() == hint):
-            self._system_notice(hint)
+            self._system_notice(
+                hint, wrap_atoms=(label, "/model default", "/model saved", "/settings")
+            )
         self._populate_model_picker()
 
     def _open_model_picker(self) -> None:
@@ -49628,7 +50377,14 @@ class OperatorApp(App[None]):
         self._editor().model_picker.set_rows(
             rows,
             current=self._current_selector(),
+            # A dead stored sign-in LEADS, ahead of the access note: its rows
+            # are offered as usable yet every turn on them fails, and the clause
+            # carries the only copy of the exact `/login <id>` command. Behind
+            # the access note `_fit_clauses` dropped it whole at 100 columns and
+            # cut the provider id at 150 (QA round 1, Q1); the generic access
+            # note degrades to `N hidden…` instead, which still says rows hid.
             status=_status_line(
+                _reauth_status(statuses),
                 note,
                 _catalogue_status(statuses),
                 self._owner_catalogue_clipped_note(),
@@ -50533,7 +51289,9 @@ class OperatorApp(App[None]):
             group=self._interaction.worker_group("loop"),
         )
 
-    async def _admit_goal_continuation(self, session: Any, text: str, echo: Any) -> None:
+    async def _admit_goal_continuation(
+        self, session: Any, text: str, echo: Any, *, current: Callable[[], bool]
+    ) -> None:
         """Admit ONE judge continuation, deferred until the session can take it.
 
         See :data:`_GOAL_CONTINUATION_ADMISSION_S` for why the wait is here at
@@ -50557,10 +51315,14 @@ class OperatorApp(App[None]):
         """
         from local_operator.session.errors import TurnInFlight
 
-        fields: dict[str, Any] = dict(echo.prompt_kwargs())
+        # Session excludes harness-injected rows from owner authority. Passing
+        # owner_typed=False would also label this local turn as remote human input.
+        fields = echo.prompt_kwargs()
 
         deadline = time.monotonic() + _GOAL_CONTINUATION_ADMISSION_S
         while True:
+            if not current():
+                raise RuntimeError("goal continuation no longer current")
             try:
                 await self._prompt_loop_turn(session, text, **fields)
                 return
@@ -50817,6 +51579,28 @@ class OperatorApp(App[None]):
             return answer or ""
 
         async def prompt(text: str) -> None:
+            from local_operator.harness.types import AgentEndEvent
+            from local_operator.session.errors import FirstTurnFailed
+
+            context = (record.goal_token, record.goal_turn_serial)
+
+            def current() -> bool:
+                return (
+                    self._interactions.get(id(session)) is source
+                    and not source.loop.running
+                    and record.goal_status == "active"
+                    and (record.goal_token, record.goal_turn_serial) == context
+                )
+
+            failure = ""
+
+            def observe(event: Any) -> None:
+                nonlocal failure
+                if isinstance(event, AgentEndEvent) and (event.error or event.aborted):
+                    failure = str(event.error or "goal continuation aborted")
+
+            subscribe = getattr(session, "subscribe", None)
+            unsubscribe = subscribe(observe) if callable(subscribe) else None
             source.turn.operation += 1
             if self._is_current(source) and self._status is not None:
                 self._status.update(streaming=True)
@@ -50830,7 +51614,9 @@ class OperatorApp(App[None]):
                 # `_prompt_loop_turn` — which prefers `prompt_and_wait`, so the
                 # driver AWAITS the terminal outcome and judges the turn it just
                 # admitted instead of correlating an event.
-                await self._admit_goal_continuation(session, text, echo)
+                await self._admit_goal_continuation(session, text, echo, current=current)
+                if failure:
+                    raise FirstTurnFailed(failure)
             except BaseException:
                 # A refused admission (a retiring session) never announces, so
                 # take the echo entry back out — otherwise it would swallow the
@@ -50841,6 +51627,9 @@ class OperatorApp(App[None]):
                 if self._is_current(source):
                     self._retire_turn_band(session)
                 raise
+            finally:
+                if callable(unsubscribe):
+                    unsubscribe()
             if self._is_current(source):
                 self._retire_turn_band(session)
 
@@ -50884,19 +51673,34 @@ class OperatorApp(App[None]):
             # The loop check is a CALLBACK over the interaction's own flag, so a
             # loop that ends re-enables this judge with no bookkeeping.
             loop_running=lambda: source.loop.running,
+            context_available=lambda: self._interactions.get(id(session)) is source,
+            recovery_idle=lambda: not getattr(session, "is_streaming", False),
         )
 
+    def _poll_goal_recovery(self) -> None:
+        for source in list(self._interactions.values()):
+            if source.session is not None:
+                self._rearm_goal_judge_on_boot(source.session)
+
     def _rearm_goal_judge_on_boot(self, session: SessionProtocol) -> None:
-        """Trigger 3 on this host: re-engage a judge that was in flight at close.
-
-        Called once per boot, after adoption, for the reasons stated at the call
-        site. Deferred to a worker rather than awaited: boot must not wait on a
-        provider call, and nothing here is the session's boot outcome.
-        """
-        from local_operator.session.goal_judge import owns_the_session
-
-        source = self._interaction
-        if session is None or not owns_the_session(session) or source.goal.judge_in_flight:
+        """Recover a due local goal when no turn or loop owns the session."""
+        source = self._interactions.get(id(session))
+        if source is None:
+            return
+        if (
+            source.goal.judge_in_flight
+            or source.loop.running
+            or getattr(session, "is_streaming", False)
+            or (lock := getattr(session, "_turn_lock", None)) is not None
+            and lock.locked()
+        ):
+            return
+        # Wake eligibility belongs to the goal's owner, not the attached viewer.
+        record = self._goal_record_for(session)
+        if record is None:
+            return
+        due = getattr(record, "goal_recovery_due", None)
+        if not callable(due) or not due():
             return
         source.goal.judge_in_flight = True
         try:
@@ -51442,7 +52246,7 @@ class OperatorApp(App[None]):
             items: list[tuple[str, str]] = []
             for definition in self._providers.login_providers():
                 # ONE state vocabulary, resolved in ONE place (the controller's
-                # ``view_rows``, rendered through ``_VIEW_STATE_COPY``). This
+                # ``view_rows``, rendered through ``provider_state_label``). This
                 # line, the ``/login`` picker, the settings pane and the
                 # desktop's census answer the same question on four surfaces,
                 # and two of them had already drifted: the picker said "needs
@@ -51962,7 +52766,9 @@ class OperatorApp(App[None]):
         # the listing's bound. Computed once, because both forms paint through it.
         budget = NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1))
         if not clear:
-            self._append_block(NoticeBlock(_notifications_listing(unread, budget), "note"))
+            self._append_block(
+                NoticeBlock(_notifications_listing(unread, budget, keymap=self._keymap), "note")
+            )
             return
         items = [
             (
@@ -51986,7 +52792,10 @@ class OperatorApp(App[None]):
         # command that is already running, and no pointer to rows that are about
         # to stop being unread (UX round 2, U7 / agent review F4).
         self._append_block(
-            NoticeBlock(_notifications_listing(unread, budget, clearing=True), "note")
+            NoticeBlock(
+                _notifications_listing(unread, budget, clearing=True, keymap=self._keymap),
+                "note",
+            )
         )
         try:
             results = await asyncio.to_thread(
@@ -53646,8 +54455,10 @@ class OperatorApp(App[None]):
             # in the same verb they just learned, for the operation this is not
             # — left them with no route to the thing they actually wanted.
             self._system_notice(
-                "ctrl+f folds an open aside into the chat (F8 opens one) — "
-                "to branch this conversation, use /fork",
+                f"{_keymap.painted_key('keymap.fork_aside', self._keymap)} folds an"
+                " open aside into the chat"
+                f" ({_keymap.painted_key('keymap.aside', self._keymap)} opens one)"
+                " — to branch this conversation, use /fork",
                 "warning",
             )
             return
@@ -54283,6 +55094,13 @@ class OperatorApp(App[None]):
             picker.set_choices(self._language_choices(), highlight=self._language_current())
             picker.set_notice("")
             return
+        if message.command == "transcript":
+            # Opens on the mode in force, the same landing `/language` gives a
+            # browse: two rows, the current one marked, so the list answers
+            # "what am I on" as well as "what may I pick".
+            picker.set_choices(self._transcript_choices(), highlight=transcript_display_mode())
+            picker.set_notice("")
+            return
         if message.command in ("credential", "cred"):
             # Both suppression reasons are read here, and the notice follows
             # whichever applies. ARMED wins the notice when both are true (a
@@ -54900,13 +55718,13 @@ class OperatorApp(App[None]):
         """
         if row is None:
             return ""
-        return getattr(row, "state_detail", None) or _VIEW_STATE_COPY[row.state]
+        return getattr(row, "state_detail", None) or provider_state_label(row.state)
 
     def _login_choices(self) -> list[ArgumentChoice]:
         """Every loginable provider, with where the user stands on each.
 
         The states come from the controller's ONE view (``view_rows``) through
-        :data:`_VIEW_STATE_COPY`, so this list, ``/provider``, the settings pane
+        :func:`provider_state_label`, so this list, ``/provider``, the settings pane
         and the desktop's census render one fact from one derivation — the
         picker and ``/provider`` had drifted before ("needs login" against "—").
 
@@ -55185,7 +56003,7 @@ class OperatorApp(App[None]):
             AIDA_NO_PROVIDER_CUE, "warning", headline=f"{name} — connect a provider"
         )
 
-    async def _route_first_run_boot(self) -> None:
+    async def _route_first_run_boot(self) -> bool:
         """Open her conversation on a fresh install's first ATTENDED boot.
 
         Cheap in the steady state: one ledger read answers "settled" and
@@ -55218,7 +56036,7 @@ class OperatorApp(App[None]):
 
             root = config_dir()
             if onboarding.greeting_settled(root):
-                return
+                return False
             # `fresh_install`, not `first_run_pending`: the latter is exactly
             # "not settled AND fresh", and the ledger half was answered on the
             # line above, so calling it here only re-read the same file.
@@ -55227,11 +56045,14 @@ class OperatorApp(App[None]):
             # routes, and `cadence_allowed` reads the ledger itself.
             if not await asyncio.to_thread(onboarding.fresh_install, root):
                 await asyncio.to_thread(onboarding.cadence_allowed, root)
-                return
+                return False
         except Exception:  # noqa: BLE001 — a predicate, never a boot dependency
             logger.warning("aida: first-run boot predicate failed", exc_info=True)
-            return
-        await self._open_aida_first_run(self._notice)
+            return False
+        # True only when it rebound `_session_factory` to her conversation:
+        # `_boot_session` snapshots the factory before awaiting this, and the
+        # return value is how it tells this route's rebind from a `/resume`'s.
+        return await self._open_aida_first_run(self._notice)
 
     async def _open_aida_first_run(self, notice: NoticeFn) -> bool:
         """R26: on a fresh install, bind the post-setup rebuild to her session.
@@ -55601,6 +56422,14 @@ class OperatorApp(App[None]):
 
         mobile_text = tr("mobile.setup")
 
+        # `/mobile approvals on` is its own verb, not a tunnel action: it installs
+        # operator authority so this computer's phones can approve (design v2 §6).
+        # Dispatched before the tunnel grammar so that grammar stays untouched.
+        words = arg.split()
+        if words and words[0].casefold() == "approvals":
+            self._mobile_approvals(words[1:], notice)
+            return
+
         try:
             action, accepted, selected = parse_mobile(arg)
         except ValueError:
@@ -55632,6 +56461,149 @@ class OperatorApp(App[None]):
         # Do not cancel an in-flight enrollment to start a second one: a thread
         # already talking to the cloud cannot be cancelled with its awaiter.
         self.run_worker(run(), group="mobile-setup")
+
+    def _mobile_approvals(self, words: list[str], notice: NoticeFn) -> None:
+        """``/mobile approvals on`` — turn on phone approvals with ONE OS prompt (§6).
+
+        The same :func:`operator.authority_setup.setup_authority` the desktop route
+        calls, so the guarantees are the same ones: gesture-only, no stored
+        password, a privileged process refused, the anchor staged with
+        ``ADMISSION_LISTED``, idempotent, audited with actor ``tui``.
+
+        THE TUI'S ONE DIFFERENCE IS THE TERMINAL (§2.5, §6 item 2). It owns a TTY, so
+        ``terminal_sudo=True``: on Linux without pkexec, ``sudo`` asks for the
+        password in this terminal. To let it, the prompt runs on the UI thread
+        under ``App.suspend()``, which hands the real terminal to sudo/pkexec and
+        takes it back after; macOS and Windows show their own GUI prompt and need
+        no suspend. A host where no prompt can appear (no launcher) gets U18's
+        sentence; an unsuspendable driver gets its own sentence naming THIS
+        TERMINAL APP as the cause (QA Q4), decided in setup_authority's precheck via
+        ``can_prompt`` so it leaves no consent row, key or staging (QA Q3).
+
+        NOTICE SHAPE (design round 1, D1/D5/D8): nothing is printed until the
+        prechecks pass — the progress line comes from ``runner``, which only runs
+        once they have — so "already on" and refusals go straight to their outcome.
+        Every outcome is ONE single-line notice, so all outcomes land in the same
+        rhythm; anything that did not turn approvals on is ``warning`` kind, and the
+        file-only caveat is its own ``warning`` notice rather than a second line
+        under the success sentence that it seemed to contradict.
+        """
+        from local_operator.i18n.keys import wire_operator_setup as ws
+        from local_operator.i18n.text import tr
+        from local_operator.operator import trust as trust_module
+
+        text = tr("wire.operator_setup")
+        if [w.casefold() for w in words] != ["on"]:
+            notice(text(ws.tui_usage()))
+            return
+        if getattr(self, "_operator_setup_busy", False):
+            # An in-pane second attempt is still an attempt: audited (QA Q1).
+            from local_operator.operator.authority_setup import (
+                record_in_progress_refusal,
+            )
+            from local_operator.paths import config_dir
+
+            record_in_progress_refusal(config_dir(), "tui")
+            notice(text(ws.refused_in_progress()), "warning")
+            return
+        self._operator_setup_busy = True
+        gui = sys.platform == "darwin" or trust_module._on_windows()
+
+        def can_prompt() -> bool:
+            # macOS/Windows show their own GUI prompt; elsewhere sudo needs the
+            # real terminal, which only a driver that can suspend can hand over.
+            driver = self._driver
+            return gui or (driver is not None and bool(driver.can_suspend))
+
+        def runner(command: list[list[str]]) -> Any:
+            # Called only after setup_authority's prechecks passed, so the progress
+            # line and the gesture sentence are printed only where a prompt really
+            # follows (design round 1, D5; D8 of the earlier round).
+            from local_operator.operator import trust
+            from local_operator.operator.elevate import (
+                PURPOSE_SETUP,
+                REFUSAL_NO_PASSWORD_PROMPT,
+                ElevationResult,
+                confirm_card_copy,
+                no_password_prompt_refusal,
+                run_elevated,
+            )
+
+            def refused() -> Any:
+                return ElevationResult(
+                    2,
+                    refusal=no_password_prompt_refusal(),
+                    refusal_code=REFUSAL_NO_PASSWORD_PROMPT,
+                )
+
+            gui = sys.platform == "darwin" or trust._on_windows()
+            driver = self._driver
+            if not gui and (driver is None or not driver.can_suspend):
+                # Asked BEFORE the promise below: a driver that cannot hand over
+                # the terminal (a web/headless driver) would otherwise print
+                # "will ask for your password" one line above U18's refusal (D8).
+                # `can_prompt` already refused this; kept as the last guard.
+                return refused()
+            self.call_from_thread(self._system_notice, text(ws.tui_starting()))
+            gesture = confirm_card_copy(purpose=PURPOSE_SETUP)[2]
+            self.call_from_thread(self._system_notice, gesture)
+
+            def elevate() -> Any:
+                return run_elevated(command, purpose=PURPOSE_SETUP, terminal_sudo=True)
+
+            if gui:
+                return elevate()
+
+            def suspended() -> Any:
+                from textual.app import SuspendNotSupported
+
+                try:
+                    with self.suspend():
+                        return elevate()
+                except SuspendNotSupported:
+                    return refused()
+
+            return self.call_from_thread(suspended)
+
+        async def run() -> None:
+            from local_operator.operator.authority_setup import (
+                OUTCOME_FAILED,
+                OUTCOME_IN_PROGRESS,
+                SetupInProgress,
+                file_only_message,
+                outcome_message,
+                setup_authority,
+            )
+            from local_operator.paths import config_dir
+
+            notices: list[tuple[str, NoticeKind]] = []
+            try:
+                result = await asyncio.to_thread(
+                    setup_authority,
+                    config_dir(),
+                    actor="tui",
+                    terminal_sudo=True,
+                    runner=runner,
+                    can_prompt=can_prompt,
+                )
+                ok = bool(result.get("ok"))
+                notices.append(
+                    (text(outcome_message(str(result["outcome"]))), "info" if ok else "warning")
+                )
+                if ok and result.get("file_only"):
+                    # §6 item 5 / U18: said plainly, not hidden — and as its own
+                    # caveat, so it does not read as contradicting the line above.
+                    notices.append((text(file_only_message()), "warning"))
+            except SetupInProgress:
+                notices.append((text(outcome_message(OUTCOME_IN_PROGRESS)), "warning"))
+            except Exception:  # noqa: BLE001 — a notice, never a traceback in the pane
+                notices.append((text(outcome_message(OUTCOME_FAILED)), "warning"))
+            finally:
+                self._operator_setup_busy = False
+            for body, kind in notices:
+                self._system_notice(body, kind)
+
+        self.run_worker(run(), group="operator-setup")
 
     # -- /network -----------------------------------------------------------
 
@@ -57458,6 +58430,8 @@ class OperatorApp(App[None]):
         # ``object`` here because an embedding host may pass its own provider
         # record, and a host whose definitions predate this field must degrade
         # to "no prompt" rather than raising out of a login.
+        if getattr(definition, "login_kind", None) == "aws":
+            return self._aws_login_callbacks(definition, on_auth_url, on_progress, on_warning)
         if getattr(definition, "local_setup", False):
 
             async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
@@ -57479,6 +58453,18 @@ class OperatorApp(App[None]):
                 displays_warnings=True,
             )
 
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            # Post-auth configuration is required even though the browser's
+            # authorization-code paste was optional. No default means empty
+            # Enter cancels rather than accepting an unusable blank project.
+            return await self._request_login_key(
+                str(getattr(definition, "name", "Server")),
+                secret=secret,
+                field_label=field,
+                default=default or None,
+                required_field=True,
+            )
+
         label = getattr(definition, "name", None) or getattr(definition, "id", "this provider")
         # WHICH value the prompt is reading, which decides both its wording and
         # whether it masks. ``requires_paste_prompt`` means the paste IS the
@@ -57488,13 +58474,28 @@ class OperatorApp(App[None]):
         secret = bool(getattr(definition, "paste_prompt_required", False))
 
         async def on_manual_code_input() -> str | None:
+            from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
+            from local_operator.i18n.text import tr
+
+            prompt_tr = tr("providers.vertex_prompts")
+
             # ``sole_path`` tracks ``secret`` here and is a DIFFERENT question
             # that happens to have the same answer for every provider in the
             # registry: "is the paste the only way this login can finish?".
             # Anthropic's is not (the loopback callback is still listening and a
             # declined paste re-parks), so declining must not be reported as a
             # cancelled login.
-            return await self._request_login_key(str(label), secret=secret, sole_path=secret)
+            return await self._request_login_key(
+                str(label),
+                secret=secret,
+                sole_path=secret,
+                field_label=(
+                    prompt_tr(prompt_keys.field_service_account())
+                    if getattr(definition, "id", None) == "google-vertex-sa"
+                    else None
+                ),
+                required_field=getattr(definition, "id", None) == "google-vertex-sa",
+            )
 
         return LoginCallbacks(
             on_auth_url=on_auth_url,
@@ -57502,6 +58503,97 @@ class OperatorApp(App[None]):
             on_progress=on_progress,
             on_input_rejected=on_input_rejected,
             on_manual_code_input=on_manual_code_input,
+            on_setup_input=on_setup_input,
+            displays_warnings=True,
+        )
+
+    def _aws_login_callbacks(
+        self,
+        definition: object,
+        on_auth_url: Callable[..., None],
+        on_progress: Callable[[str], None],
+        on_warning: Callable[[str], None],
+    ) -> LoginCallbacks:
+        """Hooks for Amazon Bedrock's structured AWS login (login_kind "aws").
+
+        Two surfaces this app already has, no new widget: every pick (method,
+        profile, Region, "sign in now?") is ONE single-select question on the
+        ask picker (`request_user_choice`), and every typed field is the
+        login key prompt (`_request_login_key`), masked for secrets. The flow
+        itself lives in `providers/bedrock/login.py`; this only renders it.
+        """
+        from local_operator.i18n.keys import wire_login_bedrock as bk
+        from local_operator.i18n.messages import render_resolved
+
+        # Lazily, like `_login_callbacks` itself: `callback_server` drags in a
+        # loopback listener's imports that only a login needs.
+        from local_operator.providers.oauth.callback_server import LoginCallbacks
+
+        name = str(getattr(definition, "name", None) or "Amazon Bedrock")
+
+        async def on_choice(
+            title: str, options: list[tuple[str, str, str]], default: str | None
+        ) -> str | None:
+            if len(options) == 1:
+                # The picker's floor is two answers (`AskQuestion`), and a
+                # one-row list is an announcement, not a choice: take it and
+                # say so, rather than asking the user to ratify it.
+                on_progress(f"{title} {options[0][1]}")
+                return options[0][0]
+            by_label = {label: value for value, label, _description in options}
+            initial = next(
+                (index for index, option in enumerate(options) if option[0] == default), None
+            )
+            question = AskQuestion(
+                id="bedrock_login",
+                question=title,
+                options=[
+                    AskOption(label=label, description=description)
+                    for _value, label, description in options
+                ],
+            )
+            answer = await self.request_user_choice(
+                [question],
+                card_options={
+                    # No free-text row (#4270 D2): a typed answer that is not a
+                    # listed row has nowhere to go, and used to cancel the whole
+                    # login. The Region list carries its own "Other…" row,
+                    # which prompts, validates and re-asks.
+                    "allow_free_text": False,
+                    # The user ran /login; no agent is asking (D3).
+                    "title": render_resolved(bk.picker_title()),
+                    "exit_hint": ("esc", "cancel"),
+                    # The default starts under the cursor WITHOUT a
+                    # RECOMMENDED badge: LO has no basis to recommend one AWS
+                    # profile or Region over another (D5).
+                    "initial_rows": [initial],
+                },
+            )
+            picked = (answer or {}).get("bedrock_login") or []
+            return by_label.get(picked[0]) if picked else None
+
+        async def on_setup_input(field: str, default: str, secret: bool) -> str | None:
+            # `render_resolved`, not this module's `_t`: `_t` only looks keys
+            # up in the tui.app catalogue, so a wire.login.bedrock key came
+            # back as its raw id on every Bedrock field (#4270 QA Q1).
+            hint = render_resolved(bk.field_hint())
+            return await self._request_login_key(
+                name,
+                secret=secret,
+                field_label=field,
+                # "" (not None): Enter on an empty OPTIONAL field (the
+                # session token) submits "" instead of cancelling setup.
+                default=default,
+                credential=False,
+                instructions=hint,
+            )
+
+        return LoginCallbacks(
+            on_auth_url=on_auth_url,
+            on_progress=on_progress,
+            on_warning=on_warning,
+            on_setup_input=on_setup_input,
+            on_choice=on_choice,
             displays_warnings=True,
         )
 
@@ -57514,17 +58606,22 @@ class OperatorApp(App[None]):
         field_label: str | None = None,
         default: str | None = None,
         credential: bool = False,
+        required_field: bool = False,
+        instructions: str | None = None,
     ) -> str | None:
-        """Put a paste prompt in the transcript and await the key.
+        """Await a credential, optional OAuth code, or explicit setup field.
 
         Awaited by the login flow on this app's own loop (``_login_flow`` runs
         as a Textual worker), so the block is mounted directly here rather than
         marshalled across threads — the same reason
         :meth:`request_tool_approval` mounts its card inline.
 
-        Returns the pasted text, or ``None`` for a cancel, which is exactly the
-        ``on_manual_code_input`` contract. The value is never logged, never
-        echoed, and is not retained by the block once handed over.
+        Returns the value, or ``None`` for a cancel. Secret values are masked;
+        nonsecret fields and optional OAuth codes remain readable. No value is
+        logged or retained by the block once handed over. ``required_field``
+        selects required-login instructions instead of endpoint setup's
+        keep-default instructions; callers pass no default when empty Enter
+        must cancel. It does not repurpose the optional browser-code fallback.
         """
         from local_operator.tui.widgets.key_prompt import KeyPromptBlock
 
@@ -57540,15 +58637,25 @@ class OperatorApp(App[None]):
         self._close_team_form()
         self._close_projects_view()
         self._close_aside()
-        instructions = None
-        if field_label:
+        # A caller-supplied hint wins: the defaults below describe the
+        # local-server setup fields ("keeps the current token if the URL is
+        # unchanged"), which is wrong for any other structured login's fields
+        # (Amazon Bedrock's access key, Region, session token).
+        if instructions is None and field_label:
             instructions = (
                 f"Enter keeps {default}"
                 if default and not secret
                 else "Enter continues without a new value; Esc cancels setup."
             )
-        if field_label and secret:
-            instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
+            if secret:
+                instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
+        if required_field:
+            from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
+            from local_operator.i18n.text import tr
+
+            prompt_tr = tr("providers.vertex_prompts")
+
+            instructions = prompt_tr(prompt_keys.hint_required())
         block = KeyPromptBlock(
             provider_label,
             secret=secret,
@@ -57881,6 +58988,37 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — an unreadable state is assumed busy
             return False
 
+    async def _offer_phone_access(self, notice: Callable[..., Awaitable[None]]) -> None:
+        """One line after a Radient sign-in on a machine with NO phone access.
+
+        WHY: teammates signed in and never learned the phone app needed one more
+        step. This names the existing in-app verb (`/mobile enable`) and says a
+        price is always shown first; it creates nothing — a machine that already
+        wanted phone access is reconnected by the post-sign-in run instead
+        (`tunnels.install.auto_setup_after_login`), so the two never overlap.
+        Once per credential (`autosetup.login_offer_due`): recording it at show
+        time is the dismissal. Off the loop, since it reads the credential store.
+        A failure here must never disturb the sign-in it follows.
+        """
+        try:
+            from local_operator.i18n.keys import mobile_setup as _ms_keys
+            from local_operator.tunnels import autosetup
+
+            due = await asyncio.to_thread(autosetup.login_offer_due)
+            if due is None:
+                return
+            await asyncio.to_thread(autosetup.record_login_offer, due)
+            # The command is accented in the inline-code ink (design round 1, D6):
+            # it is the one actionable token in an otherwise muted note. The
+            # literal is the slash command itself, verbatim in every locale.
+            self._append_block(
+                NoticeBlock(
+                    tr("mobile.setup")(_ms_keys.login_offer()), "note", accent="/mobile enable"
+                )
+            )
+        except Exception:  # noqa: BLE001 — an offer must not fail a completed sign-in
+            logger.debug("phone access offer skipped", exc_info=True)
+
     async def _login_flow(self, provider: str) -> None:
         """Run the login on the event loop, reporting into the transcript.
 
@@ -57897,7 +59035,10 @@ class OperatorApp(App[None]):
         # email (~138 ms) for a loopback listener only a login needs, and this
         # module is what every interactive session imports.
         from local_operator.harness.types import AbortSignal
-        from local_operator.providers.oauth.callback_server import LoginCancelledError
+        from local_operator.providers.oauth.callback_server import (
+            LoginCancelledError,
+            LoginDeferredError,
+        )
         from local_operator.providers.oauth.radient import RadientLoginDisabled
 
         assert self._providers is not None
@@ -57934,6 +59075,8 @@ class OperatorApp(App[None]):
             self._providers.set_login_callbacks(self._login_callbacks)
             message = await self._providers.login(provider, signal=signal)
             await notice(message, "success")
+            if provider == "radient":
+                await self._offer_phone_access(notice)
             # Make the fresh login usable as the boot default when nothing is
             # configured yet: set hosting to this provider and model_name to its
             # default. Without this, `/login` stored the credential but left
@@ -58011,6 +59154,16 @@ class OperatorApp(App[None]):
                 if self._on_config_changed is not None:
                     self._on_config_changed()
                 self._cmd_model_saved(self._notice)
+        except LoginDeferredError as deferred:
+            # The user chose to finish elsewhere (Bedrock's "I'll run it
+            # myself"): a `note`, not a red "login failed" (#4270 D4/Q7), with
+            # the command drawn in the inline-code ink so it can be found and
+            # copied. On its OWN indented row: inline, the fold split the
+            # command across two rows and a split token is drawn plain.
+            # Nothing was stored; the flow raised before any row.
+            command = deferred.command
+            body = f"{deferred}\n  {command}" if command else str(deferred)
+            self._append_block(NoticeBlock(body, "note", accent=command))
         except LoginCancelledError:
             # A cancel is an OUTCOME, not a failure. Reported as a red "login
             # failed: … cancelled" it told the user their own Escape had broken
@@ -58131,7 +59284,7 @@ class OperatorApp(App[None]):
         for names, command in named_commands:
             command_rows.add_row(
                 Text(names, style=muted),
-                Text(command.description, style=dim),
+                Text(_keymap.substitute_keys(command.description, self._keymap), style=dim),
             )
         # Rows and notes share one Group, so the list holds renderables rather
         # than only Texts (the command table is the one non-Text entry).
@@ -58339,6 +59492,22 @@ class OperatorApp(App[None]):
             row.append(description, style=dim)
             return row
 
+        # Every app-scope chord below that the keymap registry owns is painted
+        # from the LIVE remap rather than its shipped literal. `literal` is the
+        # spelling this frame already used (uppercase `F8`, arrow glyphs); it
+        # stays when the action is at its default so the default frame is
+        # byte-identical, and only a remap changes the row. Width budget: the
+        # 74-cell ceiling this block documents assumes those literals, so a
+        # deliberately long remap can wrap the row — the same trade the legend
+        # card makes, and a wrapped hint beats one naming a dead key.
+        keymap_snapshot = getattr(self, "_keymap", None)
+        if not isinstance(keymap_snapshot, dict):
+            keymap_snapshot = {}
+
+        def _live(action_id: str, literal: str) -> str:
+            live = keymap_snapshot.get(action_id)
+            return _keymap.display_key(live) if live else literal
+
         # Bang-mode's marker is named here because the glyph is the
         # colour-independent signal (#385) and a user who cannot see the
         # hue still needs to know what `$` on the composer means. The
@@ -58348,8 +59517,13 @@ class OperatorApp(App[None]):
         lines.append(_key_row("option+left/right", "move by word; +shift selects"))
         lines.append(_key_more("ctrl+left/right is the same on Linux/Windows"))
         lines.append(_key_row("option+up/down", "same as up/down (history, lists)"))
-        lines.append(_key_row("shift+tab", "cycle reasoning effort"))
-        lines.append(_key_row("ctrl+l", "clear the transcript (history stays)"))
+        lines.append(_key_row(_live("keymap.cycle_effort", "shift+tab"), "cycle reasoning effort"))
+        lines.append(
+            _key_row(
+                _live("keymap.clear_transcript", "ctrl+l"),
+                "clear the transcript (history stays)",
+            )
+        )
         # The transcript-navigation pair was bound `show=False` and listed
         # nowhere, so the ONLY place the product mentioned `ctrl+home` was a
         # resume notice that appears when the reader is already stuck. One row
@@ -58370,12 +59544,24 @@ class OperatorApp(App[None]):
         # only documented effect was "jump", in a state where jumping does
         # nothing visible (ux review round 2, U6). 71 composed cells.
         lines.append(_key_more("loads older history when there is no more to scroll"))
-        lines.append(_key_row("ctrl+t", "expand or collapse the todo panel"))
+        lines.append(
+            _key_row(
+                _live("keymap.toggle_todos", "ctrl+t"),
+                "expand or collapse the todo panel",
+            )
+        )
         # 67 composed cells against the 74-cell ceiling: names the three
         # stops so a user who only ever saw "expand/collapse" learns the panel
         # can now shrink to a row or go away (#525).
-        lines.append(_key_row("ctrl+g", "cycle the subagent panel: full, summary, hidden"))
-        lines.append(_key_row("ctrl+b", "show or hide the session sidebar"))
+        lines.append(
+            _key_row(
+                _live("keymap.toggle_subagents", "ctrl+g"),
+                "cycle the subagent panel: full, summary, hidden",
+            )
+        )
+        lines.append(
+            _key_row(_live("keymap.toggle_sidebar", "ctrl+b"), "show or hide the session sidebar")
+        )
         # Directly under it, because it is the same surface, and it is now the
         # ONLY way into that panel's keyboard mode: a pointer press on the list
         # no longer takes the keyboard (design round D1), so the route in has to
@@ -58400,11 +59586,34 @@ class OperatorApp(App[None]):
         # MEASURED: 54 description cells (74 composed) — EXACTLY at the
         # 74-cell ceiling this block documents, the same zero-headroom class
         # as the `cmd+v` row below; one more character wraps it.
-        lines.append(_key_row("f9", "keys the sessions list; ctrl+k or f10 pin; esc returns"))
+        lines.append(
+            _key_row(
+                _live("keymap.focus_sidebar", "f9"),
+                "keys the sessions list; ctrl+k or "
+                f"{_live('keymap.toggle_pin', 'f10')} pin; esc returns",
+            )
+        )
         # Beside ctrl+b, because it is the same surface: the list is where the
         # user learns what "next" means, and the one-press switch is otherwise
-        # undiscoverable (UX round 3, U5).
-        lines.append(_key_row("ctrl+shift+↑/↓", "switch to the previous/next conversation"))
+        # undiscoverable (UX round 3, U5). One arrow row while both ends sit at
+        # their defaults (the spelling this frame shipped); two live chords
+        # once either end is remapped, because one arrow cannot describe two
+        # different keys.
+        prev_session_key = keymap_snapshot.get("keymap.prev_session")
+        next_session_key = keymap_snapshot.get("keymap.next_session")
+        session_switch = (
+            "ctrl+shift+↑/↓"
+            if not prev_session_key and not next_session_key
+            else _keymap.display_key(_keymap.painted_key("keymap.prev_session", keymap_snapshot))
+            + "/"
+            + _keymap.display_key(_keymap.painted_key("keymap.next_session", keymap_snapshot))
+        )
+        lines.append(
+            _key_row(
+                session_switch,
+                "switch to the previous/next conversation",
+            )
+        )
         # NAMES BOTH MEANINGS OF `ctrl+f`, because until now this row named the
         # one that is NOT what the key does where the fleet door lives (round 2:
         # U13). The f9 row above is exactly at the 74-cell ceiling and carries
@@ -58412,7 +59621,14 @@ class OperatorApp(App[None]):
         # it had 21 cells of headroom, so the collision is stated here rather
         # than by spending a second row this frame does not have. MEASURED: 50
         # description cells (70 composed) against the 74-cell ceiling.
-        lines.append(_key_row("F8", "open an aside; ctrl+f forks or folds it (f9: asks)"))
+        lines.append(
+            _key_row(
+                _live("keymap.aside", "F8"),
+                "open an aside; "
+                f"{_live('keymap.fork_aside', 'ctrl+f')} forks or folds it "
+                f"({_live('keymap.toggle_asks', 'f4')}: asks)",
+            )
+        )
         # Directly under `F8`, because it is only meaningful once an aside
         # is open. ONE row for the pair rather than two: the partner chord fits
         # inside the description, which keeps the gutter reading as one gesture
@@ -58423,7 +59639,13 @@ class OperatorApp(App[None]):
         # keys both get the text out of a card that says nothing here joins the
         # conversation, and which one keeps that promise is the whole reason a
         # user picks between them. 67 composed cells against the 74 ceiling.
-        lines.append(_key_row("ctrl+r", "copy the open aside; ctrl+f folds it in instead"))
+        lines.append(
+            _key_row(
+                "ctrl+r",
+                "copy the open aside; "
+                f"{_live('keymap.fork_aside', 'ctrl+f')} folds it in instead",
+            )
+        )
         lines.append(_key_row("esc", "stop the agent; leave a mode"))
         lines.append(_key_row("ctrl/cmd+d", "empty: quit; draft: delete forward"))
         # Where the logs went. Console logging is off while the TUI owns the
@@ -60305,7 +61527,9 @@ class OperatorApp(App[None]):
                 # UX round 6 U4): the clause here was "or let this session's runtime
                 # retire and reopen the session here", which is the deleted remedy
                 # on the surface a reader consults BEFORE being refused.
-                remedy += self._uninstalled_anchor_clause()
+                keyed = None if self._approve_all else self._uninstalled_anchor_report(live, saved)
+                if keyed is not None:
+                    return SlashResult(kind="notice", text=keyed, style="info")
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} (this session) — {effect}; "
@@ -63001,7 +64225,14 @@ class OperatorApp(App[None]):
             self._project_settled_rows(message.messages, bound=RESUME_RENDER_MESSAGES)
             view.follow_tail()
         else:
-            self._project_settled_rows(message.messages)
+            # A reconnect gap lands under whatever the reader is doing. Sample
+            # the anchor BEFORE projecting: a reader who scrolled back to read
+            # history keeps their place (the gap rows still mount below them),
+            # and a reader at the tail still follows the new rows down. An
+            # unconditional follow here yanked a scrolled-back reader to the
+            # newest message every time the owner socket reconnected.
+            following = self._transcript_view().is_following_tail
+            self._project_settled_rows(message.messages, follow=following)
 
     def on_context_usage_reported(self, message: ContextUsageReported) -> None:
         """Move the context reading AND the cost DURING a turn, not only at its end.
@@ -63577,6 +64808,12 @@ class OperatorApp(App[None]):
                 TeamBridgeBlock(
                     bridge_card_text(message.details),
                     bridge_card_sender(message.details),
+                    # ``message_id`` is the persisted CustomMessage.id (the
+                    # entry id the resolver is keyed by).
+                    body_loader=card_body_loader(
+                        getattr(self, "_session", None), message.message_id or ""
+                    ),
+                    conversation=card_conversation(message.details),
                 )
             )
         else:
@@ -65320,7 +66557,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 154
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 158
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
@@ -66176,7 +67413,11 @@ def notification_kind_word(kind: str) -> str:
 
 
 def _notifications_listing(
-    entries: Sequence[CatalogEntry], budget: int, *, clearing: bool = False
+    entries: Sequence[CatalogEntry],
+    budget: int,
+    *,
+    clearing: bool = False,
+    keymap: Mapping[str, str] | None = None,
 ) -> str:
     """The unread-completion receipt ``/notifications`` prints.
 
@@ -66246,7 +67487,11 @@ def _notifications_listing(
         # The count of what is hidden, in BOTH forms: it is what lets the reader
         # reconcile the rows above with the number the receipt will name.
         bound = _t(_x.notifications_more(shown=str(total - NOTIFICATIONS_LISTING_ROWS)))
-        lines.append(bound if clearing else _t(_x.notifications_sidebar_hint(bound=bound)))
+        lines.append(
+            bound
+            if clearing
+            else _keymap.substitute_keys(_t(_x.notifications_sidebar_hint(bound=bound)), keymap)
+        )
     if not clearing:
         # "all N" once the bound bites, "these" only when every row is on screen:
         # at 38 unread the short form named the ten rows above it while the write
@@ -66573,28 +67818,6 @@ def _tree_listing(
 _CREDENTIAL_KINDS = {"oauth": ("oauth", "oauth logins"), "api_key": ("api key", "api keys")}
 
 
-#: The WORDS for the controller's machine states (``ProviderViewRow.state``,
-#: spelled :data:`local_operator.providers.controller.VIEW_STATES`).
-#:
-#: The machine state is ONE fact and is owned by the backend, which is what
-#: lets the desktop render it as its own copy and the census publish it as an
-#: enum; this table is the TUI's copy of it, kept here rather than derived from
-#: the enum so a wording change does not silently rewrite a wire contract.
-#:
-#: The five strings are exactly the ones the TUI printed before the enum existed
-#: (``_credential_state``), pinned by ``tests/unit/tui`` so a surface can never
-#: invent a sixth vocabulary. An unknown state is a ``KeyError`` on purpose: a
-#: row that renders as blank would read as "nothing to say" when it means "this
-#: app does not understand the backend".
-_VIEW_STATE_COPY: dict[str, str] = {
-    "logged_in": "logged in",
-    "env_key": "env key",
-    "needs_login": "needs login",
-    "local_ready": "configured server",
-    "local_unconfigured": "configure server",
-}
-
-
 #: Cells an identity may spend inside a `/logout` row's detail column.
 #:
 #: A BOUND on the column's cost, not a preservation of the old cliff: the picker
@@ -66822,6 +68045,9 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     — two footers counting one fact ("3 provider(s) need a login · 42 hidden")
     reads as two separate problems.
 
+    ``reauth_required`` is not reported HERE either, but it is reported: see
+    `_reauth_status`, which the caller places ahead of the access note.
+
     Wording is budgeted, not just chosen. The footer truncates at the picker's
     width and the access note (``2 hidden — /login <provider>``, 28 cells) leads
     it, which leaves 39 cells for this clause at a 100-column terminal. The
@@ -66853,6 +68079,35 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     if empty:
         bits.append(_t(_x.providers_no_live_list(names=", ".join(empty))))
     return " · ".join(bits)
+
+
+def _reauth_status(statuses: dict[str, str]) -> str:
+    """Footer clause naming each provider whose STORED sign-in is dead.
+
+    ``reauth_required`` is a provider the user DID sign in to whose stored grant
+    the IdP has since refused for good (``ProviderController.live_catalogue``).
+    Its rows are NOT hidden — a stored credential still counts as usable for the
+    access filter — so `_catalogue_rows` counts nothing for it, and without this
+    clause the picker showed the bundled rows with no hint that every turn on
+    them would fail until a fresh ``/login``. One clause per provider, in the
+    welcome screen's own audited words (``not logged in — /login <id>``), so the
+    user gets the exact command; the provider id is the command's argument.
+
+    Separate from `_catalogue_status` because of WHERE it goes: the caller puts
+    it first in the status, ahead of the access note. ``model_picker._fit_clauses``
+    keeps leading clauses and drops trailing ones, so behind the access note
+    (``225 hidden — /login <provider> · /model --all shows``, 51 cells) this
+    clause vanished at 100 columns and lost its provider id at 150 (QA round 1,
+    Q1). Leading, it costs 36 cells after the row count and survives at 80.
+    """
+    # Imported here, not at module top: the controller module is heavy and this
+    # module already defers its other imports from it to the call sites.
+    from local_operator.providers.controller import REAUTH_REQUIRED_STATUS
+
+    return " · ".join(
+        _t_welcome(tui_welcome.status_login_required(provider=provider))
+        for provider in sorted(p for p, s in statuses.items() if s == REAUTH_REQUIRED_STATUS)
+    )
 
 
 def _status_line(*bits: str) -> str:

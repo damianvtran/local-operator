@@ -1,6 +1,6 @@
 ---
 name: sessions
-description: "Use the `sessions` tool to list, inspect, spawn, resume, stop or peek at other local lop sessions; `lop sessions` and `lop exec --workstream` remain the CLI fallback."
+description: "Use the `sessions` tool to list, inspect, spawn, resume, stop, park or peek at other local lop sessions; `lop sessions` and `lop exec --workstream` remain the CLI fallback."
 ---
 
 # The `sessions` tool — other local sessions, tool-first
@@ -22,15 +22,36 @@ the message protocol.
 | --- | --- | --- |
 | `list` | live sessions as lean rows; `include_stored=true` adds stored conversations, and `query` searches names and recent content | read |
 | `info` | one session: state, directory, transcript path, origin, opener, sidebar visibility | read |
-| `spawn` | open a parallel session — a listed workstream by default | write |
+| `spawn` | open a parallel session — a listed workstream by default; takes `prompt`, `name`, `tags`, `team`, `profile`, `model`, `visibility`, `background`, `peer` | write |
 | `resume` | reopen a stored or stopped session headlessly | write |
-| `stop` | end a running session gracefully (no force in this version) | exec |
+| `stop` | end a running session gracefully (no force in this version); its wakes and monitors go DORMANT until it is reopened | exec |
+| `park` | end an idle session's runtime to free memory while its wakes and monitors stay ARMED; no address parks THIS session once the current turn ends | exec |
 | `peek` | a bounded transcript read — a window, a search, or a digest | read |
 | `help` | the full per-op reference — accepted inputs with types and defaults, one example and the refusals per op | read |
 
 Address a session with exactly one of `session` (exact id), `target`
 (name/cwd substring), or `pid` — the same resolver `send` uses, so an
 ambiguous target comes back with the candidate rows rather than a guess.
+
+### Spawn inputs
+
+| field | what it does |
+| --- | --- |
+| `prompt` | the task the new session runs as its first turn (required) |
+| `name` | the conversation name it is listed under |
+| `tags` | existing tag CATEGORIES to file it under; an unknown name is refused before anything launches |
+| `team` | the team whose manager, roster and briefs it runs under; omit it and the session has NO team |
+| `profile` | a reusable role/specialist (the `/agent` counterpart); it shares the one agent slot with `team`, so the two are exclusive |
+| `model` | `provider/model-id`, or a bare id that keeps the configured hosting |
+| `visibility` | `workstream` (the listed default) or `ephemeral` (hidden everywhere) |
+| `background` | run it detached; the receipt then names the job to follow |
+| `peer` | mint the session on another device instead of this one |
+
+**A session opened for a domain with a standing team carries that team at
+spawn.** `team=<name>` is what puts the team's collaboration and project briefs
+in front of its manager on the first turn: a spawn does NOT inherit the caller's
+team, and a `send` afterwards cannot carry a brief. The receipt echoes
+`team: <name>` or `team: none`, and `op='info'` keeps reporting the binding.
 
 ## Remote sessions (mesh)
 
@@ -53,6 +74,43 @@ owner on an older build answers the newest `steps` of a LIVE session instead,
 and the result's note names the reason and the dropped windows.
 Message delivery to a session on another device is `send` with `peer`;
 `guide://peer-messaging` carries it.
+
+**Artifact provenance.** Cite a peer-session artifact with its owner peer, exact
+session id and source reference: `peer=<owner>, session=<sid>,
+ref=scratchpad://<relative-path>` (or `ref=attachment:<id>`). A peer's absolute
+filesystem path is not a portable citation, and a bare `scratchpad://` reference
+resolves in the reader's own session, not the source session. To inspect the
+artifact, use the existing CLI pull recipe in `guide://network` under "Reading
+an artifact from a peer session"; keep the original peer, session and reference
+in review/evidence citations even after reading a local copy.
+
+A session on a mesh node delegates its OWN lane's review, QA, design and UX
+with `task` subagents (`agent='reviewer'`, `'qa-tester'`, `'designer'`,
+`'ux-reviewer'`), exactly as locally — never by spawning parallel sessions.
+`spawn` is only for work the user asked to run as its own session, or to host
+another manager's lane at their request, and then ONE host session per lane,
+never one per round or per reviewer. A role refused with "effort tier 'hi' is
+unavailable" is a node missing `subagents.models.<tier>`: run `lop network
+definitions push --peer <node>` (or `--all-peers`) from the operator's device —
+the one that signs for the operator, the only one that sends tiers — or set the
+tier on the node; a node keeping its own tier map needs the tier set there. It
+is never worked around with `model=inherit` or a session unless the operator
+asks.
+
+Every session on a machine shares its memory, so `bash` ENFORCES a machine-wide
+limit on heavy jobs: one at a time on hosts with 16 GB or less (parallel builds
+OOMed one on 2026-11-16), up to four on larger ones. Switch:
+`bash.heavy_jobs.enabled`; node tuning: `LOCAL_OPERATOR_HEAVY_JOB_SLOTS` and
+`LOCAL_OPERATOR_HEAVY_JOB_WAIT_S` (queue limit, default 900 s). Builds, type
+checks, JS test runners and `pytest -n` queue for a slot and say whom they wait
+behind; watchers and dev servers never queue; `lop services status` names the
+holder.
+Quick iterations: pass `-n 0` to stay off the slot.
+Wait or retry; never escape the queue by backgrounding a build with
+`nohup`/`setsid` or splitting it across sessions. `systemd-run --user --scope
+-p MemoryMax=…` caps a job in addition to the queue, never instead of it.
+Known limit: `uv cache prune` needs uv's exclusive cache lock, which no one
+gets while any session runs `uvx workspace-mcp`, so prune only a quiet node.
 
 ## Visibility: `spawn` is listed by default
 
@@ -78,6 +136,51 @@ that cannot promise an idle-only stop is REFUSED, and the refusal names which.
 Restart is two auditable calls (`stop` + `resume`). There is no force option and
 no way to stop a session that is mid-run from this tool — the escalation stays
 the operator's, in the CLI.
+
+## Stop vs park
+
+Both end an idle runtime through the same idle-only ladder (never a signal,
+never a cut turn). They differ in what happens to the session's schedules:
+
+| | `stop` | `park` |
+| --- | --- | --- |
+| runtime process | ends | ends |
+| wakes | DORMANT (`stopped_at`) — will not fire until someone reopens it | ARMED (`parked_at`) — the wake supervisor fires them and reopens the session |
+| monitors | DORMANT | ARMED — the supervisor runs read-only checks (`bash` allow-listed commands, `read`, `grep`, `glob`, `web_fetch`, `code_requests`, read-only MCP tools) itself and reopens the session only when one changes, or when an unreachable MCP server's stall or give-up notice is due; `web_search` monitors reopen it on every due tick |
+| use it when | the session's work is over | you only want the memory back |
+
+The stop receipt says how many wakes and monitors it made dormant and names
+`park` as the alternative. Free memory with `park`; reserve `stop` for ending
+work. Reopening the session (any engage) clears either stamp.
+
+**A park lasts until the next reopen.** Once a wake or a monitor change brings
+the session back, it is an ordinary session again: when it later goes idle and
+its runtime exits on its own, nothing is stamped, and its monitors go back to
+reopening it on every due tick (the cold-session behaviour). Park it again if
+you want the memory back for longer. A `web_search` monitor reopens a parked
+session on every due tick, and so does an MCP monitor whose server needs a
+credential only a session can use (a passphrase-locked secret store, or a
+sign-in borrowed from another device); parking such a session saves little.
+An MCP server that is down or needs re-authentication does not reopen it: the
+supervisor records the retry and reopens it only to tell you, after 30 minutes.
+
+**Self-park.** `sessions(op='park')` with no address parks the calling session
+once the current turn ends: a detached helper waits for the owner's idle latch
+and then parks it, so the turn is never cut. It is refused (nothing scheduled)
+while this session has a running subagent, a background job or an open ask.
+Use it when you have nothing left to do until a wake or monitor fires.
+
+**Under pressure, the fleet guard parks first.** When the machine memory pass
+reaches its act line, or swap on the data volume outgrows the free space (or
+free space drops under 2 GiB), the wake supervisor parks idle, detached
+sessions — oldest-idle first, never a busy one, one a viewer is attached to,
+the chief of staff (Aida) or an engine duty session — before it would end a
+build. It also leaves alone a runtime inside its keep-alive window (just
+opened, reopened by a wake or monitor, warmed for a viewer, or just left by
+one; at least 5 minutes) and a session with an armed monitor the supervisor
+cannot check itself (the cases above), which parking would only reopen every
+tick. Each park logs one `pressure park:` line
+in the supervisor log, and so does each monitor-based skip.
 
 ## Resume — the canonical flow
 
@@ -169,6 +272,25 @@ every list.
 - **No project linkage** — use the `project` tool.
 - **No interactive launch** — the interactive path (`lop`, `lop --resume`)
   stays refused for every agent shell; resume here is headless.
+- **No team or profile setter beyond `spawn`** — two setters live outside this
+  tool: `/team <name> <request>` inside a RUNNING session (`guide://teams`,
+  "Running a team"), and for a stopped one
+  `lop exec --resume <session-id> --team <name> -- "<request>"`. The prompt
+  there is a required POSITIONAL (exec's `command` argument), not a `--prompt`
+  flag: `lop exec` has no such option — passing one exits 2 with
+  `lop: error: unrecognized arguments: --prompt` — and a run with no prompt
+  refuses with `exec failed:` and the no-prompt sentence. Consequence: a `send`
+  cannot carry a team's brief, so a session asked to apply a team's standards
+  must ALREADY carry that team — read the `team:` line from `op='info'` first.
+- **No hand-editing under `~/.local-operator/sessions/<id>/`** —
+  `attachment.json` there is the RESUME SIDECAR. Its only writer is
+  `resume.write_session_attachment(session_dir, *, team, agent, goal)`: three
+  keyword-only arguments, all three always written. A hand-written file holding
+  only `team` therefore CLEARS `agent` and `goal` (they read back as `""`), and
+  keys you invent are silently ignored. It is read back when the session is
+  next constructed (the runtime restores the attachment) and by listings that
+  paint the team badge. Change the binding through the real setters — spawn's
+  `team=`, `/team`, `/agent`, `/goal` — so the record stays consistent.
 
 ## Fallback (CLI)
 

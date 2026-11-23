@@ -40,7 +40,7 @@ import logging
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, NamedTuple, Sequence
 
 from local_operator.profile_actions import ProfileActionReply
 from local_operator.session.runtime.types import JOURNAL_ORDER_CAPABILITY
@@ -53,7 +53,9 @@ if TYPE_CHECKING:
     # on its own side, and the annotation is a string either way (PEP 563).
     from local_operator.session.runtime.launch import Errand
 
+from local_operator.asks.surfaces import StampedReceipt
 from local_operator.harness.approval import (
+    ASK_ANSWER_OPS,
     frame_authority,
     handshake_proof,
     handshake_proof_ok,
@@ -183,6 +185,79 @@ MOVED_REASON = "owner moved this conversation to another device"
 #: nothing to do. Review round 3, UX U3.
 BIND_FAILED_REASON = "owner could not prepare this view; the session is alive — reconnect to retry"
 
+#: How much of the owner's ``bind_failed`` message a reason may carry. The owner
+#: already clips at 400; this is the VIEWER's own bound, because the sentence it
+#: lands in is printed by ``lop network --peek``/``--send`` refusals and the
+#: sessions tool, and an owner (older, or hostile) is untrusted input here.
+_BIND_FAILED_DETAIL_LIMIT = 300
+
+#: The head of a ``bind_failed`` reason that names the owner's cause. Named so
+#: :func:`_reset_reason` can recognise the announcement: the cause makes the
+#: sentence dynamic, so it can no longer sit in ``_ANNOUNCED_REASONS`` as an
+#: exact string. Only :func:`bind_failed_reason` builds a reason with this head.
+_BIND_FAILED_CAUSE_PREFIX = "owner could not prepare this view: "
+
+
+def is_bind_failed_reason(reason: str) -> bool:
+    """Recognise the canonical bind announcement, with or without its safe cause.
+
+    The owner's cause is deliberately retained in the displayed reason, so exact
+    equality with the legacy sentence loses the announcement's disposition. Keep
+    this predicate beside the formatter: reset handling and sync-wait errors must
+    agree that only this announced view failure, not an arbitrary disconnect, is
+    evidence of a live runtime that could not prepare the connection.
+    """
+    return reason == BIND_FAILED_REASON or reason.startswith(_BIND_FAILED_CAUSE_PREFIX)
+
+
+def bind_failed_cause(reason: str) -> str:
+    """Return only the canonical announcement's already-sanitized cause.
+
+    A one-shot CLI needs its own retry wording; parsing arbitrary exception prose
+    there would confuse unrelated disconnects with an announced bind failure.
+    Keep this inverse beside the formatter, without changing other surfaces' copy.
+    """
+    if not reason.startswith(_BIND_FAILED_CAUSE_PREFIX):
+        return ""
+    return reason[len(_BIND_FAILED_CAUSE_PREFIX) :].removesuffix(
+        "; the session is alive — reconnect to retry"
+    )
+
+
+def bind_failed_reason(message: object) -> str:
+    """The disconnect reason for a ``bind_failed`` frame, naming the owner's cause.
+
+    WHY THE CAUSE RIDES ALONG (2026-11-12): a coordinator on a node dialing a
+    session on another Mac got "owner could not prepare this view" and nothing
+    else. The owner HAD sent the exception text, but this client dropped it, and
+    the owner's traceback lived only in a shared rotating ``runtime.log`` that
+    was overwritten within minutes — so the cause was unrecoverable from either
+    end. Every consumer (the pilot refusal in ``network/cli``, the sessions
+    tool, the attached host) prints this string verbatim, so carrying the cause
+    HERE is what reaches all of them without each learning a new field.
+
+    The message is untrusted text from another process (possibly another
+    device): credential SHAPES are masked (the owner scrubs too, but an older
+    owner did not), control sequences and newlines are flattened so it cannot
+    repaint a terminal or forge a second line, and it is clipped. Absent or
+    empty — an older owner, or a frame without the key — keeps the exact
+    historical sentence so nothing that already reads it changes.
+
+    This pass is NOT complete on its own: an owner on 0.101.x or older sends its
+    raw ``str(exc)``, which a new viewer now displays, and the viewer can mask
+    credential shapes but not that owner's retrieved-secret ledger values.
+    """
+    if not isinstance(message, str) or not message.strip():
+        return BIND_FAILED_REASON
+    from local_operator.ansi import sanitize_prompt_line
+    from local_operator.redaction_shapes import scrub_shapes
+
+    detail = sanitize_prompt_line(scrub_shapes(message), limit=_BIND_FAILED_DETAIL_LIMIT)
+    if not detail:
+        return BIND_FAILED_REASON
+    return f"{_BIND_FAILED_CAUSE_PREFIX}{detail}; the session is alive — reconnect to retry"
+
+
 #: Maximum bytes in one frame. Must equal the server's ``_MAX_LINE_BYTES``:
 #: the writer refuses to exceed it and the reader refuses to read past it, so
 #: two different numbers would mean a frame the owner considers sendable is one
@@ -222,9 +297,10 @@ OVERSIZED_FRAME_REASON = "owner sent a frame too large to read"
 #: A transport error that follows one of them must not replace it. The owner
 #: socket is loopback TCP, and an owner that closes while the viewer's own
 #: outbound bytes sit unread in its receive buffer can make the kernel send an
-#: RST rather than a FIN (RFC 2525 §2.17; the owner closes at
-#: ``RuntimeServer._drop_client``). The pump then reads the announced frame
-#: and, on its NEXT read, gets ``ConnectionResetError``, so the bare
+#: RST rather than a FIN — the likely mechanism (RFC 2525 §2.17), inferred from
+#: the observed reset rather than established by a capture; the owner closes at
+#: ``RuntimeServer._drop_client``. What is observed: the pump reads the
+#: announced frame and, on its NEXT read, gets ``ConnectionResetError``, so the bare
 #: ``reason = "owner connection reset"`` assignment in :meth:`AttachClient._pump`
 #: overwrote a retirement the frame had already stated, and the viewer recovered
 #: a planned refresh as owner death.
@@ -234,11 +310,34 @@ _ANNOUNCED_REASONS = frozenset({STOPPED_REASON, RETIRING_REASON, MOVED_REASON, B
 
 
 def _reset_reason(announced: str) -> str:
-    """The disconnect reason for a transport reset, keeping an announced one."""
-    return announced if announced in _ANNOUNCED_REASONS else "owner connection reset"
+    """The disconnect reason for a transport reset, keeping an announced one.
+
+    A ``bind_failed`` frame that names its cause yields a reason built per
+    message (:func:`bind_failed_reason`), so it is matched by its head rather
+    than by the exact-string set. Without that, the same RST that the set
+    guards against for a bare ``bind_failed`` replaced a cause-bearing one with
+    ``"owner connection reset"`` — telling the person their session died and
+    discarding the very cause the owner sent.
+    """
+    if announced in _ANNOUNCED_REASONS or is_bind_failed_reason(announced):
+        return announced
+    return "owner connection reset"
 
 
 logger = logging.getLogger(__name__)
+
+
+def _stamped_receipt(reply: Mapping[str, Any]) -> StampedReceipt:
+    """An answer ack's sentence plus the label the runtime STAMPED (F2).
+
+    ``surface`` is absent from a runtime that predates it, which reads ``None``
+    (unknown), never as consent. Still a ``str``, so callers that only want the
+    sentence are unchanged.
+    """
+    surface = reply.get("surface")
+    return StampedReceipt(
+        str(reply.get("detail", "")), str(surface) if isinstance(surface, str) else None
+    )
 
 
 class _OversizedFrame(Exception):
@@ -322,6 +421,16 @@ class OwnerAckTimeout(ConnectionError, TimeoutError):
     #: The owner holds a live connection; an unacknowledged request is worth
     #: resending. Read through ``getattr`` by ``server/routes/desktop_sessions.py``.
     owner_alive = True
+
+
+class RemoteStreamUnresponsiveError(ConnectionError):
+    """An admitted remote stream stopped answering, not proof of runtime load.
+
+    The owner relay reads the runtime's welcome before acknowledging the stream.
+    Losing its forwarded welcome (or hearing nothing after it) therefore cannot
+    inherit the local socket's owner_alive/busy inference. Keep the connection
+    observation typed so callers do not claim that no session was ever reached.
+    """
 
 
 class OwnerWelcomeTimeout(ConnectionError):
@@ -1026,8 +1135,14 @@ class AttachClient:
         on_move_pending: Callable[[dict[str, Any]], None] | None = None,
         surface: str = "terminal",
         on_operator_prompt: Callable[[str], None] | None = None,
+        origin: str = "",
     ) -> None:
         self._surface = surface
+        #: ADR 0009: ``"mobile"`` when this client carries the PHONE's human
+        #: input (declared by the mobile daemon only), else ``""``. Sent as the
+        #: auth frame's ``origin`` key, which the owner reads once at auth time
+        #: to route the run's completion to the phone.
+        self._origin = origin
         #: Whether the host behind this client ADOPTS the directory a ``retiring``
         #: frame names (the own-cwd move). Declared to the owner in the auth frame
         #: and defaulted FALSE so an embedder that never grows adoption cannot
@@ -1106,6 +1221,10 @@ class AttachClient:
         #: supplies no callback still gets the line in the log rather than no line
         #: anywhere.
         self._on_operator_prompt = on_operator_prompt
+        # Observation only, not authority: a welcome can be the last bytes on
+        # a half-dead mesh pipe. Sync-timeout copy needs a subsequent runtime
+        # frame before claiming that the far loop is alive but busy.
+        self.received_after_welcome = False
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
         #: Fired when a ``move_pending`` frame arrives: the owner is about to
@@ -1244,6 +1363,7 @@ class AttachClient:
         if record.protocol < 2:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
+        self.received_after_welcome = False
         # THE CAPABILITY IS RESOLVED PER DIAL, from the pid in the record being
         # dialled, because "may I loosen this session's gate" is a property of
         # the pairing (this process, that runtime) and not of this client. A
@@ -1344,6 +1464,11 @@ class AttachClient:
             auth["cwd_adoption"] = True
         if self._surface == "desktop":
             auth["surface"] = "desktop"
+        if self._origin == "mobile":
+            # ADR 0009. Additive: an owner from before the key ignores it, and
+            # the mesh relay's ``AUTH_FIELDS`` never forwards it, so only a dial
+            # made on this machine with the control key can declare it.
+            auth["origin"] = "mobile"
         if self._events:
             # v4 capability flag. A v3 owner ignores unknown auth fields and
             # simply never sends event frames — the caller gates on
@@ -1482,6 +1607,8 @@ class AttachClient:
                 except ValueError:
                     continue
                 op = frame.get("op")
+                if isinstance(op, str) and op:
+                    self.received_after_welcome = True
                 if op in ("projection", "welcome"):
                     try:
                         # pid=0 record: the attach screen keys nothing on the
@@ -1610,8 +1737,9 @@ class AttachClient:
                     # moments away and every consumer already reads that string.
                     # What it buys is the truth — without it the close fell
                     # through to the pump's default and the person was told
-                    # their session had died.
-                    reason = BIND_FAILED_REASON
+                    # their session had died. The owner's message names the
+                    # CAUSE (see ``bind_failed_reason`` for why it is kept).
+                    reason = bind_failed_reason(frame.get("message"))
                 elif op == "aside_delta":
                     # One chunk of an off-record aside's answer, streamed while the
                     # request that asked for it is still in flight. LIVE ONLY by
@@ -1787,7 +1915,31 @@ class AttachClient:
             getattr(self, "_runtime_pid", None),
         )
 
-    def authority_proof(self, op: str, fields: dict[str, Any]) -> str | None:
+    def operator_ask_proof_held(self) -> bool:
+        """Whether an opted-in ask answer on THIS connection carries a proof.
+
+        Exactly the condition under which :meth:`authority_proof` returns a
+        proof for an ask op with ``operator_ask=True``: this process holds the
+        runtime's operator capability (it started that runtime,
+        ``harness.approval.operator_cap_for``) AND the runtime proved it holds
+        the same one at handshake. The runtime stamps a trusted answer surface
+        only then; otherwise it stamps ``unverified`` (``asks.surfaces``).
+
+        WHY IT EXISTS (incident a-48e3, 2026-11-16): the desktop answer route
+        reports it as ``consent_bearing`` so the card can tell the operator, at
+        answer time, that a window which did not start this session's runtime
+        records his answer but cannot authorise a delete with it. A HINT, read
+        from this client's own handshake state and never from a request: the
+        runtime's stamp stays the only thing the guard reads.
+        """
+        return bool(
+            getattr(self, "_authority_bearing", False)
+            and getattr(self, "_operator_cap", None) is not None
+        )
+
+    def authority_proof(
+        self, op: str, fields: dict[str, Any], *, operator_ask: bool = False
+    ) -> str | None:
         """The proof for an authority-increasing frame, or ``None`` for any other.
 
         THE SINGLE ENTRY POINT for every producer of control frames THIS client
@@ -1808,7 +1960,22 @@ class AttachClient:
         cap = getattr(self, "_operator_cap", None)
         if cap is None:
             return None
-        if frame_authority({"op": op, **fields}) != "authority-increasing":
+        # ASK ANSWERS CARRY THE PROOF TOO, though they are ordinary: the runtime
+        # stamps a trusted ``answered_by`` surface (the label the guard reads as
+        # delete consent) only on a frame that proved the capability, so a
+        # console that started this runtime must keep presenting it or its own
+        # answers would stop counting. Prompt-free by construction — this is the
+        # capability, never a signature (``asks/surfaces``).
+        #
+        # OPT-IN PER CALL (``operator_ask``), never by holding the capability
+        # alone: the phone daemon also engages runtimes and so can hold one, but
+        # what it relays is a REMOTE device's answer (anyone with the portal
+        # cookie), which must never be stamped as a local operator surface. Only
+        # the desktop facade, the attached pane and the TUI dock pass it.
+        if op in ASK_ANSWER_OPS:
+            if not operator_ask:
+                return None
+        elif frame_authority({"op": op, **fields}) != "authority-increasing":
             return None
         return request_proof(
             cap,
@@ -1890,9 +2057,22 @@ class AttachClient:
             # that a future reclassification cannot turn this into a recursion.
             return None
         self._requesting_challenge = True
+        # A headless node's site card (``browser_bridge/site_approval.py``):
+        # the node mints a ``decide`` challenge for it only when told the card
+        # was checked here first (review U5), and it was only if
+        # ``asks.decision.bridge_decision_target`` verified this exact target.
+        # Unsigned and advisory — it keeps a client that never checked the card
+        # (an older build, a path around the check) from signing it.
+        marker: dict[str, Any] = {}
+        if action == "decide":
+            from local_operator.asks.decision import site_card_verified
+            from local_operator.browser_bridge.site_approval import SITE_QUESTION_PREFIX
+
+            if f"#{SITE_QUESTION_PREFIX}" in request_id and site_card_verified(request_id):
+                marker["site_card_verified"] = True
         try:
             reply = await self._request_frame(
-                "operator_challenge", action=action, request_id=request_id
+                "operator_challenge", action=action, request_id=request_id, **marker
             )
         except Exception as exc:  # noqa: BLE001 — an owner that predates the op
             # An OLDER owner answers this with its generic unknown-op error frame,
@@ -1934,7 +2114,9 @@ class AttachClient:
             logger.info("attach: could not sign the operator challenge: %s", exc)
             return None
 
-    def _present_authority(self, frame: dict[str, Any]) -> dict[str, Any]:
+    def _present_authority(
+        self, frame: dict[str, Any], *, operator_ask: bool = False
+    ) -> dict[str, Any]:
         """Add this connection's proof to a frame that INCREASES authority.
 
         The console's half of the rule in ``harness/approval.frame_authority``:
@@ -1948,7 +2130,7 @@ class AttachClient:
         future caller forgets.
         """
         op = str(frame.get("op", ""))
-        proof = self.authority_proof(op, frame)
+        proof = self.authority_proof(op, frame, operator_ask=operator_ask)
         out = {**frame, "operator_cap": proof} if proof is not None else dict(frame)
         # THE SENTENCE HALF. ``slash_result`` returns REPORTS that name remedies,
         # and whether this connection may loosen decides which remedy is true —
@@ -2032,6 +2214,9 @@ class AttachClient:
         # request_ack_with_duplicate directly and never passes through them:
         # an owner that did not advertise ``input-mode-v1`` must receive
         # byte-identical frames on EVERY path (agent review round 1, R1-1).
+        # A local-operator ask answer's opt-in (see ``authority_proof``): a
+        # private keyword, popped so it never reaches the wire.
+        operator_ask = bool(fields.pop("_operator_ask", False))
         fields = self._strip_unsupported_annotation(fields)
         # FITTED BEFORE THE FUTURE IS REGISTERED, because this can raise
         # `OversizedRequest` and a future parked in `_pending` for a request
@@ -2040,7 +2225,7 @@ class AttachClient:
         # `ConnectionError` with nobody awaiting it — an "exception was never
         # retrieved" log for a refusal the caller had already handled cleanly.
         frame = await self._present_operator_signature(
-            self._present_authority({"op": op, "req": req, **fields})
+            self._present_authority({"op": op, "req": req, **fields}, operator_ask=operator_ask)
         )
         frame = await fit_request_frame(frame)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
@@ -2811,13 +2996,22 @@ class AttachClient:
         *,
         question_index: int | None = None,
         deadline_s: float = ACK_TIMEOUT_S,
+        operator_ask: bool = False,
     ) -> str:
-        """See :meth:`approval_answer` for what ``deadline_s`` is for."""
+        """See :meth:`approval_answer` for what ``deadline_s`` is for.
+
+        ``operator_ask`` (here and on every ask method): True ONLY for a caller
+        that is a person's local operator surface (desktop facade, attached pane,
+        TUI dock). It lets this client present its capability proof so the
+        runtime may stamp a trusted surface; see ``authority_proof``.
+        """
         fields: dict[str, Any] = {"request_id": request_id, "value": value}
         if question_index is not None:
             # The stale-answer guard (U8): name the question that was on
             # screen when the user answered, so an advanced picker refuses it.
             fields["question_index"] = question_index
+        if operator_ask:
+            fields["_operator_ask"] = True
         return await self._request("ask_answer", deadline_s=deadline_s, **fields)
 
     async def ask_respond(
@@ -2827,6 +3021,7 @@ class AttachClient:
         *,
         by: str = "",
         images: list[dict[str, Any]] | None = None,
+        operator_ask: bool = False,
     ) -> str:
         """Answer a QUEUED ask, ATOMIC per ask (design §2.4).
 
@@ -2857,7 +3052,11 @@ class AttachClient:
             if not getattr(self, "_ask_attachments_supported", False):
                 raise ValueError(ASK_ATTACHMENTS_UNSUPPORTED)
             fields["images"] = list(images)
-        return await self._request("ask_respond", **fields)
+        if operator_ask:
+            fields["_operator_ask"] = True
+        reply = await self._request_frame("ask_respond", **fields)
+        self._raise_for_reply_error(reply)
+        return _stamped_receipt(reply)
 
     async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> str:
         """Decide an AGENT-MESSAGES request from its card (TB-02 wiring).
@@ -2879,7 +3078,14 @@ class AttachClient:
         }
         return await self._request("bridge_decide", **fields)
 
-    async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], *, by: str = "") -> str:
+    async def ask_revise(
+        self,
+        ask_id: str,
+        answers: dict[str, list[str]],
+        *,
+        by: str = "",
+        operator_ask: bool = False,
+    ) -> str:
         """REVISE a queued ask's recorded answer before it is delivered (§10).
 
         Same body as :meth:`ask_respond` and deliberately a separate frame: the
@@ -2889,16 +3095,29 @@ class AttachClient:
         fields: dict[str, Any] = {"ask_id": ask_id, "answers": answers}
         if by:
             fields["by"] = by
-        return await self._request("ask_revise", **fields)
+        if operator_ask:
+            fields["_operator_ask"] = True
+        reply = await self._request_frame("ask_revise", **fields)
+        self._raise_for_reply_error(reply)
+        return _stamped_receipt(reply)
 
-    async def ask_decline(self, ask_id: str, *, by: str = "") -> str:
+    async def ask_decline(self, ask_id: str, *, by: str = "", operator_ask: bool = False) -> str:
         """Decline a queued ask: explicit "no answer, decide yourself"."""
         fields: dict[str, Any] = {"ask_id": ask_id}
         if by:
             fields["by"] = by
+        if operator_ask:
+            fields["_operator_ask"] = True
         return await self._request("ask_decline", **fields)
 
-    async def ask_dismiss(self, ask_id: str, *, by: str = "", reason: str | None = None) -> str:
+    async def ask_dismiss(
+        self,
+        ask_id: str,
+        *,
+        by: str = "",
+        reason: str | None = None,
+        operator_ask: bool = False,
+    ) -> str:
         """Dismiss an ask from the view. Asks the model nothing, ever.
 
         ``reason`` (``answered_in_chat`` | ``moot``) rides the frame only when given,
@@ -2913,6 +3132,8 @@ class AttachClient:
             fields["by"] = by
         if reason:
             fields["reason"] = reason
+        if operator_ask:
+            fields["_operator_ask"] = True
         return await self._request("ask_dismiss", **fields)
 
     @property
@@ -3002,8 +3223,20 @@ async def engage_session_client(
     *,
     deadline_s: float = ACK_TIMEOUT_S,
     on_projection: Callable[[SessionProjection], None] | None = None,
+    locality: str = "local",
+    origin: str = "",
 ) -> tuple[AttachClient, str]:
     """Make a runtime exist for ``session_id``, then dial it: ``(client, detail)``.
+
+    ``origin`` is ADR 0009's auth tag: the phone daemon passes ``"mobile"`` so a
+    cold answer or a cold-wake prompt routes its completion back to the phone
+    (the wake's own delivery dial gets it through ``PromptErrand.origin``).
+
+    ``locality`` is what the dial declares in its hello. The phone daemon's
+    cold ask route passes ``"remote"``: it relays a portal answer, and the
+    runtime stamps a relayed answer ``remote`` (``asks.surfaces``) — the honest
+    audit label for a phone, where a ``local`` dial without the operator proof
+    would read ``unverified`` (QA round 1, Q1). Neither label is consent.
 
     THE ONE ENGAGE-AND-DIAL SEAM. Every surface that must turn "no runtime" into
     "a runtime and a live connection" comes through here, so the engagement it
@@ -3050,6 +3283,8 @@ async def engage_session_client(
     client = AttachClient(
         on_projection or (lambda projection: None),
         lambda reason: None,
+        locality=locality,
+        origin=origin,
     )
     try:
         await client.connect(record, session_id)
@@ -3065,6 +3300,7 @@ async def continue_command(
     *,
     deadline_s: float = ACK_TIMEOUT_S,
     on_projection: Callable[[SessionProjection], None] | None = None,
+    origin: str = "",
 ) -> tuple[AttachClient, str]:
     """Deliver one retained command to whichever host wins the session lease.
 
@@ -3093,7 +3329,9 @@ async def continue_command(
             command_id=command.command_id,
             input_mode=command.input_mode,
             input_path=command.input_path,
+            origin=origin,
         ),
         deadline_s=deadline_s,
         on_projection=on_projection,
+        origin=origin,
     )

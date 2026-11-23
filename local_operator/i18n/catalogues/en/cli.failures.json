@@ -2,5 +2,7 @@
   "cli.failures.error_line": "{prog}: error: {message}",
   "cli.failures.required": "the following arguments are required: {names}",
   "cli.failures.invalid_choice": "argument {argument}: invalid choice: {value} (choose from {choices})",
-  "cli.failures.invalid_command": "Invalid {group} command: {command}"
+  "cli.failures.invalid_command": "Invalid {group} command: {command}",
+ "cli.failures.github_borrow_timeout": "GitHub credential from {owner} did not arrive within {seconds} s; retry the command",
+ "cli.failures.github_owner_offline": "GitHub login is lent by {owner}, which isn't answering right now; this session has no saved access to use meanwhile"
 }

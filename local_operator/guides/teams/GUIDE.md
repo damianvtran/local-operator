@@ -1,6 +1,6 @@
 ---
 name: teams
-description: "Create, update, and run Local Operator teams: a manager plus reusable agents, with layered briefs. Covers pull/push/update, including the public hub."
+description: "Create, update, run Local Operator teams: manager, roster, layered briefs. Attach one to a session or spawn (`/team <name>`, `team=<name>`); covers pull/push/update, public hub."
 ---
 
 # Teams
@@ -40,6 +40,13 @@ home, and a parallel one costs a roster to own and maintain for one job.
   tool with the existing team attached (`team=<name>`) and hand it the brief;
   it runs to completion without the initiator owning a new roster or managing
   its members.
+
+**A spawn does NOT inherit the caller's team.** `sessions` `op='spawn'` appends
+`--team` only from its own `team=` argument (`_sessions_open_argv`), so a spawn
+issued from inside a team session comes up with NO team unless you name one —
+and then works without the briefs its task assumes. Name the team on every
+spawn that should run under one; the spawn receipt echoes `team: none` when you
+did not, and the session's `info` line keeps saying so afterwards.
 
 ## Scope: this conversation or the account
 
@@ -214,6 +221,26 @@ A team OWNS this session's agent slot, so the two identities can never run at on
 - While a team is attached, `/agent` is refused (and `--profile` alongside `--team` fails) with the reason and the way out; `/agent clear` is refused for the same reason.
 - `/team clear` (or `/team none`) detaches the team and frees the slot again, so `/agent` works once more.
 - Clients can read the resulting identity from the session's frontend state as `effective_identity: {speaker, team, role_of_speaker}` — the team's manager, or the attached profile, or neither. `role_of_speaker` reads `manager` exactly when a team is in force, which is how a client tells the two apart; the session CATALOGUE row (a listing, not a session) publishes the empty statement on purpose, so read the row's own stored team/agent pair until a session's first frame arrives.
+
+### The team binding is not a tag category
+
+Two axes put a label on a session, and they are easy to confuse:
+
+- **The team BINDING** is which team's briefs the session runs under. Set it at
+  spawn (`team=<name>`), change it inside a running session with
+  `/team <name> <request>`, clear it with `/team clear`. At most ONE team, and
+  it owns the agent slot. Its current value is what the `sessions` tool reports
+  as `team: <name>` (or `team: none`) in `op='info'` and on each `op='list'`
+  row, and what the desktop sidebar draws as a team badge.
+- **The TAG CATEGORY** is the sidebar's own labelling axis (`tags`): a set of
+  category names per session, one of them primary. It groups rows — the sidebar's
+  "Untagged" group is that axis, not the team one — and it changes nothing about
+  which briefs the session runs under.
+
+A tag literally named "Unfinished lopdev" is a TAG: it files the row and does
+NOT attach the `lopdev` briefs. Read `team:` from `sessions` `op='info'` when the
+question is "is this session running under the team?", and the tag list when the
+question is "how is this row filed?".
 
 `/team chart [name]` opens a scrollable, zoomable **org chart** of a team: the manager at the top, members beneath, nested teams expanded recursively. `chart` is a reserved first-argument subcommand under `/team` (the same shape `/mcp login|logout|reauth` uses), and `clear`/`none` (the detach verb above) is the other:
 

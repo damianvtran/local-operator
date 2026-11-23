@@ -1,0 +1,94 @@
+"""Scoped author validation only; not an independent audit or NoticeBlock proof.
+Run with primary .venv, worktree PYTHONPATH, isolated HOME/config and no CMUX/LOP.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+import local_operator
+from local_operator.i18n import catalogues, runtime
+from scripts.i18n import check
+from rich.console import Console
+from rich.text import Text
+
+ROOT = Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+NS = 'tui.model_persistence'
+print('python:', sys.executable)
+print('module:', local_operator.__file__)
+assert Path(local_operator.__file__).resolve() == ROOT / 'local_operator/__init__.py'
+assert Path(check.__file__).resolve() == ROOT / 'scripts/i18n/check.py'
+print('HOME:', os.environ['HOME'])
+print('config:', os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+assert not any(k.startswith(('CMUX_', 'LOP_')) for k in os.environ)
+print('CMUX/LOP inherited keys: 0')
+expected_hashes = {
+    'tui.model_persistence.json': '4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff',
+    'tui.model_persistence.context.json': 'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc',
+}
+for name, expected in expected_hashes.items():
+    path = ROOT / 'local_operator/i18n/catalogues/en' / name
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert actual == expected
+    print('frozen:', name, actual)
+en = catalogues.load_catalogue('en', NS)
+es = catalogues.load_catalogue('es', NS)
+context = catalogues.context('en', NS)
+assert list(en) == list(es) == list(context)
+assert len(es) == 4
+problems = []
+check._check_context_sidecar(problems, 'en', NS, en)
+plural = json.loads((ROOT / 'local_operator/i18n/data/plural_rules.json').read_text())
+commands = {'persist': '/model default', 'settings': '/settings', 'saved': '/model saved'}
+for key, value in es.items():
+    assert check.KEY_RE.match(key) and key.startswith(NS + '.')
+    assert check.arguments_match(runtime.message_arguments(en[key]), runtime.message_arguments(value), translated_source=value, locale='es', plural=plural)
+    assert not runtime.plural_selectors(value)
+    assert all(kind not in ('plural', 'select', 'selectordinal') for _, kind in runtime.message_arguments(value))
+    check._check_plural_categories(problems, 'es', NS, key, value, plural, 'es')
+    assert not any('\u202a' <= c <= '\u202e' or '\u2066' <= c <= '\u2069' for c in value)
+    name = key.rsplit('.', 1)[1]
+    if name in commands:
+        command = commands[name]
+        assert value.count(command) == 1
+        assert re.findall(r'/model (?:default|saved)|/settings', value) == [command]
+        assert runtime.render_message(value, {}, 'es') == value
+    else:
+        assert value.count('{label}') == value.count('{routes}') == 1
+    print('key:', key, 'args=', runtime.message_arguments(value), 'text=', value)
+assert not problems, problems
+assert not check.arguments_match(runtime.message_arguments(en[NS + '.with_model']), ())
+print('PASS scoped official catalogue/context/ICU checks: 4 keys; plural/select arms=0; negative missing-argument control rejected')
+labels = ['x/y', 'provider/opaque-model-2026-11-22-' + 'abc123-' * 18 + 'end']
+rows = 0
+for locale, messages in [('en', en), ('es', es)]:
+    route = {name: runtime.render_message(messages[NS + '.' + name], {}, locale) for name in commands}
+    states = {
+        'ordinary': [route['persist'], route['saved'], route['settings']],
+        'missing-model': [route['persist'], route['settings']],
+        'absent-hosting': [route['settings']],
+        'unknown-hosting': [route['settings']],
+    }
+    for state, clauses in states.items():
+        routes = ' · '.join(clauses)
+        for label in labels:
+            rendered = runtime.render_message(messages[NS + '.with_model'], {'label': label, 'routes': routes}, locale)
+            assert rendered.count(label) == 1 and rendered.count(routes) == 1
+            for command in ('/model default', '/model saved', '/settings'):
+                assert rendered.count(command) == routes.count(command)
+            for width in (80, 100, 120):
+                console = Console(width=width, color_system=None)
+                lines = Text(rendered).wrap(console, width)
+                lengths = [line.cell_len for line in lines]
+                assert all(length <= width for length in lengths)
+                last = lines[-1].plain.strip()
+                print('RICH', locale, state, 'short' if label == labels[0] else 'long', 'width=', width, 'lines=', len(lines), 'cells=', lengths, 'lone-final-command=', last in commands.values())
+                rows += 1
+    print('RENDER', locale, runtime.render_message(messages[NS + '.with_model'], {'label': labels[0], 'routes': ' · '.join(states['ordinary'])}, locale))
+    print('DEAD-END', locale, route['settings'])
+print('PASS render matrix:', rows, 'same-code English controls included')
+print('LIMITATION: plain Rich wrapping only, not native NoticeBlock, transcript-family budgets, layout, shaping, independent audit or release clearance')
+target = ROOT / 'local_operator/i18n/catalogues/es' / (NS + '.json')
+print('target SHA256:', hashlib.sha256(target.read_bytes()).hexdigest())

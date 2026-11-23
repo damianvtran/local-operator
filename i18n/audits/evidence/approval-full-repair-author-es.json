@@ -1,0 +1,1148 @@
+{
+  "kind": "LLM-author-repair-not-independent-audit",
+  "locale": "es",
+  "namespace": "wire.settings",
+  "round": 1,
+  "head": "90009effa833836ce4471e99d90d3b6438de7f60",
+  "author": {
+    "role": "translator",
+    "session": "22f04bc8ec0d",
+    "model": "openai/gpt-6.1-sol",
+    "provenance": "Explicit model-switch host notice in this run: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol due provider quota failure; all repair values authored after fallback."
+  },
+  "inputs": {
+    "approved_target_envelope": "i18n/audits/evidence/approval-full-inputs/es-approved-envelope.json",
+    "target_original_manifest_sha256": "e1026565e8003ddb8985c82e0b23de028a7ac4e01b5fbd5e4b6a3294660c64a5",
+    "english_envelope": "i18n/audits/evidence/approval-full-inputs/Englishvoiceconstant-full-en-approved-capture.json",
+    "english_envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "source_ledger": "i18n/audits/evidence/approval-full-deduplicated-ledger.json",
+    "root_adjudication": "i18n/audits/evidence/approval-full-root-adjudication.json"
+  },
+  "hashes": {
+    "target_before": "e1026565e8003ddb8985c82e0b23de028a7ac4e01b5fbd5e4b6a3294660c64a5",
+    "target_after": "9cf60be5d36c7fe9f8359dc779cc03d9a2039496356e1d5001519e806394f43a",
+    "english_before": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "english_after": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+    "context_before": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+    "context_after": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582"
+  },
+  "key_count": 895,
+  "changed_key_count": 32,
+  "unchanged_key_count": 863,
+  "diff_lines": {
+    "added": 32,
+    "removed": 32
+  },
+  "changes": [
+    {
+      "key": "wire.settings.display_composer_chevron.label",
+      "before": "Chevron del prompt",
+      "after": "Indicador del prompt",
+      "english_current": "Prompt chevron",
+      "backtranslation": "Prompt indicator",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "before": "false",
+      "after": "desactivado",
+      "english_current": "false",
+      "backtranslation": "disabled",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "before": "default",
+      "after": "predeterminado",
+      "english_current": "default",
+      "backtranslation": "default",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "before": "allow",
+      "after": "permitir",
+      "english_current": "allow",
+      "backtranslation": "allow",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "before": "deny",
+      "after": "denegar",
+      "english_current": "deny",
+      "backtranslation": "deny",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "before": "default",
+      "after": "predeterminado",
+      "english_current": "default",
+      "backtranslation": "default",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "before": "true",
+      "after": "activado",
+      "english_current": "true",
+      "backtranslation": "enabled",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "before": "default",
+      "after": "predeterminado",
+      "english_current": "default",
+      "backtranslation": "default",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "before": "true",
+      "after": "activado",
+      "english_current": "true",
+      "backtranslation": "enabled",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "before": "default",
+      "after": "predeterminado",
+      "english_current": "default",
+      "backtranslation": "default",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "before": "default",
+      "after": "predeterminado",
+      "english_current": "default",
+      "backtranslation": "default",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "before": "true",
+      "after": "activado",
+      "english_current": "true",
+      "backtranslation": "enabled",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "before": "default",
+      "after": "predeterminado",
+      "english_current": "default",
+      "backtranslation": "default",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.session_scratchpad.title",
+      "before": "Scratchpad",
+      "after": "Borrador",
+      "english_current": "Scratchpad",
+      "backtranslation": "Scratch draft area",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.help",
+      "before": "Bytes que puede guardar el scratchpad de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB.",
+      "after": "Bytes que puede guardar el borrador de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB.",
+      "english_current": "Bytes a session's scratchpad may hold: 16 MiB to 8 GiB. Default 256 MiB.",
+      "backtranslation": "Bytes the session draft area can store: 16 MiB to 8 GiB. Default: 256 MiB.",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "before": "Límite de scratchpad (bytes)",
+      "after": "Límite del borrador (bytes)",
+      "english_current": "Scratchpad size cap (bytes)",
+      "backtranslation": "Draft area limit (bytes)",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "before": "allowlist",
+      "after": "lista de permitidos",
+      "english_current": "allowlist",
+      "backtranslation": "list of permitted items",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "before": "inherit",
+      "after": "heredar",
+      "english_current": "inherit",
+      "backtranslation": "inherit",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "before": "client",
+      "after": "cliente",
+      "english_current": "client",
+      "backtranslation": "client",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "before": "off",
+      "after": "desactivada",
+      "english_current": "off",
+      "backtranslation": "disabled",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "before": "provider",
+      "after": "proveedor",
+      "english_current": "provider",
+      "backtranslation": "provider",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "before": "La constante actual.",
+      "after": "Interpretación vocal estándar.",
+      "english_current": "Standard vocal delivery.",
+      "backtranslation": "Standard vocal delivery",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "before": "female",
+      "after": "femenina",
+      "english_current": "female",
+      "backtranslation": "female",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "before": "male",
+      "after": "masculina",
+      "english_current": "male",
+      "backtranslation": "male",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.subagents_models_hi.help",
+      "before": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+      "after": "Se factura a las tarifas de ese modelo; 'default': modelo de la sesión; vacío elimina el nivel",
+      "english_current": "Bills at that model's rates; 'default': session; empty removes the tier",
+      "backtranslation": "Billed at that model's rates; 'default': session model; empty removes the tier",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.subagents_models_lo.help",
+      "before": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+      "after": "Se factura a las tarifas de ese modelo; 'default': modelo de la sesión; vacío elimina el nivel",
+      "english_current": "Bills at that model's rates; 'default': session; empty removes the tier",
+      "backtranslation": "Billed at that model's rates; 'default': session model; empty removes the tier",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.subagents_models_med.help",
+      "before": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+      "after": "Se factura a las tarifas de ese modelo; 'default': modelo de la sesión; vacío elimina el nivel",
+      "english_current": "Bills at that model's rates; 'default': session; empty removes the tier",
+      "backtranslation": "Billed at that model's rates; 'default': session model; empty removes the tier",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.team_bridge_session.label",
+      "before": "Sesión de CoS",
+      "after": "Sesión de la jefa de gabinete",
+      "english_current": "CoS session",
+      "backtranslation": "Chief of staff session",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "before": "ordered",
+      "after": "por orden",
+      "english_current": "ordered",
+      "backtranslation": "in order",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "before": "round_robin",
+      "after": "rotación",
+      "english_current": "round_robin",
+      "backtranslation": "rotation",
+      "reason": "accepted major union"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "before": "auto",
+      "after": "automática",
+      "english_current": "auto",
+      "backtranslation": "automatic",
+      "reason": "direct paired cleanup selector/help consistency"
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "before": "Cómo el dictado quita las muletillas y las señales no verbales. auto usa la limpieza nativa del proveedor cuando está disponible y las reglas conservadoras del lado cliente en los demás casos; provider y client aplican solo uno de los dos mecanismos cada uno; off conserva la transcripción literal. El campo `cleanup` de cada petición sigue teniendo prioridad.",
+      "after": "Cómo el dictado quita las muletillas y las señales no verbales. La limpieza automática usa la limpieza nativa del proveedor cuando está disponible y las reglas conservadoras del lado cliente en los demás casos; las opciones de proveedor y cliente aplican solo uno de los dos mecanismos cada una; desactivada conserva la transcripción literal. El campo `cleanup` de cada petición sigue teniendo prioridad.",
+      "english_current": "How dictation strips filler words and non-speech cues. auto uses the provider's native cleanup where available and the conservative client rules elsewhere; provider and client each use only one of the two mechanisms; off keeps the verbatim transcript. A per-request `cleanup` field still wins.",
+      "backtranslation": "How dictation removes filler words and nonverbal cues. Automatic cleanup uses native provider cleanup where available and conservative client rules elsewhere; provider and client options each apply only one mechanism; disabled retains the verbatim transcript. The per-request `cleanup` field still wins.",
+      "reason": "direct paired cleanup selector/help consistency"
+    }
+  ],
+  "accepted_findings": [
+    {
+      "id": "I18N-WS-3D8DF8BB0DF1",
+      "key": "wire.settings.display_composer_chevron.label",
+      "source_ids": [
+        "ES-A-M1.25"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-513A71CB406C",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "source_ids": [
+        "ES-A-M1.1",
+        "ES-B-07"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-32DB6C298E5C",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "source_ids": [
+        "ES-A-M1.2",
+        "ES-B-01"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-DD21D2852FC7",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "source_ids": [
+        "ES-A-M1.3",
+        "ES-B-08"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-961F6FF2DA51",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "source_ids": [
+        "ES-A-M1.4",
+        "ES-B-09"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-EAD73985D2C9",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "source_ids": [
+        "ES-A-M1.5",
+        "ES-B-02"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-378BA7328B99",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "source_ids": [
+        "ES-A-M1.6",
+        "ES-B-10"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-CD06C73F8E78",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "source_ids": [
+        "ES-A-M1.7",
+        "ES-B-03"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-2B7797E9A40D",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "source_ids": [
+        "ES-A-M1.8",
+        "ES-B-11"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-653D8954B431",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "source_ids": [
+        "ES-A-M1.9",
+        "ES-B-04"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-8DDA7C4D87CB",
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "source_ids": [
+        "ES-A-M1.10",
+        "ES-B-05"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-3DE117B6A717",
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "source_ids": [
+        "ES-A-M1.11",
+        "ES-B-12"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-A73734B5D1A9",
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "source_ids": [
+        "ES-A-M1.12",
+        "ES-B-06"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-0C842967FFF2",
+      "key": "wire.settings.session_scratchpad.title",
+      "source_ids": [
+        "ES-A-M1.22",
+        "ES-B-22"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-7BB0A888B1A4",
+      "key": "wire.settings.session_scratchpad_max_bytes.help",
+      "source_ids": [
+        "ES-A-M1.24",
+        "ES-B-23"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-5C534E296CE9",
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "source_ids": [
+        "ES-A-M1.23",
+        "ES-B-24"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-B7F88E3953BA",
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "source_ids": [
+        "ES-A-M1.13",
+        "ES-B-13"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-3CD94E41B2B7",
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "source_ids": [
+        "ES-A-M1.14",
+        "ES-B-14"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-F8A25CCB46D7",
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "source_ids": [
+        "ES-A-M1.15",
+        "ES-B-15"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-B66F879551DE",
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "source_ids": [
+        "ES-A-M1.16",
+        "ES-B-16"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-9F37CDCBD6ED",
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "source_ids": [
+        "ES-A-M1.17",
+        "ES-B-17"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-86C0F950D222",
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "source_ids": [
+        "ES-A-M2",
+        "ES-B-28"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-C3F93F5552D5",
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "source_ids": [
+        "ES-A-M1.18",
+        "ES-B-18"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-6E07BEFC2F49",
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "source_ids": [
+        "ES-A-M1.19",
+        "ES-B-19"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-A45600762CBC",
+      "key": "wire.settings.subagents_models_hi.help",
+      "source_ids": [
+        "ES-B-25"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-1D9B897D4754",
+      "key": "wire.settings.subagents_models_lo.help",
+      "source_ids": [
+        "ES-B-26"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-BFF2CE885E58",
+      "key": "wire.settings.subagents_models_med.help",
+      "source_ids": [
+        "ES-B-27"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-EED64BE5C06E",
+      "key": "wire.settings.team_bridge_session.label",
+      "source_ids": [
+        "ES-A-M1.26"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-21B6A15BD737",
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "source_ids": [
+        "ES-A-M1.20",
+        "ES-B-20"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    },
+    {
+      "id": "I18N-WS-3886CD8B7B42",
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "source_ids": [
+        "ES-A-M1.21",
+        "ES-B-21"
+      ],
+      "disposition": "fixed by author; awaits independent audit"
+    }
+  ],
+  "rejected_major": [],
+  "remaining_major_authoring": [],
+  "deferred_minor": [
+    {
+      "id": "I18N-WS-39EE37F439D0",
+      "key": "wire.settings.agents.description",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-07267F3C52E6",
+      "key": "wire.settings.bash_query_budget_enabled.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-24A7FCA10872",
+      "key": "wire.settings.classification_notice.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-99016D9A5E02",
+      "key": "wire.settings.display_composer_rate.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-249532749C3B",
+      "key": "wire.settings.display_reasoning.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-CC7F3B618646",
+      "key": "wire.settings.display_time_format.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-E86504BA4A29",
+      "key": "wire.settings.librarian_cadence_at.help",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-3E5CEB1F650A",
+      "key": "wire.settings.librarian_cadence_paused.help",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-502F92C0DCA9",
+      "key": "wire.settings.mesh_move_working_set_max_bytes.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-4DE7C5E522CA",
+      "key": "wire.settings.mesh_move_working_set_roots.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-F73171632EA4",
+      "key": "wire.settings.model_effort.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-4F5C08064671",
+      "key": "wire.settings.monitor_deltamaxchars.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-16A8F909E03A",
+      "key": "wire.settings.monitor_normalizetimestamps.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-48961C5D1F57",
+      "key": "wire.settings.monitor_runtimeoutms.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-0E941EEFBAF0",
+      "key": "wire.settings.monitor_snapshotmaxchars.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-462AD30FC358",
+      "key": "wire.settings.network_audit_generations.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-B7C77C8DC036",
+      "key": "wire.settings.network_audit_max_age_days.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-0625CB48E556",
+      "key": "wire.settings.network_credentials_grant_ttl_s.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-B0A23D525300",
+      "key": "wire.settings.network_sync_debounce_s.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-247A04DC5FA3",
+      "key": "wire.settings.network_sync_tick_s.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-E1430343996D",
+      "key": "wire.settings.providers_openai_api.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-4968A9E98C2C",
+      "key": "wire.settings.runtime_keep_alive_seconds.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-0E672AC42415",
+      "key": "wire.settings.static_roots.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-735AA0184133",
+      "key": "wire.settings.subagents_max_running.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-AFAAE6CCB801",
+      "key": "wire.settings.subagents_max_team_depth.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-1A28E4B3E568",
+      "key": "wire.settings.subagents_slim_child_knowledge.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-59EE2D02BF11",
+      "key": "wire.settings.tool_approval_mode.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-1323A2E96834",
+      "key": "wire.settings.tools_defer.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-3702DDE4470F",
+      "key": "wire.settings.tui_sidebar_show_subagents.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-3AD1E7F5FDB3",
+      "key": "wire.settings.wakes_triggers_project_staleness_enabled.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    },
+    {
+      "id": "I18N-WS-E679E75CBC45",
+      "key": "wire.settings.web_fetch_blocked_retry.label",
+      "reason": "minor-only style/width outside accepted major and direct explanatory neighbors; no separate polish wave"
+    }
+  ],
+  "choices": [
+    {
+      "term": "prompt",
+      "choice": "retain in Indicador del prompt",
+      "source": "i18n/style-guides/es.md Product-name policy explicitly retains prompt; i18n/glossary.md prompt row uses prompt for es",
+      "usage": "settings_io.py:3171-3177; help calls this the prompt mark at input-row left edge"
+    },
+    {
+      "term": "scratchpad",
+      "choice": "borrador for generic user labels/help; scratchpad:// remains unchanged",
+      "source": "current session_scratchpad.description already says área de borrador; URI scheme is technical"
+    },
+    {
+      "term": "CoS",
+      "choice": "jefa de gabinete",
+      "source": "current aida.description uses Tu jefa de gabinete; settings_io.py team_bridge.session consumer is wake designation, not machine ID in display label"
+    },
+    {
+      "term": "medium voice",
+      "choice": "Interpretación vocal estándar.",
+      "source": "NEW English Standard vocal delivery.; unchanged wire.settings.context.json entry 83 explains existing standard vocal delivery, not constant/time/price"
+    },
+    {
+      "term": "default in tier help",
+      "choice": "literal default retained; explanatory session becomes modelo de la sesión",
+      "source": "settings_io.py:3813-3837 documents default sentinel resolving to current session model; only label/help fields changed"
+    },
+    {
+      "term": "boolean human selector labels",
+      "choice": "activado/desactivado, predeterminado; never serialized true/false/unset",
+      "source": "settings_io.py localized Choice label distinct from stable Choice.value"
+    },
+    {
+      "term": "cleanup help references",
+      "choice": "automática/proveedor/cliente/desactivada aligned with translated selector labels; `cleanup` remains exact",
+      "source": "approved source help describes mechanisms to humans; machine field explicitly code-marked"
+    }
+  ],
+  "mechanical": {
+    "pure_existing_parser": "AST-only existing runtime.py parser declarations; no application import",
+    "messages_parsed": 895,
+    "arguments_match_english_and_original": true,
+    "plural_selector_arms_preserved": true,
+    "malformed_brace_negative_controls_rejected": 3,
+    "keys_and_target_key_order_preserved": true,
+    "all_other_target_bytes_preserved": "reversing exactly 32 authored JSON values reproduces original manifest SHA256",
+    "nfc_changed_values": true,
+    "bidi_controls_introduced": 0,
+    "code_spans_and_URI_schemes_preserved": true,
+    "CLDR": "Existing Spanish selectors unchanged in all 895 values; no plural messages among 32 edits",
+    "RTL": "es is LTR; no bidi/isolation controls introduced. No Urdu files touched. No native RTL rendering claim.",
+    "pseudo": "No pseudo catalogue edited or generated. Existing placeholders/ICU structures preserved; pseudo rendering deferred to Root integration."
+  },
+  "width": {
+    "method": "Unicode combining=0, wide/fullwidth=2 otherwise=1; all changed Spanish noncombining characters single-cell",
+    "measurements": [
+      {
+        "key": "wire.settings.display_composer_chevron.label",
+        "english_cells": 14,
+        "spanish_cells": 20,
+        "expansion": 1.429,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "english_cells": 5,
+        "spanish_cells": 11,
+        "expansion": 2.2,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "english_cells": 5,
+        "spanish_cells": 8,
+        "expansion": 1.6,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "english_cells": 4,
+        "spanish_cells": 7,
+        "expansion": 1.75,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "english_cells": 4,
+        "spanish_cells": 8,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "english_cells": 4,
+        "spanish_cells": 8,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "english_cells": 4,
+        "spanish_cells": 8,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.session_scratchpad.title",
+        "english_cells": 10,
+        "spanish_cells": 8,
+        "expansion": 0.8,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.session_scratchpad_max_bytes.help",
+        "english_cells": 72,
+        "spanish_cells": 94,
+        "expansion": 1.306,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.session_scratchpad_max_bytes.label",
+        "english_cells": 27,
+        "spanish_cells": 27,
+        "expansion": 1.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "english_cells": 9,
+        "spanish_cells": 19,
+        "expansion": 2.111,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+        "english_cells": 7,
+        "spanish_cells": 7,
+        "expansion": 1.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "english_cells": 6,
+        "spanish_cells": 7,
+        "expansion": 1.167,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+        "english_cells": 3,
+        "spanish_cells": 11,
+        "expansion": 3.667,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "english_cells": 8,
+        "spanish_cells": 9,
+        "expansion": 1.125,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+        "english_cells": 24,
+        "spanish_cells": 30,
+        "expansion": 1.25,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.female.label",
+        "english_cells": 6,
+        "spanish_cells": 8,
+        "expansion": 1.333,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.male.label",
+        "english_cells": 4,
+        "spanish_cells": 9,
+        "expansion": 2.25,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.subagents_models_hi.help",
+        "english_cells": 71,
+        "spanish_cells": 94,
+        "expansion": 1.324,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.subagents_models_lo.help",
+        "english_cells": 71,
+        "spanish_cells": 94,
+        "expansion": 1.324,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.subagents_models_med.help",
+        "english_cells": 71,
+        "spanish_cells": 94,
+        "expansion": 1.324,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.team_bridge_session.label",
+        "english_cells": 11,
+        "spanish_cells": 29,
+        "expansion": 2.636,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.web_search_strategy.choice.ordered.label",
+        "english_cells": 7,
+        "spanish_cells": 9,
+        "expansion": 1.286,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+        "english_cells": 11,
+        "spanish_cells": 8,
+        "expansion": 0.727,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "english_cells": 4,
+        "spanish_cells": 10,
+        "expansion": 2.5,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.help",
+        "english_cells": 293,
+        "spanish_cells": 404,
+        "expansion": 1.379,
+        "observed_clipping": false
+      }
+    ],
+    "static_risks": [
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "english_cells": 5,
+        "spanish_cells": 11,
+        "expansion": 2.2,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "english_cells": 5,
+        "spanish_cells": 8,
+        "expansion": 1.6,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "english_cells": 4,
+        "spanish_cells": 7,
+        "expansion": 1.75,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "english_cells": 4,
+        "spanish_cells": 8,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "english_cells": 4,
+        "spanish_cells": 8,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "english_cells": 4,
+        "spanish_cells": 8,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "english_cells": 7,
+        "spanish_cells": 14,
+        "expansion": 2.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.session_scratchpad_max_bytes.label",
+        "english_cells": 27,
+        "spanish_cells": 27,
+        "expansion": 1.0,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "english_cells": 9,
+        "spanish_cells": 19,
+        "expansion": 2.111,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+        "english_cells": 3,
+        "spanish_cells": 11,
+        "expansion": 3.667,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_voice_gender.choice.male.label",
+        "english_cells": 4,
+        "spanish_cells": 9,
+        "expansion": 2.25,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.team_bridge_session.label",
+        "english_cells": 11,
+        "spanish_cells": 29,
+        "expansion": 2.636,
+        "observed_clipping": false
+      },
+      {
+        "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+        "english_cells": 4,
+        "spanish_cells": 10,
+        "expansion": 2.5,
+        "observed_clipping": false
+      }
+    ],
+    "note": "Static expansion only, not observed clipping. No fixed per-field cap enforced by context; no render run by translator."
+  },
+  "invariants": {
+    "head_frozen": "90009effa833836ce4471e99d90d3b6438de7f60",
+    "only_owned_catalogue_written": "local_operator/i18n/catalogues/es/wire.settings.json",
+    "other_locale_code_history_changes": "No writes by this author; concurrent disjoint authors expected. No claim that global worktree remained unchanged.",
+    "english_context_pinned_hashes_verified": true,
+    "no_stage_commit_push_generation_native_browser_or_tests": true
+  },
+  "limitations": [
+    "Authoring receipt only; not self-audit or native clearance",
+    "Independent A/B delta audits and Root real QA/code/design/UX integration still required",
+    "No catalogue-wide English absence or visual fit clearance"
+  ],
+  "authoring_incidents": [
+    "Initial comparison used public-copy details.sha256 instead of manifest original-file hash; assertion failed before write, then correct original manifest hash verified.",
+    "One mechanical assertion incorrectly demanded identical English/Spanish key order; locale key order is preserved and key sets match; corrected check.",
+    "Persistent eval kernel evicted twice; used self-contained commands thereafter."
+  ]
+}

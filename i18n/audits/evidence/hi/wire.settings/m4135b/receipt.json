@@ -1,0 +1,34 @@
+{
+ "locale": "hi",
+ "namespace": "wire.settings",
+ "source_sha256": "c62db407a0b2e1944e63504b6332a3da5dcc494b6877f2ecefed3f518851b96a",
+ "target_sha256": "45053e99087b281a15de70ab258776e9cb71c7f6a2b71a47f8a0d0f4f4906517",
+ "translator": {
+  "agent": "i18n-translator, session b0fe2564b811",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-17"
+ },
+ "auditor": {
+  "agent": "i18n-auditor (team lopdev, reviewer role, round m4135b), session 634bfc6a6ee7; independent of translator b0fe2564b811 and implementer feac6b2db7a4; did not read the m4135 records or any other session scratchpad",
+  "session": "634bfc6a6ee7",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none observed",
+  "date": "2026-11-17",
+  "result": "clean",
+  "findings": 0,
+  "unresolved_blocker_major": 0,
+  "severity_counts": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 0,
+   "nit": 0
+  },
+  "finding_ids": [],
+  "locale_verdict": "CLEAN"
+ },
+ "status": "passed",
+ "note": "PR #4135 merge 2 (MERGE_HEAD a0e458d43 into HEAD a4152e090), round m4135b: independent i18n-auditor session 634bfc6a6ee7 (anthropic/claude-opus-5-5, fallback none observed) audited target_sha256 against en c62db407a0b2 in the uncommitted merge tree of .worktrees/auto-prune-pr. Mechanical, 883 keys: key set equals en; placeholder and backtick parity, NFC, no bidi/control chars; literals lop install prune, lop update and lop network credential github repos --use-default verbatim; labels <=29 cells. Three-way vs merge-base eb872993c: 8 PR keys carry HEAD text, network_credentials_github_repositories.help carries main text, no both-sides changes, rest byte-identical. All 9 keys faithful. Keep help guarantee first (71 cells; whole 110). GitHub help: two states distinct, clearing stops lending (\"उधार देना रुक जाता है\"). Provenance observation (not a defect): the PR side also carries a 9th hi key vs merge-base eb872993c, wire.settings.bash_heavy_jobs_enabled.choice.true.description \"चलती\" -> \"चलते\", introduced by PR merge commit a4152e090 (not in 5c10304f3); it is masculine agreement for जॉब, consistent with every other हिंदी catalogue use (किया/मिला/पूरा जॉब), and the merged bytes carry the PR side unchanged. Findings: 0 blocker, 0 major, 0 minor, 0 nit []; minor/nit deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
+ "evidence": "i18n/audits/evidence/hi/wire.settings/m4135b/record.json",
+ "round": "m4135b",
+ "keys_audited": 883
+}

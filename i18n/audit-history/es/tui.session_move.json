@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tui.session_move",
+  "history_sha256": "b58eb27c93c7470212af24c8a867f0238faa015ed761628a48032fa461f0092b",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), c1-au-es-A",
+        "session": "96bf9fded81d",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 2,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Pre-merge C1 shard audit: 22-key group (cli.config 15, tui.session_move 7), mechanical+idiom pass, second pass done. 0 blocker/major; 3 minor + 3 nit in i18n/audits/evidence/es/tui.session_move/c1esa1/record.json (group report in both bundles)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), c1esa2",
+        "session": "95b953e7b8fd",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "R2 delta audit c1esa2: 4 changed keys here (ambiguous, to_needs_device, cannot_wait, cli_no_answer); 0 findings. deadline_exceeded re-verified: unknown outcome, command verbatim. Record: i18n/audits/evidence/es/tui.session_move/c1esa2/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.session_move",
+      "source_sha256": "6ae6b80caee5646d17edfec168e25857e56a596ef8cbeb0f4f043401fc16ac5d",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "es `tui.session_move` delta audit: 1 changed key (unsupported_flag adds --without-working-set), PASS, 0 findings; 6 other keys byte-identical to the 2026-11-11 pass. Head ca98f3789. Evidence: i18n/audits/evidence/es/cli.sessions_move_workset/mw1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mw1/record.json",
+          "sha256": "ba7aba62760f564099198222f103fdd298ed7d0e5b500d75d64075521c1a8d86"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mw1/report.md",
+          "sha256": "4e9dce34877f4c33a2b80450c96b44f7de749f02a046500ad5df5334a23f2c37"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mw1/audit.log",
+          "sha256": "dca225b29f51ee3d74fda00dfd94bce3ed34bc4f9cd7b8b867a69a42c8fbc3ca"
+        }
+      ]
+    }
+  ]
+}

@@ -132,6 +132,47 @@ class TestTheSpecCarriesIt:
         assert default_effort("claude-opus-5-5-1") == "medium"
         assert default_effort("claude-opus-5.5-20260901") == "medium"
 
+    @pytest.mark.parametrize(
+        ("hosting", "model_id", "seeded"),
+        [
+            ("anthropic", "claude-haiku-5-5", "medium"),
+            ("anthropic", "claude-haiku-5-5-20261101", "medium"),
+            ("anthropic", "claude-haiku-5.5-20261101", "medium"),
+            ("bedrock", "ca.anthropic.claude-haiku-5-5", "medium"),
+            ("bedrock", "global.anthropic.claude-haiku-5-5", "medium"),
+            # An aggregator route seeds nothing by design (see `build_model_spec`);
+            # what matters is that it does not gain `high` either.
+            ("openrouter", "anthropic/claude-haiku-5.5", None),
+        ],
+    )
+    def test_haiku_5_5_boots_on_medium_its_documented_default(
+        self, hosting: str, model_id: str, seeded: str | None
+    ) -> None:
+        """The doc: "Claude Opus 5.5 and Claude Haiku 5.5 default to medium", and
+        sending the default equals omitting it. Haiku 5.5 used to fall through to
+        the 5+ arm and SEND `high` on every turn -- measured on Bedrock at 1.78x
+        Claude Code's cost against 1.19x at `medium`, accuracy indistinguishable."""
+        assert default_effort(model_id) == "medium"
+        assert supported_efforts(model_id) == ("low", "medium", "high", "xhigh", "max")
+        assert build_model_spec(hosting, model_id).reasoning_effort == seeded
+
+    @pytest.mark.parametrize(
+        ("model_id", "expected"),
+        [
+            # The neighbours the widened arm must not reach.
+            ("claude-haiku-4-5-20251001", None),
+            ("claude-haiku-5", "high"),
+            ("claude-sonnet-5-5", "high"),
+            ("claude-sonnet-5.5", "high"),
+            ("claude-haiku-5-55", "high"),
+            ("claude-fable-5-2", "high"),
+        ],
+    )
+    def test_the_medium_arm_stays_exact_to_its_two_tiers(
+        self, model_id: str, expected: str | None
+    ) -> None:
+        assert default_effort(model_id) == expected
+
     def test_openai_boots_with_no_level_claimed(self) -> None:
         """OpenAI's default is per snapshot — `none` on gpt-5.4, `medium` on
         gpt-5.5 — so seeding either would put a level on the band that half the
@@ -308,6 +349,9 @@ _DOC_SUPPORTED = {
     # Added from the same page read 2026-09-29: "Claude Sonnet 5.5 supports all
     # five effort levels, and `high` is the default on the Claude API".
     "claude-sonnet-5-5",
+    # Added from the same page read 2026-11-20: "Claude Haiku 5.5 supports all
+    # five effort levels, and `medium` is the default".
+    "claude-haiku-5-5",
     "claude-fable-5",
     "claude-mythos-5",
     "claude-mythos-preview",

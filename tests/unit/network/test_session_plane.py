@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import contextlib
+import functools
 import gc
 import json
 import logging
@@ -102,8 +103,23 @@ def _viewer(server: relay.RelayServer) -> None:
     server.start()
 
 
-def _dial_to(server: relay.RelayServer, record: Any, host: str, port: int) -> relay.PeerLink:
-    link, reason = server.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+def _dial_to(
+    server: relay.RelayServer, record: Any, host: str, port: int, *, expected_device: str = ""
+) -> relay.PeerLink:
+    # The dialer names whom it meant to reach (mesh-listener-auth): the caller's id,
+    # or else the one other active member of a two-device record, read from the
+    # dialer's OWN record.
+    if expected_device:
+        peer = expected_device
+    else:
+        (peer,) = [
+            m.device_id
+            for m in store.load(record.network_id, server.root).active_members()
+            if m.device_id != server.identity.device_id
+        ]
+    link, reason = server.dial(
+        record.network_id, host=f"{host}:{port}", epoch=record.epoch, expected_device=peer
+    )
     assert link is not None, reason
     return link
 
@@ -206,6 +222,120 @@ def _serve(monkeypatch: pytest.MonkeyPatch, root: Path) -> dict[str, _Served]:
     return served
 
 
+#: Upper bound on waiting for a full collection to run. A failure signal (the
+#: collector never ran at all), never the window: the wait ends on the gc
+#: callback, normally within one call.
+_FULL_COLLECTION_BOUND_S = 30.0
+
+
+def _collect_fully() -> None:
+    """Return only once a FULL cyclic collection has started AND finished after the call.
+
+    WHY NOT A BARE ``gc.collect()``. CPython's collector is not re-entrant: while
+    ANY thread is mid-collection, a ``gc.collect()`` on another thread returns 0
+    at once and collects nothing (``_PyGC_Collect`` loses the ``collecting``
+    flag race). In a CI shard that is routine: the relay, sqlite and executor
+    threads every test leaves behind run finalizers (the ``unclosed database``
+    ResourceWarnings in the shard logs) from inside THEIR collections, and a
+    finalizer that touches I/O or a lock drops the GIL with the collection still
+    in progress. A test thread whose ``gc.collect()`` lands in that window
+    destroys nothing, so a garbage task's ``Task was destroyed but it is
+    pending!`` line is simply never written — measured as the py3.13 shard 3
+    "the log capture cannot see asyncio's complaint" flake (#4155, #4120), and
+    reproduced 10/10 by holding another thread's collection open.
+
+    The callback pair is the event to wait on: collections are serialised, so a
+    ``start`` seen after registration followed by a generation-2 ``stop`` is one
+    whole full collection that began after every object unreachable at the call
+    was already garbage — whichever thread happened to run it. Its finalizers,
+    asyncio's destructor log included, have run by the time ``stop`` fires.
+    """
+    lock = threading.Lock()
+    started = False
+    done = threading.Event()
+
+    def observe(phase: str, info: dict[str, int]) -> None:
+        nonlocal started
+        with lock:
+            if phase == "start":
+                started = True
+            elif started and info.get("generation") == 2:
+                done.set()
+
+    gc.callbacks.append(observe)
+    try:
+        deadline = time.monotonic() + _FULL_COLLECTION_BOUND_S
+        while not done.is_set():
+            # Returns at once, collecting nothing, when another thread holds the
+            # collector; the short wait then lets that collection finish before
+            # this thread asks again.
+            gc.collect()
+            if done.wait(timeout=0.05):
+                break
+            assert (
+                time.monotonic() < deadline
+            ), "no full collection could run on any thread within the bound"
+    finally:
+        gc.callbacks.remove(observe)
+
+
+def test_collect_fully_waits_out_a_collection_held_by_another_thread(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for the vacuity-guard flake: a busy collector must not hide the complaint.
+
+    Another thread's collection is held open deterministically (its finalizer
+    parks on an event), which is the CI shard's state when the flake fired. The
+    bare ``gc.collect()`` is asserted to MISS the complaint first — the negative
+    control that proves the hazard is real on this interpreter, so the helper's
+    pass below is not vacuous — then ``_collect_fully`` must surface it once the
+    other collection is released.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _ParkedFinalizer:
+        def __del__(self) -> None:
+            entered.set()
+            release.wait(timeout=_FULL_COLLECTION_BOUND_S)
+
+    def hold_a_collection_open() -> None:
+        cycle = _ParkedFinalizer()
+        cycle.self_ref = cycle  # type: ignore[attr-defined]
+        del cycle
+        gc.collect()
+
+    holder = threading.Thread(target=hold_a_collection_open, name="held-collection")
+    releaser = threading.Timer(0.1, release.set)
+
+    def complained() -> bool:
+        return any("Task was destroyed" in r.getMessage() for r in caplog.records)
+
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        try:
+            holder.start()
+            assert entered.wait(timeout=_FULL_COLLECTION_BOUND_S), "the holder never collected"
+            control = asyncio.new_event_loop()
+            stray = control.create_task(asyncio.Event().wait())
+            control.run_until_complete(asyncio.sleep(0))
+            control.close()
+            del stray
+            assert gc.collect() == 0 and not complained(), (
+                "precondition: a bare collect during another thread's collection was "
+                "expected to collect nothing; the hazard this pins is not present"
+            )
+            # Released from another thread while the helper is already waiting,
+            # so the helper has to outlast the held collection, not race it.
+            releaser.start()
+            _collect_fully()
+            assert complained(), "_collect_fully returned before the garbage task was destroyed"
+        finally:
+            release.set()
+            holder.join(timeout=_FULL_COLLECTION_BOUND_S)
+            if releaser.ident is not None:
+                releaser.join(timeout=_FULL_COLLECTION_BOUND_S)
+
+
 def _seed(root: Path, session_id: str) -> None:
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
@@ -300,7 +430,16 @@ def _call(root: Path, op: str, **fields: Any) -> dict[str, Any]:
 
 
 def _dial(server: relay.RelayServer, record: Any, host: str, port: int) -> relay.PeerLink:
-    link, reason = server.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    # The dialer names whom it meant to reach (mesh-listener-auth): the one other
+    # active member of this two-device record, read from the dialer's OWN record.
+    (peer,) = [
+        m.device_id
+        for m in store.load(record.network_id, server.root).active_members()
+        if m.device_id != server.identity.device_id
+    ]
+    link, reason = server.dial(
+        record.network_id, host=f"{host}:{port}", epoch=record.epoch, expected_device=peer
+    )
     assert link is not None, reason
     return link
 
@@ -1898,20 +2037,33 @@ def test_an_oversized_stored_page_is_bounded_and_never_tears_the_link_down(
         pong = link.request({"op": "ping", "req": 99_001, "locality": "remote"}, timeout=10.0)
         assert pong is not None and pong.get("op") == "ack", pong
 
-        # NOTHING SERVABLE AT ALL is a NAMED refusal over the same live link: one
-        # row larger than the frame cannot be served "in part", and the reader is
-        # told which page it was rather than left with a dead link.
+        # ONE ROW LARGER THAN THE FRAME is SERVED BOUNDED AND MARKED over the same
+        # live link (PR #3903 changed this from a ``page_too_large`` refusal, which
+        # left a conversation whose newest entry was a huge paste unreadable from
+        # any other device): its identity survives so paging stays gap-free, its
+        # body is a preview plus the truncation marker, and since no row was left
+        # behind the page claims no more. Metadata too large to fit is still the
+        # named refusal; ``test_peer_view_oversized`` pins that half.
         huge = "9f3ac1e0b7d3"
-        _seed_journal(server_b.root, huge, ["y" * 9_000_000])
-        refused = _call(
+        huge_ids = _seed_journal(server_b.root, huge, ["y" * 9_000_000])
+        served = _call(
             server_a.root,
             "peer_session_history",
             peer=server_b.identity.device_id,
             session_id=huge,
         )
-        assert refused.get("op") == "error", refused
-        assert refused.get("code") == "page_too_large", refused
-        assert link.alive, "a row too large to serve closed the peer link"
+        assert served.get("op") == "ack", served
+        huge_page = served["detail"]
+        assert [entry["id"] for entry in huge_page["entries"]] == huge_ids
+        assert huge_page["has_more"] is False, "nothing was left behind"
+        payload = huge_page["entries"][0]["payload"]
+        assert payload["role"] == "user"
+        text = payload["content"][0]["text"]
+        assert text.startswith("y") and "[truncated: this entry is" in text
+        assert len(text) < 9_000_000, "the oversized body was sent whole"
+        assert link.alive, "a row too large for one frame closed the peer link"
+        pong = link.request({"op": "ping", "req": 99_002, "locality": "remote"}, timeout=10.0)
+        assert pong is not None and pong.get("op") == "ack", pong
     finally:
         link.close("test")
 
@@ -1958,7 +2110,13 @@ def test_two_links_reading_one_stored_page_share_the_relays_own_loop(
         _link.member_pulled_at = 0.0
     server_b.refresh_membership()
     _viewer(server_c)
-    link_c = _dial_to(server_c, store.load(record.network_id, server_c.root), host_b, port_b)
+    link_c = _dial_to(
+        server_c,
+        store.load(record.network_id, server_c.root),
+        host_b,
+        port_b,
+        expected_device=server_b.identity.device_id,
+    )
 
     loops: list[Any] = []
     reads: list[int] = []
@@ -2520,8 +2678,10 @@ def test_a_read_parked_at_stop_ends_cancelled_and_is_not_destroyed_pending(
             reader.join(timeout=30)
         # THE COMPLAINT ITSELF, at the only moment a test can assert on it: the
         # destructor emits it whenever the collector next runs, so the collector is
-        # driven here rather than left to the interpreter.
-        gc.collect()
+        # driven here rather than left to the interpreter — and driven to a FULL
+        # collection that really ran, since a bare ``gc.collect()`` is a no-op
+        # while another thread is collecting (see ``_collect_fully``).
+        _collect_fully()
         destroyed = [
             r.getMessage() for r in caplog.records if "Task was destroyed" in r.getMessage()
         ]
@@ -2542,7 +2702,7 @@ def test_a_read_parked_at_stop_ends_cancelled_and_is_not_destroyed_pending(
             control.run_until_complete(asyncio.sleep(0))
             control.close()
             del stray
-            gc.collect()
+            _collect_fully()
             return any("Task was destroyed" in r.getMessage() for r in caplog.records)
 
         assert not destroyed, f"a read parked at stop was destroyed pending: {destroyed}"
@@ -3111,13 +3271,38 @@ def _warm_frame_index(root: Path, session_id: str) -> None:
     Through ``start_refresh`` rather than ``refresh_index``: the frame's fast path
     reads the RESIDENT index, which only the refresh task publishes (the desktop
     twin's ``_Harness.warm`` makes the same choice for the same reason).
+
+    THE PUBLISHED INDEX MUST DESCRIBE THE JOURNAL AS IT IS NOW. ``start_refresh``
+    joins a refresh already in flight — since PR #4224 across loops too, so a
+    refresh an EARLIER frame read armed on the relay's page loop is joined from
+    this ``asyncio.run`` loop. That scan may have read the journal before the
+    cell rewrote it, and its (correct, but older) index makes the next frame
+    answer ``runs_state: "building"`` and re-arm (gate run 44793529479). So the
+    joined scan is drained and the refresh re-run until the published
+    signature matches the journal on disk; a refresh that never catches up
+    still fails the assertion below rather than being accepted as warm.
     """
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    journal = root / "sessions" / session_id / TRANSCRIPT_FILENAME
 
     async def _warm() -> None:
         from local_operator.session import transcript_index as ti
 
-        task, _started = ti.start_refresh(root, session_id)
-        assert await task is not None
+        published: dict[str, Any] = {}
+        for _attempt in range(3):
+            task, _started = ti.start_refresh(root, session_id)
+            index = await task
+            assert index is not None
+            published = dict(index.sig)
+            st = journal.stat()
+            if (published.get("inode"), published.get("size"), published.get("mtime")) == (
+                st.st_ino,
+                st.st_size,
+                st.st_mtime,
+            ):
+                return
+        raise AssertionError(f"resident index never caught up with the journal: {published}")
 
     asyncio.run(_warm())
 
@@ -4130,6 +4315,52 @@ class _StreamClient:
             pass
 
 
+def _await_frontend_sync(client: _StreamClient, *, cap_s: float = 60.0) -> dict[str, Any]:
+    """Read until THIS connection's canonical ``frontend_sync`` frame arrives.
+
+    WHY. The runtime refuses every non-priority op while a connection's canonical
+    sync is pending — "this viewer is still connecting to the session; the request
+    was not run — retry once the interface has connected" (the gate in
+    ``RuntimeServer``'s frame handler, ``server.py`` ~7008). The flag is set when
+    the connection asks for frontend state and is cleared in the ``finally`` of
+    ``RuntimeServer._serve_frontend_sync`` (~5025), the per-connection BIND task.
+    The welcome is sent before that task finishes, so a viewer that prompts the
+    instant the welcome lands races the bind; it lost once in a full CI run
+    (PR #3885's gate, job 132034534860).
+
+    WHY THIS FRAME, NOT A QUIET INTERVAL. While the bind runs nothing reaches the
+    connection — updates are parked in ``frontend_pending`` and events wait on
+    ``events_ready`` (~4976-4984) — so "the owner went quiet for 0.5 s" is exactly
+    what a SLOW bind looks like, and that heuristic sent the prompt early whenever
+    the bind outlasted its interval (measured red with 0.8 s and 1.0 s holds,
+    PR #3933's QA round 1). The ``frontend_sync`` frame is the bind's own
+    completion signal: built at ~4917 and written at ~4975, and the only await
+    between that write and the ``finally`` that clears the flag is the socket
+    ``drain``, which does not suspend unless the transport is paused. By the time
+    the frame has crossed both relays to this socket the gate is open. The real
+    client works the same way: its dial waits for ``frontend_sync`` before it
+    lets anyone act.
+
+    The cap only stops a broken bind from hanging the test; it is NOT the
+    synchronisation, so it is generous, and running out fails loudly naming every
+    op seen rather than letting the prompt race on.
+    """
+    deadline = time.monotonic() + cap_s
+    seen: list[str] = []
+    while (remaining := deadline - time.monotonic()) > 0:
+        frame = client.recv(timeout=remaining)
+        if frame is None:
+            break
+        op = str(frame.get("op"))
+        if op == "frontend_sync":
+            return frame
+        seen.append(op)
+    raise AssertionError(
+        f"no 'frontend_sync' frame within {cap_s:.0f}s on the stream "
+        f"(frames seen before giving up, by op: {seen})"
+    )
+
+
 def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4172,6 +4403,13 @@ def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
         welcome = client.recv()
         assert welcome is not None and welcome["op"] == "welcome", welcome
         assert welcome["data"]["session_id"] == SESSION
+        # The welcome is sent BEFORE the owner's bind task finishes, and until it
+        # does the runtime refuses a ``prompt`` ("this viewer is still connecting
+        # ..."). Wait for THIS connection's ``frontend_sync`` frame — written at
+        # server.py ~4975, just before the ``finally`` at ~5025 that clears the
+        # gate checked at ~7008 — exactly as the real client does, rather than
+        # betting on a quiet interval a slow bind also produces.
+        _await_frontend_sync(client)
 
         client.send(
             {
@@ -4499,6 +4737,123 @@ def test_a_viewer_leaving_releases_the_owner_s_stream(
             child.kill()
             child.wait(timeout=20)
         _stop_all(served)
+
+
+@pytest.mark.asyncio
+async def test_a_mailbox_send_lands_on_an_owner_too_busy_to_prepare_a_view(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live bounce (2026-11-14, 0.102.5), over two real relays and a real session.
+
+    The owner's session loop is held busy, the state a long, mid-turn session is
+    in. CONTROL: a viewer's bind on that owner is refused with ``bind_failed`` —
+    a remote viewer negotiates a display window, which the owner must capture on
+    that loop within ``_REMOTE_HISTORY_BIND_WAIT_S`` — so the pilot's old mailbox
+    path, which bound a viewer first, could never write the message. THE ACT: the
+    same owner, still busy past that 2 s cliff, takes a mailbox send through the
+    view-free dial, and the receipt says delivered only once the owner's
+    admission ack arrives (it cannot while the loop is held: the send is still
+    pending at release). The row is then in the OWNER's transcript.
+    """
+    from local_operator.network import cli as net_cli
+    from local_operator.session.remote_open import open_remote_viewer
+    from local_operator.session.runtime.server import RuntimeServer
+
+    # THE SERVING PLANE ON ITS OWN THREAD, as ``process.amain`` runs it in
+    # production (``runtime.start()``): the shared rig serves in-process, where a
+    # held session loop also parks the welcome and the dial fails a rung earlier
+    # ("did not answer") than the live bounce did. The live owner WELCOMED every
+    # dial (``session_stream_opened role=owner``) and then refused the bind.
+    async def _serve_on_its_own_thread(self: RuntimeServer) -> None:
+        self.start()
+        assert await self.wait_until_published(), "the runtime never published"
+
+    monkeypatch.setattr(RuntimeServer, "start_in_process", _serve_on_its_own_thread)
+
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer, peer_pair, monkeypatch, name="busy", prompt="first"
+    )
+    release = threading.Event()
+    try:
+        # An ENGAGED session, as the live one was: the owner refuses a peer
+        # message into a conversation whose owner has not typed yet.
+        await asyncio.to_thread(created.owner.wait_for_turn)
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(created.server_a.root))
+        entered = threading.Event()
+
+        def _hold_owner_loop() -> None:
+            entered.set()
+            release.wait(net_fixtures.NET_WAIT_BUDGET_S)
+
+        created.owner._loop.call_soon_threadsafe(_hold_owner_loop)  # noqa: SLF001
+        assert await asyncio.to_thread(
+            entered.wait, net_fixtures.NET_WAIT_BUDGET_S
+        ), "the owner loop was not held"
+
+        async def _never() -> Any:
+            raise AssertionError("a remote viewer never takes over")
+
+        viewer = await open_remote_viewer(
+            created.session_id, config_dir=created.server_a.root, takeover=_never
+        )
+        assert viewer is not None
+        try:
+            with pytest.raises(ConnectionError, match="could not prepare this view"):
+                await viewer.bind_runtime()
+        finally:
+            await viewer.dispose()
+
+        # THE FRAME REACHING THE OWNER is the event this waits on, not a clock:
+        # the handle's receiver is entered on the serving thread before it hops
+        # to the held session loop, so seeing it proves the message got past the
+        # point the viewer path never left, while the loop still cannot ack.
+        arrived = threading.Event()
+        receive = created.owner.handle.receive_peer_message
+
+        @functools.wraps(receive)
+        async def _observed(*args: Any, **kwargs: Any) -> Any:
+            arrived.set()
+            return await receive(*args, **kwargs)
+
+        monkeypatch.setattr(created.owner.handle, "receive_peer_message", _observed)
+
+        act = asyncio.create_task(
+            net_cli._pilot_act(  # noqa: SLF001 — the act the CLI and the tool both run
+                verb="send",
+                session_id=created.session_id,
+                peer=created.server_b.identity.device_id,
+                text="mailbox while the owner is busy",
+                config_dir=created.server_a.root,
+                mailbox=net_cli._MailboxMode(wake=False, now=False),  # noqa: SLF001
+            )
+        )
+        assert await asyncio.to_thread(
+            net_fixtures.wait_for, arrived.is_set
+        ), "the mailbox frame never reached the owner"
+        # Still held, so no admission yet: "delivered" must wait for the ACK.
+        assert not act.done(), act.result() if act.done() else None
+        release.set()
+        payload, _lines = await asyncio.wait_for(act, net_fixtures.NET_WAIT_BUDGET_S)
+        assert payload["ok"] is True and payload["outcome"] == "delivered", payload
+        assert payload["delivery_path"] == "mailbox" and "fallback" not in payload
+        assert not payload["delivery"].get("duplicate"), payload
+        assert await asyncio.to_thread(
+            net_fixtures.wait_for,
+            lambda: "mailbox while the owner is busy"
+            in json.dumps(created.owner.transcript_entries()),
+        ), "the owner acked a message its transcript does not hold"
+    finally:
+        release.set()
+        # The threaded serving plane closes from any thread (``close``); the
+        # rig's own teardown then has no in-process runtime left to ``aclose``.
+        runtime = created.owner.runtime
+        await asyncio.to_thread(runtime.close)
+
+        async def _already_closed() -> None:
+            return None
+
+        monkeypatch.setattr(runtime, "aclose", _already_closed)
+        await asyncio.to_thread(_stop_real, created.served)
 
 
 def test_a_refused_stream_open_writes_no_close_row(

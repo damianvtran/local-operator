@@ -1679,10 +1679,11 @@ def _poison_peer_reads(
 
 
 @pytest.mark.asyncio
-async def test_a_bare_remote_id_names_the_peer_from_the_warm_cache(
+async def test_a_bare_remote_id_routes_from_the_warm_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A row the last federated listing already reported costs no read at all.
+    """A row the last federated listing already reported costs no read at all:
+    the cached holder answers, and the send is routed to it.
 
     The read is poisoned, so a cache-only hit is the ONLY way this can pass.
     """
@@ -1694,11 +1695,137 @@ async def test_a_bare_remote_id_names_the_peer_from_the_warm_cache(
     _poison_peer_reads(
         monkeypatch, "a warm cache hit paid a listing read; the cached row must answer"
     )
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, dict(_ROUTED_PAYLOAD), calls=calls)
+
+    result = await execute_send(
+        "t", {"session": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert not result.is_error, result.text
+    assert result.text.startswith("routed to cloud-node-1 (it holds `ffff12345678`)\n")
+    assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# AUTO-ROUTING: an exact `session=` id with ONE remote holder is delivered there
+# ---------------------------------------------------------------------------
+#
+# Parity with a local send (2026-11-13): the tool already KNEW the holder when
+# it refused with "pass `peer=…`", so a remote coordinator spent a turn
+# re-sending what it had already said. An exact `session=` id that exactly one
+# peer holds is now delivered via that peer, and the receipt says so. Several
+# holders stay refused with every candidate listed; `target=` is untouched.
+
+_ROUTED_PAYLOAD = {
+    "session_id": "ffff12345678",
+    "peer": "d_cloud_node_1",
+    "verb": "send",
+    "ok": True,
+    "outcome": "delivered",
+    "delivered": True,
+}
+
+
+@pytest.mark.asyncio
+async def test_an_exact_remote_id_routes_to_its_one_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`session=<id>` held by one known peer, no `peer` passed: delivered over
+    the mesh to that device — addressed by its DEVICE ID, which a duplicated
+    device name cannot make ambiguous — and the receipt names the device."""
+    from local_operator.paths import config_dir
+    from local_operator.session.peer_rows import clear_cache, seed_peer_row
+
+    clear_cache()
+    seed_peer_row(config_dir(), _remote_peer_row())
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, dict(_ROUTED_PAYLOAD), calls=calls)
+
+    result = await execute_send(
+        "t", {"session": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert not result.is_error, result.text
+    assert result.text.startswith("routed to cloud-node-1 (it holds `ffff12345678`)\n")
+    assert len(calls) == 1
+    argv = calls[0][0]
+    assert argv[argv.index("--peer") + 1] == "d_cloud_node_1"
+    assert argv[argv.index("--send") + 1] == "ffff12345678"
+    assert "--no-wake" in argv and argv[-1] == "hi"
+    assert result.details is not None
+    assert result.details["peer"] == "d_cloud_node_1"
+    assert result.details["routed_to"] == "cloud-node-1"
+
+
+@pytest.mark.asyncio
+async def test_a_routed_send_the_peer_refuses_still_names_the_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal from the holder keeps the routing line, so the caller knows
+    which device answered rather than reading it as a local refusal."""
+    from local_operator.paths import config_dir
+    from local_operator.session.peer_rows import clear_cache, seed_peer_row
+
+    clear_cache()
+    seed_peer_row(config_dir(), _remote_peer_row())
+    _fake_mesh(
+        monkeypatch,
+        {"ok": False, "code": "session_unknown", "error": "ffff12345678 is gone"},
+        rc=1,
+    )
 
     result = await execute_send(
         "t", {"session": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
     )
     assert result.is_error
+    assert result.text.startswith("routed to cloud-node-1 (it holds `ffff12345678`)\n")
+
+
+@pytest.mark.asyncio
+async def test_an_id_held_by_two_devices_is_refused_with_both_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambiguity stays a refusal: two devices report the same id, nothing is
+    sent, and both are listed by the `peer=` value that would pick each."""
+    from local_operator.paths import config_dir
+    from local_operator.session.peer_rows import clear_cache, seed_peer_row
+
+    clear_cache()
+    seed_peer_row(config_dir(), _remote_peer_row())
+    seed_peer_row(
+        config_dir(), _remote_peer_row(device_id="d_build_box_2", device_name="build-box")
+    )
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, dict(_ROUTED_PAYLOAD), calls=calls)
+
+    result = await execute_send(
+        "t", {"session": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert result.is_error
+    assert calls == [], "an ambiguous holder must never be dialled"
+    assert result.text == (
+        "`ffff12345678` is held by 2 devices — pass `peer=` with one of:\n"
+        "  peer=d_cloud_node_1  (cloud-node-1)\n"
+        "  peer=d_build_box_2  (build-box)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_full_id_target_is_not_auto_routed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`target=` semantics are unchanged: even a full-id needle keeps the
+    hint and dials nothing — auto-routing is the exact `session=` spelling's."""
+    from local_operator.paths import config_dir
+    from local_operator.session.peer_rows import clear_cache, seed_peer_row
+
+    clear_cache()
+    seed_peer_row(config_dir(), _remote_peer_row())
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, dict(_ROUTED_PAYLOAD), calls=calls)
+
+    result = await execute_send(
+        "t", {"target": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert result.is_error
+    assert calls == []
     assert result.text == "`ffff12345678` is held by cloud-node-1 — pass `peer=cloud-node-1`"
 
 
@@ -1732,12 +1859,12 @@ def _federated_fakes(dials: list[str], *, rows):
 
 
 @pytest.mark.asyncio
-async def test_a_cold_cache_pays_one_bounded_read_then_names_the_peer(
+async def test_a_cold_cache_pays_one_bounded_read_then_routes_to_the_peer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """On a miss, ONE bounded federated read (the sidebar/CLI projection), and
-    the sentence names the device the read answered with. The phase count is
-    the receipt: exactly one read."""
+    the send is routed to the device the read answered with. The phase count
+    is the receipt: exactly one read."""
     from local_operator.network import projection
     from local_operator.network import store as net_store
     from local_operator.session.peer_rows import clear_cache
@@ -1756,12 +1883,15 @@ async def test_a_cold_cache_pays_one_bounded_read_then_names_the_peer(
 
     dials: list[str] = []
     monkeypatch.setattr(projection, "RelayPeerCatalog", _federated_fakes(dials, rows=[_Row()]))
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, dict(_ROUTED_PAYLOAD), calls=calls)
 
     result = await execute_send(
         "t", {"session": "ffff12345678", "message": "hi", "wake": False}, None, None, _context()
     )
-    assert result.is_error
-    assert result.text == "`ffff12345678` is held by cloud-node-1 — pass `peer=cloud-node-1`"
+    assert not result.is_error, result.text
+    assert result.text.startswith("routed to cloud-node-1 (it holds `ffff12345678`)\n")
+    assert calls[0][0][calls[0][0].index("--peer") + 1] == "d_cloud_node_1"
     assert dials == ["built", "peers", "rows"], "the miss is ONE read, no more and no less"
 
 
@@ -2071,5 +2201,224 @@ async def test_a_locally_resolved_full_id_target_pays_no_peer_read(
         assert not result.is_error, result.text
         call = await _last_peer_call(handle)
         assert call["text"] == "id delivered"
+    finally:
+        registrant.close()
+
+
+# ---------------------------------------------------------------------------
+# a REMOTE pid — `send(pid=N)` for a pid `sessions` listed on another device
+# ---------------------------------------------------------------------------
+#
+# Measured 2026-11-18: `send(pid=89338)` for a live session on a paired Mac
+# answered "no session found with pid 89338", while `session='79bddc262663'`
+# routed and delivered. Pids are device-local and recycle, so a local MISS is
+# translated to a session id only when ONE live remote row reports the pid;
+# that session rides the existing session-id route. Ambiguous and stale rows
+# refuse; a local hit never reads the catalogue.
+
+_REMOTE_PID = 89338
+
+
+class _PidFacts:
+    def __init__(self, device_id: str, name: str, reachable: bool = True) -> None:
+        self.device_id = device_id
+        self.name = name
+        self.network_id = "n_1"
+        self.reachable = reachable
+        self.reason = "" if reachable else "asked, and it did not answer"
+
+
+class _PidRow:
+    def __init__(self, session_id: str, device_id: str, pid: int, state: str = "idle") -> None:
+        self.session_id = session_id
+        self.device_id = device_id
+        self.device_name = ""
+        self.pid = pid
+        self.state = state
+        self.conversation_name = "remote work"
+        self.pending = None
+        self.kind = "tui"
+        self.started = 10.0
+        self.busy = state == "busy"
+        self.detached = False
+
+
+def _pid_mesh(monkeypatch: pytest.MonkeyPatch, *, facts, rows, dials: list[str]) -> None:
+    """A relay with one or more peer devices, counting every catalogue phase."""
+    from local_operator.network import projection
+    from local_operator.network import store as net_store
+    from local_operator.session.peer_rows import clear_cache
+
+    clear_cache()
+    monkeypatch.setattr(net_store, "find_own_relay", lambda root=None: object())
+
+    class _Catalog:
+        def __init__(self, root: Any = None) -> None:
+            dials.append("built")
+
+        def peers(self):  # noqa: ANN201
+            dials.append("peers")
+            return list(facts)
+
+        def rows(self, device_id: str = ""):  # noqa: ANN201
+            dials.append("rows")
+            return list(rows)
+
+    monkeypatch.setattr(projection, "RelayPeerCatalog", _Catalog)
+
+
+_MAC = _PidFacts("d_mac", "damians-MacBook-Pro")
+
+
+@pytest.mark.asyncio
+async def test_a_remote_pid_with_one_live_row_routes_by_its_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Base-red reproduction: on base this was "no session found with pid
+    89338". Now the pid is translated to the ONE live session reporting it and
+    delivered through the session-id route, and the receipt says so first."""
+    dials: list[str] = []
+    _pid_mesh(
+        monkeypatch,
+        facts=[_MAC],
+        rows=[_PidRow("79bddc262663", "d_mac", _REMOTE_PID)],
+        dials=dials,
+    )
+    calls: list[tuple[list[str], float]] = []
+    payload = dict(_ROUTED_PAYLOAD, session_id="79bddc262663", peer="d_mac")
+    _fake_mesh(monkeypatch, payload, calls=calls)
+
+    result = await execute_send(
+        "t", {"pid": _REMOTE_PID, "message": "hi", "wake": False}, None, None, _context()
+    )
+    assert not result.is_error, result.text
+    lines = result.text.split("\n")
+    assert lines[0] == (
+        "pid 89338 is session 79bddc262663 on damians-MacBook-Pro; routed by session id"
+    )
+    assert lines[1] == "routed to damians-MacBook-Pro (it holds `79bddc262663`)"
+    assert len(calls) == 1
+    argv = calls[0][0]
+    assert argv[argv.index("--peer") + 1] == "d_mac"
+    assert argv[argv.index("--send") + 1] == "79bddc262663"
+    assert result.details is not None
+    assert result.details["routed_from_pid"] == _REMOTE_PID
+    assert dials == ["built", "peers", "rows"], "ONE fresh read, no more"
+
+
+@pytest.mark.asyncio
+async def test_a_remote_pid_on_two_devices_is_refused_with_both_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pids recycle across devices: two live rows with one pid is ambiguity,
+    refused with each session id and device, and nothing is delivered."""
+    dials: list[str] = []
+    linux = _PidFacts("d_linux", "node2")
+    _pid_mesh(
+        monkeypatch,
+        facts=[_MAC, linux],
+        rows=[
+            _PidRow("79bddc262663", "d_mac", _REMOTE_PID),
+            _PidRow("aaaabbbbcccc", "d_linux", _REMOTE_PID, state="busy"),
+        ],
+        dials=dials,
+    )
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, dict(_ROUTED_PAYLOAD), calls=calls)
+
+    result = await execute_send("t", {"pid": _REMOTE_PID, "message": "hi"}, None, None, _context())
+    assert result.is_error
+    assert calls == []
+    assert result.text.startswith("no session found with pid 89338 on this device, and 2 sessions")
+    assert "  session=79bddc262663  (79bddc262663 on damians-MacBook-Pro)" in result.text
+    assert "  session=aaaabbbbcccc  (aaaabbbbcccc on node2)" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("facts", "state", "reason"),
+    [
+        (
+            [_PidFacts("d_mac", "damians-MacBook-Pro", reachable=False)],
+            "idle",
+            "its device did not answer this read",
+        ),
+        ([_MAC], "stored", "it is not running there"),
+        ([_MAC], "wedged", "it is wedged there"),
+        ([], "idle", "its device did not answer this read"),
+    ],
+    ids=["owner-offline", "stored-row", "wedged-row", "owner-missing"],
+)
+async def test_a_stale_remote_pid_row_is_refused_naming_the_session(
+    monkeypatch: pytest.MonkeyPatch, facts: list[Any], state: str, reason: str
+) -> None:
+    """A row whose owner is not answering for it now is never routed: the
+    refusal names the session id and why, and nothing is delivered."""
+    dials: list[str] = []
+    _pid_mesh(
+        monkeypatch,
+        facts=facts,
+        rows=[_PidRow("79bddc262663", "d_mac", _REMOTE_PID, state=state)],
+        dials=dials,
+    )
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, dict(_ROUTED_PAYLOAD), calls=calls)
+
+    result = await execute_send("t", {"pid": _REMOTE_PID, "message": "hi"}, None, None, _context())
+    assert result.is_error
+    assert calls == []
+    assert result.text.startswith("no session found with pid 89338 on this device, and not routed:")
+    assert "session 79bddc262663 on " in result.text
+    assert f"reports pid 89338, but {reason}" in result.text
+    assert "session=79bddc262663" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_pid_nobody_reports_says_pids_are_device_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero matches: still refused, keeping the resolver's prefix, and the
+    sentence says pids are device-local and how to address a remote session."""
+    dials: list[str] = []
+    _pid_mesh(
+        monkeypatch,
+        facts=[_MAC],
+        rows=[_PidRow("79bddc262663", "d_mac", 4242)],
+        dials=dials,
+    )
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, dict(_ROUTED_PAYLOAD), calls=calls)
+
+    result = await execute_send("t", {"pid": _REMOTE_PID, "message": "hi"}, None, None, _context())
+    assert result.is_error
+    assert calls == []
+    assert result.text.startswith("no session found with pid 89338 — pids are device-local")
+    assert "session=<id>" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_local_pid_hit_never_reads_the_mesh_catalogue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local wins: a pid this device holds is delivered locally, and the
+    catalogue is never built — even when a remote row reports the SAME pid."""
+    from local_operator.network import projection
+    from local_operator.network import store as net_store
+
+    monkeypatch.setattr(net_store, "find_own_relay", lambda root=None: object())
+
+    class _Poison:
+        def __init__(self, root: Any = None) -> None:
+            raise AssertionError("a local pid hit must not read the mesh catalogue")
+
+    monkeypatch.setattr(projection, "RelayPeerCatalog", _Poison)
+    registrant, alias, handle = await _start_peer()
+    try:
+        result = await execute_send(
+            "t", {"pid": alias.pid, "message": "by pid"}, None, None, _context()
+        )
+        assert result.is_error is False, result.text
+        assert "routed" not in result.text
+        assert len([c for c in handle.calls if c[0] == "receive_peer_message"]) == 1
     finally:
         registrant.close()

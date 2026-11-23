@@ -1894,7 +1894,66 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # These are estimates at2.78 chars/token, NOT a provider invoice. Admit the
 # requested async music capability with600 tokens of slack (half the unchanged
 # tighten band), rather than weakening availability or hiding its context cost.
-BUDGET_BILLED_TOKENS = 37_218
+# RAISED 37,218 -> 37,245 for the SESSIONS ``park`` OP (PR #3850), found at the
+# convergence merge with origin/main 5c4adec8c9c: each side passed alone and the
+# union did not. Measured with THIS script, ISOLATED HOME, top kind:
+#   merge-base 5795d706581e                 103,328 chars = ~37,168 billed
+#   PR head d35f30b5757d (park only)        103,403 chars = ~37,195 billed (+27)
+#   origin/main 5c4adec8c9c (main only)     103,410 chars = ~37,198 billed (+30)
+#   merged head (both)                      103,485 chars = ~37,225 billed
+# The PR's +75 chars is the ``park`` op itself — its ``op`` Literal member, its
+# op-field row and its schema copy — a new documented capability, so the cost is
+# deliberate. The raise is exactly that +27, which leaves the merged head 20 under
+# the ceiling: the headroom origin/main already sat at, so the next addition finds
+# the ratchet as tight as this one did. The child ceiling does not move (the
+# merged head passes ``--kind child`` with 55 of headroom).
+# RAISED 37,245 -> 37,388 for the GUARDRAIL REFUSAL EXCEPTIONS (operator
+# request 2026-11-16, session 1ebbed33eae7: a refusal by a since-fixed guard,
+# and the operator's typed approval, were both read as unliftable). The
+# ``system.md`` refusal bullet now names its two exceptions and what never lifts
+# a refusal; nothing else in the start context moved. Measured with THIS
+# script, ISOLATED HOME, one host, two trees one after the other:
+#   origin/main 72dd603f   104,071 chars = ~37,436 billed
+#   this branch            104,468 chars = ~37,578 billed
+#     = +397 chars = ~+143 billed, exactly the bullet's new text.
+# The raise is that delta and nothing more, so whatever headroom main carries
+# in CI is unchanged. (This host reads main itself 191 over 37,245 — the known
+# local-vs-CI offset; the delta is the comparable number, not the absolute.)
+# RAISED 37,388 -> 37,389 at the convergence merge with origin/main da8f3f04,
+# which carries PR #4098's terser refusal bullet: the merged bullet keeps this
+# PR's text plus #4098's `ask`-reply exception (+47 chars over this branch).
+# Measured with THIS script, ISOLATED HOME, one host, one pass:
+#   origin/main da8f3f04   103,530 chars = ~37,241 billed (4 under 37,245)
+#   merged head            103,931 chars = ~37,385 billed
+#     = +401 chars = ~+144.2 billed; the ceiling moves by that delta (+144
+#     over main's 37,245), so main's headroom carries over unchanged.
+# RAISED 37,389 -> 37,467 at PR #4147's convergence merge with origin/main
+# (#4141's two-exception refusal bullet): the bullet gains #4147's REFUSAL
+# NARROWING sentence (node2 QA, PR #4104 u0: an agent resubmitting a refused
+# scratchpad log write with the literal path the refusal prescribed was
+# accused of a reroute). Measured with THIS script, ISOLATED HOME, one host,
+# base by swapping in origin/main's system.md and guardrails/check.py:
+#   origin/main 2dc66f06   104,515 chars = ~37,595 billed
+#   merged head            104,732 chars = ~37,673 billed
+#     = +217 chars = ~+78 billed, exactly the sentence; the ceiling moves by
+#     that delta so main's headroom carries over unchanged. (This host reads
+#     main itself 206 over 37,389 — the known local-vs-CI offset.)
+# LOWERED 37,467 -> 32,047 by wave 2 (perf/harness-cost-wave2): ten zero-use
+# tools (media, ``tags``, ``harness_import``) ride on demand, the ``ask`` /
+# ``ask_withdraw`` descriptions stop repeating system.md, and params-class
+# docstrings leave every schema's top level. Measured with THIS script,
+# ISOLATED HOME, one host, base checked out then head:
+#   origin/main 1566e04b   104,149 chars = ~37,464 billed (3 of headroom)
+#   this branch             89,080 chars = ~32,043 billed
+#     = -15,069 chars = ~-5,420 billed; lowered by exactly the saving so the
+#     ceiling keeps main's headroom (local-vs-CI offset, notes above).
+# RAISED 32,047 -> 32,135 by the same PR's round-1 remediation (#4326): the
+# media generators' purpose phrases name their guide (review R4, +192 chars)
+# and ``ask_withdraw`` keeps its two moot examples (QA Q-F2, +53). Same script,
+# isolated HOME, one host: 89,080 -> 89,325 chars = ~32,043 -> ~32,131 billed
+# (+88), so the ceiling moves by exactly that and keeps its 4 of headroom.
+# Net wave 2 is still -14,824 chars = ~-5,333 billed against origin/main.
+BUDGET_BILLED_TOKENS = 32_135
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2113,7 +2172,40 @@ BUDGET_BILLED_TOKENS = 37_218
 # inherits 31,317 and the tighten band below (1,200) is not in play.
 # Same measured music admission as the top arm:32,647 +600 slack. Keep the
 # child's narrower inventory and the shared tighten/negative controls unchanged.
-BUDGET_CHILD_BILLED_TOKENS = 33_247
+# RAISED 33,247 -> 33,390 with the top arm, for the same ``system.md``
+# refusal-exception text (children read the same bullet):
+#   origin/main 72dd603f   92,373 chars = ~33,228 billed / 19 headroom
+#   this branch            92,770 chars = ~33,371 billed
+#     = +397 chars = ~+143 billed; the raise keeps main's 19 of headroom.
+# RAISED 33,390 -> 33,391 at the same convergence merge (same bullet):
+#   origin/main da8f3f04   91,832 chars = ~33,033 billed
+#   merged head            92,233 chars = ~33,177 billed
+#     = +401 chars = ~+144.2 billed over main's 33,247.
+# RAISED 33,391 -> 33,469 at the same #4147 convergence merge (same sentence):
+#   origin/main 2dc66f06   92,817 chars = ~33,387 billed (4 of headroom)
+#   merged head            93,034 chars = ~33,465 billed
+#     = +217 chars = ~+78 billed; the raise keeps main's 4 of headroom.
+# LOWERED 33,469 -> 32,698 by tool-gated system.md prose (perf/harness-cost-
+# efficiency): a child holds no ``ask``, so the ask mechanics, the queued-ask
+# paragraph and the wake/monitor/no_reply sentences drop out of its block 0,
+# replaced by one no-ask line. Measured locally, isolated HOME:
+#   origin/main cc65674b   92,451 chars = ~33,256 billed / 213 headroom
+#   this branch            90,307 chars = ~32,485 billed
+#     = -2,144 chars = ~-771 billed; lowered by exactly the saving so the
+#     ceiling keeps main's 213 of headroom (CI reads differ from local by tens
+#     of tokens, see the TOP ceiling's notes). The top arm is byte-identical.
+# LOWERED 32,698 -> 27,734 by wave 2 (perf/harness-cost-wave2): the same
+# deferral, docstring and description trims as the top arm (a child holds the
+# media tools, ``tags`` and ``harness_import`` too). Measured locally, isolated
+# HOME, base checked out then head:
+#   origin/main 1566e04b   90,307 chars = ~32,485 billed / 213 headroom
+#   this branch            76,507 chars = ~27,521 billed
+#     = -13,800 chars = ~-4,964 billed; lowered by exactly the saving.
+# NOT raised for the round-1 remediation (#4326): a child holds the media
+# tools, so the R4 guide pointers cost it +192 chars (76,507 -> 76,699 =
+# ~27,590 billed); it has no ``ask_withdraw``. 144 of headroom stays, so the
+# ceiling keeps its wave-2 value rather than loosening.
+BUDGET_CHILD_BILLED_TOKENS = 27_734
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
@@ -2169,7 +2261,7 @@ def tool_schema_chars(tools: list[AgentTool]) -> int:
 #: through ``hub`` and its parent decides), so the child arm neither holds the
 #: tool nor renders the ``has_notify`` clause.
 CHILD_NEVER_HOLDS = frozenset(
-    {"ask", "ask_withdraw", "wake", "monitor", "patience", "no_reply", "notify"}
+    {"ask", "ask_withdraw", "wake", "monitor", "patience", "no_reply", "notify", "integrations"}
 )
 
 

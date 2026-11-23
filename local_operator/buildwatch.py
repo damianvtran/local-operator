@@ -53,14 +53,18 @@ nothing outside this module had to change when the definition moved here.
 
 from __future__ import annotations
 
+import asyncio
+import enum
 import logging
 import os
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Final, Literal, TypeVar
 
 if TYPE_CHECKING:
     from local_operator.update import BuildStamp
+
+_T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +173,143 @@ KEPT_UNSETTLED = "kept: the install on disk has not settled yet"
 #: sentence too: honouring the retired string is a cross-version contract, not
 #: an implementation detail to be tidied away later.
 KEPT_MATCHES_OR_UNSETTLED = "kept: build on disk matches (or has not settled)"
+
+#: The disk read behind the refresh decision did not answer within
+#: :data:`BUILD_READ_TIMEOUT_S` (or raised). Deliberately NOT a prefix of
+#: ``KEPT_MATCHES``: an unanswered read says nothing about whether the install
+#: matches, so the caller must route it to its generic ``kept`` branch rather
+#: than report the runtime current.
+KEPT_UNREADABLE = "kept: the install on disk could not be read in time"
+
+
+#: How long an ASYNC caller waits for one off-loop build read before it gives
+#: the tick up (:class:`OffLoopBuildRead`). Equal to :data:`BUILD_CHECK_S`, the
+#: cadence of every caller, and that is the reasoning rather than a coincidence:
+#: a healthy read is one dist-info lookup plus a 60-byte file (milliseconds), so
+#: a read still running when the NEXT check would be due has already cost that
+#: check, and waiting longer only delays noticing ``stop``. The incident it
+#: bounds (Mac watchdog, 2026-11-17: a 145 s ``importlib.metadata`` read under
+#: 19.2/20.5 GB swap) is ~30x this, so no setting near the healthy distribution
+#: could make it a successful read anyway — the timeout only decides how soon
+#: the caller stops WAITING. It never stops the read: a thread cannot be
+#: cancelled, which is why the reader below refuses to start a second one.
+BUILD_READ_TIMEOUT_S = BUILD_CHECK_S
+
+
+class _Unknown(enum.Enum):
+    """The type of :data:`READ_UNKNOWN`: a sentinel distinct from ``None``. An
+    enum member (and ``Final`` below) so ``x is READ_UNKNOWN`` narrows for pyright."""
+
+    TOKEN = "unknown"
+
+
+#: "The read did not answer this tick": timed out, raised, or the previous read
+#: is still stuck in its thread. NOT ``None``, because ``None`` is an ANSWER
+#: here — "nothing moved" from ``build_changed``, and "the handover no longer
+#: holds, withdraw it" from ``handover_build``. Folding a stalled read into the
+#: second would withdraw a true announcement on a slow disk, so every caller
+#: must test for this first and skip the tick: no announcement, no withdrawal,
+#: no retirement, no restart.
+READ_UNKNOWN: Final = _Unknown.TOKEN
+
+
+class OffLoopBuildRead:
+    """Run one synchronous build read OFF the event loop, bounded, at most one
+    in flight, warning once per failing streak.
+
+    WHY THIS EXISTS. ``disk_build``/``installed_build`` end in
+    ``importlib.metadata`` file reads. Called directly from a coroutine, a read
+    that blocks blocks the whole loop: on 2026-11-17 the desktop ``serve``
+    daemon stalled 145 s in ``retirement_poll -> build_changed -> disk_build ->
+    read_text`` under heavy swap, and its watchdog re-exec'd it — a build CHECK
+    restarted the very process it exists to keep serving. Every async caller of
+    those reads goes through one instance of this (one per watching task, since
+    the streak and the in-flight read are per caller).
+
+    THE CONTRACT. ``await reader(fn, *args)`` returns ``fn(*args)``, or
+    :data:`READ_UNKNOWN` when the read raised, did not finish within
+    ``timeout_s``, or an earlier read of this reader is still running. It never
+    raises (cancellation of the CALLER still propagates, as it must for
+    shutdown) and never blocks the loop beyond scheduling the thread.
+
+    AT MOST ONE READ IN FLIGHT. A timed-out thread keeps running — Python cannot
+    cancel it — so starting a fresh one every tick of a long stall would stack
+    a thread per ``BUILD_CHECK_S`` into the default executor (145 s = ~29) and
+    contend for the same swapped-out pages. Instead the stuck read is kept and
+    every tick until it finishes answers ``READ_UNKNOWN`` at once; its late
+    result is discarded, because the next tick re-reads the disk fresh and a
+    stale answer is exactly what must not be acted on.
+
+    ONE WARNING PER STREAK. The first unanswered read of a streak logs WARNING
+    (console logging runs at WARNING, so a quieter line would be invisible);
+    the rest of the streak is DEBUG, and the first answered read after it logs
+    one INFO recovery line.
+    """
+
+    def __init__(self, what: str, *, timeout_s: float | None = None) -> None:
+        self._what = what
+        self._timeout_s = BUILD_READ_TIMEOUT_S if timeout_s is None else timeout_s
+        self._inflight: "asyncio.Future[Any] | None" = None
+        self._failing = False
+
+    @property
+    def failing(self) -> bool:
+        """Is this reader inside a streak of unanswered reads?"""
+        return self._failing
+
+    async def __call__(
+        self, fn: "Callable[..., _T]", *args: object
+    ) -> "_T | Literal[_Unknown.TOKEN]":
+        if self._inflight is not None and not self._inflight.done():
+            return self._unanswered("the previous read is still running")
+        future = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+        # A read abandoned by the timeout may still FAIL later; retrieve that
+        # so asyncio does not log "exception was never retrieved" for a result
+        # this reader has already decided not to use.
+        future.add_done_callback(_consume_outcome)
+        self._inflight = future
+        try:
+            # ``shield``: a timeout (or the caller being cancelled) must not
+            # cancel the future, or ``done()`` would turn true while the thread
+            # is still stuck and the next tick would start a second one.
+            value = await asyncio.wait_for(asyncio.shield(future), self._timeout_s)
+        except asyncio.TimeoutError as exc:
+            # Since 3.11 ``asyncio.TimeoutError`` IS the builtin, so a read that
+            # itself raised TimeoutError (a network mount's own deadline) lands
+            # here too. Only the future tells the two apart: a read that gave up
+            # is done with that exception, a read still running is not done.
+            # Both are unknown either way; the log must name the one that
+            # happened, or a fast failure reads as a slow disk (review n1).
+            if future.done() and not future.cancelled() and future.exception() is exc:
+                return self._unanswered(f"the read raised {type(exc).__name__}: {exc}")
+            return self._unanswered(f"no answer within {self._timeout_s:g} s")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — an unreadable build is "unknown", never fatal
+            return self._unanswered(f"{type(exc).__name__}: {exc}")
+        if self._failing:
+            self._failing = False
+            logger.info("%s: the build read is answering again", self._what)
+        return value
+
+    def _unanswered(self, why: str) -> "Literal[_Unknown.TOKEN]":
+        if not self._failing:
+            self._failing = True
+            logger.warning(
+                "%s: the build read on disk did not answer (%s); skipping this check "
+                "and keeping the current state — nothing is announced, withdrawn or "
+                "retired on an unanswered read",
+                self._what,
+                why,
+            )
+        else:
+            logger.debug("%s: build read still unanswered (%s)", self._what, why)
+        return READ_UNKNOWN
+
+
+def _consume_outcome(future: "asyncio.Future[Any]") -> None:
+    if not future.cancelled():
+        future.exception()
 
 
 def positive_seconds(raw: str, default: float) -> float:

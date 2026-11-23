@@ -67,7 +67,12 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (state / "config.yml").write_text("version: 1\n")
     # Synthetic trees: no live process cwd, a GitHub remote with no open PR
     # (the live case's PRs were all merged), no running owner.
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
+    # Own trees take a fresh ``cwd_holders`` scan instead (PR #3987): stub the
+    # inventory too, or an unreadable same-uid ``/proc/<pid>/cwd`` on CI's
+    # Linux runner fails it closed and own cleanups read HIGH (train t6).
+    # ``test_reached_worktrees`` shares this fixture.
+    monkeypatch.setattr(prov, "_cwd_entries", lambda *, fresh=False: ())
     monkeypatch.setattr(prov, "_github_repo", lambda _: "damianvtran/local-operator-mobile")
     # ``worktree_activity`` asks the PR-history lookup (``_gh_prs``) first and
     # the open-only one only on a full page (#3782), so "no open PR" needs BOTH
@@ -105,31 +110,39 @@ def _git(*args: str, cwd: Path) -> None:
 
 
 @pytest.fixture
-def mobile(home: Path) -> Path:
-    """``~/local-operator-mobile`` with the five worktrees exactly as found live."""
+def mobile(home: Path, request: pytest.FixtureRequest) -> Path:
+    """The five field worktrees, or their witnessed counterpart for plain cleanup."""
+    witnessed = getattr(request, "param", False)
     repo = home / "local-operator-mobile"
     repo.mkdir()
     _git("init", "-q", "-b", "main", cwd=repo)
     (repo / ".gitignore").write_text("node_modules\n.expo\n.pnpm-store\n.worktrees/\n")
     (repo / "App.tsx").write_text("export {}\n")
+    if witnessed:
+        (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
     _git("add", ".", cwd=repo)
     _git("commit", "-qm", "init", cwd=repo)
     deps = repo / ".worktrees" / "native-history-continuity"
     _git("worktree", "add", "-q", "-b", "feat/nhc", str(deps), cwd=repo)
-    (deps / "node_modules" / "react").mkdir(parents=True)
+    dep_root = repo if witnessed else deps
+    (dep_root / "node_modules" / "react").mkdir(parents=True)
     state = home / ".local-operator"
     prov.record_lineage(C, origin="subagent", parent=S, state_root=state)
     for name in NAMES:
         wt = repo / ".worktrees" / name
         _git("worktree", "add", "-q", "-b", f"fix/{name}", str(wt), cwd=repo)
-        # The live trees' only extras: a node_modules SYMLINK to the sibling's
-        # dependency tree, plus ignored ``.expo/`` (three) and ``.pnpm-store/`` (one).
-        (wt / "node_modules").symlink_to("../native-history-continuity/node_modules")
-        if name in ("refused-connect", "markdown-tables", "composer-ios-wrap"):
-            (wt / ".expo").mkdir()
-            (wt / ".expo" / "settings.json").write_text("{}")
-        if name == "refused-connect":
-            (wt / ".pnpm-store" / "v3").mkdir(parents=True)
+        if witnessed:
+            # Committed matching lockfiles and a link outside the removal:
+            # the checkpoint can prove that no dependency bytes are at risk.
+            (wt / "node_modules").symlink_to("../../node_modules")
+        else:
+            # The field used a sibling link and local ignored stores; none is witnessed.
+            (wt / "node_modules").symlink_to("../native-history-continuity/node_modules")
+            if name in ("refused-connect", "markdown-tables", "composer-ios-wrap"):
+                (wt / ".expo").mkdir()
+                (wt / ".expo" / "settings.json").write_text("{}")
+            if name == "refused-connect":
+                (wt / ".pnpm-store" / "v3").mkdir(parents=True)
         _record(home, wt)
     return repo
 
@@ -207,14 +220,30 @@ def test_ignored_only_trees_are_clean_even_for_a_foreign_ranking(mobile: Path) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("command", [COMMAND_1, COMMAND_2], ids=["plain", "force-loop"])
+@pytest.mark.parametrize(
+    ("mobile", "command"),
+    [(True, COMMAND_1), (False, COMMAND_2)],
+    indirect=["mobile"],
+    ids=["plain-witnessed", "force-loop"],
+)
 async def test_own_finished_worktrees_settle_without_the_judge(
     home: Path, mobile: Path, command: str
 ) -> None:
-    """(b) Both live commands run with zero judge calls."""
+    """A witnessed plain compound command does not change legacy force-loop ranking."""
     judge = _Judge("BLOCK: should not be asked")
     outcome = await _check(home, command, judge)
     assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_own_plain_compound_cleanup_holds_unwitnessed_ignored_payload(
+    home: Path, mobile: Path
+) -> None:
+    judge = _Judge("ALLOW ledger")
+    outcome = await _check(home, COMMAND_1, judge)
+    assert outcome is not None and outcome.blocked
+    assert "3 ignored entries the guard cannot prove regenerable" in outcome.text
     assert judge.prompts == []
 
 
@@ -226,10 +255,8 @@ async def test_rm_rf_of_an_exact_own_worktree_settles(home: Path, mobile: Path) 
     assert judge.prompts == []
 
 
-def test_own_worktree_with_unregenerable_ignored_output_is_own_clean(
-    home: Path, mobile: Path
-) -> None:
-    """Ignored entries never make an OWN tree dirty: git's own remove deletes them."""
+def test_exact_remove_preserves_unregenerable_ignored_output(home: Path, mobile: Path) -> None:
+    """Git would delete ignored notes; exact removal checks preservation first."""
     wt = mobile / ".worktrees" / "keyboard-bound"
     # Ignored through the shared ``info/exclude``, and not regenerable by name.
     with (mobile / ".git" / "info" / "exclude").open("a") as fh:
@@ -242,7 +269,7 @@ def test_own_worktree_with_unregenerable_ignored_output_is_own_clean(
     v = classify_bash(
         f"git worktree remove {wt}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S
     )
-    assert v.risk is Risk.LOW, v.targets[0].reason
+    assert v.risk is Risk.HIGH and v.targets[0].cleanup_hold, v.targets[0].reason
     foreign = classify_bash(
         f"git worktree remove {wt}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S2
     )
@@ -281,6 +308,7 @@ async def test_unrelated_session_still_goes_to_the_judge_and_a_ledger_claim_fail
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mobile", [True], indirect=True, ids=["witnessed"])
 async def test_unrelated_plain_remove_while_owner_runs_goes_to_the_judge(
     home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -332,20 +360,18 @@ async def test_real_untracked_work_goes_to_the_judge_with_the_ledger_and_the_ent
 
 
 @pytest.mark.asyncio
-async def test_judge_may_settle_own_dirty_worktree_by_citing_the_ledger(
+async def test_judge_cannot_override_exact_remove_with_uncommitted_work(
     home: Path, mobile: Path
 ) -> None:
-    """The judge's ``ALLOW ledger`` is re-verified against the ledger, not trusted."""
+    """Creation is not permission to discard new work in a linked checkout."""
     wt = mobile / ".worktrees" / "composer-ios-wrap"
     (wt / "scratch.txt").write_text("throwaway")
     _record(home, wt)  # the root changed after recording (Linux ctime stamp)
     judge = _Judge("ALLOW ledger")
     outcome = await _check(home, f"git worktree remove --force {wt}", judge)
     assert outcome is not None
-    assert not outcome.blocked, outcome.text
-    assert "ledger" in " ".join(outcome.warnings)
-    brief = judge.prompts[0]
-    assert f"ledger: created by {C}" in brief  # the subagent, recorded under S too
+    assert outcome.blocked and "stash or commit" in outcome.text
+    assert not judge.prompts
 
 
 @pytest.mark.asyncio

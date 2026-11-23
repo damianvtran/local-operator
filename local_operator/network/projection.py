@@ -249,8 +249,8 @@ def _attention_block(value: Any) -> tuple[str, str] | None:
 NOTICES_MAX = 8
 
 
-def _notices_block(value: Any) -> tuple[tuple[str, int, str, str], ...] | None:
-    """``notices: [{key, revision, priority, title}, ...]`` as tuples, else no claim.
+def _notices_block(value: Any) -> tuple[tuple[str, int, str, str, int], ...] | None:
+    """``notices: [{key, revision, priority, title, at}, ...]`` as tuples, else no claim.
 
     Each entry follows :func:`_notice_block`'s refusal rule; a malformed entry is
     dropped on its own, so one bad item cannot hide the others beside it. An
@@ -265,12 +265,15 @@ def _notices_block(value: Any) -> tuple[tuple[str, int, str, str], ...] | None:
     return parsed or None
 
 
-def _notice_block(value: Any) -> tuple[str, int, str, str] | None:
-    """One ``{key, revision, priority, title}`` notice as a tuple, else no claim.
+def _notice_block(value: Any) -> tuple[str, int, str, str, int] | None:
+    """One ``{key, revision, priority, title, at}`` notice as a tuple, else no claim.
 
     Same refusal rule as :func:`_attention_block`; the revision must be a real
     positive integer (a bool is not one) because it is the episode identity the
-    origin dedupes on.
+    origin dedupes on. ``at`` (the owner item's own time, epoch ms; added
+    2026-11-13) is OPTIONAL: an older owner sends none and it reads as ``0`` —
+    "cannot prove it is new" — which the origin's no-backfill rule refuses
+    (``notifications/remote_attention``), never a refused block.
     """
     if not isinstance(value, dict):
         return None
@@ -280,7 +283,15 @@ def _notice_block(value: Any) -> tuple[str, int, str, str] | None:
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
         return None
     priority = value.get("priority")
-    return key[:256], revision, (priority if isinstance(priority, str) else "normal"), title[:200]
+    at = value.get("at")
+    at_ms = at if isinstance(at, int) and not isinstance(at, bool) and at > 0 else 0
+    return (
+        key[:256],
+        revision,
+        (priority if isinstance(priority, str) else "normal"),
+        title[:200],
+        at_ms,
+    )
 
 
 def _binding_name(binding: Any, key: str) -> str:
@@ -374,10 +385,18 @@ class PeerRow:
     #: The origin-only completion/notice facts (``notifications/remote_attention``),
     #: parsed by :func:`_attention_block`/:func:`_notices_block`. ``None`` is no claim.
     attention: tuple[str, str] | None = None
-    notices: tuple[tuple[str, int, str, str], ...] | None = None
+    notices: tuple[tuple[str, int, str, str, int], ...] | None = None
     #: ``attention_unknown: true`` — the owner's completion read failed, so a
     #: missing ``attention`` says nothing (R2-m2). Only a real ``True`` counts.
     attention_unknown: bool = False
+    #: ``asks_unknown: true`` — the owner's ASK-log read failed, so a missing
+    #: ``remote-ask:`` notice says nothing (PR #3934 R1-2). Only a real ``True``.
+    asks_unknown: bool = False
+    #: ``pending_queued: true`` — the ``pending`` claim is the ask QUEUE's
+    #: listing fact, not a parked gate (PR #3934 Q1/R1-3): a member paints the
+    #: badge but raises no park row for it. Absent (every older owner, whose
+    #: ``pending`` only ever meant a gate) reads ``False``, i.e. a gate.
+    pending_queued: bool = False
 
     @property
     def peer_block(self) -> dict[str, Any]:
@@ -509,6 +528,8 @@ class PeerRow:
             attention=_attention_block(data.get("attention")),
             notices=None if stale else _notices_block(data.get("notices")),
             attention_unknown=data.get("attention_unknown") is True,
+            asks_unknown=data.get("asks_unknown") is True,
+            pending_queued=data.get("pending_queued") is True,
         )
 
     def to_row_json(self) -> dict[str, Any]:
@@ -1332,6 +1353,25 @@ def remote_owner_for(
     return RemoteOwner(config_dir=config_dir, session_id=session_id, facts=facts, root=root)
 
 
+class RemoteStreamRefusal(ConnectionError):
+    """An explicit mesh rejection, not an ambiguous missing owner ack.
+
+    This is not a failed dial: dropping its code made an answered runtime refusal
+    look like an unreachable device. It remains a ConnectionError so existing
+    bind teardown runs, while callers that report the result keep the real code.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# #4057 mobile readers and #4060 pilot reporting must recognize ONE refusal:
+# retaining the reviewed pilot spelling as an alias preserves both callers'
+# isinstance checks, including errors raised by mobile's reply-error hook.
+RemoteStreamRefused = RemoteStreamRefusal
+
+
 class RemoteSessionClient(AttachClient):
     """An ``AttachClient`` whose endpoint is the LOCAL relay, not the runtime.
 
@@ -1372,6 +1412,12 @@ class RemoteSessionClient(AttachClient):
         #: and a local client with no such property reads False.
         self.peer_journal_source_declared = False
 
+    def _raise_for_reply_error(self, reply: dict[str, Any]) -> None:
+        code = reply.get("mesh_refusal_code")
+        if reply.get("op") == "error" and isinstance(code, str) and code:
+            raise RemoteStreamRefusal(code, str(reply.get("message") or "mesh refusal"))
+        super()._raise_for_reply_error(reply)
+
     async def connect(self, record: SessionRecord, session_id: str) -> None:
         """Open a forwarded stream to the owner and consume its welcome.
 
@@ -1393,6 +1439,7 @@ class RemoteSessionClient(AttachClient):
                 "device cannot be reached from here."
             )
         self._session_id = session_id
+        self.received_after_welcome = False
         self._drain_phrase = ""
         self._attention_supported = "completion-ack-v1" in capabilities
         self._event_mute_supported = EVENT_MUTE_CAPABILITY in capabilities
@@ -1520,9 +1567,15 @@ class RemoteSessionClient(AttachClient):
         except ValueError as exc:
             raise ConnectionError("the local relay sent a malformed frame") from exc
         if not isinstance(opening, dict) or opening.get("op") != "ack":
-            raise ConnectionError(
-                str((opening or {}).get("message") or "the relay refused to open that stream")
-            )
+            failure = opening if isinstance(opening, dict) else {}
+            message = str(failure.get("message") or "the relay refused to open that stream")
+            if not isinstance(opening, dict):
+                raise ConnectionError(message)
+            # A received codeless refusal is the owner's deliberately opaque
+            # permission answer. The local relay now labels silence explicitly,
+            # so defaulting THIS answer to not_authorised does not turn a dead
+            # transport into a phone permission error (#4057 / #4060 M1).
+            raise RemoteStreamRefused(str(failure.get("code") or "not_authorised"), message)
         raw_detail = opening.get("detail")
         detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
         self._stream_id = str(detail.get("stream") or "")
@@ -1534,7 +1587,16 @@ class RemoteSessionClient(AttachClient):
         try:
             first = await asyncio.wait_for(reader.readline(), timeout=ACK_TIMEOUT_S)
         except TimeoutError as exc:
-            raise ConnectionError("the remote owner did not send its state") from exc
+            # Admission already consumed the runtime's welcome on the owner.
+            # Its forwarding hop now being silent is not evidence of a busy
+            # runtime, even though the local attach's welcome timeout is.
+            from local_operator.mobile.attach_client import (
+                RemoteStreamUnresponsiveError,
+            )
+
+            raise RemoteStreamUnresponsiveError(
+                "the session's state did not arrive after the connection was accepted"
+            ) from exc
         except ValueError as exc:
             raise ConnectionError(OVERSIZED_FRAME_REASON) from exc
         if not first:

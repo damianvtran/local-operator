@@ -17,10 +17,11 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import os
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,23 @@ NOISE_WALL_CAP_MS = 4000.0
 #: and for callers that still assert an absolute CPU bound via
 #: ``assert_no_stall_loaded``.
 S2_FIXED_CPU_CEILING_MS = 500.0
+
+
+class FixedCpuCeilingBreach(AssertionError):
+    """A loop-CPU reading crossed the S2 CPU bound (and only that bound).
+
+    The bound is the fixed 500 ms ceiling; at the turn delta it is the same
+    ceiling scaled by the run's wall/CPU calibration ratio, as before.
+
+    WHY a distinct type: S2 judges the fixed CPU bound by persistence across two
+    independent windows (:func:`assert_fixed_cpu_breach_persists`), but the wall
+    bounds and every other assertion stay single-window and immediate. The cell
+    must tell the two apart without parsing messages. It subclasses
+    ``AssertionError`` so direct callers (the negative-control tests) still see
+    an ordinary assertion failure.
+    """
+
+    __test__ = False
 
 
 #: The generations ``gc.get_count()`` reports and this attribution keeps apart.
@@ -760,18 +778,21 @@ class StallRecorder:
             peak.cpu_ms >= cpu_ceiling_ms or peak.wall_ms >= bound_wall
         ):
             suffix = "\ncallback attribution: " + json.dumps(self._callbacks.summary())
-        assert peak.cpu_ms < cpu_ceiling_ms, (
-            f"{label} consumed {peak.cpu_ms:.1f} ms of loop-thread CPU "
-            f"(fixed ceiling {cpu_ceiling_ms:.0f} ms); "
-            f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
-            f"{suffix}{self.gc_failure_note(peak)}"
-        )
+        # Wall first: only the CPU bound is judged by persistence, so a wall
+        # breach must surface immediately and not be hidden behind a CPU retry.
         assert peak.wall_ms < bound_wall, (
             f"{label} probe wake gap was {peak.wall_ms:.0f} ms of wall time "
             f"(ceiling {bound_wall:.0f} ms); "
             f"all wall stalls: {[round(s, 1) for s in self.wall_stalls]}"
             f"{suffix}{self.gc_failure_note(peak)}"
         )
+        if not peak.cpu_ms < cpu_ceiling_ms:
+            raise FixedCpuCeilingBreach(
+                f"{label} consumed {peak.cpu_ms:.1f} ms of loop-thread CPU "
+                f"(fixed ceiling {cpu_ceiling_ms:.0f} ms); "
+                f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
+                f"{suffix}{self.gc_failure_note(peak)}"
+            )
 
     def assert_turn_delta_loaded(
         self,
@@ -848,19 +869,20 @@ class StallRecorder:
         )
         if self._callbacks is not None and (delta_cpu >= bound_cpu or worst_wall >= bound_wall):
             suffix += "\ncallback attribution: " + json.dumps(self._callbacks.summary())
-        assert delta_cpu < bound_cpu, (
-            f"the agent-turn path added {delta_cpu:.1f} ms of loop-thread CPU over "
-            f"the comparable control leg (turn {turn.cpu_ms:.1f} ms - control "
-            f"{control.cpu_ms:.1f} ms, bound {bound_cpu:.1f} ms); "
-            f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
-            f"{suffix}{self.gc_failure_note(control, turn, delta_ms=delta_cpu)}"
-        )
         assert worst_wall < bound_wall, (
             f"event loop probe wake gap was {worst_wall:.0f} ms of wall time "
             f"(ceiling {bound_wall:.0f} ms); "
             f"all wall stalls: {[round(s, 1) for s in self.wall_stalls]}"
             f"{suffix}{self.gc_failure_note(control, turn, delta_ms=delta_cpu)}"
         )
+        if not delta_cpu < bound_cpu:
+            raise FixedCpuCeilingBreach(
+                f"the agent-turn path added {delta_cpu:.1f} ms of loop-thread CPU over "
+                f"the comparable control leg (turn {turn.cpu_ms:.1f} ms - control "
+                f"{control.cpu_ms:.1f} ms, bound {bound_cpu:.1f} ms); "
+                f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
+                f"{suffix}{self.gc_failure_note(control, turn, delta_ms=delta_cpu)}"
+            )
 
 
 # --- A2: the title backfill answers a no-title directory once ----------------
@@ -892,8 +914,12 @@ def test_second_title_backfill_pass_is_stat_only(tmp_path: Path) -> None:
     1,268 sessions could never grow a sidecar and were fully re-read every
     time. The sentinel turns the second pass into one ``stat`` per directory.
     """
+    import builtins
+    import io
+
     from local_operator.resume import (
         TITLE_SCAN_SENTINEL_NAME,
+        TRANSCRIPT_NAME,
         backfill_session_titles,
         session_name,
         stored_session_title,
@@ -902,18 +928,52 @@ def test_second_title_backfill_pass_is_stat_only(tmp_path: Path) -> None:
     for index in range(25):
         _titleless_session(tmp_path, f"sess{index:04d}")
 
-    assert backfill_session_titles(tmp_path) == 0  # nothing to journal
+    # WHY A READ COUNT AND NOT A CLOCK: this used to assert the second pass
+    # took < 20 ms of wall time. The regression it guards (re-reading every
+    # transcript) cost ~0.5 ms per transcript here, ~12 ms for 25, so the bound
+    # sat within 2x of the healthy figure and a loaded CI runner crossed it on a
+    # green tree (21.7 ms, run 43866131472, test(3.12,0)). The property the
+    # sentinel exists for is "no transcript is opened again", which is a count,
+    # not a duration — it cannot flake under load and it fails deterministically
+    # the moment the sentinel check is dropped, at any machine speed.
+    #
+    # The spy sits at ``io.open``/``builtins.open`` rather than on
+    # ``_scan_all_titles`` so a re-introduced read by ANY route (the scan,
+    # ``Path.read_text``, ``compression.iter_lines``/``read_head``) is counted:
+    # ``Path.open`` resolves ``io.open`` at call time, and a bare ``open()``
+    # resolves ``builtins.open``. Only transcript files are counted; the
+    # sentinel/sidecar ``exists()`` probes are stats and never open anything.
+    transcript_opens: list[str] = []
+    real_open = io.open
+
+    def counting_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(file, (str, os.PathLike)) and Path(file).name.startswith(TRANSCRIPT_NAME):
+            transcript_opens.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(io, "open", counting_open)
+        patch.setattr(builtins, "open", counting_open)
+        assert backfill_session_titles(tmp_path) == 0  # nothing to journal
+        first_pass_opens = len(transcript_opens)
+        transcript_opens.clear()
+        # The second pass is the one that used to redo all the work.
+        assert backfill_session_titles(tmp_path) == 0
+
+    # Live-instrument guard: the first pass must be SEEN reading every one of
+    # the 25, or a zero on the second pass would only prove the spy is attached
+    # to nothing. ``>=`` not ``==``: how many opens a full scan takes per
+    # transcript is the scanner's business; the guard only needs it non-blind.
+    assert first_pass_opens >= 25, (
+        f"the read spy counted {first_pass_opens} transcript opens on the first "
+        "(full) pass, expected >= 25 — the instrument is not on the backfill's read path"
+    )
     sentinels = list((tmp_path / "sessions").glob(f"*/{TITLE_SCAN_SENTINEL_NAME}"))
     assert len(sentinels) == 25, "a no-title directory must record its scan"
-
-    # The second pass is the one that used to redo all the work.
-    started = time.perf_counter()
-    assert backfill_session_titles(tmp_path) == 0
-    elapsed_ms = (time.perf_counter() - started) * 1000.0
-    # 25 dirs x ~0.01ms stat each; the pre-fix pass re-READ every transcript
-    # (~0.5ms each here). The bound is generous against CI jitter but an
-    # order of magnitude below a single full read of this fixture.
-    assert elapsed_ms < 20.0, f"second pass took {elapsed_ms:.1f} ms — sentinel ignored?"
+    assert transcript_opens == [], (
+        f"the second backfill pass opened {len(transcript_opens)} transcript(s) — "
+        f"sentinel ignored? first: {transcript_opens[:3]}"
+    )
 
     # The picker surfaces are untouched: the sentinel is not a title.
     directory = tmp_path / "sessions" / "sess0000"
@@ -1879,11 +1939,112 @@ async def test_s1_boot_paints_and_stays_responsive_over_the_first_seconds() -> N
     assert_stall_persists_across_windows(windows)
 
 
+async def assert_fixed_cpu_breach_persists(
+    measure_window: Callable[[], Awaitable[None]],
+) -> None:
+    """Fail S2 on the fixed CPU bound only when TWO independent windows breach it.
+
+    ``measure_window`` runs the whole scenario on a fresh boot (fresh app,
+    recorder and legs) and raises :class:`FixedCpuCeilingBreach` when its CPU
+    reading crosses the bound; any other ``AssertionError`` (the wall bounds, a
+    missing leg) propagates at once and is never retried.
+
+    WHY: the 500 ms fixed CPU bound cannot tell work from time a hosted VM's
+    hypervisor took the vCPU away. CI recorded S2 breaches of 535-804 ms and
+    653 ms (stalls [652.8, 36.5], noise floor 18 ms x1.06) while the same cell
+    reads 4.6-14.5 ms of turn-delta CPU locally, unloaded or beside two CPU
+    hogs (21 serial runs, 2026-11-13). That gap fits steal/descheduling that
+    the noise estimator does not see (an inference: the CI cause is NOT proven
+    here). A real blocking stall blocks every window; a host hiccup does not
+    repeat on a fresh boot, so a persistence rule separates them without
+    touching the threshold. Mirrors S1's
+    :func:`assert_stall_persists_across_windows`.
+
+    CONSTRAINT: the threshold stays 500 ms and a deterministic stall (the
+    injected-block controls) still fails because it breaches both windows. The
+    window is re-measured only after a breach, so a clean run costs one window.
+    A stall that persists across both windows is a product investigation.
+    A regression that stalls only some windows slips through, a trade named
+    here rather than hidden in a bumped constant.
+    """
+    try:
+        await measure_window()
+        return
+    except FixedCpuCeilingBreach as first:
+        first_breach = first
+    try:
+        await measure_window()
+    except FixedCpuCeilingBreach as second:
+        raise FixedCpuCeilingBreach(
+            "the CPU bound was breached in BOTH of 2 independent windows -- a "
+            "persistent stall, not a host hiccup.\n"
+            f"window 1: {first_breach}\n"
+            f"window 2: {second}"
+        ) from second
+
+
+@pytest.mark.asyncio
+async def test_fixed_cpu_breach_persistence_rule_with_synthetic_windows() -> None:
+    """The rule itself, with no app: (ok) never re-measures, (breach, ok) passes,
+    (breach, breach) fails naming both numbers, a non-CPU failure is not retried."""
+
+    def scripted(
+        outcomes: list[BaseException | None],
+    ) -> tuple[Callable[[], Awaitable[None]], list[int]]:
+        calls: list[int] = []
+
+        async def window() -> None:
+            outcome = outcomes[len(calls)]
+            calls.append(1)
+            if outcome is not None:
+                raise outcome
+
+        return window, calls
+
+    window, calls = scripted([None])
+    await assert_fixed_cpu_breach_persists(window)
+    assert len(calls) == 1, "a clean first window must not be re-measured"
+
+    window, calls = scripted([FixedCpuCeilingBreach("535.0 ms"), None])
+    await assert_fixed_cpu_breach_persists(window)
+    assert len(calls) == 2, "a breach is re-measured once, and a clean retry passes"
+
+    window, calls = scripted([FixedCpuCeilingBreach("535.0 ms"), FixedCpuCeilingBreach("804.0 ms")])
+    with pytest.raises(FixedCpuCeilingBreach) as both:
+        await assert_fixed_cpu_breach_persists(window)
+    assert len(calls) == 2
+    assert "535.0 ms" in str(both.value) and "804.0 ms" in str(both.value)
+    assert "window 1" in str(both.value) and "window 2" in str(both.value)
+
+    # A wall (or any other) assertion is immediate: the persistence rule is for
+    # the fixed CPU bound only.
+    window, calls = scripted([AssertionError("wall gap 3000 ms")])
+    with pytest.raises(AssertionError, match="wall gap"):
+        await assert_fixed_cpu_breach_persists(window)
+    assert len(calls) == 1
+    # ... including a wall failure on the retry after a CPU breach.
+    window, calls = scripted(
+        [FixedCpuCeilingBreach("535.0 ms"), AssertionError("wall gap 3000 ms")]
+    )
+    with pytest.raises(AssertionError, match="wall gap"):
+        await assert_fixed_cpu_breach_persists(window)
+    assert len(calls) == 2
+
+
 @pytest.mark.asyncio
 async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
     record_property: Callable[[str, object], None],
 ) -> None:
-    """S2: a streamed reply with tool batches, from submit to ``agent_end``,
+    """S2, judged over up to two windows: see :func:`assert_fixed_cpu_breach_persists`
+    and :func:`_s2_send_to_agent_end_window` (the single-window body and its full
+    rationale)."""
+    await assert_fixed_cpu_breach_persists(lambda: _s2_send_to_agent_end_window(record_property))
+
+
+async def _s2_send_to_agent_end_window(
+    record_property: Callable[[str, object], None],
+) -> None:
+    """S2 (one window): a streamed reply with tool batches, from submit to ``agent_end``,
     adds no loop stall above the bar over a same-run control baseline — the
     reported 'sending a message freezes the UI until processed'. The pricing
     leg is made hostile the same way the unit test makes it: discovery stubbed
@@ -2460,7 +2621,37 @@ def test_s2_gc_attribution_is_reported_on_failure_and_in_the_pass_summary() -> N
     assert "at most" in message
     assert "at least" in message
     assert "upper bound" in message
-    assert "648" not in message  # the message reports THIS run, not history
+    # The message reports THIS run's measurement, not history. Asserted
+    # positively: a negative substring guard against a historical figure ("648")
+    # is itself flaky, because a real forced gen-2 pass over a loaded CI worker's
+    # heap can legitimately measure 648.0 ms (main run 43372640233, shard 4).
+    assert f"{turn.gc.total_ms:.1f} ms of loop-thread GC" in message
+
+
+def test_s2_gc_failure_note_reports_a_run_that_matches_a_historical_figure() -> None:
+    """A real measurement equal to an old reading must not read as "history".
+
+    Deterministic reproduction of the main-branch flake: a leg whose gen-2 pass
+    measured exactly 648.0 ms (the figure an earlier incident recorded) is a
+    legitimate reading of THIS run and must appear in the failure message.
+    """
+    recorder = StallRecorder()
+    try:
+        leg = GcLeg(
+            label="turn",
+            collections={2: 1},
+            cpu_ms={2: 648.0},
+            count_at_open=(339, 3, 14),
+            count_at_close=(9, 0, 0),
+        )
+        control = LegPeak(cpu_ms=5.0, wall_ms=5.0, gc=None)
+        with pytest.raises(AssertionError) as failure:
+            recorder.assert_turn_delta_loaded(
+                control=control, turn=LegPeak(cpu_ms=650.0, wall_ms=5.0, gc=leg)
+            )
+    finally:
+        recorder.gc_attribution.detach()
+    assert "648.0 ms of loop-thread GC" in str(failure.value)
 
 
 def test_s2_gc_attribution_costs_nothing_measurable_when_nothing_collects() -> None:

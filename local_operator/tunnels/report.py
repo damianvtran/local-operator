@@ -47,6 +47,8 @@ from typing import Any
 
 import httpx
 
+from local_operator.i18n.keys import tunnel_status
+from local_operator.i18n.text import tr
 from local_operator.providers.auth_store import (
     DEFAULT_BLOCK_MS,
     AuthStore,
@@ -55,6 +57,19 @@ from local_operator.providers.auth_store import (
     RefreshUnconfirmedError,
 )
 from local_operator.tunnels import config, gateway, state
+
+# `last_connector_failure` and its bounds live in `tunnels.state` (stdlib +
+# `config` only) so the TUI's 5 s poll can read a retrying cause without pulling
+# httpx/starlette onto its event loop; re-exported here, where `probe` and the
+# status surfaces (and their tests) have always read them.
+from local_operator.tunnels.state import (  # noqa: F401 — re-exported
+    CURRENT_FAILURE_S,
+    LOG_TAIL_BYTES,
+    last_connector_failure,
+    retrying_notice,
+)
+
+_t = tr("tunnel.status")
 
 #: How long the login verdict may wait for a token endpoint that is not answering.
 #:
@@ -154,12 +169,16 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
     detail = ""
     transport = ""
     cloudflared = False
+    listening = False
+    status_code: int | None = None
+    last: dict[str, Any] | None = None
     try:
         async with httpx.AsyncClient(trust_env=False) as client:
             reply = await client.get(
                 f"http://127.0.0.1:{value['gateway_port']}/_lop_tunnel/health", timeout=2
             )
-            served = reply.status_code == 200
+            status_code = reply.status_code
+            served = status_code == 200
             payload = reply.json() if served else {}
             if not isinstance(payload, dict):
                 # A stale or foreign listener on this port can answer 200 with
@@ -181,18 +200,61 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
                 # own sentence rather than saying nothing.
                 reason = str(payload.get("reason") or "")
                 detail = gateway.terminal_detail(reason, str(payload.get("detail") or ""))
-    except (httpx.HTTPError, ValueError):
-        # A stopped connector and a gateway that is not there are also
-        # different jobs: the first is this process, the second is the unit.
-        detail = (
-            "The local relay gateway is not answering on "
-            f"127.0.0.1:{value['gateway_port']}; run lop tunnel install to restore it"
+    except httpx.ConnectError:
+        # REFUSED: nothing is listening on the port. Only here can a missing or
+        # dead unit be the explanation — but a connector in its retry loop also
+        # leaves the port closed between attempts (it exits and the supervisor
+        # restarts it 10 s later), so a CURRENT retrying exit wins over the
+        # install advice (field report: a Radient 503 read here as "run lop
+        # tunnel install" while the real cause sat in service.log). An old exit
+        # does not: the log outlives the outage, so a failure from last week
+        # beside a closed port means the unit is gone, and the install advice
+        # is the right answer (review round 1, R1-1). It is still returned as
+        # `last_error`, which the CLI prints as history.
+        last = last_connector_failure()
+        if last is not None and last["current"]:
+            reason = last["reason"]
+            detail = gateway.terminal_detail(reason, "")
+        else:
+            detail = (
+                "The local relay gateway is not answering on "
+                f"127.0.0.1:{value['gateway_port']}; run lop tunnel install to restore it"
+            )
+    except (httpx.HTTPError, ValueError) as failure:
+        # The port ACCEPTED the connection, so the unit is there: install advice
+        # would send the operator to repair something that is running. Say what
+        # was actually observed (timed out, or an answer that is not a health
+        # payload) — the exception's own text is not used, because httpx echoes
+        # the request URL.
+        listening = True
+        port = str(value["gateway_port"])
+        if isinstance(failure, httpx.TimeoutException):
+            detail = _t(tunnel_status.gateway_listening_timed_out(port=port))
+        else:
+            detail = _t(tunnel_status.gateway_listening_unreadable(port=port))
+    if not served and status_code is not None:
+        # The port answered HTTP, but not the 200 every lop gateway gives its
+        # health route: a foreign listener holds the port, or the gateway is
+        # failing. Name the status rather than printing a bare "stopped"
+        # (QA round 1, Q2); install advice would not free the port either.
+        listening = True
+        detail = _t(
+            tunnel_status.gateway_listening_http_status(
+                port=str(value["gateway_port"]), status=str(status_code)
+            )
         )
+    if listening:
+        last = last_connector_failure()
+        if last is not None and last["current"]:
+            # Only a CURRENT exit explains a listener that is not serving; an
+            # old one is history and is printed as such by the CLI (R1-1).
+            reason = last["reason"]
+            detail += " " + gateway.terminal_detail(reason, "")
     if connected:
         word = "connected"
     elif healthy:
         word = "connecting"
-    elif served:
+    elif served or listening:
         # The gateway answered and is refusing to serve. That is not a stopped
         # connector — cloudflared may still hold the edge connection — and
         # "stopped" beside a sentence promising it clears itself would
@@ -210,6 +272,10 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
     if transport:
         result["transport"] = transport
         result["cloudflared"] = cloudflared
+    if last is not None:
+        # Additive: the code and when it was written, so `--json` readers and
+        # the CLI can show the connector's own last exit beside the state.
+        result["last_error"] = last
     return result
 
 
@@ -473,8 +539,18 @@ async def _pinned_login_verdict(value: dict[str, Any]) -> dict[str, Any]:
 
 def remedy(
     value: dict[str, Any], connector: dict[str, Any], login: dict[str, Any]
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
     """The one command that clears what was just found, when one exists.
+
+    Every remedy also carries ``kind`` — the button-shaped twin of ``command``
+    from `gateway.REMEDY_KIND`, the vocabulary the desktop setup route speaks —
+    so a graphical surface can offer the ACTION (reconnect, accept the price, add
+    credit, open the console) instead of printing a terminal command a
+    non-technical user cannot run. A connector that is RETRYING on a named cause
+    (no park) now gets a remedy too, because "the tunnel isn't active" with no
+    action is exactly the dead end the field report hit; the waiting kinds
+    (`wait_network`, `wait_radient`) carry no command, since they clear by
+    themselves.
 
     The connector's own park carries its remedy (only it knows whether the fix is
     a login, an install or a re-enrolment); nothing else has one to offer, and
@@ -521,6 +597,7 @@ def remedy(
             )
         ):
             return {
+                "kind": gateway.remedy_kind(str(connector.get("reason") or "")) or "run",
                 "command": str(parked["command"]),
                 "url": str(parked.get("url") or gateway.CONSOLE_URL),
             }
@@ -531,6 +608,7 @@ def remedy(
         # Ahead of both arms below: a newer sign-in to the same account is
         # already here, so the fix is re-pointing at it, never another sign-in.
         return {
+            "kind": gateway.REMEDY_KIND[gateway.LOGIN_SUPERSEDED],
             "command": gateway.TERMINAL_REMEDY[gateway.LOGIN_SUPERSEDED],
             "url": gateway.CONSOLE_URL,
         }
@@ -542,15 +620,75 @@ def remedy(
         # command is pinned in `gateway`'s table so every surface renders one
         # spelling of it.
         return {
+            "kind": gateway.REMEDY_KIND[gateway.OWNER_MISSING],
             "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
             "url": gateway.CONSOLE_URL,
         }
     if login.get("state") == "login_required":
         return {
+            "kind": gateway.REMEDY_KIND[gateway.LOGIN_REQUIRED],
             "command": gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED],
             "url": gateway.CONSOLE_URL,
         }
-    return None
+    return _retrying_remedy(connector)
+
+
+def _retrying_remedy(connector: dict[str, Any]) -> dict[str, Any] | None:
+    """The remedy for a connector that is not parked but names why it is failing.
+
+    The reason arrives from the gateway's health answer or the connector's last
+    CURRENT retrying exit (`probe`), both already this package's vocabulary.
+    Only causes with an ACTION or a reassuring wait are surfaced: `check_status`
+    kinds (a lease about to renew, a briefly busy store) stay ``None``, because
+    a callout for a state that clears in seconds is noise, and an unknown code
+    from another build is never handed a guessed button.
+    """
+    reason = str(connector.get("reason") or "")
+    kind = gateway.remedy_kind(reason)
+    if kind is None or kind == "check_status":
+        return None
+    waiting = kind in gateway.WAITING_KINDS
+    return {
+        "kind": kind,
+        # A waiting kind has nothing to run; naming `lop tunnel status` there
+        # would send a reader to "fix" a state that is recovering by itself.
+        # A console kind's fix is a link, so it has no setup command either.
+        "command": (
+            None
+            if waiting or kind in gateway.CONSOLE_KINDS
+            else gateway.TERMINAL_REMEDY.get(reason)
+        ),
+        "url": None if waiting else gateway.CONSOLE_URL,
+    }
+
+
+def unconfigured_remedy() -> dict[str, Any]:
+    """What a machine with an INTERRUPTED create (no tunnel yet) is offered.
+
+    Only reached when `create.json` records a setup that did not finish, or a
+    `config.json` exists but cannot be read (`local_payload`); a machine with
+    neither record gets no remedy at all.
+
+    `run` when a Radient login is already on this device (the desktop renders its
+    "Set up phone access" card from it and posts the setup route), `sign_in` when
+    there is none yet — setup cannot start without a login, and offering `run`
+    would put a button in front of a refusal. Read-only: a metadata read of the
+    credential store, never a write, so the polled routes stay side-effect free.
+    """
+    try:
+        with closing(AuthStore(read_only=True)) as store:
+            signed_in = any(
+                row.credential_type == "oauth" for row in store.list_credentials("radient")
+            )
+    except (AuthStoreError, OSError):
+        signed_in = False
+    if signed_in:
+        return {"kind": "run", "command": "lop tunnel setup", "url": None}
+    return {
+        "kind": gateway.REMEDY_KIND[gateway.LOGIN_REQUIRED],
+        "command": gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED],
+        "url": None,
+    }
 
 
 def payload(
@@ -595,6 +733,22 @@ async def local_payload(*, reachable: bool = True) -> dict[str, Any]:
     try:
         value = config.load()
     except ValueError:
+        # NO REMEDY WHEN NOTHING IS ENROLLED (main 6f79d9a3's contract, kept on
+        # #3945 by the lopdev manager): with no tunnel there is nothing to sign
+        # in FOR, and this payload is also `tunnel_remedy` on
+        # `GET /v1/auth/status`, whose consumers read a non-null remedy as "your
+        # remote access is broken". A machine that never asked for phone access
+        # is served by the setup OFFER instead — the desktop card from
+        # `tunnel.setup.read` (`configured: false`, local-operator-ui #1910) and
+        # the TUI's one-line `/mobile enable` note — never by a remedy here.
+        #
+        # "Enrolled" is `install.phone_access_wanted()`, the ONE notion the
+        # post-sign-in run already uses: `config.json` OR `create.json`, so an
+        # interrupted create (reservation intent, no configuration yet) still
+        # gets its next step. Imported here, not at module scope: only this
+        # branch needs it (measured 5 ms / 10 modules, paid once per process).
+        from local_operator.tunnels.install import phone_access_wanted
+
         return {
             "configured": False,
             "tunnel_id": None,
@@ -610,7 +764,9 @@ async def local_payload(*, reachable: bool = True) -> dict[str, Any]:
                 "remedy": None,
             },
             "login": {"credential_id": None, "state": "unknown"},
-            "remedy": None,
+            # Only for an interrupted create: that person already asked for phone
+            # access, so "nothing to do" would strand a half-made tunnel.
+            "remedy": unconfigured_remedy() if phone_access_wanted() else None,
         }
     stored = value.get("record")
     assembled = payload(
@@ -622,4 +778,14 @@ async def local_payload(*, reachable: bool = True) -> dict[str, Any]:
         login=await login_verdict(value),
     )
     assembled["configured"] = True
+    # The post-sign-in no-spend run, while it holds `setup.lock` (U10): said
+    # outright, so a desktop reading this mid-reconnect shows "reconnecting"
+    # rather than the stale cause that run is busy clearing. `autosetup`, not
+    # `setup`: this polled read must not load the CLI and installers.
+    from local_operator.tunnels import autosetup
+
+    reconnecting = await asyncio.to_thread(autosetup.auto_reconnecting)
+    assembled["reconnecting"] = reconnecting
+    if reconnecting and not value.get("stopped"):
+        assembled["remedy"] = {"kind": "wait_reconnect", "command": None, "url": None}
     return assembled

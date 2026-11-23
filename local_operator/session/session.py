@@ -51,7 +51,7 @@ import tempfile
 import time
 import uuid
 import weakref
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -67,8 +67,9 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
+from local_operator.asks.surfaces import PROFILE_CONSENT_SURFACES
 from local_operator.compaction.carry import (
     is_carried_tier,
     read_recent_decisions,
@@ -81,6 +82,7 @@ from local_operator.compaction.cutpoint import (
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
     RENDERED_INJECTION_KEY,
+    is_preserved_replay,
     is_resume_card,
 )
 from local_operator.compaction.marker import (
@@ -381,6 +383,8 @@ if TYPE_CHECKING:
     # Type-only: the consent intent is a harness value, held without being
     # constructed here.
     from local_operator.harness.types import DurableWriteIntent
+    from local_operator.harness.verifier import VerifierLimits, VerifierVerdict
+    from local_operator.harness.verifier_evidence import VerifierEvidence
     from local_operator.mcp.manager import McpManager
 
     # Type-only: the contract itself is built by the host that installs it
@@ -427,9 +431,82 @@ def _stamp_remote_prompt(message: Any) -> None:
     message.provider_payload = payload
 
 
+def _stamp_mesh_origin(message: Any, mesh_origin: Mapping[str, Any] | None) -> None:
+    """Record the receiving runtime's mesh origin stamp on a remote user row.
+
+    ``provider_payload["lop_mesh_origin"]`` (``network/origin.py``): which mesh
+    device the row came from, over which link, and whether this runtime could
+    prove it. Invisible to providers like the two stamps beside it. MERGED into
+    whatever payload the row already has, never overwriting it: the stamp sits
+    beside ``lop_remote_prompt`` and the harness-injection marker (G5, §4).
+    Written for the future guard; nothing in this build reads it.
+    """
+    if mesh_origin is None:
+        return
+    from local_operator.network.origin import MESH_ORIGIN_PAYLOAD_KEY
+
+    payload = dict(getattr(message, "provider_payload", None) or {})
+    payload[MESH_ORIGIN_PAYLOAD_KEY] = dict(mesh_origin)
+    message.provider_payload = payload
+
+
 def _is_remote_prompt(message: Any) -> bool:
     payload = getattr(message, "provider_payload", None)
     return isinstance(payload, Mapping) and bool(payload.get(REMOTE_PROMPT_KEY))
+
+
+#: ``provider_payload`` key on a user row naming the SURFACE its human input came
+#: from (ADR 0009 Decision 1, mobile repo ``docs/adr/0009-*``). Why it exists: the
+#: phone should hear about work it started, and the desktop about everything
+#: else, and no other record says which surface a turn came from (``origin.json``
+#: is the code path that created a directory, ``mesh.json`` the device). The
+#: value is decided by the runtime from the AUTHENTICATED connection
+#: (``server._input_surface_for``), never read off a frame, and defaults to
+#: ``tui`` for the in-process owner. Invisible to the model and to providers,
+#: like the remote-prompt stamp beside it.
+INPUT_SURFACE_KEY = "lop_input_surface"
+
+#: The routing vocabulary. ``unknown`` is the reading for a conversation with no
+#: stamped human input (a legacy row, a channel-only conversation) and routes as
+#: non-mobile, which errs quiet on the phone.
+INPUT_SURFACES = frozenset({"mobile", "remote", "desktop", "tui", "unknown"})
+
+
+def _input_surface(value: object, default: str = "tui") -> str:
+    """Clamp a surface to :data:`INPUT_SURFACES` (anything else is ``default``)."""
+    return value if isinstance(value, str) and value in INPUT_SURFACES else default
+
+
+def _stamp_input_surface(message: Any, surface: str) -> None:
+    payload = dict(getattr(message, "provider_payload", None) or {})
+    payload[INPUT_SURFACE_KEY] = _input_surface(surface)
+    message.provider_payload = payload
+
+
+def spooled_input_surface(line: Any) -> str:
+    """The surface a SPOOLED owner line carries (``serving._owner_sender``).
+
+    A line spooled across a runtime swap keeps the surface it would have had
+    live. A line from a build before the key reads ``unknown`` rather than
+    ``tui``: it may have come from the phone, and ``unknown`` errs quiet.
+    """
+    sender = getattr(line, "sender", None)
+    value = sender.get("input_surface") if isinstance(sender, Mapping) else None
+    return _input_surface(value, default="unknown")
+
+
+def _noop_answer_surface_undo() -> None:
+    """``Session.note_answer_surface``'s undo when the note changed nothing."""
+    return None
+
+
+def _input_surface_of(message: Any) -> str | None:
+    """The stamped surface of one row, or ``None`` when it carries no stamp."""
+    payload = getattr(message, "provider_payload", None)
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get(INPUT_SURFACE_KEY)
+    return value if isinstance(value, str) and value in INPUT_SURFACES else None
 
 
 #: Transcript custom entry carrying the PROFILE-TRUST EPISODE bit (host-only,
@@ -474,7 +551,12 @@ def _profile_input_class(message: Any) -> str:
     if custom_type == "ask_response":
         details = getattr(message, "details", None) or {}
         by = details.get("answered_by") or {}
-        if ask_answer_is_person(message) and by.get("surface") in {"tui", "desktop", "chat"}:
+        # ``desktop``/``tui`` are consent only because the runtime now stamps
+        # every WIRE answer's surface from a per-connection capability proof
+        # (``asks/surfaces.stamp_answer_surface``): a frame's own ``by`` can no
+        # longer write them, so an unproven answer reads ``unverified``/``remote``
+        # and lands here as untrusted.
+        if ask_answer_is_person(message) and by.get("surface") in PROFILE_CONSENT_SURFACES:
             return "consent"
         return "untrusted"
     if custom_type is not None:
@@ -751,6 +833,22 @@ def _frontend_jobs_delay(last_cost_s: float) -> float:
 #: ``monkeypatch.setattr(session, "ATTENTION_REPUBLISH_DELAYS_S", (0.0, 0.0))``
 #: rather than waiting out the shipped delays.
 ATTENTION_REPUBLISH_DELAYS_S: tuple[float, ...] = (1.0, 5.0, 20.0, 60.0)
+
+#: CEILING ON THE TURN'S OWN WAIT for the attention store write (and the banner
+#: stamp after it), in seconds. `_publish_attention_outcome` runs in a turn's
+#: ``finally`` with ``_turn_lock`` held, and the store write it offloads with
+#: ``asyncio.to_thread`` can legitimately block for up to ~12 s under SQLite
+#: contention (``attention._retry_contention``: 2 attempts x 5 s busy timeout),
+#: far longer than a healthy ~ms write. Unbounded, one wedged store pinned the
+#: lock, so the NEXT queued input never got an owner (hosted gate failures of
+#: ``test_input_after_accepted_end_gets_a_new_pipeline_and_generation``:
+#: agent_end_count=2, is_streaming=False, turn_lock_locked=True, parked in
+#: ``to_thread``). The journal marker is already durable before the offload and
+#: publication is idempotent by token, so giving up the WAIT loses nothing: the
+#: expiry is handled exactly like ``AttentionWriteDeferred`` (republish ladder).
+#: Kept well under the 8 s settle window the acceptance tests allow.
+ATTENTION_PUBLISH_OFFLOAD_CEILING_S: float = 3.0
+ATTENTION_BANNER_STAMP_CEILING_S: float = 1.0
 
 #: Self-prompt scheduled after a compaction pass that cleared the recovery
 #: band, so the model resumes where the summary left off.
@@ -1383,6 +1481,19 @@ class _PeerArrival:
         self._event.set()
 
 
+class _DenseTailArgs(TypedDict, total=False):
+    """The dense-tail keywords of :meth:`Session._produce_summary`.
+
+    ``total=False`` because each is passed only when set (see
+    :meth:`Session._dense_tail_kwargs`): a duck-typed ``_produce_summary``
+    that predates them keeps its signature.
+    """
+
+    dense_tail: int
+    dense_previous_chars: int
+    dense_closed: bool
+
+
 @dataclass(frozen=True, slots=True)
 class _CompactionPlan:
     """One compaction pass, decided but not yet committed.
@@ -1422,6 +1533,32 @@ class _CompactionPlan:
     #: commit: ``_run_compaction`` never reads it, so a hint can never reach the
     #: summarizer or permanent history.
     advisor_hint: Any | None = None
+    #: Index into ``llm_history`` where the LIVE TASK carried on the archive's
+    #: tail edge starts, or ``None`` when no span changed carrier. When set,
+    #: ``llm_history[dense_tail_from:cut]`` is the span the task floor would
+    #: have kept raw; the commit hands its length to ``compact_to_archive`` so
+    #: it is replayed as plain text rather than paged (see
+    #: :meth:`Session._dense_tail_cut` for why and for the measurements).
+    #: Carried as an INDEX, not a count, because the byte-aware step may move
+    #: ``cut`` later after the plan decided this, and the span must follow it.
+    dense_tail_from: int | None = None
+    #: Trailing characters of the PREVIOUS archive's text that are the same
+    #: live task, still running (``Archive.live_tail_chars``). Non-zero only
+    #: when this pass continues a task whose opening request an earlier dense
+    #: pass archived, so ``task_boundary_floor`` had nothing to measure from;
+    #: ``dense_tail_from`` is then ``0`` (the whole summarized span continues
+    #: it). See :meth:`Session._dense_tail_cut`.
+    dense_tail_previous_chars: int = 0
+    #: The task floor was CLAMPED at its cap when it chose this pass's span:
+    #: the task is already wider than its protection. The span is carried on
+    #: this pass and not recorded as continuable, which is the horizon the raw
+    #: floor has (its anchor is cut away on exactly this pass).
+    dense_tail_closed: bool = False
+    # Economic snapcompact authorizes the actual prepared replay, then commits
+    # these same bytes. Never generate the archive twice or pay a fallback.
+    economic_summary: list[tuple[str, dict[str, Any] | None]] = dataclass_field(
+        default_factory=list, compare=False
+    )
     # Ephemeral task carrier, not durable state. Speculation may return data but
     # never persist it; only append_compaction's committed marker authorizes that.
     memory_capture: list[asyncio.Task[Any]] = dataclass_field(default_factory=list, compare=False)
@@ -1932,6 +2069,22 @@ def _ask_refusal_copy(record: Mapping[str, Any] | None) -> str:
     from local_operator.asks.render import refusal_copy
 
     return refusal_copy(record)
+
+
+def _site_not_applied_copy(reason: str) -> str:
+    """The operator's words for a typed ``applied: false`` from the node's
+    browser: one mapping for the host's own cards and a subagent's cards, so
+    the two answer paths cannot drift."""
+    from local_operator.i18n.keys import browser_site_approval as _copy
+    from local_operator.i18n.messages import render_resolved
+
+    copy = {
+        "unsigned_decision": _copy.refused_unsigned(),
+        "no_approver": _copy.refused_no_approver(),
+        "wrong_key": _copy.refused_bad_signature(),
+        "bad_signature": _copy.refused_bad_signature(),
+    }.get(reason, _copy.refused_expired())
+    return render_resolved(copy)
 
 
 def _collect_tool_call_delta(state: dict[int, dict[str, Any]], event: Any) -> None:
@@ -2715,12 +2868,100 @@ def _idle_growth_baseline(transcript: Any) -> tuple[int | None, int | None, str]
                 tokens = usage.get("context_tokens")
                 if isinstance(tokens, int) and tokens > 0:
                     return tokens, declined, marker_id
-    receipt = transcript.latest_custom(COMPACTION_IDLE_PASS_TYPE)
-    if receipt is not None and str(receipt.get("marker_id") or "") == marker_id:
-        value = receipt.get("tokens_after")
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value, declined, marker_id
+    # Either discretionary pass may own the newest marker; its receipt is the
+    # only after-size until the next request measures one.
+    from local_operator.compaction.economics import COMPACTION_ECONOMIC_PASS_TYPE
+
+    for receipt_type in (COMPACTION_IDLE_PASS_TYPE, COMPACTION_ECONOMIC_PASS_TYPE):
+        receipt = transcript.latest_custom(receipt_type)
+        if receipt is not None and str(receipt.get("marker_id") or "") == marker_id:
+            value = receipt.get("tokens_after")
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value, declined, marker_id
     return None, declined, marker_id
+
+
+def _economic_declined_at(transcript: Any, marker_id: str) -> int | None:
+    """Context size of the newest economic decline written for ``marker_id``.
+
+    Separate from the idle decline on purpose: the idle pass's "no" is a
+    parked ADVISOR's judgement about open work, the economic pass's is a
+    price/size verdict. Either must suppress only its own re-ask, or a
+    session whose advisor declined once would also lose the cost rule.
+    """
+    from local_operator.compaction.economics import COMPACTION_ECONOMIC_DECLINED_TYPE
+
+    if transcript is None:
+        return None
+    decline = transcript.latest_custom(COMPACTION_ECONOMIC_DECLINED_TYPE)
+    if decline is None or str(decline.get("marker_id") or "") != marker_id:
+        return None
+    value = decline.get("context_tokens")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+#: Bound on the entries one economic usage scan walks back over. The scan runs
+#: at turn ends above the economic floor; 50k entries comfortably covers the
+#: rate window plus the last few passes of the chief of staff's measured
+#: cadence (~250-400 requests between passes, a few entries per request)
+#: without making a pathological journal cost a full walk per turn.
+_ECONOMIC_SCAN_MAX_ENTRIES = 50_000
+
+
+def _economic_usage_scan(
+    transcript: Any, *, limit: int, max_yields: int = 4
+) -> tuple[list[dict[str, Any]], int | None, list[tuple[int, int]]]:
+    """One backward walk for the economic gate's measured inputs.
+
+    Returns ``(rows, since_marker, yields)``:
+
+    - ``rows``: the newest ``limit`` usage payloads, OLDEST first;
+    - ``since_marker``: how many of those were recorded after the newest
+      compaction marker (``None`` when no marker was reached);
+    - ``yields``: ``(before, after)`` provider context per pass, NEWEST
+      first — the last usage before each marker and the first after it, the
+      measured yield the low-yield backoff judges. Positional, like
+      ``usages_since_newest_shrink``: only append order knows "after".
+    """
+    if transcript is None:
+        return [], None, []
+    entries = transcript.recent_entries(_ECONOMIC_SCAN_MAX_ENTRIES)
+    rows: list[dict[str, Any]] = []
+    since_marker: int | None = None
+    yields: list[tuple[int, int]] = []
+    # Walking BACKWARD: ``newer`` is the context of the usage just visited
+    # (the first one after a marker, once the marker is reached), and
+    # ``awaiting`` holds a marker's after-size until its before-size appears.
+    newer: int | None = None
+    awaiting: int | None = None
+    for entry in reversed(entries):
+        if entry.type == "compaction":
+            if since_marker is None:
+                since_marker = len(rows)
+            if awaiting is not None:
+                # Two markers with no request between them: the older pass's
+                # yield is unmeasurable; (0, 0) stops the streak, never
+                # extends it on a guess.
+                yields.append((0, 0))
+            awaiting = newer if newer is not None else 0
+            newer = None
+        elif entry.type == "message":
+            usage = entry.payload.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            tokens = usage.get("context_tokens")
+            if not isinstance(tokens, int) or tokens <= 0:
+                continue
+            if awaiting is not None:
+                yields.append((tokens, awaiting))
+                awaiting = None
+            newer = tokens
+            if len(rows) < limit:
+                rows.append(usage)
+        if len(rows) >= limit and len(yields) >= max_yields:
+            break
+    rows.reverse()
+    return rows, since_marker, yields
 
 
 def _newest_usage_at_ms(transcript: Transcript, *, now_ms: int | None = None) -> int:
@@ -3608,6 +3849,54 @@ MCP_DISCOVERY_FAILED_DETAIL = (
 )
 
 
+@dataclass
+class _SiteCard:
+    """One site card a queue-less ``task`` subagent raised in its host's queue.
+
+    WHY (security review 60334): the card's question id binds ONE extension
+    entry of ONE requester (``session:<id>``). The host keeps who that is by
+    object identity (``owner`` is a weak reference, never a session id, so two
+    sessions sharing an id cannot alias — review m3) and a commit state, so a
+    decision, a teardown and a lapse cannot each act on the card at once.
+
+    ``state`` (every transition a synchronous check-and-set on the one event
+    loop the host and its in-process children share — ``run_subagent`` builds
+    children on the parent's loop — so no ``await`` sits between a check and
+    its set):
+
+    * ``open`` — nothing in flight; a decision, the owner's teardown or the
+      owner's own stale-card withdraw may take it.
+    * ``deciding`` — :meth:`Session.site_decide` took it before submitting the
+      signed decision. Teardown, pruning and withdraw leave it alone.
+    * ``answered`` — the extension acknowledged (``applied: true``) and the
+      answer was recorded in the same synchronous run.
+    * ``withdrawn`` — the owner's teardown or its own withdraw took it while
+      open, or the extension said it did NOT apply after the owner ended.
+    * ``unknown`` — the submit failed after it may have reached the extension
+      (lost reply, timeout, task cancellation). Nobody here can know whether
+      the decision applied, so the record stays open, every later tap is
+      refused without resubmitting, and the agent reads the truth from the
+      extension (``await_access``). Withdrawing the local decision grant on
+      ``unknown`` takes back only this process's authority to decide again;
+      it never revokes a browser grant the extension may already have applied
+      (60334 design correction (1)).
+
+    ``settled`` is set whenever a decision leaves ``deciding``; a teardown
+    waits on it (bounded) instead of acting on an in-flight card.
+
+    NO SHARING (narrowed, PR #4283 round 4): one card per requester's entry;
+    a second requester for an origin with an open card is refused
+    ``card_busy`` and never bound to this card. Cross-requester sharing needs
+    an entry-scoped ``cancel_access`` in the extension and is a follow-up.
+    """
+
+    origin: str
+    entry_id: str
+    owner: Callable[[], Any]
+    state: str = "open"
+    settled: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+
+
 class Session:
     """The session facade. Satisfies ``SessionProtocol``."""
 
@@ -3645,6 +3934,7 @@ class Session:
         #: ``no_seam`` refusal byte for byte; the CLI headless path and the
         #: runtime that serves the TUI/desktop/phone turn it on.
         owner_prompt_consent: bool = False,
+        goal_wake_due: int | None = None,
         #: HOST-ONLY taint snapshot for a subagent: whether ANY ancestor run
         #: (parent, grandparent, ...) had read untrusted input when this child
         #: was spawned. A child's own inputs are its parent's text, so without
@@ -3846,7 +4136,11 @@ class Session:
         #: inventory instead of the factory's gate-less view.
         self._knowledge_hooks: _KnowledgeHooks | None = None
         self._transcript = transcript
+        # Native producer handles only; never populated from retained/replayed
+        # messages. Completed consumers verify disk, not this runtime object.
+        self._file_provenance_state = None
         self._init_bridge_taint(inherited_bridge_taint)
+        self._init_community_taint()
         # Attention bookkeeping is DELIBERATELY NON-FATAL to construction, and
         # this guard is the outer half of a pair (`bootstrap_transcript` holds
         # its own). Anything raising here kills the runtime process before it
@@ -4057,6 +4351,40 @@ class Session:
         #: provenance: the pre-filter's touched-directory sweep only lists files modified
         #: at or after it.
         self._run_started_at: float = 0.0
+        #: ADR 0009 origin: the surface of the most recent HUMAN input admitted
+        #: into the current run (a stamped prompt/steer row, an ask answer, a live
+        #: approval or picker answer), or ``None`` for a run with none so far.
+        #: Reset at every pipeline head beside ``_run_started_at``.
+        self._run_input_surface: str | None = None
+        #: The conversation's LAST DRIVER, which a run with no human input (a
+        #: wake, a job result, a peer or channel message) inherits. ``None`` means
+        #: "not rebuilt yet"; the first run end rebuilds it from the transcript
+        #: (``_reconstruct_input_driver``) so a resumed conversation keeps it.
+        self._conversation_driver: str | None = None
+        #: Surfaces of queued-ask answers, keyed by ask id, noted by the control
+        #: server when the answer op arrives (``note_answer_surface``) and taken
+        #: when the ``ask_response`` row reaches ``_note_run_input``. In memory on
+        #: purpose: the answer and its delivery run happen in one runtime, and a
+        #: lost entry only means the run inherits the last driver (errs quiet).
+        self._ask_answer_surfaces: dict[str, str] = {}
+        #: Epoch ms the next ``needs_user`` window opens: one past the previous
+        #: run END (initialised to construction, so an ask restored from an
+        #: earlier process is never re-announced). It opens there rather than at
+        #: ``_run_started_at``:
+        #: a Team Bridge request ask is raised by the harness BETWEEN runs
+        #: (``_deliver_peer_message``'s idle arm, ``_retry_pending_bridge_issuances``),
+        #: so "opened during this run" would never announce it (ADR 0009 review
+        #: round 3, R3-1, the "opened since the previous run end" remedy). Each ask
+        #: still falls in exactly one window, so it is announced once.
+        #:
+        #: Seeded from the newest durable outcome marker
+        #: (``_seed_needs_user_window``): a runtime swap or resume must not drop
+        #: an ask raised between the previous runtime's last run end and this
+        #: construction (review round 1, m1). Read HERE, at construction, so the
+        #: seed is the PREVIOUS runtime's marker: any marker this runtime appends
+        #: (its own run ends, a republish) comes later and must not move it.
+        self._needs_user_constructed_ms: int = int(time.time() * 1000)
+        self._needs_user_window_ms: int = self._seed_needs_user_window()
         #: The session's last REAL typed request, kept across runs (NOT reset at the
         #: pipeline head, unlike ``_run_user_text``). A turn that resumes after an ANSWERED
         #: ask carries no typed row of its own -- the ``ask_response`` is the only input --
@@ -4214,6 +4542,9 @@ class Session:
         # The goal rides the prompt's volatile tail; the holder is shared with
         # the system-blocks provider so an edit applies from the next turn.
         self._goal_state = goal_state if goal_state is not None else GoalState()
+        self._goal_recovery_disabled = False
+        self._goal_recovery_prior_token = ""
+        self._goal_restored_token = ""
         self._variables = variables
         self._job_id = job_id
         saver_bridge = getattr(self._stream_fn, "bind_saver", None)
@@ -4235,6 +4566,34 @@ class Session:
             weakref.ref(parent_session) if parent_session is not None else None
         )
         self._parent_session_id = str(parent_session_id or "")
+        #: REQUESTER side of the family's site cards (security review 60334):
+        #: the extension entries THIS session's browser path asked its host
+        #: queue to raise a card for, keyed by entry id. The host refuses facts
+        #: not pending here and refuses a DECISION once they are gone — defence
+        #: in depth: the extension's own entry binding (the signed decision
+        #: names one ``entryId``) is the real tie. In memory only: an
+        #: in-process child and its extension entries (10-minute TTL) do not
+        #: outlive the runtime.
+        self._pending_site_requests: dict[str, Any] = {}
+        #: Per pending entry, the browser tool's ``cancel_access`` closure, so
+        #: teardown can withdraw the entry on this requester's own behalf.
+        self._site_request_cancels: dict[str, Callable[[], Awaitable[Any]]] = {}
+        #: Set at teardown (:meth:`_release_site_requests`): THE FENCE. From
+        #: here the browser tool may not dispatch a new ``request_access``
+        #: (:meth:`begin_site_request`), no card is raised for this requester
+        #: and none of its cards is decided (60334 design correction (2)).
+        self._site_requests_closed = False
+        #: ``request_access`` calls this requester's browser tool has in
+        #: flight (dispatched, reply not yet turned into a card), keyed by a
+        #: token: ``(cancel, done)``. Teardown waits for them (bounded) and
+        #: then cancels their entries, so a request that crossed the fence
+        #: while in flight is not left behind (60334 design correction (2)).
+        self._site_dispatches: dict[object, tuple[Callable[[], Awaitable[Any]], asyncio.Event]] = {}
+        #: HOST side: ``ask_id -> _SiteCard`` for the cards queue-less
+        #: subagents raised in THIS queue. A card the host raised itself
+        #: (main's ``enqueue_ask`` path) has no entry here. Pruned once a card
+        #: can no longer be decided (review N1).
+        self._site_cards: dict[str, _SiteCard] = {}
         #: Channel records relayed from LIVE children (design §5.1): a SEPARATE
         #: fold from this session's own, because the children block is their
         #: home on the wire and mixing them into ``rows`` would present a
@@ -4295,6 +4654,11 @@ class Session:
         #: disposal that follows it. Released by ``end_drain``'s abandon arm,
         #: which keeps serving the same runtime.
         self._leaving_deliveries = False
+        #: One-shot wake fires a leaving runtime handed to its LIVE turn, by
+        #: ``(wake_id, occurrence)``, so a fire left parked past the turn's last
+        #: boundary is re-armed rather than spooled as text
+        #: (``_spool_parked_for_successor``). Empty except while draining.
+        self._live_final_wakes: dict[tuple[str, int], DueWake] = {}
         #: Declared by a ONE-SHOT host at entry
         #: (``Session.declare_one_shot_exit``, called from ``run_print_mode``;
         #: v3, 2026-09-30). The session then arms the departure pair itself in
@@ -4328,6 +4692,10 @@ class Session:
         #: wiring (the tool-context parity guard does exactly that), matching
         #: the three registries above.
         self.bridge_runtime = bridge_runtime
+        # The runtime survives profile switches. Track the resolved host
+        # identity here, then freeze it in each dispatch context; never derive
+        # authorship from a transcript title, endpoint name or mutable client.
+        self._bridge_session_agent_display = getattr(bridge_runtime, "session_agent_display", None)
         #: The team this session is running as manager of, when ``/team``
         #: launched it. Held here so every ``task`` child inherits the group's
         #: collaboration and project briefs without the manager restating them.
@@ -4392,6 +4760,10 @@ class Session:
         #: :meth:`_persist_attachment`.
         self._unresolved_team: str = ""
         self._unresolved_agent: str = ""
+        #: Monotonic time of the last re-resolve attempt for those names (see
+        #: :meth:`_reresolve_unresolved_attachment`); ``None`` until the first.
+        self._attachment_reresolved_at: float | None = None
+        self._attachment_reresolve_fingerprint: tuple[int, ...] = ()
         # The conversation's title. A holder rather than a plain string for
         # the same reason the goal is one: the title arrives on a DETACHED
         # naming task after the host already built its status chrome, and
@@ -4501,6 +4873,19 @@ class Session:
                 "notify_available",
                 lambda: any(tool.name == "notify" for tool in self._tools),
             )
+        if getattr(system_blocks_provider, "session_tool_membership", False):
+            # The factory provider closes over the PRE-narrowing tool list, but
+            # block zero's tool-gated prose (browser/console usage, library,
+            # todo, ask mechanics ...) must describe the tools this session
+            # actually holds: an SDK ``ApprovalPolicy.declared([...])`` run
+            # narrowed to three tools used to ship the browser playbook in block
+            # 0 while block 1 said "This session was not given the browser
+            # tool". ``self._tools`` is the live, already-narrowed set (every
+            # rebinding goes through ``refresh_tools``), deferred tools included.
+            # The provider keys its cache on these names, so a change before the
+            # first turn reaches the frozen prefix and a later one is an ordinary
+            # head change handled by ``_prepare_system_blocks``.
+            setattr(system_blocks_provider, "live_tools", lambda: list(self._tools))
         if getattr(system_blocks_provider, "session_cos_identity", False):
             # Her configured name for the prompt (``_cos_display_name``). The
             # factory cannot answer it: it must not import her package (R17),
@@ -4550,6 +4935,9 @@ class Session:
         #: offending block is IN the history, so an un-degraded retry sends it
         #: again, and the session is otherwise unusable for good.
         self._images_rejected = False
+        # Harness-selected required media is opt-in, never inferred from a
+        # mutable role name. Ordinary sessions keep their text degradation.
+        self._required_image_evidence = False
         #: Whether the strip above was caused by SIZE rather than by a refused
         #: block. The two causes share one flag because they have the same
         #: effect on the render, but they do NOT have the same lifetime: a
@@ -4598,6 +4986,48 @@ class Session:
         #: runtime rather than a trusted one — an unattended compliance worker
         #: that must reach its screening tools and nothing else.
         self._declared_tools: frozenset[str] | None = None
+        #: Whether the bounded wait for declared/preloaded MCP servers has
+        #: SUCCEEDED (``session/declared_mcp_ready.py``). Once per session: the
+        #: wait exists for the cold-start race, and a server that drops later is
+        #: the reconnect path's job, not a per-turn stall. Set only after the gate
+        #: settles, never before it runs: an SDK caller retrying ``prompt()``
+        #: after the gate raised (or after an abort cut it short) must meet the
+        #: gate again, not a silent send without its declared tools (agent
+        #: review round 1, R3).
+        self._named_mcp_ready_checked = False
+        #: Which servers that first-turn gate waits for: ``"declared"`` (the
+        #: default every host gets: declared candidates, plus preload-only
+        #: servers when headless), ``"all"`` (also every other configured server
+        #: still connecting; raises ``McpServersNotReady`` at the bound) or
+        #: ``"off"`` (no wait at all). Only ``set_first_turn_mcp_wait`` moves
+        #: it, and only the SDK calls that: an in-process SDK owner's first
+        #: ``prompt()`` is the run, with no later turn for a late server to merge
+        #: into. Never copied to a delegated child, which skips the gate anyway.
+        self._first_turn_mcp_wait: Literal["declared", "all", "off"] = "declared"
+        #: That gate's bound in seconds; ``None`` keeps the module's measured
+        #: default (``DECLARED_MCP_READY_TIMEOUT_S``).
+        self._first_turn_mcp_timeout_s: float | None = None
+        #: Whether this session's MCP reach is INHERITED: a delegated child whose
+        #: MCP tools are fixed by its parent's ``_child_mcp_wiring`` surface (on
+        #: the parent's BORROWED manager) and whose declaration is the parent's
+        #: bound carried down. Stamped by ``harness.subagent`` before it applies
+        #: that declaration. Two things key on it, both so a child keeps exactly
+        #: the tool set its parent's surface built for it:
+        #:
+        #: * ``materialize_declared_tools`` grants nothing. An inherited
+        #:   declaration NARROWS (``subagent``: "the two intersect rather than
+        #:   either winning"); treating it as a caller's enumeration and granting
+        #:   from the raw shared manager bypasses ``selected``, which withholds
+        #:   every ``ownTurnOnly`` server's tools from children. That is how the
+        #:   OSWorld parent's episode action tool reached a child's request
+        #:   (merge-gate run 44707733427).
+        #: * the first-turn MCP readiness gate does not run. The parent's own
+        #:   gate already settled the declared servers on the manager the child
+        #:   borrows, and nothing a wait could deliver enters a child's fixed
+        #:   surface (only an explicit ``mcp://`` activation does), so a wait
+        #:   would be pure latency and a raise would refuse a child turn over a
+        #:   tool it was never going to hold.
+        self._mcp_reach_inherited = False
         #: The OPS a declared tool may reach, for the few tools whose reach is not
         #: its name. ``None`` means "every op this build's tool accepts", which is
         #: the state every declaration without an op scope is in — see
@@ -4968,6 +5398,11 @@ class Session:
         # when ``_open_pending_body_turn`` actually won a reservation, so a
         # session with nothing pending never pays for the per-call gate.
         self._pending_body_turn: Any | None = None
+        #: Team Bridge card excerpt decisions, frozen at each card's first render
+        #: in this process (``card_projection.attach_history_excerpts``): keeps
+        #: already-cached card bytes stable. Cleared whenever standing fails and
+        #: at every compaction commit (``_finish_compaction``).
+        self._bridge_excerpt_memo: dict[str, Any] = {}
         # The body turn whose answer was already seen at a terminal step, so
         # it is never cut afterwards (``_body_turn_cut_for_person``).
         self._body_answered_turn: Any | None = None
@@ -4980,6 +5415,9 @@ class Session:
         # turn. The reservation, not this task or the card text, owes the work.
         self._pending_body_followup_task: asyncio.Task[Any] | None = None
         self._pending_body_followup_again = False
+        #: Rows the last ``_open_pending_body_turn`` claimed (a batch's every
+        #: member); the drain adds them to its per-pass attempted set.
+        self._pending_body_tried: tuple[tuple[str, str], ...] = ()
         # Person prompts waiting for the turn lock (see
         # ``person_prompt_waiting``): the body path yields to them.
         self._person_prompts_waiting = 0
@@ -5174,6 +5612,7 @@ class Session:
         #: The pending request start above survives route invalidation, but
         #: cannot establish a warm cache until that request reports usage.
         self._idle_cache_anchor_ms = 0
+        # --- Turn-end economic compaction (``compaction/economics.py``) -----
         # --- Asynchronous compaction pass (advisor-triggered path only) ------
         #
         # The advisor call was already off the turn, but the PASS it authorised
@@ -5215,6 +5654,13 @@ class Session:
         self._seed_cache_diagnostics(transcript)
         self._seeded = False  # seed_history is once-only, pre-prompt
         self._logical_generation: int | None = None
+        #: The generation of the last ``agent_start`` this session EMITTED, kept
+        #: after the turn ends (unlike ``_logical_generation``). It is what the
+        #: frontend snapshot publishes, so snapshots, updates and turn events
+        #: share one counter; the raw ``_generation`` also counts continuation
+        #: runs and runs that never announce a start. The next announced start
+        #: is always above it, because ``_run_turn`` bumps the raw counter first.
+        self._turn_generation = 0
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
         # Todo-continuation latch: the full todo fingerprint captured at the
         # last guardrail nudge in THIS user turn, so a model that yields twice
@@ -5497,6 +5943,7 @@ class Session:
         # behaviour is exactly what it was before this was configurable.
         self.jobs = AsyncJobManager(
             on_job_complete=self._on_job_completed,
+            on_file_completed=self._file_job_completed,
             # One mutation seam persists resumability and publishes the live
             # canonical roster, including progress/cost/status changes.
             on_roster_change=self._schedule_subagent_persist,
@@ -5552,16 +5999,6 @@ class Session:
         # is what this lock is for (review round 1, MAJOR 4).
         self._ask_wake_lock = asyncio.Lock()
         self._ask_reach: Callable[[], Any] | None = None
-        #: THE ASK GATE'S HONOR RULE (design docs/design/ask-gate.md §2.5):
-        #: fingerprint -> epoch for asks this session has already DIVERTED
-        #: (verdict clear/resolve). A hit skips the second check and enqueues
-        #: unchanged — the model's second attempt is a decision the operator
-        #: can override. Bounded LRU: a hit or a record moves the entry to the
-        #: end, overflow drops the oldest (``GATE_FINGERPRINT_CAP``).
-        #: SESSION-lifetime, no TTL, and in-memory on purpose: the skip
-        #: direction is ENQUEUE (the safe one), so eviction costs one redundant
-        #: check and a restart costs one more — never a lost ask.
-        self._ask_gate_diverts: OrderedDict[str, float] = OrderedDict()
         #: The host's wire publisher for the ask fold (design §4, N2). A
         #: runtime/terminal host registers one so the queue's own change path
         #: (``AskQueue._refresh`` -> ``publish_ask_state``) can push the asks
@@ -5590,6 +6027,7 @@ class Session:
             deliver=self._deliver_monitor,
             persist=self._persist_monitor_schedules,
             on_change=self._on_monitor_change,
+            on_quiet_check=self._on_quiet_monitor_check,
             index_writable=lambda: not self._monitor_index_write_failed,
             classify=monitor_classify,
             announce=self._announce_monitor_notice,
@@ -5690,7 +6128,17 @@ class Session:
         # and an empty schedule list removes it. Runs before the catch-up
         # snapshot only because ``load()`` has already re-armed overdue rows,
         # so what lands on disk is the post-load truth.
-        self._rebuild_wake_index_entry()
+        if goal_wake_due is None:
+            self._rebuild_wake_index_entry()
+        else:
+            from local_operator.session.runtime.launch import RuntimeStartupError
+            from local_operator.wakes.goals import permits_wake
+
+            # Preparation can yield again after lease admission. More
+            # importantly, automation is not a manual reopen: do not rewrite
+            # the index at all, even if a stop lands just after this read.
+            if not permits_wake(self._transcript.directory, goal_wake_due):
+                raise RuntimeStartupError("automatic goal wake is no longer eligible")
         self._prepare_missed_wake_catchup()
         # Monitors load and rebuild their own derived index on EVERY open,
         # exactly like the wake pair above: the transcript is the source of
@@ -5816,6 +6264,10 @@ class Session:
         # session's own context exists. This pass cannot cover a capability that
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
+        # Observe authority before the initial merge so a grant arriving before
+        # the first prompt remains a transition. Inventory replacement is not an
+        # authority change: unchanged authority must preserve refresh_tools exactly.
+        self._notify_authority_available = self._notify_tool_callable() is not None
         self._merge_capability_tools()
         # AFTER the merge: ``task``/``wake`` arrive there, and the declaration
         # below must see the whole inventory it narrows.
@@ -5933,7 +6385,29 @@ class Session:
         # so a pass that skipped them would leave the original 400 live there;
         # the empty case is short-circuited before any decode, so only blocks
         # that carry something are decoded.
+        # Required-media callers must not turn a transport repair into a false
+        # text-only success. Ordinary sessions keep their existing degradation.
+        required_media = getattr(self, "_required_image_evidence", False) and not keep_images
+        required_count = (
+            sum(
+                isinstance(block, ImageContent) for message in rendered for block in message.content
+            )
+            if required_media
+            else 0
+        )
+        # Typed verification can acquire images from a counted inspection after
+        # a text-only start. Admit pixels at every model-facing projection, not
+        # just when the initial envelope happened to contain an image.
+        required_images = required_media and bool(required_count)
+        if required_images and (
+            self._images_rejected
+            or not self._model.supports_images
+            or not self._model.supports_images_stated
+        ):
+            raise ValueError("required image evidence cannot be served by the current model")
         rendered, missing_media = _without_unresolvable_frames(rendered)
+        if required_images and missing_media:
+            raise ValueError("required image evidence is missing or corrupt")
         if missing_media:
             self._announce_missing_media_once(missing_media)
         # THE AUDIO STRIP, ABOVE THE IMAGE EARLY RETURNS for the same reason
@@ -5960,6 +6434,15 @@ class Session:
             self._announce_text_only_omission_once(rendered)
             return _without_images(rendered, model_incapable=True)
         rendered = _rebound_history_images(rendered)
+        if required_images:
+            from local_operator.harness.verifier_evidence import validate_required_image
+
+            # Let the existing oversize repair bound the pixels first. Only
+            # then demand positively decodable media instead of opaque bytes.
+            for message in rendered:
+                for block in message.content:
+                    if isinstance(block, ImageContent):
+                        validate_required_image(block)
         # LAST, so it measures what will actually be sent: the rebound pass
         # above can shrink a block, and resizing or shedding a frame that
         # would have fit is content lost for nothing. This is the transport
@@ -5969,13 +6452,27 @@ class Session:
         # full fidelity until no protected rung fits, then descends the same
         # ladder as the last thing sacrificed; only a walk that cannot fit
         # drops any.
-        rendered, downscaled, shed, rung = _fit_frames_to_budget(
-            rendered, budget=self._wire_bytes_budget()
-        )
+        wire_budget = self._wire_bytes_budget()
+        rendered, downscaled, shed, rung = _fit_frames_to_budget(rendered, budget=wire_budget)
         if downscaled:
             self._announce_frames_downscaled_once(downscaled, rung)
         if shed:
             self._announce_frames_shed_once(shed)
+        if (
+            required_images
+            and sum(
+                isinstance(block, ImageContent) for message in rendered for block in message.content
+            )
+            != required_count
+        ):
+            raise ValueError("required image evidence could not fit the request")
+        if required_images and wire_budget > 0:
+            from local_operator.compaction.api import estimate_wire_bytes
+
+            # User-supplied media is protected by the ordinary fitting policy;
+            # an unchanged image count alone does not prove it actually fit.
+            if estimate_wire_bytes(rendered) > wire_budget:
+                raise ValueError("required image evidence exceeds the request byte budget")
         return rendered
 
     def _render_for_request(self, messages: list[AgentMessage]) -> list[Message]:
@@ -7199,6 +7696,12 @@ class Session:
         # conversation has an assistant reply — see
         # :meth:`_adopt_stored_attachment`.
         self._adopt_stored_attachment()
+        # A stored team/agent this runtime could NOT resolve when it opened (a
+        # moved session whose definitions landed after its runtime, or a mirror
+        # the cached registry snapshot predates) is retried here, so the brief
+        # joins the next prompt instead of waiting for a reopen. See
+        # :meth:`_reresolve_unresolved_attachment`.
+        self._reresolve_unresolved_attachment()
         desired = self._system_blocks(model)
         if inspect.isawaitable(desired):
             desired = await desired
@@ -7544,10 +8047,31 @@ class Session:
         # symbols this seam always has — ``test_read_only_prompt_bound``'s stub
         # session mirrors exactly those, and routing through an instance method
         # it cannot know about broke the aside-equals-turn equality it pins.
+        # Bridge journal cards carry bounded replay excerpts on the main turn
+        # (``_bridge_history_transform``, frozen in ``_bridge_excerpt_memo``).
+        # Skipping that transform here rendered every card as ids-only,
+        # diverging the wire prefix at the very first excerpted card and
+        # forcing full cache rewrites (220k-315k tokens) on clearance/aside/
+        # compaction-advisor calls. Run it read-only so a racing helper never
+        # mutates ``_bridge_excerpt_memo`` or runs side-effecting store purges;
+        # guard both attributes so minimal stub sessions remain compatible.
+        # KNOWN TRADE-OFF (PR #4370): a Team Bridge body turn anchors its
+        # ephemeral body frame right after the wake card (PendingTurn
+        # ._insert_index), and this read-only prompt deliberately never carries
+        # that frame (it holds no admission). So during a body turn an aside or
+        # clearance matches the main prefix only up to the wake card and
+        # re-writes the turn's tool steps, where it used to match through
+        # tool_result N-1. Accepted for the per-step frame re-write the anchor
+        # saves; watch clearance cache_read on body turns after deploy.
+        combined: list[AgentMessage] = [*history, *turns]
+        if getattr(self, "bridge_runtime", None) is not None and hasattr(
+            self, "_bridge_history_transform"
+        ):
+            combined = self._bridge_history_transform(combined, read_only=True)
         return blocks, normalise_replay_tool_names(
             bound_replay_payloads(
                 with_attachment_hints(
-                    self._render_history([*history, *turns]),
+                    self._render_history(combined),
                     world_root=self._confinement_root,
                 )
             ),
@@ -8417,6 +8941,12 @@ class Session:
         stored = self._goal_state.arm(text)
         self._persist_attachment()
         self._persist_goal_record()
+        if stored and not getattr(self, "_goal_recovery_disabled", False):
+            from local_operator.resume import USER_ORIGINS, session_origin
+
+            origin = session_origin(self._transcript.directory)
+            if not origin or origin in USER_ORIGINS:
+                self._ensure_wake_supervisor()
         self.refresh_frontend_state()
         return stored
 
@@ -8655,6 +9185,7 @@ class Session:
         """
         self._goal_state.agent_brief = ""
         self._goal_state.agent_name = self._team_manager_name()
+        self._bridge_session_agent_display = self._goal_state.agent_name or None
         self._attached_profile_tools = ()
         # The team's manager supersedes any carried unresolved agent name (R1),
         # exactly as a successful ``/agent`` attach does.
@@ -8671,6 +9202,7 @@ class Session:
         """
         self._goal_state.agent_brief = ""
         self._goal_state.agent_name = ""
+        self._bridge_session_agent_display = None
         self._attached_profile_tools = ()
         self._clear_unresolved("agent")
 
@@ -8771,7 +9303,52 @@ class Session:
             directory = self._transcript.directory
         except Exception:  # noqa: BLE001 — a reduced host must not lose its turn
             return
-        write_goal_record(directory, self._goal_state.to_payload())
+        payload = self._goal_state.to_payload()
+        payload["recover"] = True
+        if getattr(self, "_goal_recovery_disabled", False):
+            # A one-shot run must not plant a new unattended obligation. If
+            # it was explicitly resumed against an already armed token, leave
+            # that token's original policy intact.
+            payload["recover"] = self._goal_state.token == getattr(
+                self, "_goal_recovery_prior_token", ""
+            )
+        payload["cwd"] = getattr(self, "_cwd", "")
+        write_goal_record(directory, payload)
+
+    def goal_recovery_due(self) -> bool:
+        """A retry is an owner-side trigger, never a durable prompt."""
+        from local_operator.wakes.goals import retry_at
+        from local_operator.wakes.store import is_held, read_entry
+
+        if (
+            self._disposed
+            or self._job_id is not None
+            or self._goal_state.status != "active"
+            or getattr(self, "_goal_recovery_disabled", False)
+        ):
+            return False
+        due = retry_at(self._transcript.directory)
+        return (
+            due is not None
+            and due <= int(time.time() * 1000)
+            and not is_held(read_entry(self._config_dir, self._session_id))
+        )
+
+    def disable_goal_recovery(self) -> None:
+        """Keep one-shot exec's verdict-only contract across its teardown."""
+        from local_operator.resume import read_goal_record
+
+        record = read_goal_record(self._transcript.directory) or {}
+        # Exec may be resuming an existing goal, or may just have armed a new
+        # one. Only the former is allowed to retain its cold-wake authority.
+        if (
+            self._goal_restored_token == self._goal_state.token
+            and record.get("recover") is not False
+        ):
+            self._goal_recovery_prior_token = self._goal_state.token
+        self._goal_recovery_disabled = True
+        if self._goal_state.status == "active":
+            self._persist_goal_record()
 
     def _restore_goal_record(self) -> None:
         """Rebuild the judged-goal record from ``goal.json``, if there is one.
@@ -8808,6 +9385,7 @@ class Session:
         holder.judge = record.judge
         holder.history = record.history
         holder.token = record.token
+        self._goal_restored_token = record.token
         holder.created_at = record.created_at
 
     def _clear_unresolved(self, slot: str) -> None:
@@ -9080,6 +9658,104 @@ class Session:
         if self._transcript_has_assistant_message():
             return
         self._restore_attachment()
+
+    #: Minimum seconds between two re-resolve attempts of an unresolved stored
+    #: attachment when the registries expose no root to fingerprint.
+    #: ``_prepare_system_blocks`` runs at every provider step, and a team that is
+    #: genuinely gone would otherwise force a registry rescan per step.
+    _ATTACHMENT_RERESOLVE_INTERVAL_S = 15.0
+
+    def _reresolve_unresolved_attachment(self) -> None:
+        """Re-apply a stored team/agent brief this LIVE runtime failed to resolve.
+
+        WHY (2026-11-13, PR #3937 round 1, session ce6fcb93c28a on
+        lop-remote-node-2): a session moved with ``attachment.json`` =
+        ``{team: "lopdev"}``, and the node listed ``lopdev`` as a mirrored team,
+        yet the moved conversation's system prompt had no ``[team: lopdev]``
+        brief. The brief is applied only by :meth:`_restore_attachment`, which
+        runs at construction (and, via :meth:`_adopt_stored_attachment`, once
+        more before an UNANSWERED conversation's first turn). A moved session is
+        answered by definition, so when its runtime opened before the team
+        resolved here — the definitions push landing after the runtime, or a
+        registry snapshot (5 s cache) taken before the mirror was installed —
+        the miss was recorded in ``_unresolved_team`` and nothing ever retried it.
+
+        The trigger is that recorded miss and nothing else: the name is still
+        this session's intended attachment (a ``/team`` or ``/agent`` mutation
+        clears it — see :meth:`_persist_attachment`), so re-applying it can never
+        resurrect something the user detached, which is the reason the late
+        adoption refuses answered conversations. Registries are force-refreshed
+        first (the cached snapshot is the stale-mirror case), then the ordinary
+        restore runs through the same resolvers ``/team`` uses, mirrored rows
+        included. A failed attempt is retried only once a registry root's mtime
+        moves (or, unfingerprintable, after :data:`_ATTACHMENT_RERESOLVE_INTERVAL_S`).
+
+        Each slot is cleared only once IT resolved (review r2 R2-M1); a slot still
+        missing keeps its marker and is retried on the next registry change.
+        Never raises: a turn must not fail over a brief.
+        """
+        pending_team = self._unresolved_team and self.active_team is None
+        pending_agent = self._unresolved_agent and not self._goal_state.agent_name
+        if not (pending_team or pending_agent):
+            return
+        # Retry only when something could have changed: a definitions install
+        # creates a row directory, which moves its registry root's mtime. Where a
+        # (scoped) registry does not expose its root, fall back to a time throttle.
+        fingerprint: list[int] = []
+        for registry, attr in (
+            (self.team_registry, "teams_dir"),
+            (self.agent_registry, "agents_dir"),
+        ):
+            root = getattr(registry, attr, None)
+            if root is None:
+                fingerprint = []
+                break
+            try:
+                fingerprint.append(os.stat(root).st_mtime_ns)
+            except OSError:
+                fingerprint.append(0)
+        now = time.monotonic()
+        last = self._attachment_reresolved_at
+        if last is not None:
+            if fingerprint and tuple(fingerprint) == self._attachment_reresolve_fingerprint:
+                return
+            if not fingerprint and now - last < self._ATTACHMENT_RERESOLVE_INTERVAL_S:
+                return
+        self._attachment_reresolved_at = now
+        self._attachment_reresolve_fingerprint = tuple(fingerprint)
+        for registry in (self.team_registry, self.agent_registry):
+            # BOTH registries must re-read disk NOW (review r2 R2-M1): the team
+            # registry spells it ``refresh`` but ``AgentRegistry`` /
+            # ``ScopedAgentRegistry`` spell it ``refresh_now``. Calling only the
+            # first left agent lookups (a team's specialist manager, an agent-only
+            # attachment) on the 5 s snapshot while the fingerprint above was
+            # already spent, so the miss was never retried.
+            refresh = getattr(registry, "refresh", None) or getattr(registry, "refresh_now", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception:  # noqa: BLE001 — the restore reports a bad registry
+                    logger.debug("attachment re-resolve: refresh failed", exc_info=True)
+        try:
+            self._restore_attachment()
+        except Exception:  # noqa: BLE001 — see the docstring
+            logger.debug("attachment re-resolve failed", exc_info=True)
+        # Per slot: the restore records misses but never clears them (that is a
+        # user action's job), so a slot that now resolved is cleared here and one
+        # that did not keeps its name for the next attempt. An attached team also
+        # settles the agent slot: it owns that slot (issue #2014), so a stored
+        # agent beside it is superseded, not missing.
+        team_done = not pending_team or self.active_team is not None
+        agent_done = (
+            not pending_agent or bool(self._goal_state.agent_name) or self.active_team is not None
+        )
+        if team_done and pending_team:
+            self._unresolved_team = ""
+        if agent_done and pending_agent:
+            self._unresolved_agent = ""
+        if team_done and agent_done:
+            self.attachment_restore_notice = ""
+            logger.info("attachment re-resolve: applied the stored attachment")
 
     def _transcript_has_assistant_message(self) -> bool:
         """Whether the DURABLE conversation has produced any assistant reply.
@@ -9367,6 +10043,7 @@ class Session:
         # contradicting each other. Both fields are stamped together in
         # ``_stamp_agent_brief``; they must be cleared together too.
         self._goal_state.agent_name = ""
+        self._bridge_session_agent_display = None
         # An explicit detach also retires a carried unresolved name (R1), or
         # ``/agent clear`` would appear to work and the profile would come back
         # at the next resume.
@@ -9391,6 +10068,7 @@ class Session:
         # case): the profile IS attached and the band must name it, so the
         # segment tracks "which profile is in force", not "did it layer text".
         self._goal_state.agent_name = display_name
+        self._bridge_session_agent_display = display_name or None
         # A successful attach supersedes any carried unresolved name (R1).
         self._clear_unresolved("agent")
         # The single funnel every successful ``/agent`` attach passes through
@@ -10230,8 +10908,15 @@ class Session:
         audio: Sequence[AudioContent] | None = None,
         documents: Sequence[DocumentContent] | None = None,
         owner_typed: bool = True,
+        mesh_origin: Mapping[str, Any] | None = None,
+        _file_capture: Any = ...,
+        input_surface: str = "tui",
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
+
+        ``mesh_origin`` is the receiving runtime's stamp for a REMOTE prompt
+        (``network/origin.py``), stored on the row's ``provider_payload`` beside
+        ``lop_remote_prompt``; ``None`` writes nothing (local, legacy).
 
         ``owner_typed=False`` marks a person's prompt that did NOT come from a
         local operator surface (a mesh ``drive`` member, a peer's ``sessions
@@ -10327,6 +11012,10 @@ class Session:
         # FIFO before this acquire, or across the expansion's await) yields
         # instead of running one more body turn ahead of the person. Harness
         # rows (goal continuations) are not a person and are not marked.
+        if _file_capture is ...:
+            _file_capture = (
+                None if harness_injected else self._capture_file_input(text, producer_command_id)
+            )
         with contextlib.nullcontext() if harness_injected else self.person_prompt_waiting():
             if audio:
                 await self._refuse_audio_admission(audio)
@@ -10452,8 +11141,19 @@ class Session:
             elif input_path is not None:
                 extra["input_path"] = input_path
             user = Message.user(text, images, audio=audio, documents=documents, **extra)
+            if not harness_injected:
+                self._file_owner().bind(user.id, _file_capture)
+                if producer_command_id:
+                    self._file_owner().admissions.pop(producer_command_id, None)
             if not owner_typed:
                 _stamp_remote_prompt(user)
+            _stamp_mesh_origin(user, mesh_origin)
+            # ADR 0009: which surface typed this, decided by the runtime from the
+            # connection (``input_surface``; ``tui`` for the in-process owner).
+            # A harness-minted row is not human input, so it carries no stamp and
+            # the run inherits the conversation's last driver.
+            if not harness_injected:
+                _stamp_input_surface(user, input_surface)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -10463,7 +11163,14 @@ class Session:
                 # durable journal row (`encode_message_payload` keeps a non-None
                 # payload) — so this needs no new field and no protocol bump.
                 # See `docs/DESKTOP_API.md` for what a viewer does with it.
-                user.provider_payload = {RENDERED_INJECTION_KEY: True}
+                #
+                # MERGED, not assigned: an assignment here dropped the remote-
+                # prompt stamp (and would drop the mesh origin) from a harness-
+                # injected remote row (mesh-origin-stamp §4, M-12).
+                user.provider_payload = {
+                    **(user.provider_payload or {}),
+                    RENDERED_INJECTION_KEY: True,
+                }
             initial: list[AgentMessage] = [catchup, user] if catchup is not None else [user]
             # PARKED WAKES FOLD HERE, beside the catch-up fold above: a wake that
             # fired during the operator's conversation was held rather than
@@ -10566,8 +11273,14 @@ class Session:
         harness_injected: bool = False,
         owner_typed: bool = True,
         delivery: BusyDelivery | str | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
+        _file_capture: Any = ...,
+        input_surface: str = "tui",
     ) -> None:
         """Inject an identified steering message into the running turn.
+
+        ``mesh_origin`` has ``prompt``'s meaning: the receiver-minted stamp,
+        merged onto the queued row's ``provider_payload``.
 
         ``owner_typed`` has ``prompt``'s meaning: False for a steer that did not
         come from a local operator surface.
@@ -10635,16 +11348,33 @@ class Session:
             extra["input_path"] = str(AudioPath.MODEL_AUDIO_SIDECAR)
         elif input_path is not None:
             extra["input_path"] = input_path
+        if _file_capture is ...:
+            _file_capture = (
+                None if harness_injected else self._capture_file_input(text, producer_command_id)
+            )
         message = Message.user(text, images, audio=audio, documents=documents, **extra)
+        if not harness_injected:
+            self._file_owner().bind(message.id, _file_capture)
+            if producer_command_id:
+                self._file_owner().admissions.pop(producer_command_id, None)
         if not owner_typed:
             _stamp_remote_prompt(message)
+        _stamp_mesh_origin(message, mesh_origin)
+        # ADR 0009: a steer is human input, so it flips the run it lands in (a
+        # phone steer into a desk-started run makes that run mobile-origin).
+        if not harness_injected:
+            _stamp_input_surface(message, input_surface)
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
             # row is born — the same contract ``prompt`` documents one method
             # up, and the reason both wires need no new field: ``provider_payload``
             # rides the live ``MessageStartEvent`` and the durable journal row
             # alike.
-            message.provider_payload = {RENDERED_INJECTION_KEY: True}
+            # Merged for the reason ``prompt`` gives (mesh-origin-stamp §4).
+            message.provider_payload = {
+                **(message.provider_payload or {}),
+                RENDERED_INJECTION_KEY: True,
+            }
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
@@ -11576,6 +12306,8 @@ class Session:
             # A prompt spooled from a REMOTE connection keeps that provenance
             # (``serving.REMOTE_ORIGIN_SENDER_KEY``): never owner-typed here.
             owner_typed=not bool((getattr(line, "sender", None) or {}).get("remote_origin")),
+            _file_capture=self._take_file_continuation(command_id),
+            input_surface=spooled_input_surface(line),
         )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
@@ -11584,6 +12316,170 @@ class Session:
         if command_id:
             seen.add(command_id)
         return True
+
+    # -- ADR 0009 origin ------------------------------------------------------
+
+    def _note_run_input_surface(self, message: Any) -> None:
+        """Record the surface of one run input, when it is HUMAN input.
+
+        Origin is the surface of the MOST RECENT human input admitted into the
+        run (ADR 0009 Decision 1, option B): a stamped prompt or steer row, or a
+        person's answer to a queued ask whose answer op the control server
+        noted. Everything else (wakes, job results, peer and channel messages,
+        harness injections) leaves the run to inherit the last driver.
+        """
+        stamped = _input_surface_of(message)
+        if stamped is not None and getattr(message, "role", None) == "user":
+            self._run_input_surface = stamped
+            return
+        if ask_answer_is_person(message):
+            details = getattr(message, "details", None) or {}
+            ask_id = details.get("ask_id") if isinstance(details, Mapping) else None
+            surface = self._ask_answer_surfaces.pop(ask_id, None) if ask_id else None
+            if surface is not None:
+                self._run_input_surface = surface
+
+    def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None]:
+        """The control server's record of WHO answered (ADR 0009, R10).
+
+        Returns an UNDO the server runs when the answer is then refused (review
+        round 1, m2), so a refused answer relabels nothing. The note itself
+        must precede the answer (see ``_answer_noting_surface``).
+
+        ``ask_id`` names a QUEUED ask: its answer reaches the run later as an
+        ``ask_response`` row, which picks this up in ``_note_run_input``. ``None``
+        is a live answer (an approval, a blocking picker) inside the run in
+        flight, which flips that run now. ``surface`` is derived by the server
+        from the authenticated connection, never from the frame.
+        """
+        clamped = _input_surface(surface, default="unknown")
+        if ask_id:
+            previous = self._ask_answer_surfaces.get(ask_id)
+            self._ask_answer_surfaces[ask_id] = clamped
+
+            def undo_queued() -> None:
+                # Only this note's own value is retracted: a later note for the
+                # same ask (another surface answering) stays.
+                if self._ask_answer_surfaces.get(ask_id) != clamped:
+                    return
+                if previous is None:
+                    self._ask_answer_surfaces.pop(ask_id, None)
+                else:
+                    self._ask_answer_surfaces[ask_id] = previous
+
+            return undo_queued
+        if self._is_streaming:
+            previous_run = self._run_input_surface
+            self._run_input_surface = clamped
+
+            def undo_live() -> None:
+                if self._run_input_surface == clamped:
+                    self._run_input_surface = previous_run
+
+            return undo_live
+        return _noop_answer_surface_undo
+
+    def _reconstruct_input_driver(self) -> str:
+        """The conversation's last driver, rebuilt from the transcript on resume.
+
+        Newest first: a stamped user row is that surface, and an attention
+        marker carrying ``origin`` is the origin a previous run ended with (that
+        covers runs driven by an ask answer, whose row carries no stamp). No
+        such entry, which is every conversation written before ADR 0009, is
+        ``unknown``. Never raises: unreadable history is ``unknown`` (errs quiet).
+        """
+        from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+        from local_operator.session.transcript import ENTRY_CUSTOM, _entry_to_message
+
+        try:
+            entries = self._transcript.entries()
+            for entry in reversed(entries):
+                if entry.type == ENTRY_CUSTOM:
+                    if entry.payload.get("custom_type") == ATTENTION_CUSTOM_TYPE:
+                        details = entry.payload.get("details")
+                        origin = details.get("origin") if isinstance(details, Mapping) else None
+                        if isinstance(origin, str) and origin in INPUT_SURFACES:
+                            return origin
+                    continue
+                message = _entry_to_message(entry)
+                if getattr(message, "role", None) != "user":
+                    continue
+                stamped = _input_surface_of(message)
+                if stamped is not None:
+                    return stamped
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("origin: could not rebuild the last driver", exc_info=True)
+        return "unknown"
+
+    def _run_origin(self) -> str:
+        """This run's origin: its own human input, else the inherited driver."""
+        if self._run_input_surface is not None:
+            return self._run_input_surface
+        if self._conversation_driver is None:
+            self._conversation_driver = self._reconstruct_input_driver()
+        return self._conversation_driver
+
+    def _run_needs_user(self, now: float | None = None) -> bool:
+        """Whether an ask NEW to this run's window is still open at its end.
+
+        ADR 0009 §3 (R2-1): a queued ask is durable, so every later wake, job
+        or peer run also ends with it open; counting "any open ask" would
+        re-push the same question on every background tick. So only an ask
+        whose ``created_at`` falls inside this run's window counts. The window
+        opens just past the PREVIOUS run's end (R3-1: a Team Bridge request ask
+        is raised by the harness between runs, and would otherwise never be
+        announced) and closes now; calling this CLOSES it, so it is called once
+        per run end. Both clocks are this process's wall clock, which
+        ``AskQueue`` stamps ``created_at`` from.
+        """
+        end_ms = int((now if now is not None else time.time()) * 1000)
+        start_ms = self._needs_user_window_ms
+        # The NEXT window opens one millisecond after this one closes, so the
+        # windows tile with no overlap: an ask whose ``created_at`` ties this
+        # run's end at millisecond resolution is counted here and never again.
+        self._needs_user_window_ms = end_ms + 1
+        records = self._open_ask_records(end_ms)
+        return any(start_ms <= int(record.get("created_at") or 0) <= end_ms for record in records)
+
+    def _seed_needs_user_window(self) -> int:
+        """Where this runtime's FIRST needs-you window opens.
+
+        Just past the newest durable outcome marker, else construction. Every
+        marker is appended after its run's window closed, so an ask counted by
+        an earlier runtime (``created_at`` <= that run end <= the marker) is
+        never counted again, while one raised after it (a Bridge issuance retried
+        by ``reconcile_asks`` on a deadline tick before a swap, with no turn
+        following) still falls in this window (review round 1, m1). Capped at
+        construction so the seed can only widen the old window, never narrow it.
+        A read failure keeps construction: routing must never cost a turn.
+        """
+        from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+
+        seed = self._needs_user_constructed_ms
+        try:
+            entry = self._transcript.latest_custom_entry(ATTENTION_CUSTOM_TYPE)
+            if entry is not None and entry.ts:
+                seed = min(seed, int(float(entry.ts) * 1000) + 1)
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("needs_user: could not read the outcome marker", exc_info=True)
+        return seed
+
+    def _open_ask_records(self, now_ms: int) -> list[dict[str, Any]]:
+        """The queue's OPEN asks (``asks.store.open_asks``), or ``[]``.
+
+        ``[]`` while the blocking arm is live (no queue: an ask there blocks the
+        run, which therefore cannot end on it) and on any read failure, which
+        errs quiet. Its own seam so the window rule above is testable apart
+        from the queue's delivery machinery.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return []
+        try:
+            return list(queue.open_records(now_ms))
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("needs_user: could not read the ask queue", exc_info=True)
+            return []
 
     def _steer_is_live_queued(self, command_id: str) -> bool:
         """Whether a steer with this producer id is already owed by this process.
@@ -12044,7 +12940,11 @@ class Session:
                 and bool(row_id)
                 and not self._transcript.has_entry(row_id)
             )
-            await self._transcript.append_message(message, producer_command_id=producer_command_id)
+            await self._transcript.append_messages(
+                [message],
+                producer_command_id=producer_command_id,
+                _file_captures=self._file_owner().take([message]),
+            )
             if is_new_bridge_row:
                 try:
                     self._maybe_raise_bridge_ask(message)
@@ -13020,14 +13920,27 @@ class Session:
         from local_operator.team_bridge import ask_issuance as ledger_mod
 
         directory = asks_store.session_dir(self._config_dir, self.session_id)
+        now = _time.time()
         try:
+            # A delivered bridge row is a CustomMessage, persisted as a
+            # ``message`` row (payload kind ``custom``) — never a ``custom``
+            # entry, so ``custom_messages`` is what makes this scan see it at
+            # all. ``min_ts`` is the repair's own 24 h window pushed into the
+            # walk: this runs synchronously on the event loop at every turn
+            # start, ask op and deadline tick, and without the bound its cost
+            # tracked the journal's whole size (1.07 s warm on a 688 MB one,
+            # while matching nothing). With both, it reads back only as far as
+            # the window or the 20th row, whichever comes first.
             rows = transcript_mod.read_custom_entries(
-                directory, TEAM_BRIDGE_MESSAGE_TYPE, max_rows=20
+                directory,
+                TEAM_BRIDGE_MESSAGE_TYPE,
+                max_rows=20,
+                custom_messages=True,
+                min_ts=now - 86400,
             )
         except Exception:  # noqa: BLE001 — repair is best-effort, never a crash
             return
         ledger = ledger_mod.AskIssuance(runtime.config_dir)
-        now = _time.time()
         for entry in rows:
             if now - float(getattr(entry, "ts", 0.0) or 0.0) > 86400:
                 continue
@@ -13303,6 +14216,27 @@ class Session:
             return None
         return self._enqueue_ask
 
+    def _integration_consent_seam(self) -> Any | None:
+        """The Team Integrations consent seam, or ``None`` where no person can grant.
+
+        Bound per turn beside the ask doors and ``None`` under the same queue
+        condition, plus for a delegated child: a child never files a consent
+        card on its parent's screen for work the person watching never asked
+        about (the ``_authorize_hub_pull`` rule), and a channel post that
+        reached a child must never reach an integration admin operation (RFC
+        §8.1, S-83). ``answered_ids`` is read LIVE, because the set is filled as
+        answer rows arrive during the run and reset when the next run starts.
+        """
+        if self._parent_session_id or self.ask_queue() is None:
+            return None
+        from local_operator.team_bridge.integration_consent import IntegrationConsent
+
+        return IntegrationConsent(
+            self.ask_queue,
+            lambda: set(self._run_answered_ask_ids),
+            session_id=str(self.session_id or ""),
+        )
+
     def _ask_withdraw_callable(self) -> Callable[..., Any] | None:
         """The tool's withdraw door, or ``None`` on the BLOCKING arm (design §12).
 
@@ -13315,119 +14249,6 @@ class Session:
         if self.ask_queue() is None:
             return None
         return self.withdraw_ask
-
-    def _ask_gate_callable(self) -> Callable[..., Any] | None:
-        """The ask tool's gate door, or ``None`` wherever ``ask`` cannot queue (§2.2).
-
-        Bound per turn beside :meth:`_ask_enqueue_callable` and ``None`` under
-        exactly the same two conditions — the flag on AND a host that can show
-        an ask — because the gate exists only to decide the fate of an ask the
-        queued engine would otherwise take, and its presence IS that fact. The
-        kill switch (``LOP_ASK_GATE``) is deliberately NOT part of the binding:
-        it is read INSIDE :meth:`_gate_ask` as its step 1, the callable's own
-        policy, so gate-off is one flag check on a path the tool already walks.
-        """
-        if self.ask_queue() is None:
-            return None
-        return self._gate_ask
-
-    async def _gate_ask(
-        self,
-        questions: list[Any],
-        timeout_raw: Any = None,
-        *,
-        tool_call_id: str = "",
-    ) -> dict[str, Any] | None:
-        """Run the gate's clearance check; divert or enqueue, never fail the ask.
-
-        THE TOTALITY TABLE (design docs/design/ask-gate.md §2.2), in order —
-        every non-divert path returns ``None``, which the tool maps to the
-        UNCHANGED enqueue:
-
-        1. ``LOP_ASK_GATE`` off → ``None`` (the fork is never called);
-        2. no queue (defense; unreachable through the tool) → ``None``;
-        3. any ``secret=True`` question → ``None`` — a credential is the user's
-           to hand over, so the fork is NEVER called for it;
-        4. fingerprint hit → ``None`` — the honor rule, no second check (§2.5);
-        5. timeout/provider/parse failure → ``None`` — fail-open; a CANCELLED
-           turn re-raises instead, because an abort must abort (§2.2);
-        6. no verdict / ``raise`` → ``None`` (nothing recorded on raise — the
-           queue's own caps own the re-ask path);
-        7. ``clear``/``resolve`` → the diversion mapping, fingerprint recorded.
-
-        ``timeout_raw`` and ``tool_call_id`` are accepted for call-shape parity
-        with :meth:`_enqueue_ask` (the tool passes the same two arguments to
-        both doors) and are deliberately unused: the gate's bound is
-        ``policy.GATE_TIMEOUT_S``, not the ask's own timeout — the deadline the
-        model set belongs to the QUEUED question, not to the check about it.
-        """
-        from local_operator.asks import policy
-        from local_operator.session import clearance
-
-        if not policy.gate_enabled():
-            return None
-        if self.ask_queue() is None:  # pragma: no cover — the tool only calls this when set
-            return None
-        if any(_question_marked_human_required(question) for question in questions):
-            # H5a (contract §10.3, #125): a human_required ask — a bridge
-            # request — is NEVER eligible for clearance: the fork is not
-            # called, nothing can suppress it, bypass its enqueue, auto-resolve
-            # it or authorize a decide. Returning None sends it down the
-            # UNCHANGED enqueue path, which is the requirement class's whole
-            # meaning. The check sits FIRST, before the secret/fingerprint
-            # logic, so no path can reorder around it.
-            return None
-        if any(bool(getattr(question, "secret", False)) for question in questions):
-            # §2.2 step 3, and note the ORDER: this refusal runs before the
-            # fingerprint is even computed, so a secret ask is a zero-token,
-            # zero-check path by construction.
-            return None
-        digest = clearance.fingerprint(questions)
-        if digest in self._ask_gate_diverts:
-            # §2.5: recorded content queues with NO second check. A hit moves
-            # the entry to the LRU's end (recency), matching the record path.
-            self._ask_gate_diverts.move_to_end(digest)
-            return None
-        prompt = clearance.build_clearance_prompt(questions)
-        try:
-            async with asyncio.timeout(policy.GATE_TIMEOUT_S):
-                text = await self.complete_clearance([Message.user(prompt)])
-        except asyncio.CancelledError:
-            # Named explicitly rather than left to ``except Exception``: an
-            # aborted turn must keep aborting. (It would propagate anyway —
-            # CancelledError is a BaseException — but the intent is the
-            # contract here, not the class hierarchy.)
-            raise
-        except Exception:  # noqa: BLE001 — see the totality table; failure = enqueue
-            logger.debug("ask gate: clearance check failed; enqueueing", exc_info=True)
-            return None
-        verdict = clearance.parse_verdict(text)
-        if verdict is None or verdict == "raise":
-            # Unparseable is a provider quirk, ``raise`` is the user's — both
-            # mean the ask travels unchanged. Neither records a fingerprint.
-            return None
-        reason = clearance.parse_reason(text)
-        self._record_ask_gate_divert(digest)
-        return {
-            "verdict": verdict,
-            "text": clearance.clearance_note(verdict, reason),
-            "details": {"ask_gate": {"hidden": True, "verdict": verdict, "reason": reason}},
-        }
-
-    def _record_ask_gate_divert(self, digest: str) -> None:
-        """Record a diverted fingerprint in the bounded LRU (design §2.5).
-
-        A hit or a record moves the entry to the end; overflow drops the oldest
-        (``GATE_FINGERPRINT_CAP = 64``). The epoch value is diagnostic — the
-        window is session-lifetime and no reader ages entries out — so a clock
-        oddity cannot affect routing.
-        """
-        from local_operator.session.clearance import GATE_FINGERPRINT_CAP
-
-        self._ask_gate_diverts[digest] = time.time()
-        self._ask_gate_diverts.move_to_end(digest)
-        while len(self._ask_gate_diverts) > GATE_FINGERPRINT_CAP:
-            self._ask_gate_diverts.popitem(last=False)
 
     def _enqueue_ask(
         self,
@@ -13485,6 +14306,305 @@ class Session:
             for question in (record.get("questions") or ())
             if isinstance(question, Mapping)
         )
+
+    @staticmethod
+    def _bridge_door_refusal(record: Mapping[str, Any] | None) -> str:
+        """The sentence a plain ask door refuses a bridge-carried record with.
+
+        PR #3938 U5: a headless node's ``site:v1:`` card is a bridge record too,
+        so it is refused here like any other — but the Team Bridge sentence
+        ("approve it from the request's own card … or a paired device") is wrong
+        for it. The caller reaching this door IS on the card: it is a desktop
+        app or client from before signed site approvals, whose answer route
+        still posts to ``ask_respond``/revise/per-question. The phone the
+        sentence offers is exactly what a site card cannot be answered from.
+        So a site card gets the old-signer refusal, the same keyed sentence the
+        runtime's challenge and ``bridge_decide`` doors give (update this
+        computer; the card stays open). The refusal itself is unchanged: these
+        doors carry no signature, so they still fail by construction.
+        """
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        if isinstance(record, Mapping) and any(
+            is_site_question_id(question.get("question_id"))
+            for question in (record.get("questions") or ())
+            if isinstance(question, Mapping)
+        ):
+            from local_operator.i18n.keys import browser_site_approval as _site_keys
+            from local_operator.i18n.messages import render_resolved
+
+            return render_resolved(_site_keys.refused_old_signer())
+        return Session.BRIDGE_DECISION_DOOR_REQUIRED
+
+    async def site_decide(
+        self,
+        ask_id: str,
+        question_id: str,
+        word: str,
+        *,
+        submit: Callable[[dict[str, Any]], Awaitable[Mapping[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
+        """The ``site:v1:`` door: a headless node's per-site browser approval.
+
+        Reached from the runtime's ``bridge_decide`` op for a question id
+        carrying :data:`~local_operator.browser_bridge.site_approval.SITE_QUESTION_PREFIX`
+        — AHEAD of the Team Bridge door, because a site ask has nothing to do
+        with agent messages and must work on a node with no Team Bridge at all.
+        The authority seam already admitted the frame and minted the one-shot
+        grant; when the admission was a verified operator signature it also
+        stashed the signed proof beside it.
+
+        THE EFFECT HAPPENS FIRST, THE RECORD SECOND. The node's browser
+        extension re-verifies the operator's signature against its own
+        managed-policy anchor and decides exactly the entry the question id
+        binds; only when it reports ``applied`` is the grant consumed and the
+        answer recorded. Recording first would let the ask say "approved" for a
+        site the browser refused (bad signature, expired entry). A refusal
+        withdraws the grant (the S-R3-3 rule: a refused frame leaves nothing
+        spendable) and comes back typed, so the card can say why.
+
+        ``submit`` is injectable for tests; production sends
+        ``submit_signed_decision`` over the browser bridge of THIS host.
+        """
+        from local_operator.browser_bridge import site_approval
+        from local_operator.harness.approval import (
+            bridge_decide_grant_proof,
+            consume_bridge_decide_grant,
+            withdraw_bridge_decide_grant,
+        )
+        from local_operator.i18n.keys import browser_site_approval as _copy
+        from local_operator.i18n.messages import render_resolved
+
+        session_id = str(self.session_id)
+        ask_id = str(ask_id)
+        question_id = str(question_id)
+        decision_word = str(word or "").strip().lower()
+
+        def _refuse(text: str, code: str = "") -> dict[str, Any]:
+            withdraw_bridge_decide_grant(
+                session_id=session_id, ask_id=ask_id, question_id=question_id
+            )
+            answer: dict[str, Any] = {"ok": False, "error": text}
+            if code:
+                answer["code"] = code
+            return answer
+
+        queue = self.ask_queue()
+        if queue is None:
+            return _refuse("this session's runtime predates queued asks")
+        record = queue.find(ask_id)
+        if record is None:
+            return _refuse(_ask_refusal_copy(None))
+        question = next(
+            (
+                candidate
+                for candidate in (record.get("questions") or ())
+                if isinstance(candidate, Mapping)
+                and str(candidate.get("question_id") or "") == question_id
+            ),
+            None,
+        )
+        if question is None or not site_approval.is_site_question_id(question_id):
+            return _refuse("that request's question is not on this ask.")
+        if decision_word not in site_approval.SITE_WORDS:
+            return _refuse("that is not an answer this request accepts — choose Approve or Deny.")
+        refusal = _ask_refusal_copy(record)
+        if refusal:
+            return _refuse(refusal)
+        proof = (
+            bridge_decide_grant_proof(
+                session_id=session_id, ask_id=ask_id, question_id=question_id, word=decision_word
+            )
+            or {}
+        )
+        params = {
+            "session_id": session_id,
+            "ask_id": ask_id,
+            "question_id": question_id,
+            "word": decision_word,
+            # Empty when the frame was admitted WITHOUT a signature (the node's
+            # own console holds the spawn capability): the extension refuses
+            # that as ``unsigned_decision``, by design — see the module doc.
+            "challenge": proof.get("challenge", ""),
+            "sig": proof.get("operator_sig", ""),
+            "key_id": proof.get("operator_key_id", ""),
+        }
+        if submit is None:
+            from local_operator.browser_bridge.backend import BridgeClient
+
+            async def _bridge_submit(payload: dict[str, Any]) -> Mapping[str, Any]:
+                return await BridgeClient().call("submit_signed_decision", payload)
+
+            submit = _bridge_submit
+        # A CHILD-BOUND CARD (security review 60334) takes the explicit commit
+        # protocol of :class:`_SiteCard`; a card the host raised itself has no
+        # binding and keeps main's path below unchanged.
+        card = self._site_cards.get(ask_id)
+        if card is not None:
+            return await self._site_decide_bound(
+                card,
+                params,
+                submit,
+                refuse=_refuse,
+                slot=str(question.get("id") or ""),
+                word=decision_word,
+                question_id=question_id,
+            )
+        try:
+            result = await submit(params)
+        except Exception:  # noqa: BLE001 — any transport failure: nothing was decided
+            logger.warning(
+                "site decide: the browser bridge did not take ask %s", ask_id, exc_info=True
+            )
+            return _refuse(render_resolved(_copy.refused_unreachable()), "site_unreachable")
+        if not result.get("applied"):
+            reason = str(result.get("reason") or "")
+            return _refuse(_site_not_applied_copy(reason), reason or "no_live_request")
+        consume_bridge_decide_grant(
+            session_id=session_id, ask_id=ask_id, question_id=question_id, word=decision_word
+        )
+        slot = str(question.get("id") or "")
+        outcome = queue.respond(ask_id, {slot: [decision_word]}, by="operator")
+        if not outcome.get("ok"):
+            # The browser HAS the decision; only the record failed. Say so
+            # rather than claim nothing happened — await_access reads the
+            # browser, which is the truth for the agent.
+            logger.warning("site decide: ask %s decided in the browser but not recorded", ask_id)
+            return {"ok": True, "word": decision_word, "recorded": False}
+        return {"ok": True, "word": decision_word, "state": str(result.get("state") or "")}
+
+    #: How long a teardown waits for a signed decision already at the extension,
+    #: or for a ``request_access`` already dispatched, before it moves on. The
+    #: bridge calls themselves are bounded (``BridgeClient`` ``timeout_for``);
+    #: this only stops a child's dispose from waiting on them indefinitely.
+    #: Past it a deciding card settles itself (answered / withdrawn / unknown)
+    #: and an in-flight dispatch's entry is cancelled on the tool's own path.
+    _SITE_TEARDOWN_DECIDE_WAIT_S = 15.0
+
+    async def _site_decide_bound(
+        self,
+        card: _SiteCard,
+        params: dict[str, Any],
+        submit: Callable[[dict[str, Any]], Awaitable[Mapping[str, Any]]],
+        *,
+        refuse: Callable[..., dict[str, Any]],
+        slot: str,
+        word: str,
+        question_id: str,
+    ) -> dict[str, Any]:
+        """THE COMMIT PROTOCOL for a subagent's card (60334 R2-1, design §1).
+
+        The lock is taken synchronously before the submit, and the answer is
+        recorded in the SAME synchronous run as the extension's
+        acknowledgement — no ``await`` between ``applied`` and
+        ``queue.respond``, so nothing (a teardown, a prune) can act on the card
+        in between. Every way the submit can end maps to exactly one state:
+
+        * ``applied: true`` → ``answered``. ``queue.respond`` also records a
+          card whose ask timed out while deciding: the queue folds a bridge
+          carriage's answer after its deadline to ``late`` (``asks/store.py``),
+          so a lapse never discards an acknowledged outcome (60334 design
+          correction (1)). Only a record something else made unanswerable
+          meanwhile comes back ``recorded: False``, logged with its ask id.
+        * ``applied: false`` (the extension SAID it did not apply) → ``open``
+          for a live owner (the operator may answer again, main's behaviour),
+          else ``withdrawn``: nobody is left to answer for.
+        * ``HostPreDeliveryFailure`` (nothing was dispatched) → as
+          ``applied: false``: the decision provably never left.
+        * any other failure, including the task being CANCELLED mid-submit →
+          ``unknown``: the decision may have applied, so neither ``open`` nor
+          ``withdrawn`` would be true (60334 design correction (1)).
+        """
+        from local_operator.browser_bridge.backend import HostPreDeliveryFailure
+        from local_operator.harness.approval import consume_bridge_decide_grant
+        from local_operator.i18n.keys import browser_site_approval as _copy
+        from local_operator.i18n.messages import render_resolved
+
+        ask_id = str(params.get("ask_id") or "")
+        session_id = str(params.get("session_id") or "")
+        queue = self.ask_queue()
+        assert queue is not None  # site_decide found the record in it
+        if card.state == "unknown":
+            return refuse(render_resolved(_copy.refused_outcome_unknown()), "site_outcome_unknown")
+        if card.state == "deciding":
+            return refuse(
+                "a decision for this request is already being applied.", "decision_in_flight"
+            )
+        # A FINISHED REQUESTER IS NOT DECIDED FOR (S60334-1): refused before
+        # anything is signed into the browser. Covers an answer racing the
+        # teardown's withdraw, and a card whose owner withdrew the request.
+        if card.state != "open" or not self._site_request_live(card.owner(), card.entry_id):
+            return refuse(render_resolved(_copy.refused_expired()), "requester_gone")
+        card.state = "deciding"
+        card.settled.clear()
+        try:
+            try:
+                result = await submit(params)
+            except HostPreDeliveryFailure:
+                logger.warning("site decide: ask %s was not dispatched to the browser", ask_id)
+                self._site_card_not_applied(ask_id, card)
+                return refuse(render_resolved(_copy.refused_unreachable()), "site_unreachable")
+            except asyncio.CancelledError:
+                # Cancellation cannot prove the decision never reached the
+                # extension (60334 design correction (1)): unknown, then let
+                # the cancellation propagate. ``refuse`` withdraws only the
+                # local decision grant, never a browser grant already applied.
+                self._site_card_unknown(ask_id, card, "cancelled mid-submit")
+                refuse("cancelled", "site_outcome_unknown")
+                raise
+            except Exception:  # noqa: BLE001 — after dispatch, any failure may follow delivery
+                self._site_card_unknown(ask_id, card, "lost reply")
+                return refuse(
+                    render_resolved(_copy.refused_outcome_unknown()), "site_outcome_unknown"
+                )
+            if not result.get("applied"):
+                self._site_card_not_applied(ask_id, card)
+                reason = str(result.get("reason") or "")
+                return refuse(_site_not_applied_copy(reason), reason or "no_live_request")
+            # ACKNOWLEDGED: from here to ``settled.set()`` is one synchronous run.
+            consume_bridge_decide_grant(
+                session_id=session_id, ask_id=ask_id, question_id=question_id, word=word
+            )
+            outcome = queue.respond(ask_id, {slot: [word]}, by="operator")
+            card.state = "answered"
+            self._site_cards.pop(ask_id, None)
+            owner = card.owner()
+            if isinstance(owner, Session):
+                owner._forget_site_request(card.entry_id)
+            if not outcome.get("ok"):
+                logger.warning(
+                    "site decide: ask %s decided %r in the browser but not recorded: %s",
+                    ask_id,
+                    word,
+                    outcome.get("error"),
+                )
+                return {"ok": True, "word": word, "recorded": False}
+            return {"ok": True, "word": word, "state": str(result.get("state") or "")}
+        finally:
+            if card.state == "deciding":
+                # Defence in depth: an exit no branch above names is still
+                # never mistaken for "nothing happened".
+                self._site_card_unknown(ask_id, card, "unexpected exit")
+            card.settled.set()
+
+    def _site_card_not_applied(self, ask_id: str, card: _SiteCard) -> None:
+        """The extension did not apply a decision: reopen, or withdraw when the
+        owner has ended (its teardown left the deciding card to us)."""
+        if self._site_request_live(card.owner(), card.entry_id):
+            card.state = "open"
+            return
+        card.state = "withdrawn"
+        self._site_cards.pop(ask_id, None)
+        queue = self.ask_queue()
+        if queue is not None:
+            queue.withdraw(ask_id, reason="moot")
+
+    @staticmethod
+    def _site_card_unknown(ask_id: str, card: _SiteCard, why: str) -> None:
+        card.state = "unknown"
+        # Rollout watch: a frequent count means the bridge's read timeout is
+        # too tight for ``submit_signed_decision``.
+        logger.warning("site_outcome_unknown: ask %s (%s, %s)", ask_id, card.origin, why)
 
     def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
         """TB-02 P1: the ONLY door a bridge request may be decided through.
@@ -13578,6 +14698,27 @@ class Session:
             # the user's language; the exception still carries the developer's.
             logger.debug("bridge decide refused at the word: %s", failure)
             return _refuse("that is not an answer this request accepts — choose Approve or Deny.")
+        # ONE WORD PER ASK (PR #4099 design (c), exit 7). A desktop approvals
+        # batch recorded a signed word for this ask that the hub has not
+        # confirmed. The card may neither contradict it (the hub could later get
+        # the batch's word while the session acts on the card's) nor repeat it
+        # (its consumption would find the batch row and send nothing — a silent
+        # no-op). Refused BEFORE any ask-log write, with the grant withdrawn; the
+        # list row shows the word as ``unsent_decision`` and re-sends it there.
+        # Fails closed: an unreadable ledger cannot prove there is no such row.
+        try:
+            from local_operator.team_bridge.decide_intents import DecideIntents
+
+            unconfirmed = DecideIntents(runtime.config_dir).unconfirmed_batch_intent(
+                runtime.key(), str(ask_id), str(question_id)
+            )
+        except Exception:  # noqa: BLE001 — refused, never raised into the door
+            logger.warning("bridge decide: decide-intent ledger unreadable", exc_info=True)
+            return _refuse("this machine's decision record could not be read; nothing was sent.")
+        if unconfirmed is not None:
+            from local_operator.asks.render import BATCH_PENDING_COPY
+
+            return _refuse_with_code("decided_from_list", BATCH_PENDING_COPY)
         question_slot = str(question.get("id") or "")
         existing = record.get("answers") or {}
         picks = [str(value) for value in (existing.get(question_slot) or ())]
@@ -13705,6 +14846,7 @@ class Session:
         *,
         by: str = "unknown",
         attachments: Mapping[str, Sequence[ImageContent]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Answer a queued ask (design §2.4), storing any secret values first.
 
@@ -13743,7 +14885,7 @@ class Session:
             # re-word a message from another organization. The refusal names
             # the door that works. Class-qualified because reduced stand-in
             # sessions (the ask-wire fixtures) drive the real method.
-            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
+            return {"ok": False, "error": Session._bridge_door_refusal(record)}
         refusal = _ask_refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
@@ -13773,9 +14915,11 @@ class Session:
                     journal_credential=self.journal_credential_change,
                 )
             )
+        # The receiver-minted mesh origin rides to ``answered_by.mesh_origin``.
+        origin_kwargs = {"mesh_origin": mesh_origin} if mesh_origin is not None else {}
         if attachments:
-            return queue.respond(ask_id, merged, by=by, attachments=attachments)
-        return queue.respond(ask_id, merged, by=by)
+            return queue.respond(ask_id, merged, by=by, attachments=attachments, **origin_kwargs)
+        return queue.respond(ask_id, merged, by=by, **origin_kwargs)
 
     def revise_ask(
         self,
@@ -13784,6 +14928,7 @@ class Session:
         *,
         by: str = "unknown",
         attachments: Mapping[str, Sequence[ImageContent]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Revise a queued ask's recorded answer while it is still undelivered.
 
@@ -13832,7 +14977,7 @@ class Session:
             # and `answer_ask_question` — a bridge request is re-worded only
             # through the verified door (`bridge_decide`), never by a raw
             # revision this route carries no proof for.
-            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
+            return {"ok": False, "error": Session._bridge_door_refusal(record)}
         # THE PROBE BEFORE THE HOP. Same decision the write path makes, asked
         # without writing; see the docstring for what doing it in the other order
         # costs. Nothing can interleave between the two — this method is sync and
@@ -13856,7 +15001,9 @@ class Session:
                     journal_credential=self.journal_credential_change,
                 )
             )
-        return queue.revise(ask_id, merged, by=by)
+        # Always passed (None included): the store folds a revision with NO stamp
+        # as unverified, so a missing stamp is information, not an omission.
+        return queue.revise(ask_id, merged, by=by, mesh_origin=mesh_origin)
 
     def answer_ask_question(
         self,
@@ -13865,6 +15012,7 @@ class Session:
         values: "Sequence[str]",
         *,
         by: str = "unknown",
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """THE LEGACY INCREMENTAL ANSWER (design §4, A2 addendum).
 
@@ -13897,7 +15045,7 @@ class Session:
             # re-word a message from another organization. The refusal names
             # the door that works. Class-qualified because reduced stand-in
             # sessions (the ask-wire fixtures) drive the real method.
-            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
+            return {"ok": False, "error": Session._bridge_door_refusal(record)}
         refusal = _ask_refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
@@ -13925,7 +15073,7 @@ class Session:
                 journal_credential=self.journal_credential_change,
             )
             cell = [str(item) for item in substituted.get(key, ())]
-        return queue.answer_one(ask_id, key, cell, by=by)
+        return queue.answer_one(ask_id, key, cell, by=by, mesh_origin=mesh_origin)
 
     def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
         """Decline a queued ask — today's Esc, made explicit (design D5)."""
@@ -14201,6 +15349,594 @@ class Session:
         if queue is None:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
         return queue.withdraw(ask_id, reason=reason, answers=answers, message_id=message_id, by=by)
+
+    def site_ask_lapses(self, origin: str) -> int:
+        """How many site cards for ``origin`` lapsed unanswered since the operator last spoke.
+
+        Review U15: a node's agent may re-raise a site card once after it
+        expires; the browser tool refuses a further card from this count, so the
+        bound lives in the queue (it survives compaction and an agent that lost
+        count) rather than in the model's memory. ``timed_out``/``expired``
+        count, and ``dismissed`` too — clearing a lapsed card from the screen
+        is not an answer, and must not reset the bound. A card the agent
+        withdrew itself (``cancel_access``, a superseded entry) or one the
+        operator answered or declined is not the operator ignoring it.
+
+        THE OPERATOR'S REPLY RE-OPENS THE BOUND (review R4-1). Counting the
+        whole session's history refused forever, so an operator who came back
+        and said "ask me again" could not be honoured. Only lapses that settled
+        AFTER the operator's last admitted chat message count, which gives one
+        fresh card plus one re-raise per operator reply. A card lapses at its
+        ``expires_at`` (a dismissal is only accepted on an already-lapsed card,
+        so that is its lapse moment too), compared in the same millisecond clock
+        as the message stamp.
+
+        "The operator spoke" is :meth:`latest_user_message_at`, deliberately:
+        it is stamped only by :meth:`_note_admitted_user_message`, i.e. a plain
+        ``Message(role="user")`` the turn or the steer drain handed to the
+        model, minus rows stamped harness-injected (``RENDERED_INJECTION_KEY``)
+        and harness chrome (goal/connectivity continuations, spooled prompts).
+        Wake and monitor deliveries, incidents, system notices, peer ``send``
+        cards, Team Bridge messages and subagent ``hub`` messages are
+        ``CustomMessage`` rows and never reach the stamp, so nothing another
+        local session or this agent sends can re-open the bound. A REMOTE prompt
+        (``REMOTE_PROMPT_KEY``: the operator's desktop attached over the mesh,
+        the relayed phone) is still a person's turn and counts — on a headless
+        node it is the operator's only way to chat at all.
+        """
+        # ONE COUNTER PER FAMILY (review m2): every site card for ``origin`` in
+        # the queue that holds the family's cards counts, whoever in the agent
+        # family raised it. Counting per requester let N children raise 2N
+        # cards the operator never answered; one counter keeps "the operator
+        # hasn't answered twice" true to its words. A subagent with no queue of
+        # its own reads its host's count through this same method.
+        host = self._site_card_host()
+        return 0 if host is None else host._count_site_lapses(origin)
+
+    def _count_site_lapses(self, origin: str) -> int:
+        """The lapse count of :meth:`site_ask_lapses`, over THIS session's queue."""
+        from local_operator.asks import store as _ask_store
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        queue = self.ask_queue()
+        if queue is None:
+            return 0
+        lapsed_states = (
+            _ask_store.STATUS_TIMED_OUT,
+            _ask_store.STATUS_EXPIRED,
+            _ask_store.STATUS_DISMISSED,
+        )
+        spoke_at = self.latest_user_message_at() or 0
+        count = 0
+        for record in queue.records():
+            if record.get("status") not in lapsed_states:
+                continue
+            if int(record.get("expires_at") or 0) <= spoke_at:
+                continue
+            if any(
+                isinstance(question, Mapping)
+                and is_site_question_id(question.get("question_id"))
+                and isinstance(question.get("site"), Mapping)
+                and str(question["site"].get("origin") or "") == origin
+                for question in record.get("questions") or ()
+            ):
+                count += 1
+        return count
+
+    def withdraw_site_asks(self, origin: str, keep_question_id: str = "") -> list[str]:
+        """Settle this session's OPEN site cards for ``origin`` (review U3/Q1).
+
+        A headless node's site card is bound to ONE extension entry by its
+        ``site:v1:`` question id. Once that entry is gone — ``cancel_access``,
+        or a fresh request that the extension gave a new entry — the card can
+        only be refused when answered, and while it stays open the queue's
+        identical-text rule keeps the live entry from getting a card at all.
+        So the browser tool withdraws it (``moot``: nothing is injected, the
+        operator's surfaces drop it) and raises a card bound to the live entry.
+        ``keep_question_id`` spares the card that IS bound to the live entry.
+
+        SCOPED TO THIS REQUESTER (60334): a session withdraws only the cards it
+        raised — on the queue's own session the cards no subagent is bound to,
+        on a queue-less subagent its own cards in its host's queue. A top-level
+        session's stale-card withdraw therefore never takes a subagent's card
+        (60334 design correction (3)).
+        """
+        for entry_id, facts in list(self._pending_site_requests.items()):
+            if facts.origin == origin and facts.question_id != keep_question_id:
+                self._forget_site_request(entry_id)
+        host = self._site_card_host()
+        if host is None:
+            return []
+        return host._withdraw_site_cards_of(self, origin, keep_question_id)
+
+    def _withdraw_site_cards_of(
+        self, requester: Session, origin: str, keep_question_id: str
+    ) -> list[str]:
+        """HOST side of :meth:`withdraw_site_asks` for ``requester``."""
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        queue = self.ask_queue()
+        if queue is None or not (requester is self or self._is_live_descendant(requester)):
+            return []
+        self._prune_site_cards()
+        withdrawn: list[str] = []
+        for record in queue.open_records():
+            ask_id = str(record.get("ask_id") or "")
+            if self._site_card_owner(ask_id) is not requester:
+                continue
+            card = self._site_cards.get(ask_id)
+            if card is not None and card.state != "open":
+                # ``deciding``: the in-flight decision settles it (R2-1).
+                # ``unknown``: the record stays open until its own timeout so
+                # every tap keeps being refused rather than resubmitted.
+                continue
+            for question in record.get("questions") or ():
+                if not isinstance(question, Mapping):
+                    continue
+                question_id = str(question.get("question_id") or "")
+                site = question.get("site")
+                if (
+                    is_site_question_id(question_id)
+                    and isinstance(site, Mapping)
+                    and str(site.get("origin") or "") == origin
+                    and question_id != keep_question_id
+                ):
+                    outcome = queue.withdraw(ask_id, reason="moot")
+                    if outcome.get("ok"):
+                        withdrawn.append(ask_id)
+                        if card is not None:
+                            card.state = "withdrawn"
+                            self._site_cards.pop(ask_id, None)
+                    break
+        return withdrawn
+
+    # -- a queue-less subagent's site cards (security review 60334) ----------------------
+    #
+    # A ``task`` child is built without an ask handler, so it has no queue and a
+    # headless node's browser could never raise its operator-signed site card.
+    # The child hands the TYPED facts of its live extension request to the
+    # nearest ancestor that has a queue (the HOST); the host checks the child is
+    # its live descendant and that the request is pending there, then rebuilds
+    # the canonical card itself. Top-level sessions do not use this door: they
+    # keep main's ``enqueue_ask`` path unchanged. Every check below is one of
+    # 60334's constraints:
+    #   * typed facts only, card reconstructed server-side ("deriving a question
+    #     ID alone is not sufficient authentication");
+    #   * bound to the actual requester (live object lineage, not a claimed id),
+    #     the node (its own device id), and the live request (pending, unexpired);
+    #   * withdraw scoped to that requester; the lapse bound counted once per
+    #     family (review m2);
+    #   * ONE commit protocol per card (:class:`_SiteCard`), with an explicit
+    #     ``unknown`` when the extension's answer was lost;
+    #   * owner-only teardown behind a fence that stops new ``request_access``
+    #     dispatch first and accounts for dispatches already in flight;
+    #   * ONE open card per origin and NO sharing (narrowed, round 4): a second
+    #     requester gets ``card_busy`` carrying the open card's id, its own entry
+    #     is left to the extension's TTL rather than cancelled from here, and an
+    #     approve — a node-wide exact-origin grant — already covers its retry.
+
+    #: How far up a child walks for an ancestor with a queue; the same bound
+    #: :meth:`_ancestor_session_ids` uses, so a cycle no real tree has stops.
+    _SITE_ANCESTOR_HOPS = 16
+
+    def _site_card_ancestor(self) -> Session | None:
+        """The nearest LIVE ancestor whose ask queue exists, or ``None``.
+
+        ``ask_queue()`` is ``None`` under the kill switch and on a host with no
+        ask surface, so this is ``None`` exactly where no operator card can be
+        queued anywhere in the family — the fail-closed case.
+        """
+        seen: set[int] = {id(self)}
+        parent = self._parent_session
+        while parent is not None and len(seen) <= self._SITE_ANCESTOR_HOPS:
+            if id(parent) in seen:
+                return None
+            seen.add(id(parent))
+            ask_queue = getattr(parent, "ask_queue", None)
+            if callable(ask_queue) and ask_queue() is not None:
+                return cast("Session", parent)
+            parent = getattr(parent, "_parent_session", None)
+        return None
+
+    def _site_card_host(self) -> Session | None:
+        """The session whose queue holds THIS session's site cards: its own
+        queue when it has one, else :meth:`_site_card_ancestor`."""
+        return self if self.ask_queue() is not None else self._site_card_ancestor()
+
+    def _is_live_descendant(self, child: Any) -> bool:
+        """Whether ``child`` is a live session whose parent chain reaches THIS object.
+
+        Identity, not ids: a session id is a string anyone can repeat, while
+        the weak parent links are set only by ``run_subagent`` at construction.
+        """
+        if not isinstance(child, Session) or child is self:
+            return False
+        seen: set[int] = {id(child)}
+        parent = child._parent_session
+        while parent is not None and len(seen) <= self._SITE_ANCESTOR_HOPS:
+            if parent is self:
+                return True
+            if id(parent) in seen:
+                return False
+            seen.add(id(parent))
+            parent = getattr(parent, "_parent_session", None)
+        return False
+
+    def _site_card_enqueue_callable(self) -> Callable[..., Any] | None:
+        """The site-card door: bound ONLY on a subagent with no queue of its own
+        (it reaches its nearest ancestor's). A session that can queue an ask
+        itself keeps main's ``enqueue_ask`` path byte-for-byte, so this change
+        has no top-level regression surface (narrowed design, round 4)."""
+        if self._parent_session_id and self.ask_queue() is None:
+            return self.raise_site_card
+        return None
+
+    def begin_site_request(self, cancel: Callable[[], Awaitable[Any]]) -> Callable[[], None] | None:
+        """THE FENCE, BEFORE DISPATCH (60334 design correction (2)).
+
+        The browser tool calls this before it sends ``request_access`` and
+        calls the returned ``finish`` once the reply has become a card (or a
+        refusal). ``None`` means this requester's teardown has started: the
+        tool sends nothing, so no extension entry is created for a session
+        whose cleanup already ran. A dispatch that was already in flight when
+        the teardown started is in :attr:`_site_dispatches`; the teardown
+        waits for it (bounded) and cancels its entry with ``cancel`` — the
+        tool's own ``cancel_access`` for this requester.
+        """
+        if self._site_requests_closed:
+            return None
+        token = object()
+        done = asyncio.Event()
+        self._site_dispatches[token] = (cancel, done)
+
+        def _finish() -> None:
+            self._site_dispatches.pop(token, None)
+            done.set()
+
+        return _finish
+
+    def raise_site_card(
+        self,
+        facts: Any,
+        timeout: Any = None,
+        tool_call_id: str = "",
+        cancel: Callable[[], Awaitable[Any]] | None = None,
+    ) -> dict[str, Any]:
+        """REQUESTER side: record the live request, then have the host raise it.
+
+        ``cancel`` withdraws this request's extension entry (the browser tool's
+        own ``cancel_access`` closure); it is kept so this requester's
+        teardown can withdraw its entry (never anyone else's: ``cancel_access``
+        is keyed by origin and THIS requester).
+        """
+        from local_operator.browser_bridge.site_approval import (
+            SITE_REQUESTER_CLOSED,
+            SiteAccessFacts,
+        )
+
+        if not isinstance(facts, SiteAccessFacts) or not facts.entry_id:
+            return {"ok": False, "error": "only typed site-access facts can raise a site card"}
+        if self._site_requests_closed:
+            return {
+                "ok": False,
+                "code": SITE_REQUESTER_CLOSED,
+                "error": "site card refused: this session has finished",
+            }
+        host = self._site_card_host()
+        if host is None:
+            return {
+                "ok": False,
+                "no_ancestor": True,
+                "error": (
+                    "this subagent has no ask queue of its own and none of the sessions "
+                    "that delegated to it can queue an ask for the operator"
+                ),
+            }
+        # Registered BEFORE the call: it is what the host checks the facts
+        # against, and it is cleared on withdraw, settle, teardown or a refusal.
+        self._pending_site_requests[facts.entry_id] = facts
+        if cancel is not None:
+            self._site_request_cancels[facts.entry_id] = cancel
+        if host is self:
+            outcome = self._queue_site_card_checked(
+                facts, requester=self, timeout=timeout, tool_call_id=tool_call_id
+            )
+        else:
+            outcome = host.enqueue_child_site_card(
+                facts,
+                child=self,
+                request_id=facts.entry_id,
+                timeout=timeout,
+                tool_call_id=tool_call_id,
+            )
+        if not outcome.get("ok") and "already carries that question" not in str(
+            outcome.get("error") or ""
+        ):
+            self._forget_site_request(facts.entry_id)
+        return outcome
+
+    def _forget_site_request(self, entry_id: str) -> None:
+        self._pending_site_requests.pop(entry_id, None)
+        self._site_request_cancels.pop(entry_id, None)
+
+    def _site_request_live(self, requester: Any, entry_id: str) -> bool:
+        """Whether ``requester`` still has ``entry_id`` pending and is still in
+        this family. The extension's entry binding is the real tie for a
+        decision; this is the in-process side of it (defence in depth)."""
+        if not isinstance(requester, Session) or requester._site_requests_closed:
+            return False
+        if requester is not self and not self._is_live_descendant(requester):
+            return False
+        return entry_id in requester._pending_site_requests
+
+    def _this_node_device_id(self) -> str:
+        """This machine's mesh device id: what setup wrote into the extension's
+        policy as ``nodeDeviceId`` (``site_approval.anchor_policy_fields``),
+        ``""`` when there is no identity, exactly as setup falls back."""
+        try:
+            from local_operator.network import identity
+
+            device = identity.load()
+        except Exception:  # noqa: BLE001 — unreadable identity binds to "", as setup does
+            device = None
+        return str(device.device_id) if device is not None else ""
+
+    def enqueue_child_site_card(
+        self,
+        facts: Any,
+        *,
+        child: Any,
+        request_id: str,
+        timeout: Any = None,
+        tool_call_id: str = "",
+    ) -> dict[str, Any]:
+        """HOST side: rebuild and queue a DESCENDANT's signed site card.
+
+        Takes NO question, options or payload — only the typed facts — and
+        refuses unless every 60334 binding holds. ``child`` must be a live
+        descendant: this door is never the host's own (that is
+        :meth:`raise_site_card`).
+        """
+        from local_operator.browser_bridge.site_approval import SiteAccessFacts
+
+        if not isinstance(facts, SiteAccessFacts):
+            return self._refuse_site_card(
+                "only typed site-access facts are accepted, never a question"
+            )
+        if not self._is_live_descendant(child):
+            return self._refuse_site_card("the requester is not a live subagent of this session")
+        if not request_id or request_id != getattr(facts, "entry_id", None):
+            return self._refuse_site_card("the facts are for a different request")
+        return self._queue_site_card_checked(
+            facts, requester=child, timeout=timeout, tool_call_id=tool_call_id
+        )
+
+    @staticmethod
+    def _refuse_site_card(why: str) -> dict[str, Any]:
+        logger.info("site card refused: %s", why)
+        return {"ok": False, "error": f"site card refused: {why}"}
+
+    def _queue_site_card_checked(
+        self, facts: Any, *, requester: Session, timeout: Any, tool_call_id: str
+    ) -> dict[str, Any]:
+        """The 60334 checks every requester's facts pass before a card exists."""
+        from local_operator.browser_bridge.site_approval import (
+            SITE_REQUESTER_CLOSED,
+            SiteAccessFacts,
+        )
+
+        refuse = self._refuse_site_card
+        if not isinstance(facts, SiteAccessFacts):
+            return refuse("only typed site-access facts are accepted, never a question")
+        if self.ask_queue() is None:
+            return refuse("this session has no ask queue")
+        if requester._site_requests_closed:
+            # Typed, so the tool leaves the entry to the guarded teardown
+            # (``site_approval.SITE_REQUESTER_CLOSED``).
+            return {**refuse("the requester has finished"), "code": SITE_REQUESTER_CLOSED}
+        if requester._pending_site_requests.get(facts.entry_id) != facts:
+            return refuse("that request is not pending in the requester's browser")
+        if facts.expires_at_ms is not None and facts.expires_at_ms <= int(time.time() * 1000):
+            requester._forget_site_request(facts.entry_id)
+            return refuse("that request has expired")
+        if facts.node_device_id != self._this_node_device_id():
+            return refuse("the request is bound to another node")
+        if not facts.origin:
+            return refuse("the request names no origin")
+        return self._queue_site_card(
+            facts, requester=requester, timeout=timeout, tool_call_id=tool_call_id
+        )
+
+    def _queue_site_card(
+        self, facts: Any, *, requester: Session, timeout: Any, tool_call_id: str = ""
+    ) -> dict[str, Any]:
+        """Raise ``requester``'s card, or refuse it as ``busy``.
+
+        ONE OPEN CARD PER ORIGIN, NO SHARING (narrowed design, round 4). An
+        open card bound to this very request (same canonical question id,
+        hence entry) and requester is simply still pending. Any OTHER open
+        site card for the origin — another subagent's, or the host's own —
+        refuses this request ``busy`` with that card's ids, so the tool can
+        point the agent at it (manager 79). Nothing is bound to the other
+        card, and nothing about it changes: a busy refusal neither claims nor
+        withdraws it (60334 design correction (3)).
+        """
+        from local_operator.tools.builtin import _node_display_name
+
+        self._prune_site_cards()
+        open_card = self._open_site_card(facts.origin)
+        if open_card is not None:
+            ask_id, question_id = open_card
+            if question_id == facts.question_id and self._site_card_owner(ask_id) is requester:
+                return {
+                    "ok": False,
+                    "error": "this ask queue already carries that question",
+                    "details": {"ask_id": ask_id},
+                }
+            return {
+                "ok": False,
+                "busy": True,
+                "error": "another open card already asks the operator about this site",
+                "details": {"ask_id": ask_id, "question_id": question_id},
+            }
+        question = facts.card(node_name=_node_display_name())
+        outcome = self._enqueue_ask([question], timeout, tool_call_id=tool_call_id)
+        if outcome.get("ok"):
+            details = outcome.get("details")
+            ask_id = str(details.get("ask_id") or "") if isinstance(details, Mapping) else ""
+            if ask_id:
+                self._site_cards[ask_id] = _SiteCard(
+                    origin=facts.origin, entry_id=facts.entry_id, owner=weakref.ref(requester)
+                )
+        return outcome
+
+    def _open_site_card(self, origin: str) -> tuple[str, str] | None:
+        """``(ask_id, question_id)`` of the open site card for ``origin``, if any."""
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        queue = self.ask_queue()
+        if queue is None:
+            return None
+        for record in queue.open_records():
+            for question in record.get("questions") or ():
+                if not isinstance(question, Mapping):
+                    continue
+                site = question.get("site")
+                if (
+                    is_site_question_id(question.get("question_id"))
+                    and isinstance(site, Mapping)
+                    and str(site.get("origin") or "") == origin
+                ):
+                    return str(record.get("ask_id") or ""), str(question.get("question_id"))
+        return None
+
+    def _site_card_owner(self, ask_id: str) -> Session | None:
+        """Who a card in this queue was raised for; an unbound card is the host's."""
+        card = self._site_cards.get(ask_id)
+        return self if card is None else card.owner()
+
+    def _prune_site_cards(self) -> None:
+        """Drop the cards that can no longer be decided (review N1, design §3).
+
+        LAPSE IS NOT A STATE. A card whose ask timed out keeps its binding:
+        the queue still accepts an answer to it (folded ``late``), and the
+        binding is what makes that answer pass the requester checks and the
+        commit protocol. Only a record nobody can answer any more (withdrawn,
+        dismissed, expired, answered, gone) drops it. A ``deciding`` card is
+        the decision's to settle. No extension call is made here — main never
+        cancels on lapse; the entry has its own TTL.
+        """
+        queue = self.ask_queue()
+        if queue is None or not self._site_cards:
+            return
+        for ask_id, card in list(self._site_cards.items()):
+            if card.state == "deciding":
+                continue
+            record = queue.find(ask_id)
+            if record is None or _ask_refusal_copy(record):
+                self._site_cards.pop(ask_id, None)
+
+    async def _release_site_requests(self) -> None:
+        """TEARDOWN of a queue-less subagent that raised site requests (S60334-1).
+
+        Runs first in dispose, which every end of a child reaches (normal end,
+        ``cancel_subagents``, ``jobs cancel``, dispose). Owner-only by
+        construction: it acts on THIS requester's cards and entries only, and
+        ``cancel_access`` is keyed by (origin, ``session:<this id>``), so it
+        cannot touch another requester's entry (60334 R3-1).
+
+        1. Synchronously: close the FENCE (no new ``request_access`` is
+           dispatched, no card raised, none decided — 60334 design correction
+           (2)), snapshot and clear the pending entries and in-flight
+           dispatches, and on the host move every ``open`` card of this
+           requester to ``withdrawn``.
+        2. Wait, bounded, for this requester's ``deciding`` cards to settle and
+           its in-flight dispatches to finish.
+        3. Cancel the entries of the cards it withdrew (and of in-flight
+           dispatches) — each re-checked synchronously right before its
+           ``await``: the entry of a card that was ``deciding``, and any origin
+           with a card of this requester still ``deciding`` or ``unknown``, is
+           NOT cancelled (the decision may have
+           applied; cancelling could race it) and is left to the extension's
+           TTL. That is harmless: the requester is gone, and a late approve
+           grants what the operator chose (60334 R2-2).
+
+        A session with its own queue is skipped: its cards are durable in its
+        own ask log and survive a runtime restart by design.
+        """
+        if self.ask_queue() is not None:
+            return
+        self._site_requests_closed = True
+        to_cancel: list[tuple[str, str | None, Callable[[], Awaitable[Any]]]] = [
+            (entry_id, facts.origin, cancel)
+            for entry_id, cancel in self._site_request_cancels.items()
+            if (facts := self._pending_site_requests.get(entry_id)) is not None
+        ]
+        dispatches = list(self._site_dispatches.values())
+        self._pending_site_requests.clear()
+        self._site_request_cancels.clear()
+        self._site_dispatches.clear()
+        # An in-flight dispatch's origin is the extension's to normalise, so
+        # its cancel is checked against ANY unsettled card of this requester.
+        to_cancel.extend(("", None, cancel) for cancel, _done in dispatches)
+        host = self._site_card_ancestor()
+        in_flight = host._withdraw_requester_cards(self) if host is not None else []
+        # A card that was DECIDING belongs to its decision whatever it settles
+        # to (answered: the entry is decided; withdrawn or unknown: the entry
+        # is left to the extension's TTL), so its entry is never cancelled here.
+        decided_entries = {card.entry_id for card in in_flight}
+        waits = [card.settled.wait() for card in in_flight] + [
+            done.wait() for _cancel, done in dispatches
+        ]
+        if waits:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*waits), timeout=self._SITE_TEARDOWN_DECIDE_WAIT_S
+                )
+            except TimeoutError:
+                logger.warning(
+                    "site card teardown: a decision or request is still in flight; "
+                    "its card settles itself and its entry is left to the extension's TTL"
+                )
+        for entry_id, origin, cancel in to_cancel:
+            # THE MUTATION BOUNDARY: synchronous, immediately before the await.
+            if entry_id in decided_entries or (
+                host is not None and host._requester_card_unsettled(self, origin)
+            ):
+                continue
+            try:
+                await asyncio.wait_for(cancel(), timeout=5)
+            except Exception:  # noqa: BLE001 — the entry's own TTL is the floor
+                logger.debug("site card teardown: cancelling an entry failed", exc_info=True)
+
+    def _withdraw_requester_cards(self, requester: Session) -> list[_SiteCard]:
+        """HOST side of teardown, synchronous: withdraw ``requester``'s open
+        cards and return its ``deciding`` ones for the teardown to wait on.
+        ``unknown`` cards stay open until their own timeout."""
+        queue = self.ask_queue()
+        if queue is None:
+            return []
+        in_flight: list[_SiteCard] = []
+        for ask_id, card in list(self._site_cards.items()):
+            if card.owner() is not requester:
+                continue
+            if card.state == "deciding":
+                in_flight.append(card)
+            elif card.state == "open":
+                card.state = "withdrawn"
+                self._site_cards.pop(ask_id, None)
+                queue.withdraw(ask_id, reason="moot")
+        return in_flight
+
+    def _requester_card_unsettled(self, requester: Session, origin: str | None) -> bool:
+        """Whether ``requester`` owns a card here (for ``origin``; ``None``: any)
+        whose decision may have reached the extension."""
+        return any(
+            card.owner() is requester
+            and card.state in ("deciding", "unknown")
+            and (origin is None or card.origin == origin)
+            for card in self._site_cards.values()
+        )
 
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end.
@@ -15047,6 +16783,39 @@ class Session:
         else:
             self._merge_capability_tools(("no_reply", "notify"))
 
+    def set_first_turn_mcp_wait(self, timeout_s: float | None) -> None:
+        """Hold the first turn for EVERY configured MCP server, bounded; ``None`` opts out.
+
+        The SDK's in-process owner (``sdk.open_session(mode="own")``) calls this
+        from ``SessionSpec.mcp_ready_timeout_s``. Without it an undeclared SDK
+        session's first ``prompt()`` went out while a slow stdio server was
+        still ``connecting`` and the model's call to its tool read "Tool not
+        found" (see ``session/declared_mcp_ready.py``, "EVERY CONFIGURED
+        SERVER"). A number ``>= 0`` is the bound for the first turn's wait,
+        which then also covers the declared/preload rule; a server still
+        connecting at the bound raises ``McpServersNotReady`` before anything
+        is sent. ``None`` turns the first-turn wait off entirely, declared
+        tools included: the caller has chosen to race discovery (and may gate
+        by hand with :meth:`wait_for_tools`). A delegated child never runs the
+        gate (``_mcp_reach_inherited``), whatever this says.
+
+        Validated like :meth:`wait_for_tools`' ``timeout_s`` (same message), so
+        the SDK's two spellings of a readiness bound accept the same values.
+        """
+        if timeout_s is None:
+            self._first_turn_mcp_wait = "off"
+            self._first_turn_mcp_timeout_s = None
+            return
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s < 0
+        ):
+            raise ValueError("timeout_s must be a finite number >= 0")
+        self._first_turn_mcp_wait = "all"
+        self._first_turn_mcp_timeout_s = float(timeout_s)
+
     def materialize_declared_tools(self) -> tuple[str, ...]:
         """Grant the SCHEMAS of this session's declared tools that are lazy.
 
@@ -15073,25 +16842,76 @@ class Session:
         have nothing to grant. Returns the names granted.
         """
         declared = self._declared_tools
+        if declared is None:
+            return ()
+        return self._grant_named_mcp_tools(declared)
+
+    def _unreached(self, names: Sequence[str]) -> list[str]:
+        """The ``names`` the live enforced inventory does not reach yet."""
+        inventory = set(self.tool_inventory)
+        return [name for name in names if name not in inventory]
+
+    def _grant_named_mcp_tools(self, names: Collection[str]) -> tuple[str, ...]:
+        """Grant the schemas of NAMED lazy MCP tools this session may reach.
+
+        The one grant step behind a declaration (:meth:`materialize_declared_tools`)
+        and a caller's explicit enumeration (:meth:`wait_for_tools`): both are
+        the caller naming the tool, which is the activation a model would
+        otherwise perform by reading its ``mcp://`` URL. Never a widening: a
+        declared session grants only names inside its declaration (and
+        ``refresh_tools`` re-applies that bound), and a delegated child grants
+        nothing (``_mcp_reach_inherited``).
+        """
         manager = getattr(self, "mcp_manager", None)
-        if declared is None or manager is None:
+        # An inherited declaration is a bound, never a grant: see
+        # ``_mcp_reach_inherited``. Before the first-turn gate called this on a
+        # child, the only child call (``set_tool_inventory`` in ``subagent``)
+        # ran before the borrowed manager was attached, which hid the leak.
+        if manager is None or self._mcp_reach_inherited:
+            return ()
+        wanted = set(names)
+        if self._declared_tools is not None:
+            wanted &= self._declared_tools
+        if not wanted:
             return ()
         try:
             available = manager.get_tools()
         except Exception:  # noqa: BLE001 — a reduced manager must not break a run
-            logger.debug("mcp get_tools() unavailable for a declaration", exc_info=True)
+            logger.debug("mcp get_tools() unavailable for a named-tool grant", exc_info=True)
             return ()
         present = {tool.name for tool in self._tools}
         granted = [
             tool
             for tool in available
-            if getattr(tool, "name", None) in declared and tool.name not in present
+            if getattr(tool, "name", None) in wanted and tool.name not in present
         ]
-        if granted:
-            # Through ``refresh_tools``, so the grant is subject to the very
-            # declaration that asked for it rather than beside it.
-            self.refresh_tools([*self._tools, *granted])
-        return tuple(tool.name for tool in granted)
+        if not granted:
+            return ()
+        names_granted = tuple(tool.name for tool in granted)
+        # AN UNDECLARED SESSION'S GRANT IS AN ACTIVATION, so it goes through the
+        # factory's activation bookkeeping (``_mcp_activate_named``, installed by
+        # ``session_factory.wire_mcp_into_session`` beside
+        # ``_mcp_cold_boundary_prune``). Installed directly, the tool sat outside
+        # that bookkeeping: a later ``mcp://`` read of the same over-cap tool
+        # selected it again and the provider array carried the name twice — an
+        # Anthropic 400 on every later request (PR #4349 agent review round 1,
+        # R1). A DECLARATION keeps the direct path on purpose: its tools are the
+        # caller's fixed contract (a bounded runtime may hold no ``read`` to
+        # re-find a schema), so they must not enter the idle demotion a
+        # model's activation is subject to.
+        activate = getattr(self, "_mcp_activate_named", None)
+        if self._declared_tools is None and callable(activate):
+            try:
+                activate(names_granted)
+            except Exception:  # noqa: BLE001 — a grant must not break the wait
+                logger.debug("mcp activation unavailable for a named-tool grant", exc_info=True)
+            else:
+                reached = set(self.tool_inventory)
+                return tuple(name for name in names_granted if name in reached)
+        # Through ``refresh_tools``, so the grant is subject to the very
+        # declaration that asked for it rather than beside it.
+        self.refresh_tools([*self._tools, *granted])
+        return names_granted
 
     def unresolved_declared_tools(self) -> tuple[str, ...]:
         """Declared names this session reaches NOTHING for, for a host to report.
@@ -15161,6 +16981,15 @@ class Session:
             raise ValueError("timeout_s must be a finite number >= 0")
         required_names = tuple(names)
 
+        # LAZY MCP TOOLS: a connected server's tools stay out of the enforced
+        # inventory until something activates them (``mcp://`` read or a
+        # declaration), so on an undeclared session this read ``missing`` with
+        # discovery settled for a tool the server had already delivered
+        # (measured: SDK + slow stdio fixture, server ``connected``, manager
+        # listing ``mcp__slowfix_search``, readiness ``missing``). Naming the
+        # tool here is that activation, granted under the same bounds as a
+        # declaration's; a cold cache gets the same grant after the wait below.
+        self._grant_named_mcp_tools(self._unreached(required_names))
         inventory = self.tool_inventory
         present = tuple(name for name in required_names if name in inventory)
         if len(present) == len(required_names):
@@ -15181,6 +17010,7 @@ class Session:
                 # CancelledError (BaseException) still propagates to the caller.
                 settled = None
 
+        self._grant_named_mcp_tools(self._unreached(required_names))
         inventory = self.tool_inventory
         present = tuple(name for name in required_names if name in inventory)
         missing = tuple(name for name in required_names if name not in inventory)
@@ -15255,8 +17085,9 @@ class Session:
         1. ``hub_pull`` keeps its own ladder, untouched.
         2. A CLEAN LOCAL agent -- this run and every ancestor run read no
            untrusted input (:meth:`profile_lineage`) -- creates, updates or
-           reverts an account agent/team ITSELF: no owner text, no card. The
-           backup/revert receipt and the transaction audit record it. This
+           reverts an account agent/team, or creates/updates a managed skill,
+           ITSELF: no owner text, no card. The backup/revert receipt (a skill's
+           previous bytes in ``hub/backups``) and the audit record it. This
            holds for a row linked to an org hub too: this write changes the
            LOCAL account copy and never publishes, nor enables or grants any
            push. A link's EXISTING user-set ``auto_push`` may later publish
@@ -15283,9 +17114,13 @@ class Session:
             # can be granted by it.
             return await self._authorize_hub_pull(intent)
         run_ms = int(self._run_started_at * 1000)
+        # Skills are in this rung too (create/update only: the skill tool has
+        # no revert, and ``remove_paths`` is a ``delete`` that keeps its card).
+        # Its writes stay LOCAL like the agent/team rows: the skill tool never
+        # publishes, and a hub-linked skill's edit is an unpublished local change.
         if (
             intent.operation in {"create", "update", "revert"}
-            and intent.kind in {"agent", "team"}
+            and intent.kind in {"agent", "team", "skill"}
             and not self.profile_lineage()[1]
         ):
             # ``local-agent:`` (not ``owner-prompt:``) so the audit trail says
@@ -15311,7 +17146,18 @@ class Session:
             from local_operator import profile_proposals
             from local_operator.harness.types import ProposedProfileWrite
 
-            registry = self.agent_registry if intent.kind == "agent" else self.team_registry
+            # A skill proposal has no registry of its own: it lives in the same
+            # config root the agent/team ones do, the root ``profile_proposal``
+            # and ``decide_profile_proposal`` read (``agent or team`` registry).
+            registry = (
+                self.agent_registry
+                if intent.kind == "agent"
+                else (
+                    self.team_registry
+                    if intent.kind == "team"
+                    else self.agent_registry or self.team_registry
+                )
+            )
             if registry is None:
                 return None
             record = profile_proposals.file(
@@ -15342,7 +17188,10 @@ class Session:
                     profile_proposals.summary_line(item)
                     for item in profile_proposals.summarize_changes(
                         profile_proposals.changes(
-                            record.get("before"), record["after"], record.get("fields") or []
+                            record.get("before"),
+                            record["after"],
+                            record.get("fields") or [],
+                            record["kind"],
                         )
                     )
                 ),
@@ -15362,7 +17211,7 @@ class Session:
         # has no structured before/after, and counts parsed from its prose
         # summary mis-counted — PR #3777 R3-1), then — after a blank line —
         # the change content clipped to SAVE_DETAIL_MAX_CHARS: a direct save
-        # has no review page (skills have no proposal path), so the card is
+        # has no review page (e.g. a skill delete), so the card is
         # the only place the approver can read what they approve (R2-2).
         # Proposal cards stay 3 lines with structured counts.
         changed = profile_proposals.save_changes_line(
@@ -15920,6 +17769,11 @@ class Session:
         """
         if self._yolo:
             return None
+        from local_operator.harness.bridge_egress import (
+            ApprovalGrant,
+            session_grant_covers,
+        )
+
         base = self._request_approval
         declared = self._declared_tools
         if base is None or declared is None or not self._declared_tools_unattended:
@@ -15933,7 +17787,13 @@ class Session:
             taint_raised: bool = False,
             bridge_latched: bool = False,
         ) -> bool:
-            if tool_name in declared:
+            if tool_name in declared and session_grant_covers(
+                ApprovalGrant(auto=True), title=tool_name
+            ):
+                # A person-only gate is never answered by declaration: its title
+                # holds a space no tool name can, so this is belt and braces for
+                # a future gate whose title could be declared (review R1-2).
+                #
                 # A declared unattended inventory approves by declaration even
                 # in a Team-Bridge-latched session: the S-51 carve-out, left
                 # as is (accepted risk outside ask mode).
@@ -17418,19 +19278,48 @@ class Session:
                 # `sqlite3.Error` around exactly this call for exactly that reason.
                 # Logged rather than silent: the store row is what the sidebar
                 # reads, so a failure to write it is real.
-                await asyncio.to_thread(
-                    AttentionStore().publish,
-                    identity,
-                    saved["token"],
-                    saved["anchor"],
-                    saved["kind"],
-                    reason=str(saved.get("reason") or ""),
-                    cause=str(saved.get("cause") or ""),
-                    # §14.3: the marker carries the run's computed value; a
-                    # pre-notify marker (key absent) means notify=1 — its
-                    # behaviour, verbatim.
-                    notify=bool(saved.get("notify", True)),
+                # BOUNDED FOR THE SAME REASON AS THE TURN'S OWN PUBLISH
+                # (``ATTENTION_PUBLISH_OFFLOAD_CEILING_S``): this call holds
+                # ``_attention_publish_lock``, and the NEXT turn's
+                # ``_publish_attention_outcome`` takes that lock inside its
+                # ``finally`` with ``_turn_lock`` held. An unbounded wait here
+                # on a wedged store would pin the lock, hence the turn lock,
+                # beyond the settle window. WORST CASE the next turn waits:
+                # lock hold <= 3.0 s (this ceiling) + its own offload 3.0 s +
+                # banner stamp 1.0 s = 7.0 s < 8 s ``SETTLE_TIMEOUT_S``. The
+                # turn's acquire needs no separate timeout of its own: a
+                # timed-out acquire there would precede the journal append and
+                # lose the outcome, and with every holder bounded the acquire
+                # wait is already capped by this ceiling. Expiry orphans the
+                # worker (it cannot be killed; publish is idempotent by token)
+                # and returns False so the latch stays armed for the next rung.
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        AttentionStore().publish,
+                        identity,
+                        saved["token"],
+                        saved["anchor"],
+                        saved["kind"],
+                        reason=str(saved.get("reason") or ""),
+                        cause=str(saved.get("cause") or ""),
+                        # §14.3: the marker carries the run's computed value; a
+                        # pre-notify marker (key absent) means notify=1 — its
+                        # behaviour, verbatim.
+                        notify=bool(saved.get("notify", True)),
+                        # ADR 0009: replayed verbatim too; absent reads as
+                        # ``unknown`` origin and no open ask.
+                        origin=str(saved.get("origin") or ""),
+                        needs_user=bool(saved.get("needs_user", False)),
+                    ),
+                    timeout=ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
                 )
+            except TimeoutError:
+                logger.warning(
+                    "attention: republish still running after %gs; worker orphaned, "
+                    "latch stays armed",
+                    ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
+                )
+                return False
             except AttentionWriteDeferred:
                 # CONTENTION: the ladder's own case, and the latch stays armed for
                 # it.
@@ -17694,6 +19583,7 @@ class Session:
         # distinguished: they require the approval card rather than granting.
         # The assistant/tool rows a session appends itself never reach here.
         input_class = _profile_input_class(message)
+        self._note_run_input_surface(message)
         if input_class == "untrusted":
             self._run_untrusted_input = True
         elif input_class == "consent":
@@ -18021,9 +19911,14 @@ class Session:
         * user semantics win: a consumed user message, or a queued-but-
           unconsumed one (``awaiting_user``), notifies, and a mixed run keeps
           that behaviour with EXACTLY one publication (one row per turn);
-        * any non-user trigger that is not exclusively wake/monitor deliveries
-          notifies (a job result, an incident notice, a wake+job mix) — a
-          quiet delivery never suppresses it;
+        * routine ask answers, background-job results and known system notices
+          stay silent on EVERY surface. The operator's decision (ask a-91bd,
+          2026-11-16) was "No, stay quiet everywhere unless it errors or needs
+          me": bookkeeping completion is not worth another interruption.
+          Errors and awaiting-user inputs still override this default; explicit
+          high-priority attention items keep their independent delivery path;
+        * other non-user inputs keep their existing loud default; unknown types
+          are never silently classified as routine;
         * EXCEPT a PEER-ONLY run: a run whose non-user inputs are exclusively
           peer-family — a ``peer_message`` from another local session, or a
           defensive ``hub_message`` (``PEER_FAMILY_INPUT_TYPES``) — optionally
@@ -18033,8 +19928,8 @@ class Session:
           to, and the sender reads the reply as the turn's own outcome. It
           notifies again the moment a typed or queued user joins the run, a
           delivery asked to be told, or the run errors; peer mixed with any
-          other internal input keeps that input's loud semantics — fail loud
-          for every class the policy has not explicitly quieted;
+          other internal input keeps that input's semantics — fail loud for
+          every class the policy has not explicitly quieted;
         * wake/monitor-only runs notify iff one of their deliveries asked to
           (``notify_requested``, the OR of their ``notify`` parameters);
         * AIDA'S CHECK-IN QUIETING VETO, applied after the rule above and only
@@ -18055,16 +19950,27 @@ class Session:
         )
         triggers = set(self._run_triggers)
         non_user = triggers - {"user"}
-        # PEER-ONLY runs stay quiet: non-user inputs that are exclusively
-        # peer-family (the peer-notify policy, 2026-10-10). ``_run_input_types``
-        # holds the raw custom types of this run's INTERNAL inputs —
-        # wake/monitor deliveries are not recorded there — and the empty or
-        # unknown sentinel can never match, so every input the policy has not
-        # explicitly quieted is LOUD.
-        peer_only = (
+        # One shared eligibility decision prevents desktop and phone policy
+        # drift. Use an explicit vocabulary, not a session_* prefix: a future
+        # input requiring attention must fail loud until deliberately classified.
+        # Wake/monitor inputs have no raw type here; their notify request still
+        # wins below, as do a real user (including mixed runs) and actual errors.
+        routine_input_types = {
+            ASK_RESPONSE_MESSAGE_TYPE,
+            JOB_RESULT_MESSAGE_TYPE,
+            SESSION_INCIDENT_MESSAGE_TYPE,
+            SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+            SESSION_CREDENTIAL_MESSAGE_TYPE,
+            SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+            SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+            SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+            SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            SESSION_SEND_NOTICE_MESSAGE_TYPE,
+        }
+        quiet_internal = (
             "internal" in non_user
             and bool(self._run_input_types)
-            and self._run_input_types <= PEER_FAMILY_INPUT_TYPES
+            and self._run_input_types <= PEER_FAMILY_INPUT_TYPES | routine_input_types
         )
         notify = (
             self._has_awaiting_user()
@@ -18072,7 +19978,12 @@ class Session:
             or not (
                 non_user
                 and (
-                    non_user <= {WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE} or peer_only
+                    non_user <= {WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE}
+                    or (
+                        non_user
+                        <= {"internal", WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE}
+                        and quiet_internal
+                    )
                 )
             )
             or self._run_notify_requested
@@ -18295,7 +20206,7 @@ class Session:
     def _quiet_end_callable(self) -> Callable[[], Awaitable[str | None]] | None:
         """The ``no_reply`` tool's quiet-end door, or ``None`` where silence is unavailable.
 
-        Bound per turn beside the ask doors (:meth:`_ask_gate_callable`); its
+        Bound per turn beside the ask doors; its
         presence IS the fact that this session may end a turn quietly, which is
         exactly what ``build_no_reply_tool``'s createIf gate reads — the tool is
         ABSENT, not inert, where a quiet end could not be honoured (footprint
@@ -18355,6 +20266,10 @@ class Session:
           exclusions — the host's product is the final text);
         * ``LOP_NOTIFY=0``.
 
+        A session ANOTHER AGENT started keeps this door (its parked approvals
+        and asks are gate rows the operator must see) and loses only the
+        ``notify`` TOOL — :meth:`_notify_tool_callable`, review round 1 R1-2/Q1.
+
         The gate answers "is there an inbox the operator reads for this
         session" — reachability, not host identity (AGENTS.md footprint ladder).
         """
@@ -18367,6 +20282,121 @@ class Session:
         if not self._session_is_listed():
             return None
         return self._notify_inbox
+
+    def _reconcile_notify_tool(self) -> None:
+        """Apply external authority changes at the next turn's inventory boundary.
+
+        The CLI writes a sidecar, not this owner's in-memory tool list. Only an
+        observed authority transition may change inventory: unchanged authority
+        must not undo a caller's exact refresh_tools replacement. Rescue only
+        notify through declaration filtering; cached invocations independently
+        recheck revocation, so this observation is never a permission cache.
+        """
+        available = self._notify_tool_callable() is not None
+        if available == self._notify_authority_available:
+            return
+        self._notify_authority_available = available
+        present = any(tool.name == "notify" for tool in self._tools)
+        if available:
+            if not present:
+                self._merge_capability_tools(("notify",))
+        elif present:
+            self.refresh_tools(
+                [tool for tool in self._tools if tool.name != "notify"], republish=False
+            )
+
+    def _notify_tool_callable(self) -> Callable[..., Awaitable[str]] | None:
+        """The deliberate-notify door: inbox reachability plus reporting authority.
+
+        WHY A SEPARATE DOOR (review round 1, R1-2 / QA Q1): the agent-spawned
+        exclusion first sat in :meth:`_notify_inbox_callable`, which
+        :meth:`raise_gate_item` also uses — so a spawned workstream (and every
+        subagent under it) parked approvals and asks with no ``gate:`` row, and
+        the operator never saw them. The operator rule withholds only the
+        deliberate ``notify`` channel from agent-started sessions; asks must
+        still reach the inbox, so the gate path keeps the unfiltered door.
+        """
+        door = self._notify_inbox_callable()
+        if door is None or self._session_was_agent_spawned():
+            return None
+        return self._notify_authorized_item
+
+    async def _notify_authorized_item(self, **kwargs: Any) -> str:
+        # Tool contexts can outlive an operator revocation. Recheck the same
+        # authority at invocation, not just when constructing the inventory.
+        door = self._notify_inbox_callable()
+        if door is None or self._session_was_agent_spawned():
+            return "Notification authority is unavailable; report to your delegating agent."
+        return await door(**kwargs)
+
+    def _session_was_agent_spawned(self) -> bool:
+        """Whether this session still reports to the agent that started it.
+
+        OPERATOR RULE (2026-11-13): "child/reviewer/QA sessions never notify the
+        operator directly." A delegated child (``_job_id``) and a hidden run
+        were already gated above; two agent-started kinds were not, because they
+        are LISTED:
+
+        * a ``sessions spawn`` workstream (``origin.json`` =
+          ``resume.ORIGIN_AGENT_WORKSTREAM``, the spawn tool's default) — listed
+          so the operator can watch it, but its findings go back to the agent
+          that spawned it, which decides whether the operator needs an item.
+          An explicit local standalone-notification grant can change this
+          reporting policy without changing the spawn provenance;
+        * a session placed here at another device's request (a ``peer``
+          placement) whose stamp does NOT positively say the operator started
+          it (``remote_attention.origin_is_operator_started``): an AGENT's
+          create, and — DEFAULT-DENY (operator rule, 2026-11-14) — a legacy
+          peer-create stamp from before the attestation. A ``moved``/``fork``
+          stamp (the operator carried the session here) keeps the tool.
+          The owner refuses to forward such a session's items, so the tool
+          would only fill an inbox nobody reads. A local top-level session
+          (no stamp, or a ``local`` placement) is untouched.
+
+        Withholding the tool (rather than a tool that refuses) is the delegated
+        child's own mechanism: the model is never offered a channel it may not
+        use, and ``hub``/its final text is how it reports. An unreadable marker
+        answers NO, the ``_session_is_listed`` direction.
+        """
+        directory = getattr(getattr(self, "transcript", None), "directory", None)
+        if not directory:
+            return False
+        try:
+            from local_operator.notifications.remote_attention import (
+                AGENT_ORIGIN_KIND,
+                PEER_CREATE_ORIGIN_KINDS,
+                origin_is_operator_started,
+            )
+            from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, session_origin
+            from local_operator.session.placement import MESH_STAMP_NAME, MeshStamp
+
+            if session_origin(Path(directory)) == ORIGIN_AGENT_WORKSTREAM:
+                from local_operator.notifications.authority import granted
+
+                if not granted(Path(directory)):
+                    return True
+            stamp_file = Path(directory) / MESH_STAMP_NAME
+            if not stamp_file.is_file():
+                return False
+            stamp = MeshStamp.from_json(json.loads(stamp_file.read_text(encoding="utf-8")))
+            if stamp is None:
+                return False
+            if str(stamp.origin.get("kind") or "") == AGENT_ORIGIN_KIND:
+                return True
+            if stamp.placement.mode != "peer":
+                return False
+            # Only a peer CREATE is withheld without the attestation (review r1,
+            # M1). A ``moved``/``fork`` stamp is a session the operator carried
+            # here themselves (``lop sessions move --to local`` writes mode
+            # ``peer`` with no ``started_by``); denying it would strip ``notify``
+            # from the operator's own device. No leak follows from keeping it:
+            # the owner already refuses to forward a non-attested stamp's items.
+            if str(stamp.origin.get("kind") or "") not in PEER_CREATE_ORIGIN_KINDS:
+                return False
+            return not origin_is_operator_started(stamp.origin)
+        except Exception:  # noqa: BLE001 — an unanswered question keeps the tool
+            logger.debug("notify: could not read the session's spawner", exc_info=True)
+            return False
 
     def _session_is_listed(self) -> bool:
         """Whether the operator's own listings show this session (``is_user_session``).
@@ -18443,7 +20473,8 @@ class Session:
             # A session ANOTHER device placed here: the row is in THIS device's
             # inbox and reaches the operator only when the origin forwards it
             # (``notifications/remote_attention``), so a bare "Notified" would
-            # tell the model the operator was told. Empty for every local session.
+            # tell the model the operator was told. A session started on a mesh
+            # node says its item stayed there; empty on a device in no mesh.
             #
             # READ BEFORE THE BANNER ROUTE, never after it: ``_route_item_banner``
             # spawns the held-banner task, and its hold must start only once this
@@ -19000,6 +21031,9 @@ class Session:
         # errors notify, and interrupted stays suppressed by the readers' kind
         # filters whatever this says.
         notify = bool(getattr(outcome, "notify", True))
+        # ADR 0009: read off the same end event, never re-derived here.
+        origin = str(getattr(outcome, "origin", "") or "")
+        needs_user = bool(getattr(outcome, "needs_user", False))
         token = self._attention_run_token or str(uuid.uuid4())
         # The DURABLE reason. For a cut-off it is the harness-authored cause
         # sentence, never the live notice's longer framing: this string is what
@@ -19035,7 +21069,29 @@ class Session:
             # narration text and ``not messages`` alone would miss it. Errors
             # never reach this branch (``kind == "complete"``), which keeps
             # R3's "always notifies" for a quiet batch whose re-entry fails.
-            if kind == "complete" and (not messages or delegated or self._run_ended_quiet(outcome)):
+            # ADR 0009: a quiet or textless end that leaves an ask opened in its
+            # window still open is NOT quiet for the phone (``needs_user``
+            # bypasses ``notify``), so it publishes its row; ``notify`` is forced
+            # false so the desktop's completion banner stays silent, as the
+            # quiet end asked (the ask keeps its own desktop banner).
+            #
+            # The DELEGATED arm gets the same exception (review round 1, M1): a
+            # run that opens an ask AND leaves a ``task`` job running has already
+            # closed its needs-you window (``_run_needs_user``), so suppressing its
+            # row here would lose the ask for good — the job_result run's window
+            # starts after it. Its desktop completion banner stays silent (the
+            # delegated parent is not finished), so ``notify`` is forced false.
+            if (
+                kind == "complete"
+                and needs_user
+                and (not messages or self._run_ended_quiet(outcome) or delegated)
+            ):
+                notify = False
+            if kind == "complete" and (
+                (not messages and not needs_user)
+                or (delegated and not needs_user)
+                or (self._run_ended_quiet(outcome) and not needs_user)
+            ):
                 await self._transcript.append_custom(
                     ATTENTION_CUSTOM_TYPE,
                     {
@@ -19047,7 +21103,11 @@ class Session:
                 return
             # Failure may precede the first assistant message. Its durable outcome
             # marker, not an unrelated previous answer, is the viewable anchor.
-            anchor = messages[-1].id if kind == "complete" else provisional_anchor(token)
+            # A ``needs_user`` run with no text of its own (an ask raised, then
+            # ``no_reply``) anchors on its outcome marker the same way.
+            anchor = (
+                messages[-1].id if kind == "complete" and messages else provisional_anchor(token)
+            )
             # The journal precedes publication: runtime death between these writes
             # is repaired idempotently on resume, without fabricating a new token.
             await self._transcript.append_custom(
@@ -19063,19 +21123,80 @@ class Session:
                     # (bootstrap/republish, both of which replay this marker)
                     # re-lands the same row instead of a defaulted one.
                     "notify": notify,
+                    # ADR 0009: durable for the same reason, and the marker's
+                    # ``origin`` is also how a resumed session rebuilds the
+                    # conversation's last driver (``_reconstruct_input_driver``).
+                    "origin": origin,
+                    "needs_user": needs_user,
                 },
             )
+            # A notify-requested delivery owes a durable inbox entry as well as
+            # the completion signal. The normal-priority item deliberately does
+            # NOT banner: this run's already-finalized completion owns the OS
+            # route. High explicit notify items retain their own delivery ladder.
+            # Use the tool's authority gate, not the broader gate-item door, so
+            # delegated agents cannot turn a wake into operator attention.
+            if (
+                kind == "complete"
+                and notify
+                and self._run_notify_requested
+                and not self._run_notified
+                and messages
+                and isinstance(messages[-1], Message)
+            ):
+                door = self._notify_tool_callable()
+                if door is not None:
+                    try:
+                        from local_operator.tui.notify import scrub_banner_text
+
+                        text = scrub_banner_text(
+                            self._redact_tool_result_text(messages[-1].text)
+                        ).strip()
+                        if text:
+                            await door(
+                                title=text.splitlines()[0],
+                                body=text,
+                                priority="normal",
+                                key=f"completion:{token}",
+                                links=[],
+                                anchor_id=anchor,
+                                raise_banner=False,
+                            )
+                    except Exception:  # noqa: BLE001 — preserve completion on an inbox outage
+                        logger.warning(
+                            "notify: could not persist delivery completion", exc_info=True
+                        )
             try:
-                self._attention = await asyncio.to_thread(
-                    AttentionStore().publish,
-                    conversation_identity(self._transcript.directory),
-                    token,
-                    anchor,
-                    kind,
-                    reason=reason,
-                    cause=cause,
-                    notify=notify,
-                )
+                # BOUNDED WAIT, NOT A BOUNDED THREAD: ``wait_for`` cancels our
+                # await, but a running worker thread cannot be killed. The
+                # orphan finishes (or fails) on its own; it touches only the
+                # store, through an idempotent ``INSERT OR IGNORE`` by token,
+                # and its result is discarded here (``self._attention`` is
+                # assigned only on success), so a late finish cannot corrupt
+                # session state -- the republish ladder armed on expiry
+                # re-publishes the same token, a no-op if the orphan landed.
+                try:
+                    self._attention = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            AttentionStore().publish,
+                            conversation_identity(self._transcript.directory),
+                            token,
+                            anchor,
+                            kind,
+                            reason=reason,
+                            cause=cause,
+                            notify=notify,
+                            origin=origin,
+                            needs_user=needs_user,
+                        ),
+                        timeout=ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
+                    )
+                except TimeoutError as expired:
+                    raise AttentionWriteDeferred(
+                        "store write still running after "
+                        f"{ATTENTION_PUBLISH_OFFLOAD_CEILING_S:g}s; the worker thread "
+                        "is orphaned and the turn lock released"
+                    ) from expired
                 if notify and self._run_aida_checkin:
                     # THE BANNER BUDGET'S STAMP (``aida.proactive``
                     # ``MAX_BANNERS_PER_DAY``): one timestamp per True publish
@@ -19097,7 +21218,16 @@ class Session:
                     try:
                         from local_operator.aida import proactive as _aida_proactive
 
-                        await asyncio.to_thread(_aida_proactive.note_banner_sent, self._config_dir)
+                        await asyncio.wait_for(
+                            asyncio.to_thread(_aida_proactive.note_banner_sent, self._config_dir),
+                            timeout=ATTENTION_BANNER_STAMP_CEILING_S,
+                        )
+                    except TimeoutError:
+                        logger.warning(
+                            "aida: banner-budget stamp still running after %gs; the worker "
+                            "thread is orphaned and the turn lock is released",
+                            ATTENTION_BANNER_STAMP_CEILING_S,
+                        )
                     except Exception:  # noqa: BLE001 — see above
                         logger.debug("aida: could not stamp the banner budget", exc_info=True)
             except AttentionWriteDeferred as deferred:
@@ -19397,31 +21527,51 @@ class Session:
 
             sync = subscription.sync
             try:
-                window = capture_window(
-                    self._transcript,
-                    conversation_id=sync.snapshot.session_id,
-                    owner_epoch=sync.epoch,
-                    through_id=sync.live_cursor,
-                    durable_seed_tools=frozenset(
+                capture_args: dict[str, Any] = {
+                    "conversation_id": sync.snapshot.session_id,
+                    "owner_epoch": sync.epoch,
+                    "through_id": sync.live_cursor,
+                    "durable_seed_tools": frozenset(
                         str(event.get("tool_call_id", ""))
                         for event in sync.snapshot.live_events
                         if event.get("type") == "tool_execution_end"
                     ),
-                )
-                window.durable_seed_ids = [
+                }
+                window = capture_window(self._transcript, **capture_args)
+                durable_seed_ids = [
                     str(event["message"]["id"])
                     for event in sync.snapshot.live_events
                     if isinstance(event.get("message"), dict)
                     and self._transcript.has_entry(str(event["message"].get("id", "")))
                 ]
+                window.durable_seed_ids = durable_seed_ids
                 sync.display_history = window
+                if window.status == "full_required":
+                    # THE PEER VIEWER'S PAGE FOR THE SAME CUT, captured here on
+                    # the loop that owns the transcript and only when the exact
+                    # page escalated (rare, and the cost of one more bounded
+                    # read). The runtime serves it to a non-local connection
+                    # instead of a ``full_required`` that viewer cannot act on;
+                    # see ``history_window.PEER_BOUNDED_MIN_MESSAGE_BYTES``.
+                    bounded = capture_window(
+                        self._transcript, **capture_args, bound_oversized=True
+                    ).model_copy(update={"durable_seed_ids": list(durable_seed_ids)})
+                    if bounded.status == "ok":
+                        sync._peer_display_history = bounded
             except BaseException:
                 subscription.unsubscribe()
                 raise
         return subscription
 
-    def history_page(self, before: str, anchor: str = ""):  # type: ignore[no-untyped-def]
-        """Authenticated reads reuse the resident replay at the signed sync cut."""
+    def history_page(  # type: ignore[no-untyped-def]
+        self, before: str, anchor: str = "", *, bound_oversized: bool = False
+    ):
+        """Authenticated reads reuse the resident replay at the signed sync cut.
+
+        ``bound_oversized`` is the runtime's answer for a NON-LOCAL viewer: an
+        older group too large for one page rides bounded and marked rather than
+        escalating to a local replay that viewer cannot perform.
+        """
         from local_operator.session.history_window import display_window
 
         state = self.frontend_state
@@ -19432,6 +21582,7 @@ class Session:
             through_id=state.history_cursor,
             before=before,
             anchor=anchor,
+            bound_oversized=bound_oversized,
         ).model_dump(mode="json")
 
     def refresh_frontend_state(self) -> None:
@@ -19766,6 +21917,17 @@ class Session:
             # ``_publish_attention_outcome`` reads it back rather than
             # re-deriving it. One value, four readers, decided by nobody else.
             event = event.model_copy(update={"notify": self._finalize_attention_notify(event)})
+            # ADR 0009: WHERE the outcome goes is decided by origin, and whether
+            # it needs the user by an ask opened in this run's window. Both are
+            # stamped here, at the same choke point as ``notify`` and computed
+            # independently of it: ``notify`` is false for exactly the runs that
+            # end on an open ask without a typed prompt (a wake), which are the
+            # ones the phone must hear about when the desk is away.
+            origin = self._run_origin()
+            needs_user = self._run_needs_user()
+            if self._run_input_surface is not None:
+                self._conversation_driver = self._run_input_surface
+            event = event.model_copy(update={"origin": origin, "needs_user": needs_user})
             self._attention_outcome = event
             # Turn supplements (§2.1): freeze the facts the runtime subscriber needs, while
             # they still exist -- ``_run_triggers`` and the accumulator are reset at the
@@ -20049,6 +22211,7 @@ class Session:
         drain_steering_on_open: bool = False,
         pending_body_only: bool = False,
         pending_body_selected: tuple[str, str] | None = None,
+        pending_body_scope: tuple[float, frozenset[tuple[str, str]]] | None = None,
         initial_after_guard: Callable[[], list[AgentMessage]] | None = None,
     ) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
@@ -20213,7 +22376,9 @@ class Session:
                     return
                 # The normal guard ran under the lock. Hydrate before opening
                 # a turn, so a refused body costs no empty model request.
-                await self._open_pending_body_turn(selected=pending_body_selected)
+                await self._open_pending_body_turn(
+                    selected=pending_body_selected, scope=pending_body_scope
+                )
                 opened_body = self._pending_body_turn
                 if opened_body is None:
                     return
@@ -20285,6 +22450,48 @@ class Session:
         # idle+supervisor decision before this admission may proceed.
         from local_operator.session.runtime import restart_fence
 
+        # FIRST, before anything about this run is published or journalled: a
+        # declared MCP server that is still connecting must be awaited before
+        # the request is built, and one that never arrives raises here, where
+        # nothing durable has happened yet (the same shape as ``TurnInFlight``).
+        # Never for a delegated child (``_mcp_reach_inherited``): its parent's
+        # gate settled the borrowed manager, and the gate's grant step would
+        # widen the child's surface past what its parent allowed.
+        # ``"off"`` is an SDK caller's explicit opt-out (``set_first_turn_mcp_wait``).
+        if (
+            self._first_turn_mcp_wait != "off"
+            and not self._named_mcp_ready_checked
+            and not self._mcp_reach_inherited
+        ):
+            from local_operator.session.declared_mcp_ready import (
+                DECLARED_MCP_READY_TIMEOUT_S,
+                await_named_mcp_servers,
+            )
+
+            # A FRONT END ATTACHED (an in-process terminal, or a viewer such as
+            # the TUI/desktop subscribed to this runtime) merges a late
+            # ``preload_tools`` server mid-session, the contract documented on
+            # ``session_factory.create_session``'s ``defer_mcp_wiring``, so only
+            # a headless host (exec, SDK, scheduler) holds the turn for one.
+            # The same "no UI, no attach subscriber" test the turn-end
+            # checkpoint uses to tell a headless store apart (review R4).
+            store = getattr(self, "_frontend_state_store", None)
+            front_end = self._has_ui or bool(store is not None and store.has_subscribers)
+            self._named_mcp_ready_checked = await await_named_mcp_servers(
+                self.mcp_manager,
+                declared=self._declared_tools,
+                reachable=lambda: self.tool_inventory,
+                materialize=self.materialize_declared_tools,
+                wait_for_preload=not front_end,
+                wait_for_all=self._first_turn_mcp_wait == "all",
+                # Esc lands here as the sticky flag (no turn signal exists yet).
+                cancelled=lambda: self._abort_requested,
+                timeout_s=(
+                    DECLARED_MCP_READY_TIMEOUT_S
+                    if self._first_turn_mcp_timeout_s is None
+                    else self._first_turn_mcp_timeout_s
+                ),
+            )
         admission = await restart_fence.acquire_shared(self._config_dir)
         try:
             publish_admission = getattr(self, "_publish_turn_admitted", None)
@@ -20398,6 +22605,9 @@ class Session:
         self._run_last_trigger = None
         self._run_user_text = ""
         self._run_started_at = time.time()
+        # ADR 0009: origin is per run, so the previous run's human input never
+        # labels this one (a wake after a phone prompt inherits it instead).
+        self._run_input_surface = None
         self._turn_items = []
         self._prepared_writes = {}
         self._turn_text_budget = TURN_TEXT_BUDGET
@@ -20580,12 +22790,17 @@ class Session:
         name = fetched.get("conversation_name")
         kind = fetched.get("sender_kind")
         sender = fetched.get("sender_label")
+        # The body read's ``conversation_kind`` (pinned in the body-response
+        # fixture) decides whether the frame carries the channel participation
+        # rule; absent on an older hub, which keeps the pre-rule frame.
+        conversation_kind = fetched.get("conversation_kind")
         return FetchedBody(
             body=body,
             body_sha256=body_hash,
             conversation_label=name if isinstance(name, str) else "",
             sender_label=sender if isinstance(sender, str) else "",
             sender_kind=kind if isinstance(kind, str) else "unknown",
+            conversation_kind=conversation_kind if isinstance(conversation_kind, str) else None,
         )
 
     def _pending_body_followup_row(
@@ -20601,12 +22816,27 @@ class Session:
             return None
         if self._abort_requested or self._graceful_cancel_requested:
             return None
-        from local_operator.team_bridge.host import owner_fence_refusal
+        from local_operator.team_bridge.host import (
+            outbound_tool_fence,
+            owner_fence_refusal,
+        )
         from local_operator.team_bridge.store import Store
 
         try:
-            if owner_fence_refusal(runtime) is not None:
-                return None
+            # THE ROW IS THE AUTHORITY for a non-designated session. The strict
+            # fence answers not_designated for a task session the connector routed
+            # a DM reply to, which left a busy routed session unable to serve its
+            # own row until the sweep handed it back to the designated session.
+            # So a not_designated refusal alone is retried with the binding-only
+            # fence (every owner/generation/consent check, designation relaxed),
+            # and such a session may then serve ONLY a row routed to it; the
+            # per-call facts below re-prove the stamped designation is still live.
+            routed_only = False
+            refusal = owner_fence_refusal(runtime)
+            if refusal is not None:
+                if refusal.get("code") != "not_designated" or outbound_tool_fence(runtime):
+                    return None
+                routed_only = True
             store = Store(runtime.config_dir)
             skipped = set(exclude)
             while True:
@@ -20619,17 +22849,7 @@ class Session:
                 )
                 if row is None:
                     return None
-                facts = store.per_call_admission_state(runtime.owner, runtime.session_id)
-                receipt = store.receipt_for_message(runtime.owner, str(row["message_id"]))
-                if (
-                    facts
-                    and facts.get("designation_matches")
-                    and facts.get("consent_version") == row["consent_version"]
-                    and facts.get("policy_epoch") == row["policy_epoch"]
-                    and receipt
-                    and receipt.get("verdict") == "allow"
-                    and receipt.get("body_sha256") == row["body_sha256"]
-                ):
+                if self._pending_body_row_valid(store, runtime, row, routed_only=routed_only):
                     return row
                 if selected is not None:
                     return None
@@ -20639,6 +22859,75 @@ class Session:
         except Exception:  # noqa: BLE001 — no readable authority means no automatic work
             logger.debug("bridge: follow-up authority unavailable")
             return None
+
+    @staticmethod
+    def _pending_body_row_valid(store: Any, runtime: Any, row: Any, *, routed_only: bool) -> bool:
+        """The per-row admission test: designation, consent, policy, receipt+sha.
+
+        ONE predicate for the drain's primary and for every multi-frame
+        companion/digest row (``PendingTurnBatch(admissible=...)``), so a row
+        can never ride a batch on weaker evidence than it would need alone.
+        """
+
+        facts = store.per_call_admission_state(
+            runtime.owner,
+            runtime.session_id,
+            reservation=(str(row["conversation_id"]), str(row["message_id"])),
+        )
+        receipt = store.receipt_for_message(runtime.owner, str(row["message_id"]))
+        return bool(
+            (not routed_only or row.get("routed_session") == runtime.session_id)
+            and facts
+            and facts.get("designation_matches")
+            and facts.get("consent_version") == row["consent_version"]
+            and facts.get("policy_epoch") == row["policy_epoch"]
+            and receipt
+            and receipt.get("verdict") == "allow"
+            and receipt.get("body_sha256") == row["body_sha256"]
+        )
+
+    def _pending_body_batch_admissible(self) -> Callable[[dict[str, Any]], bool]:
+        """The batch's per-row gate: the drain's own test, failing closed."""
+
+        from local_operator.team_bridge.host import (
+            outbound_tool_fence,
+            owner_fence_refusal,
+        )
+        from local_operator.team_bridge.store import Store
+
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None:
+            return lambda _row: False
+        routed_only = False
+        refusal = owner_fence_refusal(runtime)
+        if refusal is not None:
+            if refusal.get("code") != "not_designated" or outbound_tool_fence(runtime):
+                return lambda _row: False
+            routed_only = True
+        store = Store(runtime.config_dir)
+
+        def admissible(row: dict[str, Any]) -> bool:
+            try:
+                return self._pending_body_row_valid(store, runtime, row, routed_only=routed_only)
+            except Exception:  # noqa: BLE001 — unreadable authority = not admissible
+                return False
+
+        return admissible
+
+    def _multi_frame_turns_enabled(self, config_dir: Any) -> bool:
+        """``team_bridge.multi_frame_turns`` from the live config file (default on)."""
+
+        try:
+            from local_operator.config_watch import process_watcher
+            from local_operator.team_bridge.settings import TeamBridgeSettings
+
+            watcher = process_watcher(Path(config_dir))
+            watcher.poll_now()
+            return TeamBridgeSettings.from_values(watcher.values).multi_frame_turns
+        except Exception:  # noqa: BLE001 — an unreadable file keeps the default
+            from local_operator.team_bridge.settings import DEFAULT_MULTI_FRAME_TURNS
+
+            return DEFAULT_MULTI_FRAME_TURNS
 
     def _ensure_pending_body_followup(self) -> None:
         """Coalesce busy arrivals without cancelling work or creating a session.
@@ -20672,6 +22961,13 @@ class Session:
                 ) is not None:
                     identity = (row["conversation_id"], row["message_id"])
                     attempted.add(identity)
+                    # ONE batch per pass step: the guard re-checks the PRIMARY
+                    # only; companions/digest rows are re-proved row by row
+                    # inside ``PendingTurnBatch`` with the same admissibility
+                    # test. Every row the batch tried joins ``attempted`` so a
+                    # served companion is not this pass's next primary; a
+                    # companion released for capacity does NOT, so it is.
+                    self._pending_body_tried = ()
                     await self._prompt_messages(
                         [],
                         guard=lambda identity=identity: (
@@ -20680,7 +22976,9 @@ class Session:
                         guard_note="selected admitted bridge body no longer eligible",
                         pending_body_only=True,
                         pending_body_selected=identity,
+                        pending_body_scope=(horizon, frozenset(attempted)),
                     )
+                    attempted.update(self._pending_body_tried)
                     # Each attempt releases the ordinary turn lock. Selecting
                     # B explicitly prevents failed A being hydrated again here.
                     if self._person_is_waiting():
@@ -20857,7 +23155,110 @@ class Session:
         self._context.messages[:] = [m for m in messages if all(m is not c for c in stranded)]
         return stranded
 
-    async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
+    def _bridge_history_transform(
+        self, messages: list[Any], *, read_only: bool = False
+    ) -> list[Any]:
+        """Attach bounded replay excerpts to recent Team Bridge journal cards.
+
+        WHY here: the excerpt is a STANDING decision (live owner, consent,
+        designation) and only the session holds the runtime that can prove it.
+        Re-evaluated on every physical provider call, so a revoked owner loses
+        excerpts at the next request (design §5, property C). It never mutates
+        the context: cards get request-local copies (``card_projection``).
+        Any failure is "no excerpts", which is today's ids-only marker.
+        STANDING is re-proved per call; each card's excerpt DECISION is frozen at
+        its first render (``_bridge_excerpt_memo``) so cached card bytes do not
+        move. NOT covered: the stranded-card reorder
+        (``_fallback_card_wake_initial``) still moves a card to the tail, which
+        re-writes the cache from its old position; the memo leaves it alone.
+
+        ``read_only=True`` is for auxiliary requests (``_read_only_prompt``:
+        aside, clearance, compaction advisor) that can race the main turn. It
+        reads a shallow copy of ``_bridge_excerpt_memo`` so the prefix stays
+        byte-identical to the main turn's frozen decisions, while NEVER
+        mutating ``_bridge_excerpt_memo`` and NEVER running side-effecting
+        store purges on standing refusal (it still fails closed by returning
+        ``messages`` unchanged, i.e., ids-only).
+        """
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None or not any(
+            getattr(message, "custom_type", None) == TEAM_BRIDGE_MESSAGE_TYPE
+            for message in messages
+        ):
+            return messages
+        try:
+            from local_operator.team_bridge.authority import authority_fence
+            from local_operator.team_bridge.card_projection import (
+                attach_history_excerpts,
+            )
+            from local_operator.team_bridge.display_bodies import (
+                DisplayBodyStore,
+                purge_if_bridge_off,
+                radient_signed_in,
+            )
+            from local_operator.team_bridge.store import _owner_key
+
+            # Frozen decisions hold body text; they ride only while standing
+            # does, so every refusal below drops them with the excerpts.
+            memo = getattr(self, "_bridge_excerpt_memo", None)
+            refusal = authority_fence(runtime)
+            if refusal is not None:
+                if not read_only:
+                    if memo is not None:
+                        memo.clear()
+                    code = refusal.get("code")
+                    if code == "feature_off":
+                        # A torn config read also answers ``feature_off``; only a
+                        # definite OFF is an opt-out worth a purge.
+                        purge_if_bridge_off(Path(runtime.config_dir))
+                    elif code == "consent_revoked":
+                        # The consent-revoke path as THIS process sees
+                        # it: the retained bodies lost their standing, so they go
+                        # now rather than at the next card view (review R3 / QA
+                        # Q1). ``owner_changed`` is deliberately not here: the new
+                        # owner's rows are not this session's to delete, and an
+                        # account switch already purges at enrollment commit.
+                        DisplayBodyStore(Path(runtime.config_dir)).purge()
+                return messages
+            if not radient_signed_in(
+                runtime.config_dir, getattr(runtime.owner, "credential_id", None)
+            ):
+                # Enrollment and consent outlive ``lop logout radient``; the
+                # sign-in itself is part of the standing (QA Q1). The logout
+                # hook purged the rows already; this withholds excerpts even
+                # if a row survived (fail closed: the ids-only marker).
+                if not read_only and memo is not None:
+                    memo.clear()
+                return messages
+            effective_memo = dict(memo) if (read_only and memo is not None) else memo
+            return attach_history_excerpts(
+                messages,
+                config_dir=runtime.config_dir,
+                owner_key=_owner_key(runtime.owner),
+                memo=effective_memo,
+            )
+        except Exception:  # noqa: BLE001 — excerpts are optional; never fail a request
+            logger.debug("bridge: history excerpts skipped", exc_info=False)
+            return messages
+
+    def _compose_transform_context(self) -> Any:
+        """The loop's one ``transform_context``: excerpts first, then the live frame."""
+        frame = self._pending_body_turn
+        if getattr(self, "bridge_runtime", None) is None:
+            return frame.transform if frame is not None else None
+
+        def transform(messages: list[Any]) -> list[Any]:
+            shaped = self._bridge_history_transform(messages)
+            return frame.transform(shaped) if frame is not None else shaped
+
+        return transform
+
+    async def _open_pending_body_turn(
+        self,
+        *,
+        selected: tuple[str, str] | None = None,
+        scope: tuple[float, frozenset[tuple[str, str]]] | None = None,
+    ) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
         THE GATE IS THE ROW, NOT THE DESIGNATION (review round 2, MINOR D). The
@@ -20878,7 +23279,10 @@ class Session:
         if runtime is None:
             return
         try:
-            from local_operator.team_bridge.pending_turn import PendingTurn
+            from local_operator.team_bridge.pending_turn import (
+                PendingTurn,
+                PendingTurnBatch,
+            )
 
             captured_owner = runtime.owner
             captured_scope = (Path(runtime.config_dir), runtime.session_id, runtime.tenant_id)
@@ -20894,12 +23298,28 @@ class Session:
                     == captured_scope
                 )
 
-            turn = PendingTurn(
-                captured_owner,
-                runtime.session_id,
-                config_dir=runtime.config_dir,
-                binding_guard=binding_guard,
-            )
+            turn: Any
+            if self._multi_frame_turns_enabled(runtime.config_dir):
+                # Same surface as ``PendingTurn`` (open/transform/renew/settle/
+                # binding_intact), so nothing below or in the loop branches on
+                # which one it holds. ``off`` keeps one body per turn exactly.
+                horizon, exclude = scope if scope is not None else (time.time(), frozenset())
+                turn = PendingTurnBatch(
+                    captured_owner,
+                    runtime.session_id,
+                    config_dir=runtime.config_dir,
+                    binding_guard=binding_guard,
+                    admissible=self._pending_body_batch_admissible(),
+                    admitted_before=horizon,
+                    exclude=exclude,
+                )
+            else:
+                turn = PendingTurn(
+                    captured_owner,
+                    runtime.session_id,
+                    config_dir=runtime.config_dir,
+                    binding_guard=binding_guard,
+                )
             won = await turn.open(
                 budget=self._pending_body_budget(),
                 fetch=self._fetch_pending_body,
@@ -20908,6 +23328,8 @@ class Session:
         except Exception:  # noqa: BLE001 — an ordinary request is the fallback
             logger.debug("bridge: pending body unavailable", exc_info=True)
             return
+        # The drain folds these into its attempted set (see its comment).
+        self._pending_body_tried = tuple(getattr(turn, "identities", ()) or ())
         if won:
             self._pending_body_turn = turn
 
@@ -20950,6 +23372,21 @@ class Session:
             self._pending_body_verdict = None
             self._body_answered_turn = None
             self._body_turn_opening_tail = None
+
+    def _forget_bridge_guidance_memo(self) -> None:
+        """Drop this session's "guidance note already shown" record.
+
+        Keys mirror the writer in ``team_bridge.tool`` (the tool context's
+        session id, falling back to the runtime's), so both are cleared. Never
+        raises: a host without a bridge runtime simply has no memo.
+        """
+
+        runtime = getattr(self, "bridge_runtime", None)
+        memo = getattr(runtime, "advised_guidance", None)
+        if not isinstance(memo, dict):
+            return
+        for key in {self.session_id, str(getattr(runtime, "session_id", "") or "")}:
+            memo.pop(key, None)
 
     async def _settle_quiet_request(self) -> None:
         """Commit silence only at the HOST boundary, after compaction/obligations.
@@ -21290,6 +23727,9 @@ class Session:
             # turn, so the schema the model sees is consistent for the whole
             # turn (see ``_reconcile_web_tools`` for why not on the tick).
             self._reconcile_web_tools()
+            # Local CLI grants/revocations are external to this live owner;
+            # apply them before either prompt inventory or wire tools freeze.
+            self._reconcile_notify_tool()
             # This turn has published nothing yet, so the first provider call
             # below captures the inventory as it stands NOW — with the web-tool
             # reconcile above already applied — and every later call in the turn
@@ -21331,6 +23771,13 @@ class Session:
                     # transforms after these bytes have crossed the boundary.
                     raise RuntimeError("bridge body authority changed before dispatch")
                 request = request.model_copy()
+                if getattr(self, "_required_image_evidence", False):
+                    request.required_image_count = sum(
+                        isinstance(block, ImageContent)
+                        for message in request.messages
+                        for block in message.content
+                    )
+                    request.validate_required_images()
                 request._codex_turn_state = codex_turn_state
                 inner = base_stream_fn(request, stream_signal)
                 # The context this request was built from, taken before any
@@ -21356,10 +23803,28 @@ class Session:
                     # model-origin lookalikes cannot carry this ephemeral proof.
                     # Check each message so independently admitted A/B frames
                     # cannot cancel each other's run-level presentation evidence.
-                    if runtime is not None and any(
-                        presented_bridge_ref([message]) is not None for message in request.messages
-                    ):
-                        runtime.bridge_input_presented = True
+                    if runtime is not None:
+                        for message in request.messages:
+                            presented = presented_bridge_ref([message])
+                            if presented is not None:
+                                runtime.bridge_input_presented = True
+                                # Default thread placement for a later bound
+                                # channel_post reads the hub's own root for
+                                # this message (tool._default_thread_root).
+                                # Best-effort: a missing record only degrades
+                                # that post to channel-level with a warning,
+                                # so a runtime without the method (or a record
+                                # that raises) must never fail this dispatch,
+                                # which would strand the body unserved.
+                                note = getattr(runtime, "note_presented", None)
+                                if note is not None:
+                                    try:
+                                        note(presented)
+                                    except Exception:  # noqa: BLE001 — best-effort record
+                                        logger.debug(
+                                            "bridge presented-placement record failed",
+                                            exc_info=True,
+                                        )
                     if carried:
                         # Past the refusal checks, the request is going out:
                         # any owed card it carries has now been read.
@@ -21398,14 +23863,15 @@ class Session:
                 # calls this once per PHYSICAL request, so a turn that makes
                 # several calls gets the same cached bytes every time (the
                 # per-call invariant lives in ``PendingTurn.for_call``).
-                transform_context=(
-                    self._pending_body_turn.transform
-                    if self._pending_body_turn is not None
-                    else None
-                ),
+                # Replay excerpts for past bridge cards ride the same hook
+                # (``_compose_transform_context``); without a bridge runtime it
+                # is exactly the frame's transform (or None), as before.
+                transform_context=self._compose_transform_context(),
                 capture_prepared_write=(
                     self._capture_prepared_write if self._prepared_capture_enabled else None
                 ),
+                bind_nested_diff=self._bind_nested_diff,
+                file_provenance=self._file_provenance_hook,
                 divergence_judge=self._divergence_judge,
                 model=self._model,
                 # Re-read per provider call, so a ``set_model`` landing while
@@ -21540,6 +24006,7 @@ class Session:
                         # the UI sees, and its generation stamps the eventual
                         # end. Continuation runs re-enter here and are silent.
                         self._logical_generation = event.generation
+                        self._turn_generation = event.generation
                         await self._emit(event)
                     else:
                         # A continuation's provider receipt is newer than the
@@ -21816,6 +24283,114 @@ class Session:
             # turn that never reached one again (see ``_flush_parked_deliveries``).
             await self._flush_parked_deliveries()
 
+    async def _spool_parked_for_successor(self, *, disposing: bool = False) -> None:
+        """Hand peer messages and wakes parked past the last boundary to the successor.
+
+        The leaving-runtime twin of the flush below. A turn on a draining
+        runtime still takes peer messages and its own wakes (the node2
+        incident, 2026-11-17: holding them for ~40 min behind one busy turn was
+        the defect), and the busy arms park them on the steering queue for "the
+        next tool boundary". A turn that ends first has no next boundary, and
+        opening a new turn for them is exactly what a leaving runtime must not
+        do — so they go to the inbox the successor drains into its first turn
+        (``process._drain_inbox_into``), with ``wake=True`` because each was a
+        delivery somebody asked to be acted on.
+
+        Only wake and peer ``CustomMessage`` rows are taken; everything else
+        (plain steers, asks, monitors) keeps its place and its pre-existing
+        handling. A peer row carries its own ``message.id`` so the successor's
+        ``receive_peer_message`` duplicate gate answers a second copy instead of
+        appending it twice. Never raises: this runs in the turn's ``finally``.
+
+        EVERY ROW GOES THROUGH ``inbox.append_for_successor`` (review round 1,
+        R1-1), the vehicle the admission-time spool
+        (``ServingSessionHandle._spool_for_successor``) uses: it records the
+        owed turn (``wakes/spooled/<sid>.json``) BEFORE the append and raises
+        the supervisor's reader. A plain ``append_inbox`` wrote a row nothing
+        was obliged to read — on a headless session the runtime exits at idle
+        and no successor is ever started for it (the 2026-09-21 class
+        ``inbox.SPOOL_RECEIPT_WAKE`` documents).
+
+        A ONE-SHOT (``due.final``) wake keeps its re-arm: the live arm of
+        ``_spool_wake_to_inbox`` remembers the ``DueWake`` it handed the turn,
+        and here that occurrence is re-armed through ``_queue_wake_rearm``
+        exactly as an idle fire would have been, so the id the user knows stays
+        cancellable and ``hand_wakes_to_successor`` writes it at the exit.
+        ``disposing=True`` (the call from ``_dispose_impl``) skips the re-arm:
+        a disposal may come after the exit's handover already ran, or with no
+        handover at all (the signal drain), so a hold placed then could be
+        written by nobody — the owed text row is the one durable outcome there.
+        """
+        from local_operator.harness.message_types import PEER_DELIVERABLE_CUSTOM_TYPES
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import InboxLine, append_for_successor
+        from local_operator.wakes.spooled import await_spool_write
+
+        kept: list[AgentMessage] = []
+        taken: list[CustomMessage] = []
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            if isinstance(item, CustomMessage) and (
+                item.custom_type == WAKE_PROMPT_MESSAGE_TYPE
+                or item.custom_type in PEER_DELIVERABLE_CUSTOM_TYPES
+            ):
+                taken.append(item)
+            else:
+                kept.append(item)
+        for item in kept:
+            self._steering_queue.put_nowait(item)
+        # Every live-handed one-shot is settled by this pass or was already
+        # consumed by a boundary; either way the memo must not outlive it.
+        live_finals: dict[tuple[str, int], DueWake] = getattr(self, "_live_final_wakes", {})
+        self._live_final_wakes = {}
+        if not taken:
+            return
+        directory = getattr(self._transcript, "directory", None)
+        for message in taken:
+            try:
+                if message.custom_type == WAKE_PROMPT_MESSAGE_TYPE:
+                    details = message.details or {}
+                    due = live_finals.get(
+                        (str(details.get("wake_id", "")), int(details.get("occurrence") or 0))
+                    )
+                    if due is not None and not disposing and self._queue_wake_rearm(due):
+                        continue
+                    await self._spool_parked_wake(message, for_successor=True)
+                    continue
+                details = message.details or {}
+                if directory is None:
+                    logger.warning("parked peer message %s could not be spooled", message.id)
+                    continue
+                custom_type = (
+                    message.custom_type if message.custom_type != PEER_MESSAGE_MESSAGE_TYPE else ""
+                )
+                await await_spool_write(
+                    append_for_successor,
+                    config_dir(),
+                    Path(directory),
+                    InboxLine(
+                        text=str(details.get("body") or details.get("text") or ""),
+                        sender=dict(details.get("sender") or {}),
+                        mode="mailbox",
+                        written_at=time.time(),
+                        wake=True,
+                        message_id=str(message.id or ""),
+                        custom_type=custom_type,
+                        # The bridge locator, which the successor cannot
+                        # re-derive (H5 F3; review round 1, R1-5) — the same
+                        # carriage the admission-time spool makes.
+                        bridge_meta=dict(details.get("bridge") or {}),
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — the turn's finally must not die here
+                logger.warning(
+                    "parked delivery %s could not be spooled while draining",
+                    getattr(message, "id", ""),
+                    exc_info=True,
+                )
+        self._courtesy_wake_count = 0
+        self.refresh_frontend_state()
+
     async def _flush_parked_deliveries(self) -> None:
         """Hand over what a busy latch parked, now that the turn has ended.
 
@@ -21892,6 +24467,14 @@ class Session:
         would cost the busy arms one shared sentence. Recorded here so the
         next reader does not re-derive the mismatch as a bug.
         """
+        if self._leaving_deliveries and not self._disposed and not self._one_shot_exit:
+            # A DRAINING RUNTIME NOW PARKS PEER MESSAGES AND WAKES HERE: they are
+            # delivered into its live turn rather than spooled
+            # (``ServingSessionHandle._admits_into_live_turn``,
+            # ``_spool_wake_to_inbox``), so one that lands past the turn's last
+            # boundary would otherwise sit in memory until the exit disposes it.
+            await self._spool_parked_for_successor()
+            return
         if self._disposed or self._leaving_deliveries or self._one_shot_exit:
             return
         drained: list[AgentMessage] = []
@@ -22613,6 +25196,66 @@ class Session:
                 "bridge taint latch row write failed; latch held in memory", exc_info=True
             )
 
+    # -- Community read taint (RFC v2.4 §5.9; community/taint.py) ---------------
+
+    def _init_community_taint(self) -> None:
+        """Own the session's "read community content" flag, fed from durable commits.
+
+        The bridge latch's wiring, one source narrower: every transcript commit
+        is observed so a ``community_read`` result is seen whatever path
+        appended it, and the backstop scan reads the journal from row 0 — which
+        a resume, a fork (it copies ``transcript.jsonl``) and a ``/move``
+        replica all load. Compaction appends a marker and never rewrites rows,
+        so it cannot lift the flag; only ``/new`` or a fresh session starts
+        clean.
+        """
+        from local_operator.community.taint import CommunityTaint
+
+        transcript = self._transcript
+
+        def journal() -> list[tuple[str, dict[str, Any]]]:
+            return [(entry.type, entry.payload) for entry in transcript.entries()]
+
+        self._community_taint = CommunityTaint(entries=journal)
+        self._community_taint_row_task: asyncio.Task[None] | None = None
+        subscribe = getattr(transcript, "subscribe_commits", None)
+        if subscribe is not None:
+            subscribe(self._on_community_taint_commit)
+
+    @property
+    def community_tainted(self) -> bool:
+        """Whether this session has read community content. Fail-closed."""
+        return self._community_taint.tainted
+
+    def _on_community_taint_commit(self, entries: Any, _source: Any = None) -> None:
+        taint = self._community_taint
+        taint.observe_entries((entry.type, entry.payload) for entry in entries)
+        if taint.tainted and not taint.row_present:
+            task = self._community_taint_row_task
+            if task is not None and not task.done():
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.warning("community taint row not written: no running loop")
+                return
+            self._community_taint_row_task = loop.create_task(self._write_community_taint_row())
+
+    async def _write_community_taint_row(self) -> None:
+        from local_operator.community.taint import COMMUNITY_TAINT_ROW_TYPE
+
+        taint = self._community_taint
+        if taint.row_present:
+            return
+        if self._transcript.latest_custom_entry(COMMUNITY_TAINT_ROW_TYPE) is not None:
+            taint.row_present = True
+            return
+        try:
+            # The commit observer sees this row too and sets ``row_present``.
+            await self._transcript.append_custom(COMMUNITY_TAINT_ROW_TYPE, taint.row_details())
+        except Exception:  # noqa: BLE001 - the in-memory flag stays set; warned
+            logger.warning("community taint row write failed; flag held in memory", exc_info=True)
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -22662,6 +25305,7 @@ class Session:
             ancestor_session_ids=self._ancestor_session_ids(),
             bridge_taint=self._bridge_taint,
             inherited_bridge_taint=self._bridge_taint.inherited,
+            community_taint=self._community_taint,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
             # On a CHILD this resolves to the parent's title (see
@@ -22700,6 +25344,10 @@ class Session:
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
+            # The BASE gate, kept under --yolo, for person-only cards a tool
+            # raises itself (a community post): yolo skips the tool gate, not
+            # the person (the profile save's route, ``_request_approval``).
+            person_approval=self._request_approval,
             # The host's consent seam for tool-issued ACCOUNT writes. Held on
             # the session because this context is rebuilt every turn; ``None``
             # is a refusal, never a permission (see the constructor field).
@@ -22717,11 +25365,33 @@ class Session:
             # the queue is absent, which is what keeps ``ask_withdraw`` off the
             # blocking arm's tool surface.
             withdraw_ask=self._ask_withdraw_callable(),
-            # THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2): the
-            # same two conditions as the two doors above, so its presence IS
-            # "this ask would queue" — which is exactly the population the
-            # gate exists for. ``None`` means the tool never awaits a check.
-            gate_ask=self._ask_gate_callable(),
+            # A node's stale site cards (cancelled or superseded extension
+            # entries) are settled through the same engine, so the same
+            # condition binds it.
+            # On a SUBAGENT with no queue of its own (security review 60334) the
+            # site-card trio reaches the nearest ancestor's queue instead,
+            # scoped to this requester's own cards; the methods pick the host.
+            withdraw_site_asks=(
+                self.withdraw_site_asks
+                if self._ask_withdraw_callable() is not None
+                or self._site_card_enqueue_callable() is not None
+                else None
+            ),
+            # The re-raise bound (review U15) reads the same queue, counted
+            # once per family (review m2).
+            site_ask_lapses=(
+                self.site_ask_lapses
+                if self._ask_withdraw_callable() is not None
+                or self._site_card_enqueue_callable() is not None
+                else None
+            ),
+            enqueue_site_card=self._site_card_enqueue_callable(),
+            begin_site_request=(
+                self.begin_site_request if self._site_card_enqueue_callable() is not None else None
+            ),
+            # Team Integrations: only a person's answer on a host-filed card
+            # can publish an app or mint a credential (RFC §8.2).
+            integration_consent=self._integration_consent_seam(),
             # THE QUIET-END DOOR (design docs/design/quiet-turns.md §4): the
             # whole availability fact of ``no_reply`` — ``None`` for subagent
             # children, one-shot hosts, output-contract sessions and under the
@@ -22731,8 +25401,9 @@ class Session:
             # THE INBOX DOOR (docs/design/notifications-inbox.md §3.2): the
             # whole availability fact of ``notify`` — ``None`` for delegated
             # children, hidden sessions, one-shot hosts, output-contract
-            # sessions and under the kill switch.
-            notify_inbox=self._notify_inbox_callable(),
+            # sessions and under the kill switch — and, for the TOOL only,
+            # sessions another agent started (``_notify_tool_callable``).
+            notify_inbox=self._notify_tool_callable(),
             # The channel-spend ingest seam. ACTIVE only where a session owns a
             # fold: tools build a frozen record and call it, and the session
             # folds, journals and publishes. A bound method (not a value) so the
@@ -22765,6 +25436,8 @@ class Session:
             # ``agent_shell.MAY_DELEGATE_ENV`` for the commands it runs; see
             # ``agent_shell.py`` for what reads it and why it is asymmetric.
             may_delegate=any(tool.name == "task" for tool in self._tools),
+            # Same derivation, for the spill footer (see the field's comment).
+            spill_readable=any(tool.name == "read" for tool in self._tools),
             jobs=self.jobs,
             peer_arrival=self._peer_arrival,
             subagent_comms=self.subagent_comms,
@@ -22811,6 +25484,7 @@ class Session:
             # itself — one value, both roles, so the check and the executor
             # cannot see different answers. ``None`` keeps the tool absent.
             bridge_runtime=self.bridge_runtime,
+            bridge_session_agent_display=getattr(self, "_bridge_session_agent_display", None),
             delegated_tools={
                 tool.name: tool for tool in self._tools if tool.name.startswith("mcp__")
             },
@@ -22920,6 +25594,376 @@ class Session:
             model_selector=model,
         )
 
+    async def verify_completion(
+        self,
+        *,
+        request: str,
+        claim: str,
+        observation: str | None = None,
+        host_tools: "Sequence[AgentTool]" = (),
+        limits: "VerifierLimits | None" = None,
+        on_started: "Callable[[dict[str, Any]], None] | None" = None,
+        label: str = "Verify completion",
+        evidence: str | None = None,
+        typed_evidence: "VerifierEvidence | None" = None,
+    ) -> "VerifierVerdict":
+        """Run the harness completion verifier against a claimed-finished task.
+
+        WHY A SESSION PRIMITIVE. The check must be independent of the model
+        that did the work (fresh context, read-only reach), and it must be the
+        HARNESS's decision to run it: the model that most needs checking is the
+        one that never delegates (``harness/verifier.py`` has the measurement).
+        It reuses the ordinary child machinery (``run_subagent``) so the
+        verifier is a real child session: its own transcript, its request rows
+        attributed by ``job_id`` and ``actor_role="verifier"`` into whatever
+        accounting the root tree feeds, its job cancelled with this session.
+
+        What differs from a ``task`` launch, and why:
+
+        * the role is code-defined (``verifier_profile``), never the registry's;
+        * a :class:`ChildSurface` ceiling of the verifier allowlist, so the
+          child gets no ``web_*`` floor, no ``hub``/``task``, no inherited MCP,
+          and ``readonly_shell``: its ``bash`` is write-confined by THIS launch,
+          not by the ``verifier`` name (an operator role of that name keeps
+          its own shell);
+        * ``host_tools`` -- whatever lets it SEE the deliverable -- exist in
+          that child only, wrapped to count against ``max_commands``. Their
+          presence means the deliverable is on a remote target, so the
+          child's LOCAL read/glob/grep/bash are withdrawn (``verifier_ceiling``:
+          main33's host-confused verdicts); with none, the local read-only set
+          is unchanged;
+        * ``evidence`` -- the worker's recorded tool calls, so the check starts
+          from the claims instead of rediscovering them. ``None`` reads this
+          session's own most recent answered calls (``recent_tool_evidence``);
+          ``""`` sends none;
+        * ``announce=False``: the result is returned here, never injected into
+          this session's conversation;
+        * bounded by :class:`VerifierLimits`: a spent command budget refuses
+          and asks for the verdict; the request cap cancels once a request
+          past it asks for more tools; the wall cancels. A verdict line in
+          the child's final assistant message wins over all three, even when
+          the job was cancelled before it settled (PR #3837 round 3).
+
+        Never raises for an expected refusal (closing session, memory
+        admission, no request observation to enforce the request cap): those
+        return ``INCONCLUSIVE`` with ``ended_by="refused"`` so the caller can
+        record a skip and carry on exactly as if no verifier existed. Blocks
+        until the verdict; the caller decides what the worker sees.
+        """
+
+        from local_operator import memory_guard
+        from local_operator.harness.subagent import ChildSurface, run_subagent
+        from local_operator.harness.verifier import (
+            CANCEL_JOIN_S,
+            COMMAND_BUDGET_REFUSAL,
+            REQUEST_BUDGET_REFUSAL,
+            VERIFIER_ROLE,
+            VerdictStatus,
+            VerifierLimits,
+            VerifierVerdict,
+            build_verifier_prompt,
+            counted_host_tools,
+            find_verdict,
+            parse_verdict,
+            recent_tool_evidence,
+            verifier_ceiling,
+            verifier_profile,
+        )
+        from local_operator.harness.verifier_evidence import (
+            TYPED_COMMAND_BUDGET_REFUSAL,
+            TYPED_REQUEST_BUDGET_REFUSAL,
+            VerifierEvidence,
+            assess_completion,
+        )
+
+        # Receipts belong to this invocation: reusing an SDK evidence envelope
+        # must not make a prior check's inspections available to a fresh child.
+        if typed_evidence is not None:
+            typed_evidence = VerifierEvidence(
+                typed_evidence.items, typed_evidence.required_modalities
+            )
+        limits = limits or VerifierLimits()
+        started = time.monotonic()
+        # The budget cue is the last thing a capped child reads before it
+        # answers, so it must ask for the format ``decode`` below reads.
+        typed = typed_evidence is not None
+        command_cue = TYPED_COMMAND_BUDGET_REFUSAL if typed else COMMAND_BUDGET_REFUSAL
+        request_cue = TYPED_REQUEST_BUDGET_REFUSAL if typed else REQUEST_BUDGET_REFUSAL
+
+        def decode(text: str | None) -> tuple[VerdictStatus, str]:
+            return (
+                assess_completion(text, typed_evidence)
+                if typed_evidence is not None
+                else parse_verdict(text)
+            )
+
+        def refused(reason: str) -> VerifierVerdict:
+            return VerifierVerdict(
+                status="INCONCLUSIVE",
+                findings=reason,
+                ended_by="refused",
+                wall_s=time.monotonic() - started,
+            )
+
+        if (
+            typed_evidence is not None
+            and "image" in typed_evidence.required_modalities
+            and not typed_evidence.images
+        ):
+            return refused("required image evidence is unavailable")
+        if self._disposed or self._owned_work_closing:
+            return refused("this session is shutting down")
+        # The same admission every child pays (``_launch_subagent``): a verifier
+        # is resident work in this process like any other child.
+        admission = memory_guard.admission_check("a completion verifier")
+        if not admission.admitted:
+            return refused(admission.reason or "memory admission refused")
+        # What the child is actually GIVEN, for ``verifier_started``/``tools``
+        # (review M5): the declaration lists ``bash``, but a confined child on
+        # a host that cannot sandbox gets no shell at all, by the same probe
+        # ``_readonly_shell_root`` asks (cached after the first spawn). Asked
+        # BEFORE the request subscription, so nothing awaits between that and
+        # the ``finally`` that removes it.
+        from local_operator.tools.confinement import (
+            shell_sandbox_unavailable_reason_async,
+        )
+
+        no_shell_sandbox = await shell_sandbox_unavailable_reason_async() is not None
+
+        cap_requests = limits.request_budget
+        state: dict[str, Any] = {
+            "job_id": None,
+            "requests": 0,
+            "assistant_messages": 0,
+            # The latest assistant message's text when it called NO tool --
+            # the child's answer -- else ``None`` (a later step supersedes it).
+            "answer": None,
+            "local_tools": 0,
+            "caps": [],
+        }
+        # Set only when a request PAST the cap asks for more tools: the child
+        # did not take its last request to answer, so it is cancelled now. A
+        # past-the-cap request that answers is the verdict and is waited for.
+        overshoot = asyncio.Event()
+        host_names = frozenset(tool.name for tool in host_tools)
+
+        def hit(cap: str) -> None:
+            if cap not in state["caps"]:
+                state["caps"].append(cap)
+
+        def observe(observation: Any) -> None:
+            # Request-final rows of the WHOLE root tree arrive here; only the
+            # verifier's own job counts. Synchronous, append-and-return.
+            if state["job_id"] is None or observation.job_id != state["job_id"]:
+                return
+            state["requests"] += 1
+            if state["requests"] >= cap_requests:
+                hit("requests")
+            if state["requests"] > cap_requests + 1:
+                # Backstop for requests that end without an assistant message
+                # (so ``on_message`` never judges them): the first past the
+                # cap cannot be told from one whose message is still on its
+                # way (row and message arrive in either order), so it is the
+                # SECOND past the cap that is cancelled -- at most two past
+                # the cap in this case, one in every other.
+                overshoot.set()
+
+        def on_message(text: str, tool_names: tuple[str, ...], stop_reason: str | None) -> None:
+            # From the child's relay, synchronously, at each finished
+            # assistant message (``ChildSurface.on_assistant_message``). Max
+            # of both counts: the request row and the message event of one
+            # request may arrive in either order.
+            state["assistant_messages"] += 1
+            # Only a message the provider FINISHED is an answer: a stream that
+            # errored (or was aborted, or hit its length) still ends the
+            # message with its partial text, whose last line may be a
+            # per-requirement ``Verdict: PASS`` written on the way to the real
+            # one (review round 3, M1: a failed job read as a PASS).
+            state["answer"] = None if tool_names or stop_reason != "stop" else text
+            state["local_tools"] += sum(1 for name in tool_names if name not in host_names)
+            if tool_names and max(state["assistant_messages"], state["requests"]) > cap_requests:
+                overshoot.set()
+
+        def request_budget_spent() -> str | None:
+            # Tool calls made by the cap's own request (its row has arrived by
+            # the time they run) -- host or the child's own -- are refused
+            # with the cue to answer, so the one request past the cap is spent
+            # on the verdict.
+            return request_cue if state["requests"] >= cap_requests else None
+
+        try:
+            unsubscribe = self.subscribe_requests(observe)
+        except RuntimeError:
+            # Without request observation the request cap cannot be enforced,
+            # and an uncapped verifier is not one this method may launch.
+            return refused("request observation unavailable; the request cap cannot be enforced")
+        wrapped, command_count = counted_host_tools(
+            host_tools,
+            limit=limits.max_commands,
+            on_call=lambda _count: None,
+            on_exhausted=lambda: hit("commands"),
+            refuse_when=request_budget_spent,
+            on_result=typed_evidence.record_result if typed_evidence is not None else None,
+            command_refusal=command_cue,
+        )
+        # ``readonly_shell`` confines this launch's ``bash`` by the launch
+        # itself, never by the ``verifier`` name (an operator's registry role
+        # of that name must keep its own shell: review R2 / QA Q1).
+        surface = ChildSurface(
+            # Grounding: a remote target channel withdraws the local tools.
+            ceiling=verifier_ceiling(host_names),
+            host_tools=wrapped,
+            initial_images=typed_evidence.images if typed_evidence is not None else (),
+            require_images=typed_evidence is not None,
+            readonly_shell=True,
+            on_assistant_message=on_message,
+            # The child's own tools (read/grep/bash) get the same cue on the
+            # cap's request as the host tools, so a child is never cancelled
+            # for a request past the cap it was not told to spend answering.
+            tool_gate=request_budget_spent,
+        )
+        job_id: str | None = None
+        settled: asyncio.Event | None = None
+        granted = surface.declaration(getattr(self, "_declared_tools", None)) or frozenset()
+        if no_shell_sandbox:
+            granted = granted - {"bash"}
+        granted_tools = tuple(sorted(granted))
+        if evidence is None:
+            # Read before launch, from this session's own context: the worker
+            # is parked (the caller awaits the verdict), so the list is stable.
+            evidence = recent_tool_evidence(list(self._context.messages))
+        prompt = build_verifier_prompt(
+            request=request,
+            claim=claim,
+            observation=observation,
+            evidence=evidence,
+            target_tools=tuple(sorted(host_names)),
+        )
+        if typed_evidence is not None:
+            prompt += "\n" + typed_evidence.prompt()
+        try:
+            try:
+                job_id = run_subagent(
+                    label,
+                    prompt,
+                    parent_session=self,
+                    jobs_manager=self.jobs,
+                    agent=VERIFIER_ROLE,
+                    profile_override=verifier_profile(),
+                    surface=surface,
+                    announce=False,
+                )
+            except Exception as error:  # noqa: BLE001 -- a refused launch is a skip
+                logger.warning("completion verifier could not launch", exc_info=True)
+                return refused(f"launch refused: {error}")
+            # Set before the first await: the runner has not run yet, so no
+            # request of this job can have finished unobserved.
+            state["job_id"] = job_id
+            job = self.jobs.get(job_id)
+            if on_started is not None:
+                on_started(
+                    {
+                        "job_id": job_id,
+                        "model": getattr(job, "model_label", None),
+                        "tools": list(granted_tools),
+                        "limits": limits.as_record(),
+                    }
+                )
+            settled = self.jobs.settled_event(job_id)
+            deadline = started + float(limits.wall_s)
+
+            async def first_of(events: "tuple[asyncio.Event, ...]", timeout: float) -> None:
+                waiters = [asyncio.ensure_future(event.wait()) for event in events]
+                try:
+                    await asyncio.wait(
+                        waiters, timeout=max(0.0, timeout), return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    for waiter in waiters:
+                        waiter.cancel()
+
+            # No short settle grace any more: a spent command budget and the
+            # request cap both leave the child its answering request, and only
+            # a past-the-cap request asking for MORE tools (``overshoot``) or
+            # the wall ends it early. The worst case is still ``wall_s +
+            # CANCEL_JOIN_S``, the envelope embedders budget for.
+            await first_of((settled, overshoot), deadline - time.monotonic())
+            ended_by: str | None = None
+            if not settled.is_set():
+                ended_by = "requests" if overshoot.is_set() else "wall"
+                hit(ended_by)
+                await self.jobs.cancel(job_id)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(settled.wait(), timeout=CANCEL_JOIN_S)
+            job = self.jobs.get(job_id)
+            status_text = getattr(job, "status", None)
+            usage = getattr(job, "usage", None)
+            common: dict[str, Any] = {
+                "job_id": job_id,
+                "requests": state["requests"],
+                "commands": command_count(),
+                "wall_s": time.monotonic() - started,
+                "model": getattr(job, "model_label", None),
+                "tools": granted_tools,
+                "transcript_dir": (
+                    str(directory)
+                    if (comms := getattr(self, "subagent_comms", None)) is not None
+                    and (directory := comms.session_dir_of(job_id)) is not None
+                    else None
+                ),
+                "usage": usage.model_dump(mode="json") if usage is not None else None,
+                "caps_hit": tuple(state["caps"]),
+                "local_tools": state["local_tools"],
+            }
+            # A child that answered wins over any cap: the verdict exists, so
+            # use it. Settled ``completed`` is the ordinary case; otherwise the
+            # job was cancelled (or failed) AFTER its final assistant message,
+            # whose verdict line is still the answer -- the live t31v episode
+            # discarded a ``VERDICT: PASS`` exactly here.
+            if status_text == "completed" and job is not None:
+                verdict_status, findings = decode(job.result_text)
+                return VerifierVerdict(
+                    status=verdict_status, findings=findings, ended_by="verdict", **common
+                )
+            # Never from a job that FAILED: its last message is whatever the
+            # error left, and a failed check is INCONCLUSIVE, never a pass
+            # (M1). The rescue is for a job a cap cancelled after it answered.
+            rescued = (
+                (
+                    decode(state["answer"])
+                    if typed_evidence is not None
+                    else find_verdict(state["answer"])
+                )
+                if state["answer"] and status_text not in ("failed", "interrupted")
+                else None
+            )
+            if rescued is not None:
+                return VerifierVerdict(
+                    status=rescued[0], findings=rescued[1], ended_by="verdict", **common
+                )
+            ended_by = ended_by or "failed"
+            detail = (
+                (getattr(job, "error_text", None) or "the verifier did not finish")
+                if ended_by == "failed"
+                else f"the verifier was stopped by its {ended_by} cap before giving a verdict"
+            )
+            return VerifierVerdict(
+                status="INCONCLUSIVE", findings=detail, ended_by=ended_by, **common
+            )
+        except BaseException:
+            # The caller was cancelled (an Esc, a teardown) or a callback
+            # raised: the observer enforcing the request cap is about to be
+            # unsubscribed and the wall cap WAS the wait above, so a child left
+            # running here would run uncapped and, being consumed, never
+            # surface (review R3). Shielded so the cancel itself completes even
+            # though this task is being cancelled.
+            if job_id is not None and not (settled is not None and settled.is_set()):
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(self.jobs.cancel(job_id))
+            raise
+        finally:
+            unsubscribe()
+
     def _record_divergence_notice(self, payload: dict[str, Any]) -> None:
         """Paint a divergence notice into the transcript, from the judge's callback.
 
@@ -22951,6 +25995,214 @@ class Session:
                 logger.debug("could not record the divergence notice", exc_info=True)
 
         self._spawn_background(_append())
+
+    async def _bind_nested_diff(
+        self, outer_call_id: str, call_id: str, tool_name: str, desc: dict[str, Any]
+    ) -> bool:
+        """Journal the trusted binding of one nested write/edit archive.
+
+        The eval bridge awaits this before it advertises ``archived`` (QA F5 on
+        #3762: a nested call has no tool row, so its archive was unreachable).
+        The entry carries only ids, the tool name and the content-free
+        descriptor -- never a row -- and is written to THIS session's own
+        journal, which is the one a child route resolves through containment.
+        Any failure answers ``False`` and the caller downgrades the descriptor.
+        """
+        from local_operator.tools import diff_archive
+
+        if not self._session_id:
+            return False
+        try:
+            await self.transcript.append_custom(
+                diff_archive.NESTED_DIFF_BINDING_TYPE,
+                diff_archive.nested_binding(
+                    session_id=self._session_id,
+                    outer_call_id=outer_call_id,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    desc=desc,
+                ),
+            )
+        except Exception:  # noqa: BLE001 - an unbound archive is reported unavailable
+            logger.warning("nested diff binding failed for %s", tool_name)
+            return False
+        return True
+
+    def _file_owner(self):
+        from local_operator.session.file_provenance import OwnerProvenance
+
+        if self._file_provenance_state is None:
+            self._file_provenance_state = OwnerProvenance(
+                self._transcript,
+                config_root=self._config_dir,
+                cwd=Path(os.path.abspath(self._cwd)),
+                home=Path.home(),
+            )
+        return self._file_provenance_state
+
+    def _capture_file_input(self, text: str, command_id: str | None = None):
+        """Synchronous metadata freeze BEFORE any admission queue/spool.
+
+        Locality is not proof eligibility: an authorized remote drive/phone
+        prompt is a genuine owning-runtime admission too, while owner_typed
+        retains its separate existing account/deletion-protection meaning.
+        """
+        from local_operator.session.file_provenance import text_candidates
+
+        owner = self._file_owner()
+        return (
+            owner.admit(text, command_id)
+            if command_id
+            else owner.capture("user", text_candidates(text))
+        )
+
+    def _take_file_continuation(self, command_id: str):
+        # No in-memory ticket after runtime loss => unknown, never stat-at-drain.
+        return self._file_owner().continuation(command_id)
+
+    async def _file_provenance_hook(self, stage: str, value: Any, facts: Any) -> None:
+        """Awaited native harness producer/binder, not an analytics observer."""
+        from itertools import chain
+
+        from local_operator.session.file_provenance import (
+            argument_candidates,
+            native_result_candidates,
+        )
+
+        try:
+            owner = self._file_owner()
+            if stage == "assistant":
+                owner.capture_message(value)
+            elif stage == "executing":
+                from hashlib import sha256
+
+                candidates = list(argument_candidates(facts["tool"], facts["arguments"]))
+                allowed = owner.call_references.get(value.id)
+                references = [
+                    {"digest": sha256(c.reference.encode()).hexdigest(), "locator": c.locator}
+                    for c in candidates
+                    if allowed is None
+                    or (sha256(c.reference.encode()).hexdigest(), c.locator) in allowed
+                ]
+                call_event = CustomMessage(
+                    custom_type="file_provenance_native_call_v1",
+                    details={
+                        "hidden": True,
+                        "call_id": value.id,
+                        "tool": facts["tool"],
+                        "references": references,
+                    },
+                )
+                input_ticket = owner.capture("tool_call", candidates, cwd=Path(facts["cwd"]))
+                input_ticket.call_id = value.id
+                owner.native_calls[value.id] = (call_event, input_ticket)
+                facts["call_event"] = call_event
+                facts["references"] = references
+            elif stage == "executed":
+                # Capture output arguments immediately after the real executor,
+                # before result copies, post hooks or queued completion events.
+                ticket = owner.capture(
+                    "tool_completion",
+                    chain(
+                        argument_candidates(facts["tool"], facts["arguments"]),
+                        native_result_candidates(facts["tool"], facts["result"].details),
+                    ),
+                    cwd=Path(facts["cwd"]),
+                )
+                native_call = owner.native_calls.get(value.id)
+                ticket.call_id = value.id
+                ticket.origin_id = owner.call_sources.pop(value.id, None) or (
+                    native_call[0].id if native_call else None
+                )
+                owner.calls[value.id] = (facts, ticket)
+                owner.call_references.pop(value.id, None)
+            elif stage == "result":
+                captured = owner.calls.pop(facts.tool_call_id, None)
+                if captured is not None:
+                    owner.bind(value.id, captured[1])
+                owner.native_calls.pop(facts.tool_call_id, None)
+            elif stage == "nested":
+                captured = owner.calls.pop(value.id, None)
+                if captured is None:
+                    return
+                native, ticket = captured
+                # A nested tool has no ordinary tool row. This host-created
+                # source event is awaited before arbitrary cell code sees it;
+                # a cell-returned lookalike has no native capture ticket.
+                message = CustomMessage(
+                    custom_type="file_provenance_native_v1",
+                    details={
+                        "hidden": True,
+                        "tool": native["tool"],
+                        "call_id": value.id,
+                        "outer_call_id": facts["outer_call_id"],
+                        "references": (
+                            [
+                                {"digest": f.reference_digest, "locator": f.locator}
+                                for f in ticket.files
+                            ]
+                            if ticket
+                            else []
+                        ),
+                    },
+                )
+                native_call = owner.native_calls.pop(value.id, None)
+                if native_call is None:
+                    return
+                call_event, input_ticket = native_call
+                input_ticket.outer_call_id = facts["outer_call_id"]
+                owner.bind(call_event.id, input_ticket)
+                if ticket is not None:
+                    ticket.origin_id = call_event.id
+                    ticket.outer_call_id = facts["outer_call_id"]
+                    owner.bind(message.id, ticket)
+                messages = [call_event, message]
+                await self._transcript.append_messages(
+                    messages, _file_captures=owner.take(messages)
+                )
+        except Exception:
+            # Ordinary transcript/tool delivery survives provenance failure.
+            # This is unknown evidence, never a deferred target restat/retry.
+            logger.debug("native file provenance unavailable", exc_info=True)
+
+    async def _file_job_completed(self, job: Any, native: Any) -> None:
+        """Freeze at FIRST native completion, not wait/roster/on-delivery replay."""
+        from local_operator.session.file_provenance import argument_candidates
+
+        owner = self._file_owner()
+        from hashlib import sha256
+
+        allowed = {(r["digest"], r["locator"]) for r in native.get("references", [])}
+        ticket = owner.capture(
+            "job_completion",
+            (
+                c
+                for c in argument_candidates(native["tool"], native["arguments"])
+                if (sha256(c.reference.encode()).hexdigest(), c.locator) in allowed
+            ),
+            cwd=Path(native["cwd"]),
+        )
+        call_event = native.get("call_event")
+        if not isinstance(call_event, CustomMessage):
+            return
+        ticket.origin_id = call_event.id
+        ticket.call_id, ticket.job_id = native["call_id"], job.id
+        message = CustomMessage(
+            custom_type="file_provenance_native_v1",
+            details={
+                "hidden": True,
+                "job_id": job.id,
+                "call_id": native["call_id"],
+                "tool": native["tool"],
+                "references": [
+                    {"digest": f.reference_digest, "locator": f.locator} for f in ticket.files
+                ],
+                "unproven": list(ticket.unknown),
+            },
+        )
+        owner.bind(message.id, ticket)
+        messages = [call_event, message]
+        await self._transcript.append_messages(messages, _file_captures=owner.take(messages))
 
     def _capture_prepared_write(self, call: ToolCall, result: ToolResult) -> None:
         """Private exact executed bytes; never persisted or passed to a provider.
@@ -23116,6 +26368,7 @@ class Session:
         """
         from local_operator.harness.subagent import (
             SubagentModelUnavailable,
+            local_missing_tier_remedy,
             resolve_member_model,
         )
 
@@ -23230,7 +26483,16 @@ class Session:
             # that would be noise about a default (the pre-strict code was
             # silent there too). Malformed or unreadable config still warns.
             if strict:
-                raise SubagentModelUnavailable(wanted, reason)
+                # ``quiet`` is exactly the "nothing configured at that tier"
+                # case (``resolve_member_model``), the one a mesh node with
+                # ``subagents: {}`` hits for every tier-pinned role; the refusal
+                # names the fix so the delegating model reports it instead of
+                # silently relaunching on ``model=inherit`` or as a session.
+                raise SubagentModelUnavailable(
+                    wanted,
+                    reason,
+                    remedy=local_missing_tier_remedy(str(wanted)) if quiet else "",
+                )
             if not quiet:
                 logger.warning("subagent model tier %r: %s; using session model", wanted, reason)
             return None
@@ -25952,7 +29214,9 @@ class Session:
         # boundary while avoiding an fsync for every already-paired result.
         # A latched checkpoint rides THIS commit, so the record and its batch
         # are never split (see `_persist_new_messages`).
-        await self._transcript.append_messages(fresh, checkpoint=checkpoint)
+        await self._transcript.append_messages(
+            fresh, checkpoint=checkpoint, _file_captures=self._file_owner().take(fresh)
+        )
         if checkpoint is not None:
             self._checkpoint_pending = False
 
@@ -26239,6 +29503,13 @@ class Session:
             # The automatic path has nobody to tell — a turn that did not need
             # compacting must not narrate that fact every time.
             #
+            # Below the size trigger is exactly where the turn-end ECONOMIC
+            # pass is considered (``_maybe_economic_compact``): every turn end
+            # reaches here, wakes and quiet ``no_reply`` turns included, which
+            # is what an always-on session needs, since its armed wakes keep
+            # the idle pass below from ever firing.
+            if planned.reason == "below_threshold" and await self._maybe_economic_compact():
+                return
             # This IS the turn end of a session that may now go idle on a large
             # context, so it is where the idle / pre-wake pass is considered.
             # Arming only schedules a timer; the predicate is re-run at fire.
@@ -26385,13 +29656,20 @@ class Session:
     def _capture_elision_budget(self, compaction_api: Any, plan: _CompactionPlan) -> int | None:
         """The byte ceiling capture elision targets at a pass, or ``None``.
 
-        The target is the SAME band the auto-continue gate measures against --
-        ``WIRE_RECOVERY_BAND`` x the resolved wire trigger -- because that is
-        the definition of "created real headroom" this package already uses: a
-        pass that lands there schedules its continuation, while one that
-        merely shaved a capture and is still over the trigger would re-fire
-        next turn (the dead-loop the band exists to prevent, restated in the
-        trigger's own units).
+        Two cases, keyed on the SAME condition the byte-aware cut is keyed on
+        (:meth:`_advance_cut_for_wire_band`: the planned request is over the
+        byte trigger), so the cut's projection of elision and the elision the
+        commit performs always use one figure:
+
+        - Over the byte trigger: the landing target
+          (:meth:`_wire_landing_bytes`). This pass exists because of image
+          weight, and one that merely shaved a capture and is still near the
+          trigger re-fires a few tool groups later, each time rewriting the
+          prompt prefix.
+        - Not over it (a token-fired, manual or advised pass): the acceptance
+          band (:meth:`_wire_band_bytes`), exactly as before the landing
+          target existed. Nothing about such a pass is driven by bytes, so it
+          must not start shedding captures it kept yesterday.
 
         ``None`` when the byte trigger is disabled or the resolvers are
         absent: a session that never opted into byte pressure keeps exactly
@@ -26399,6 +29677,11 @@ class Session:
         knob do no elision work at all. A ruler failure is ``None`` too -- the
         band check's posture: it may never fail a pass.
         """
+        trigger = self._wire_trigger_bytes(compaction_api, plan.settings)
+        if trigger is None:
+            return None
+        if self._wire_bytes_of(compaction_api, plan.llm_history) > trigger:
+            return self._wire_landing_bytes(compaction_api, plan.settings)
         return self._wire_band_bytes(compaction_api, plan.settings)
 
     def _wire_trigger_bytes(self, compaction_api: Any, settings: Any) -> int | None:
@@ -26423,17 +29706,56 @@ class Session:
     def _wire_band_bytes(self, compaction_api: Any, settings: Any) -> int | None:
         """``WIRE_RECOVERY_BAND`` x the resolved wire trigger, or ``None``.
 
-        The ONE definition of "a pass created real byte headroom" for the two
-        places that must land inside it: capture elision (the kept rows) and
-        the byte-aware cut (:meth:`_advance_cut_for_wire_band`). Neither
-        restates the arithmetic, so they cannot drift from each other or from
-        the auto-continue gate's :func:`cleared_wire_headroom`.
+        The ACCEPTANCE line: the auto-continue gate's
+        :func:`cleared_wire_headroom`, and the elision ceiling of a pass that
+        is not under byte pressure (:meth:`_capture_elision_budget`). Where a
+        byte-fired pass AIMS is :meth:`_wire_landing_bytes`, which is lower.
         """
         band: Any = getattr(compaction_api, "WIRE_RECOVERY_BAND", None)
         trigger = self._wire_trigger_bytes(compaction_api, settings)
         if band is None or trigger is None:
             return None
         return int(float(band) * trigger)
+
+    def _wire_landing_bytes(self, compaction_api: Any, settings: Any) -> int | None:
+        """The byte size a byte-fired pass aims to land the request at, or ``None``.
+
+        The ONE landing target for the two places that must land inside it:
+        the byte-aware cut (:meth:`_advance_cut_for_wire_band`) and capture
+        elision on a pass over the byte trigger
+        (:meth:`_capture_elision_budget`). Neither restates the arithmetic, so
+        they cannot drift from each other.
+
+        The target is ``thresholds.wire_landing_bytes`` (``WIRE_LANDING_BAND``
+        x the resolved wire trigger), deliberately BELOW the acceptance line
+        (:meth:`_wire_band_bytes`). They used to be one number, and a pass that
+        aims at its own acceptance line lands with 20% of the trigger to
+        spare: under three full-size screenshots, so the byte trigger re-fired
+        every few tool groups and each pass rewrote the prompt prefix. The
+        acceptance line is unchanged and stays at or above this target (the
+        resolver clamps it), so a pass that hits the target always clears the
+        auto-continue gate.
+
+        A compaction module without the resolver (a partial test double that
+        predates it) falls back to the acceptance band rather than losing the
+        byte-aware cut altogether.
+        """
+        landing: Any = getattr(compaction_api, "wire_landing_bytes", None)
+        if not callable(landing):
+            return self._wire_band_bytes(compaction_api, settings)
+        if self._wire_trigger_bytes(compaction_api, settings) is None:
+            return None
+        try:
+            target: Any = landing(settings)
+        except Exception:  # noqa: BLE001 — a ruler failure must not fail the pass
+            logger.debug("wire landing resolution failed; wire band skipped", exc_info=True)
+            return None
+        # Same narrowing posture as ``_wire_trigger_bytes``: a duck-typed
+        # resolver can hand back anything, and a non-positive target means
+        # "disabled", never "land at zero bytes".
+        if not isinstance(target, int) or target <= 0:
+            return None
+        return target
 
     def _advance_cut_for_wire_band(
         self,
@@ -26466,9 +29788,9 @@ class Session:
         previous marker (its archive frames included) and the preserved user
         turns it carries forward. The first pass of a session has no marker to
         measure, so it is under-counted by one fresh archive (46-315 KB across
-        the three provider shapes, 0.3-2% of the trigger) -- inside the 20%
-        the band leaves, and a constant to cover it would be a guess dressed as
-        a measurement.
+        the three provider shapes, 0.3-2% of the trigger) -- inside the room
+        the landing band leaves under the trigger, and a constant to cover it
+        would be a guess dressed as a measurement.
 
         Capture elision runs on the kept rows at the commit
         (:meth:`_capture_elision_budget`), so the ruler counts the bytes it will
@@ -26480,7 +29802,10 @@ class Session:
         partial test double without the helper keeps the plain cut.
         """
         advance: Any = getattr(compaction_api, "advance_cut_to_wire_band", None)
-        band = self._wire_band_bytes(compaction_api, settings)
+        # The LANDING target, not the acceptance band: this walk only runs
+        # while the request is over the byte trigger (the guard below), which
+        # is the case the landing target exists for.
+        band = self._wire_landing_bytes(compaction_api, settings)
         trigger = self._wire_trigger_bytes(compaction_api, settings)
         if not callable(advance) or band is None or trigger is None:
             return cut
@@ -26509,7 +29834,7 @@ class Session:
                 # window, like the marker and preserved turns. It is small
                 # (count-bounded), but counting it here keeps the band's
                 # arithmetic honest rather than leaving a constant-sized
-                # undercount for the 20% margin to absorb.
+                # undercount for the landing margin to absorb.
                 or (
                     carried_key is not None
                     and isinstance(message.provider_payload, dict)
@@ -26538,8 +29863,10 @@ class Session:
             )
 
             # Same budget the commit hands elision (``_capture_elision_budget``
-            # is the band on the KEPT rows alone, ``fixed`` excluded), so the
-            # projection is exactly what the commit will do to this window.
+            # is the landing target on the KEPT rows alone whenever the request
+            # is over the byte trigger, which it is here; ``fixed`` excluded),
+            # so the projection is exactly what the commit will do to this
+            # window.
             projected, _elided = reclaim_captures_to_wire_budget(llm_history[index:], budget=band)
             return fixed + self._wire_bytes_of(compaction_api, projected)
 
@@ -26573,6 +29900,512 @@ class Session:
     # Cold start at session LOAD (a resumed session that is already idle) is
     # deliberately not armed: its cache age is unknown to this process and
     # the first turn's end arms it anyway.
+
+    # -- Turn-end economic compaction (compaction/economics.py) ----------------
+    #
+    # The idle pass above can never fire for an always-on session: its armed
+    # wakes keep the cache warm (gate ``wake_keeps_cache_warm``), and any turn
+    # start cancels the timer. This pass is the turn-end complement. It runs in
+    # ``_maybe_compact``'s below-threshold branch, i.e. at EVERY turn end that
+    # reaches the size gate (typed, wake, peer and quiet ``no_reply`` turns
+    # alike), asks the pure EOQ predicate on cheap measured inputs, and only
+    # when that says due pays for an exact cut plan and re-asks on the exact
+    # residual before committing. Both verdicts that cost something (a refused
+    # re-check, a failed pass) are journaled so the next consideration needs
+    # ``G_min`` more growth, surviving a restart like the idle rows do.
+
+    def _is_high_wake(self) -> bool:
+        """Whether this session's cadence makes its residual the dominant cost.
+
+        Behavioural first: at least ``HIGH_WAKE_MIN_REQUESTS`` turn requests in
+        the trailing six hours (the fleet's p75 rate; see the constant).
+        The chief of staff is included by IDENTITY as well (``_aida_is_hers``,
+        one stat), so a quiet day does not flip her preserved-block cap back
+        and forth between passes. Never a subagent: a child's context dies with
+        its job. Failure answers False (the ordinary, looser cap).
+        """
+        if self._parent_session_id:
+            return False
+        try:
+            from local_operator.compaction.economics import (
+                HIGH_WAKE_MIN_REQUESTS,
+                is_high_wake_rate,
+            )
+
+            rows, _since, _yields = _economic_usage_scan(
+                self._transcript, limit=HIGH_WAKE_MIN_REQUESTS, max_yields=0
+            )
+            stamps = [int(row.get("at_ms") or 0) for row in rows]
+            if is_high_wake_rate(stamps, now_ms=int(time.time() * 1000)):
+                return True
+        except Exception:  # noqa: BLE001 - a classification, never a turn failure
+            logger.debug("high-wake classification failed", exc_info=True)
+        return self._aida_is_hers()
+
+    async def _economic_prices(
+        self, context_tokens: int | None = None
+    ) -> tuple[float, float, float] | None:
+        """Serving-request rates, not million-token probes, in dollars/token.
+
+        Every bucket uses the SAME full prompt size and dispatch provenance.
+        Inclusive-input providers must include cached tokens in input_tokens;
+        otherwise one tuple silently mixes short- and long-context tariffs.
+        Deliberately uncached: size, service tier, TTL, schedule and route all
+        affect prices. Unknown provenance disables only this optional pass.
+        """
+        provider, model_id = self._idle_cache_route or (
+            self.effective_model.provider,
+            self.effective_model.model_id,
+        )
+        count = int(context_tokens or self._idle_gate_tokens() or 0)
+        provenance = self._economic_price_provenance(str(provider))
+        if count <= 0 or provenance is None:
+            return None
+        from local_operator.compaction.idle import CACHE_TTL_1H_S
+        from local_operator.model.configure import _cache_tokens_are_inside_input
+
+        inclusive = _cache_tokens_are_inside_input(str(provider))
+        ttl = float(self._idle_cache_ttl_s or 0.0)
+        write = {"cache_write_tokens": count}
+        write["cache_write_1h_tokens" if ttl >= CACHE_TTL_1H_S else "cache_write_5m_tokens"] = count
+
+        def lookup() -> tuple[float, float, float] | None:
+            prices: list[float] = []
+            for fields in ({"cache_read_tokens": count}, write, {"input_tokens": count}):
+                fields = dict(fields)
+                if inclusive:
+                    fields["input_tokens"] = count
+                micro, known = price_call(
+                    str(provider), str(model_id), Usage(**fields, **provenance)
+                )
+                if not known:
+                    return None
+                prices.append(micro / 1e6 / count)
+            return prices[0], prices[1], prices[2]
+
+        try:
+            return await asyncio.to_thread(lookup)
+        except Exception:  # noqa: BLE001 - an optimization never breaks turn end
+            logger.debug("economic compaction: pricing failed", exc_info=True)
+            return None
+
+    def _economic_price_provenance(self, provider: str) -> dict[str, Any] | None:
+        """Only carry a tariff stamp from the route that actually served it."""
+        route = self._idle_cache_route
+        if route is not None and route != (
+            self.effective_model.provider,
+            self.effective_model.model_id,
+        ):
+            return None
+        usage = self._last_usage
+        if provider == "openai" and (
+            usage is None or usage.openai_service_tier not in ("default", "fast")
+        ):
+            return None
+        return {
+            "openai_service_tier": usage.openai_service_tier if usage else None,
+            "openai_long_context": usage.openai_long_context if usage else False,
+        }
+
+    async def _economic_summary_cost(self, plan: _CompactionPlan) -> float | None:
+        """Price the actual summary template/span plus its generation bound.
+
+        Retained operator turns are still summary input. Net context savings
+        cannot price this request. A fresh Anthropic system may incur cache
+        creation, so use the larger of uncached input and a full 5m write.
+        A route change/fallback with unknown serving tariff fails closed.
+        """
+        api = plan.compaction_api
+        previous, span = api.split_leading_marker(
+            [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)]
+        )
+        prompt = api.build_compaction_prompt(span, previous_summary=previous)
+        from local_operator.compaction.tokens import count_text_tokens
+        from local_operator.model.configure import _cache_tokens_are_inside_input
+
+        count = int(await self._offloaded(api, "estimate_messages_tokens", [Message.user(prompt)]))
+        count += count_text_tokens(api.SUMMARIZATION_SYSTEM_PROMPT)
+        # The local/provider ruler calibration also applies to the summary's
+        # serialized text. Never scale down a conservatively larger local count.
+        context = int(self._last_usage.context_tokens or 0) if self._last_usage else 0
+        prefix = int(getattr(self._last_usage, "system_tokens", 0) or 0)
+        kappa = max(1.0, (context - prefix) / max(1, plan.tokens_before))
+        count = math.ceil(count * kappa)
+        provider, model_id = self._model.provider, self._model.model_id
+        if (provider, model_id) != (self.effective_model.provider, self.effective_model.model_id):
+            return None
+        provenance = self._economic_price_provenance(provider)
+        if provenance is None:
+            return None
+        common = {**provenance, "output_tokens": api.MAX_SUMMARY_TOKENS}
+        full_write = {"cache_write_tokens": count, "cache_write_5m_tokens": count}
+        if _cache_tokens_are_inside_input(provider):
+            full_write["input_tokens"] = count
+
+        def lookup() -> float | None:
+            costs = [
+                price_call(provider, model_id, Usage(input_tokens=count, **common)),
+                price_call(provider, model_id, Usage(**full_write, **common)),
+            ]
+            if not all(known for _, known in costs):
+                return None
+            return max(micro for micro, _ in costs) / 1e6
+
+        return await asyncio.to_thread(lookup)
+
+    def _economic_cold_next(self, median_gap_ms: int) -> bool:
+        """Whether the next request is expected to miss the cache anyway.
+
+        True when a typical gap from now lands past the cache expiry this
+        process measured. An UNKNOWN anchor (no usage on this route yet, or a
+        route change that reset it) answers False: the cold shortcut is a
+        reward for a deterministic miss, never a guess.
+        """
+        anchor = int(self._idle_cache_anchor_ms or 0)
+        ttl = self._idle_cache_ttl_s
+        if anchor <= 0 or not ttl or median_gap_ms <= 0:
+            return False
+        return int(time.time() * 1000) + int(median_gap_ms) > anchor + int(ttl * 1000)
+
+    async def _economic_exact_residual(
+        self, plan: _CompactionPlan, *, prefix_tokens: int, provider_context: int
+    ) -> int:
+        """Project the pass's residual from a REAL cut plan, in provider tokens.
+
+        ``kept window + capped preserved block + actual marker/carry`` measured by
+        the local ruler, scaled by this session's own provider/ruler ratio
+        ``kappa`` (provider conversation tokens over the plan's local estimate,
+        floored at one, never clipped downward), plus the shared system/tools
+        prefix. The preserved block uses the unchanged commit cap. Snapcompact
+        prepares and reuses the real archive; text summaries reserve the full
+        configured output bound. This is a conservative projection, not a
+        promise that local text tokens equal future provider billing.
+        """
+        api = plan.compaction_api
+        to_summarize = plan.llm_history[: plan.cut]
+        kept = plan.llm_history[plan.cut :]
+        kept_tokens = int(await self._offloaded(api, "estimate_messages_tokens", kept))
+        genuine_user_ids = {
+            message.id
+            for message in self._context.messages
+            if isinstance(message, Message) and message.role == "user"
+        }
+        turns: list[Any] = list(api.extract_preserved_user_turns(to_summarize, genuine_user_ids))
+        turns = list(api.collapse_relaunch_briefs(turns))
+        previous = self._transcript.latest_entry("compaction") if self._transcript else None
+        previous_payload = previous.payload if previous is not None else {}
+        dropped = _payload_count(previous_payload, "preserved_turns_dropped")
+        shed = _payload_count(previous_payload, "preserved_turns_shed")
+        # A resumed legacy marker may have been healed only in rendered context.
+        # Match commit's two-source reconciliation before pricing its notice.
+        for message in self._context.messages:
+            carried_dropped, carried_shed = api.elision_counts_of(message)
+            dropped = max(dropped, int(carried_dropped))
+            shed = max(shed, int(carried_shed))
+        capped = api.cap_preserved_user_turns(
+            turns,
+            cap=self._preserved_turns_cap(plan.settings),
+            already_dropped_genuine=dropped,
+            already_dropped_injections=shed,
+        )
+        if plan.strategy == "snapcompact":
+            from local_operator.compaction import snapcompact
+
+            # Prepare ONCE under the turn lock and reuse these exact bytes at
+            # commit. Raster/layout failure must not buy an unchecked paid LLM
+            # fallback; ordinary size/manual passes retain that safety net.
+            prepared = await self._produce_summary(
+                api,
+                [m for m in to_summarize if _is_summarizable(m)],
+                plan.strategy,
+                settings=plan.settings,
+                allow_llm_fallback=False,
+                **self._dense_tail_kwargs(plan),
+            )
+            plan.economic_summary[:] = [prepared]
+            payload = (prepared[1] or {}).get("snapcompact")
+            archive = snapcompact.Archive.model_validate(payload)
+            visual_count = snapcompact.replayed_frame_count(archive)
+            visual = visual_count * snapcompact.frame_token_estimate_for(
+                self.effective_model.provider, self.effective_model.model_id
+            )
+            summary, preserve_data = prepared
+        else:
+            # Count the empty marker's framing separately from the bounded
+            # generated text. No model call is bought for a residual estimate.
+            summary, preserve_data = "", None
+            visual_count = 0
+            visual = 0
+        preserve_data = with_attachment_manifest(
+            preserve_data, to_summarize, world_root=self._confinement_root
+        )
+        marker = build_compaction_marker(summary, preserve_data)
+        rendered_marker = self._convert_to_llm([marker])
+        from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE
+
+        marker_tokens = int(await self._offloaded(api, "estimate_messages_tokens", rendered_marker))
+        # The converter ruler already charges each replayed image at its local
+        # image price. Replace, don't double-add, the provider visual cost.
+        text_archive = marker_tokens - visual_count * IMAGE_TOKEN_ESTIMATE
+        if plan.strategy != "snapcompact":
+            from local_operator.compaction.tokens import count_text_tokens
+
+            # A provider/local-tokenizer mismatch can activate the post-hoc
+            # truncation guard, whose notice is appended beyond the text cap.
+            text_archive += api.MAX_SUMMARY_TOKENS + count_text_tokens(api.SUMMARY_TRUNCATED_MARKER)
+        preserved = [Message.user(str(turn.get("text", ""))) for turn in capped.turns]
+        # Elision is a derived notice, not a retained operator turn. Include its
+        # current counts and this plan's new drops, as commit does.
+        notice = api.elision_notice_text(capped.genuine_dropped, capped.injections_dropped)
+        if notice:
+            preserved.append(Message.user(notice))
+        carried = render_carried_tier(*self._carried_tier_live_state())
+        if carried is not None:
+            preserved.extend(self._convert_to_llm([carried]))
+        preserved_tokens = int(await self._offloaded(api, "estimate_messages_tokens", preserved))
+        local = kept_tokens + preserved_tokens + text_archive
+        allowance = text_archive + visual
+        kappa = 1.0
+        if plan.tokens_before > 0 and provider_context > prefix_tokens:
+            kappa = (provider_context - prefix_tokens) / plan.tokens_before
+        kappa = max(1.0, kappa)
+        # The pieces, so a rollout can tell a task-floor-wide kept window (the
+        # usual reason a re-check refuses) from a preserved or archive excess.
+        logger.debug(
+            "economic residual: prefix=%d kept=%d preserved=%d allowance=%d kappa=%.2f",
+            prefix_tokens,
+            kept_tokens,
+            preserved_tokens,
+            allowance,
+            kappa,
+        )
+        return math.ceil(prefix_tokens + local * kappa + visual)
+
+    async def _journal_economic_decline(
+        self, context_tokens: int, why: str, decision: Any = None
+    ) -> None:
+        """Durably record an economic "not now"; the next ask needs G_min growth."""
+        if self._transcript is None:
+            return
+        from local_operator.compaction.economics import (
+            COMPACTION_ECONOMIC_DECLINED_TYPE,
+        )
+
+        marker = self._transcript.latest_entry("compaction")
+        details: dict[str, Any] = {
+            "marker_id": marker.id if marker is not None else "",
+            "context_tokens": int(context_tokens),
+            "why": why,
+        }
+        if decision is not None:
+            details["projected_residual"] = int(decision.projected_residual)
+            details["delta_star"] = int(decision.delta_star)
+        try:
+            await self._transcript.append_custom(
+                COMPACTION_ECONOMIC_DECLINED_TYPE, details, preserve_mtime=True
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping, never a crash
+            logger.debug("economic compaction: decline journal failed", exc_info=True)
+
+    async def _maybe_economic_compact(self) -> bool:
+        """Run a turn-end economic pass when it pays for itself; True if one ran.
+
+        Called from ``_maybe_compact`` only when the size gate refused with
+        ``below_threshold``, under the turn lock the caller holds, so it can
+        never splice into a running turn. Total: any failure answers False and
+        the turn end proceeds to arm the idle pass exactly as before.
+
+        No auto-continue follows an economic pass: nothing was interrupted (the
+        context was BELOW the trigger), and a continuation turn would itself
+        cost a full read of the context the pass just paid to shrink.
+        """
+        try:
+            from local_operator.compaction import api as compaction_api
+            from local_operator.compaction import economics
+
+            settings = self._compaction_settings or compaction_api.CompactionSettings()
+            if (
+                not settings.enabled
+                or self._parent_session_id
+                or self._transcript is None
+                or self._compaction_pass_in_flight
+                or self._pending_compaction is not None
+                or self._advisor_in_flight
+            ):
+                return False
+            gate_tokens = self._idle_gate_tokens()
+            if gate_tokens is None:
+                return False
+            t_eff = compaction_api.resolve_threshold_tokens(
+                self.effective_model.context_window, settings
+            )
+            g_min = compaction_api.idle_growth_for(
+                t_eff, int(getattr(settings, "idle_min_growth_tokens", 0) or 0)
+            )
+            high_wake = self._is_high_wake()
+            # Low-wake sessions keep the idle line as a floor: below it a
+            # discretionary pass trades verbatim context for savings too small
+            # to matter, and the idle pass (advisor-confirmed) already owns
+            # that band for sessions that park. High-wake sessions have only
+            # the EOQ rule and its guards, because their residual is the cost.
+            floor = (
+                0
+                if high_wake
+                else compaction_api.idle_threshold_for(
+                    t_eff, int(getattr(settings, "idle_threshold_tokens", 0) or 0)
+                )
+            )
+            if gate_tokens < max(floor, g_min):
+                return False
+            rows, since_marker, yields = _economic_usage_scan(
+                self._transcript, limit=economics.ECONOMIC_RATE_WINDOW
+            )
+            stats = economics.usage_stats(
+                rows, since_shrink=len(rows) if since_marker is None else since_marker
+            )
+            baseline, _idle_declined, marker_id = _idle_growth_baseline(self._transcript)
+            declined = _economic_declined_at(self._transcript, marker_id)
+            prices = await self._economic_prices(gate_tokens)
+            p_read, p_write, p_input = prices if prices is not None else (0.0, 0.0, 0.0)
+            strategy = self._resolve_strategy(settings)
+            streak = economics.low_yield_streak(yields, ratio=economics.ECONOMIC_MAX_RESIDUAL_RATIO)
+            cold_next = self._economic_cold_next(stats.median_gap_ms)
+
+            # Cheap admission is optimistic (zero call cost); only the exact
+            # plan can authorize payment, after the actual request is priced.
+            pass_cost = 0.0
+
+            def judge(residual: int | None) -> Any:
+                return economics.economic_compaction_due(
+                    enabled=True,
+                    strategy=strategy,
+                    is_subagent=False,
+                    priced=prices is not None,
+                    context_tokens=gate_tokens,
+                    min_context_tokens=floor,
+                    projected_residual=residual,
+                    baseline_after_tokens=baseline,
+                    declined_at_tokens=declined,
+                    growth_per_request=stats.growth_per_request,
+                    p_read=p_read,
+                    p_write=p_write,
+                    cold_event_rate=stats.cold_event_rate,
+                    cold_next=cold_next,
+                    pass_cost=pass_cost,
+                    min_gain_tokens=g_min,
+                    max_residual_ratio=economics.ECONOMIC_MAX_RESIDUAL_RATIO,
+                    low_yield_streak=streak,
+                    t_eff=t_eff,
+                )
+
+            # CHEAP residual: the last pass's MEASURED after-size when there is
+            # one (it already contains the prefix, preserved block and archive
+            # this pass would keep); otherwise an optimistic structural floor,
+            # prefix + keep window + archive allowance, which only lets the
+            # exact re-check below decide. Optimism here costs one plan per
+            # G_min of growth at most, because the re-check journals a decline.
+            if baseline:
+                cheap = int(baseline)
+            else:
+                cheap = (
+                    stats.prefix_tokens
+                    + int(settings.keep_recent_tokens)
+                    + int(economics.ECONOMIC_ARCHIVE_ALLOWANCE_TOKENS)
+                )
+            decision = judge(cheap)
+            if not decision.due:
+                logger.debug("economic compaction not due: %s", decision.reason)
+                return False
+            planned = await self._plan_compaction(respect_threshold=False)
+            if isinstance(planned, CompactionOutcome):
+                await self._journal_economic_decline(gate_tokens, f"refused:{planned.reason}")
+                return False
+            provider_context = int(self._last_usage.context_tokens or 0) if self._last_usage else 0
+            try:
+                exact = await self._economic_exact_residual(
+                    planned, prefix_tokens=stats.prefix_tokens, provider_context=provider_context
+                )
+            except Exception:  # noqa: BLE001 - paid fallback is not authorized
+                await self._journal_economic_decline(gate_tokens, "pass_failed")
+                return False
+            rewrite_prices = await self._economic_prices(exact)
+            # EOQ assumes one tariff over its interval. Crossing a whole-prompt
+            # tier violates that model; decline rather than mix its rates.
+            # price_call rounds each total to a micro-dollar: only tolerate
+            # the combined half-micro rounding errors divided by prompt size,
+            # not an arbitrary percentage that could hide a real tariff delta.
+            rounding_error = 0.5e-6 / max(1, gate_tokens) + 0.5e-6 / max(1, exact)
+            if (
+                prices is None
+                or rewrite_prices is None
+                or any(
+                    not math.isclose(a, b, rel_tol=0.0, abs_tol=rounding_error)
+                    for a, b in zip(prices, rewrite_prices)
+                )
+            ):
+                await self._journal_economic_decline(gate_tokens, "recheck:tariff_change")
+                return False
+            if strategy != "snapcompact":
+                quoted = await self._economic_summary_cost(planned)
+                if quoted is None:
+                    await self._journal_economic_decline(gate_tokens, "recheck:unpriced_pass")
+                    return False
+                pass_cost = quoted
+            decision = judge(exact)
+            if not decision.due:
+                await self._journal_economic_decline(
+                    gate_tokens, f"recheck:{decision.reason}", decision
+                )
+                return False
+        except Exception:  # noqa: BLE001 - an optimisation must never break a turn end
+            logger.debug("economic compaction failed before commit", exc_info=True)
+            return False
+
+        async def settle(outcome: CompactionOutcome) -> None:
+            # Runs BEFORE ``compaction_end`` (``_finish_compaction``): the
+            # durable after-size for the growth gate until a request measures it.
+            if not outcome.ran:
+                await self._journal_economic_decline(gate_tokens, "pass_failed", decision)
+                return
+            if self._transcript is None:
+                return
+            marker = self._transcript.latest_entry("compaction")
+            await self._transcript.append_custom(
+                economics.COMPACTION_ECONOMIC_PASS_TYPE,
+                {
+                    "marker_id": marker.id if marker is not None else "",
+                    "context_tokens": int(gate_tokens),
+                    "tokens_before": int(outcome.tokens_before),
+                    "tokens_after": int(outcome.tokens_after),
+                    "projected_residual": int(decision.projected_residual),
+                    "delta_star": int(decision.delta_star),
+                    "cold_next": bool(decision.cold_next),
+                    "high_wake": bool(high_wake),
+                },
+                preserve_mtime=True,
+            )
+
+        try:
+            outcome = await self._run_compaction(planned, reason="economic", before_end=settle)
+        except Exception:  # noqa: BLE001
+            logger.warning("economic compaction pass failed", exc_info=True)
+            await self._journal_economic_decline(gate_tokens, "pass_failed", decision)
+            return False
+        if not outcome.ran:
+            return False
+        # The same reading the size path's ``_after_compaction_pass`` installs,
+        # WITHOUT its auto-continue (see the docstring).
+        self._held_context_tokens = outcome.tokens_after
+        logger.info(
+            "economic compaction: %d -> %d (projected %d, delta* %d, cold_next=%s, high_wake=%s)",
+            outcome.tokens_before,
+            outcome.tokens_after,
+            decision.projected_residual,
+            decision.delta_star,
+            decision.cold_next,
+            high_wake,
+        )
+        return True
 
     def _idle_inputs(self, settings: Any, compaction_api: Any, context_tokens: int) -> Any:
         """Run ``idle_compaction_due`` on this session's current state."""
@@ -27395,6 +31228,8 @@ class Session:
         # This changes the CUT, not the TRIGGER: it runs for every pass,
         # advisory or not, and introduces no second gate.
         keep_recent = settings.keep_recent_tokens
+        task_anchor_missing = False
+        task_floor_clamped = False
         boundary_floor: Any = getattr(compaction_api, "task_boundary_floor", None)
         if parked_hint is not None:
             # IDLE PASS. The task floor measures "since the last genuine user
@@ -27417,12 +31252,15 @@ class Session:
                 for message in self._context.messages
                 if isinstance(message, Message) and message.role == "user"
             }
-            floor_value: Any = boundary_floor(
-                llm_history,
-                genuine_user_ids,
-                cap=self._advisor_floor_cap(settings),
-            )
+            floor_cap = self._advisor_floor_cap(settings)
+            floor_value: Any = boundary_floor(llm_history, genuine_user_ids, cap=floor_cap)
             keep_recent = max(keep_recent, int(floor_value))
+            # ``0`` is the floor saying there is NO operator turn left in this
+            # history to measure a task from (a positive cap never clamps a
+            # real span to zero); AT the cap, the task is wider than the floor
+            # protects. Both are read again at (2b').
+            task_anchor_missing = int(floor_value) == 0
+            task_floor_clamped = floor_cap > 0 and int(floor_value) >= floor_cap
         if advisor_hint is not None:
             # Clamped with the SAME cap the local floor uses. Uncapped, a wide
             # but perfectly legal hint turns "keep more" into "never compact":
@@ -27521,6 +31359,50 @@ class Session:
                 tokens_after=local_estimate,
             )
 
+        # (2b') Dense carry of the live task. Only the automatic task floor
+        # moves the CUT: an advisory (live or parked) is a semantic "this
+        # must survive as it is" and keeps its raw window exactly as before, so
+        # the advisor's widen-only guarantee and its reclaim bookkeeping mean
+        # what they meant. Snapcompact only: context-full has no verbatim tail,
+        # and handing the task to an LLM summary would paraphrase it.
+        dense_tail_from: int | None = None
+        dense_tail_previous_chars = 0
+        dense_tail_closed = False
+        if strategy == "snapcompact" and parked_hint is None:
+            if advisor_hint is None and keep_recent > settings.keep_recent_tokens:
+                dense_cut = await self._dense_tail_cut(
+                    compaction_api, llm_history, cut, settings.keep_recent_tokens
+                )
+                if dense_cut is not None:
+                    dense_tail_from, cut = cut, dense_cut
+                    dense_tail_closed = task_floor_clamped
+            elif task_anchor_missing:
+                # THE SAME TASK, ONE PASS LATER. A dense pass archives the
+                # task's opening request with the task, so here the floor has
+                # no operator turn to measure from and the cut is already
+                # plain recency. If the previous archive recorded a protected
+                # live tail, everything this pass summarizes continues it:
+                # keep both on the new tail (bounded by ``_dense_tail_cap``)
+                # instead of letting the earlier steps fall into the paged
+                # middle after a single pass (agent review round 1, F1). A new
+                # operator turn gives the floor an anchor again, takes the
+                # branch above, and releases the earlier task. The record is
+                # absent once the task has outgrown the bound (see
+                # ``Archive.live_tail_chars``), and this pass is then the
+                # plain recency pass it is today.
+                #
+                # An ADVISED pass takes this branch too. The hint decides the
+                # raw window and that is untouched (the cut is not moved
+                # here); what the pass archives is still the same task, and
+                # being advised is no reason to drop its earlier steps into
+                # the paged middle (agent review round 2, N2). An idle pass
+                # (``parked_hint``) does not: its advisor re-anchored on the
+                # still-open work of a parked session, and the floor is not
+                # computed for it.
+                dense_tail_previous_chars = self._previous_live_tail_chars()
+                if dense_tail_previous_chars > 0:
+                    dense_tail_from = 0
+
         # (2c) Byte-aware cut. The cut above is ruled in TOKENS; a screenshot
         # history is over the BYTE trigger long before it is over any token
         # line, so a byte-fired pass would land beside the trigger and re-fire
@@ -27555,6 +31437,9 @@ class Session:
             strategy=strategy,
             llm_history=llm_history,
             cut=cut,
+            dense_tail_from=dense_tail_from,
+            dense_tail_previous_chars=dense_tail_previous_chars,
+            dense_tail_closed=dense_tail_closed,
             context_tokens=context_tokens,
             tokens_before=local_estimate,
             # ATTRIBUTION, not influence. The hint above may have widened the
@@ -27597,6 +31482,117 @@ class Session:
                     else None
                 )
             ),
+        )
+
+    async def _dense_tail_cut(
+        self,
+        compaction_api: Any,
+        llm_history: list[Message],
+        wide_cut: int,
+        keep_recent_tokens: int,
+    ) -> int | None:
+        """The plain-recency cut to use INSTEAD of the task floor's, or ``None``.
+
+        WHY. The task floor keeps the whole live task raw (up to its cap)
+        because a recency-shaped cut used to land inside the task the agent
+        was still executing. That protection is right and the carrier was
+        expensive. Replaying 25 real compaction points through
+        :meth:`compact_now` (``docs/design/compaction-dense-tail.md``),
+        the passes the floor widened landed at 82k / 108k / 134k local tokens
+        (task spans of 20-50k / 50-100k / over the 100k cap) against 57k where
+        it did not bind -- and a local token is roughly 1.4-1.7 provider tokens
+        on an Anthropic model, so those are the passes that leave a 400k
+        context above 250k.
+
+        Narrowing the raw window is not the fix, and that was measured on the
+        same points rather than assumed. Cutting back to plain recency kept
+        49% of the live task's steps and 55% of its result heads in the
+        rebuilt context; capping the floor at 50k kept 77% of each. The
+        archive's fixed-size middle cannot absorb the history a narrower
+        window hands it.
+
+        WHAT. Keep the protection, change the carrier. The pass cuts at plain
+        recency and the span the floor would have kept raw --
+        ``llm_history[wide_cut:returned]`` -- rides the archive's verbatim
+        tail edge as serialized text (``compact_to_archive``'s
+        ``protected_tail_messages``). On those 25 points the passes land at
+        54k / 69k / 87k for the same three groups (median 99k -> 64k overall,
+        worst case 155k -> 108k, none larger), with 1343 of the task's 1345
+        steps, every assistant message, 99% of its result first lines and 97%
+        of its long-result ends still present, at the same CPU cost per pass.
+
+        ACROSS PASSES. This cut archives the task's opening request with the
+        task, so the NEXT pass's floor has nothing to measure from. The
+        archive records what is still live (``Archive.live_tail_chars``) and
+        ``_plan_compaction`` continues it while no operator turn arrives,
+        bounded by :meth:`_dense_tail_cap`, on the horizon the raw floor has
+        (see ``compact_to_archive``). Without that the protection lasted one
+        pass: 127 of 415 steps after a second pass of two real tasks, against
+        279 with it and 284 for today's raw floor.
+
+        WHAT IS GIVEN UP, stated because it is the whole trade: inside the
+        moved span the serializer keeps the first 1,500 and up to the last
+        500 characters of a tool result longer than ``TOOL_RESULT_MAX_CHARS``
+        and cuts the middle, cuts a tool call's arguments past
+        ``TOOL_ARGS_MAX_CHARS``, drops results flagged useless with their
+        calls, turns image and document blocks into placeholders (the raw
+        window kept them as images), and carries no provider reasoning
+        blocks. So the model still sees every step, every assistant message
+        and both ends of every output, but not the middle of a long output,
+        the body of a long write, or a screenshot older than the recent
+        window: it re-reads the file, re-runs the command or looks again if
+        it needs those. The operator's own
+        turns are unaffected (preserved verbatim outside the archive), and
+        the newest ``keep_recent_tokens`` stay raw as they always have.
+
+        ``None`` -- keep the floor's raw window, exactly the pre-existing
+        behaviour -- whenever the change would not be a clean win:
+
+        * recency finds no cut, or none later than the floor's (nothing to
+          move);
+        * the recency cut's first kept message is not a transcript entry: the
+          floor's cut may be replayable where this one is not, and a pass must
+          never be refused as ``cut_not_replayable`` because of an
+          optimisation;
+        * the span is not smaller serialized than raw
+          (``snapcompact.dense_tail_saves``) -- the invariant that makes this
+          change unable to enlarge a pass.
+
+        Runs only once a pass is already going to happen, so the second
+        ``find_cut_point`` and one tokenization of the span are paid per PASS,
+        never per turn; both go off the event loop for the reason
+        :meth:`_offloaded` gives.
+        """
+        narrow = await self._offloaded(
+            compaction_api, "find_cut_point", llm_history, keep_recent_tokens
+        )
+        if narrow is None or narrow <= wide_cut:
+            return None
+        if not self._transcript.has_entry(llm_history[narrow].id):
+            return None
+        span = [m for m in llm_history[wide_cut:narrow] if _is_summarizable(m)]
+        try:
+            from local_operator.compaction import snapcompact
+
+            saves = await asyncio.to_thread(snapcompact.dense_tail_saves, span)
+        except Exception:  # noqa: BLE001 - an optimisation must never fail a pass
+            logger.debug("dense tail check failed; keeping the raw task window", exc_info=True)
+            return None
+        return narrow if saves else None
+
+    @staticmethod
+    def _dense_tail_count(plan: _CompactionPlan) -> int:
+        """How many trailing ``to_summarize`` messages are the dense-carried task.
+
+        Counted with the same filter that builds ``to_summarize``
+        (:func:`_is_summarizable`) over the plan's own slice, so the number is
+        exactly "the last N messages handed to the archive" whatever the
+        byte-aware step did to ``cut`` after the plan chose its span.
+        """
+        if plan.dense_tail_from is None:
+            return 0
+        return sum(
+            1 for m in plan.llm_history[plan.dense_tail_from : plan.cut] if _is_summarizable(m)
         )
 
     def _settle_advisor(self, plan: _CompactionPlan, outcome: CompactionOutcome) -> None:
@@ -27768,7 +31764,10 @@ class Session:
         await self._cancel_background_compaction()
         await self._emit(CompactionStartEvent(reason=reason))
         return await self._finish_compaction(
-            plan, reason=reason, summarized=None, before_end=before_end
+            plan,
+            reason=reason,
+            summarized=plan.economic_summary[0] if plan.economic_summary else None,
+            before_end=before_end,
         )
 
     async def _cancel_background_compaction(self) -> None:
@@ -27890,7 +31889,27 @@ class Session:
             [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)],
             plan.strategy,
             settings=plan.settings,
+            **self._dense_tail_kwargs(plan),
         )
+
+    @classmethod
+    def _dense_tail_kwargs(cls, plan: _CompactionPlan) -> _DenseTailArgs:
+        """The dense-tail arguments for :meth:`_produce_summary`, or nothing.
+
+        Passed only when set, so a duck-typed ``_produce_summary`` that
+        predates the parameters (the suite has several) keeps its signature.
+        ``dense_previous_chars`` rides alone when a continuing pass has no new
+        message to archive: the earlier tail is still the live task.
+        """
+        kwargs: _DenseTailArgs = {}
+        count = cls._dense_tail_count(plan)
+        if count:
+            kwargs["dense_tail"] = count
+        if plan.dense_tail_previous_chars > 0:
+            kwargs["dense_previous_chars"] = plan.dense_tail_previous_chars
+        if plan.dense_tail_closed:
+            kwargs["dense_closed"] = True
+        return kwargs
 
     def _carried_tier_live_state(
         self,
@@ -27991,7 +32010,11 @@ class Session:
                 summarized
                 if summarized is not None
                 else await self._produce_summary(
-                    compaction_api, to_summarize, plan.strategy, settings=plan.settings
+                    compaction_api,
+                    to_summarize,
+                    plan.strategy,
+                    settings=plan.settings,
+                    **self._dense_tail_kwargs(plan),
                 )
             )
             # THE ATTACHMENTS MANIFEST, on the session's own compaction path:
@@ -28072,6 +32095,15 @@ class Session:
                     carried_genuine, carried_shed = int(carried[0]), int(carried[1])
                     preserved_turns_dropped = max(preserved_turns_dropped, carried_genuine)
                     preserved_turns_shed = max(preserved_turns_shed, carried_shed)
+            # A resumed subagent's launch brief is re-stamped on every resume
+            # and each copy is a genuine user turn; carry it once so the cap
+            # below budgets distinct content (``collapse_relaunch_briefs``
+            # has the measurements). Resolved by name like its neighbours, so
+            # a partial double degrades to the uncollapsed block.
+            collapse: Any = getattr(compaction_api, "collapse_relaunch_briefs", None)
+            if callable(collapse):
+                collapsed: Any = collapse(preserved_user_turns)
+                preserved_user_turns = list(collapsed)
             if callable(cap):
                 preserved_turns_cap = self._preserved_turns_cap(plan.settings)
                 capped: Any = cap(
@@ -28173,7 +32205,10 @@ class Session:
                 carried_asks=carried_asks,
                 carried_decisions=carried_decisions,
                 resume_card=resume_card,
-                trigger="idle" if reason == "idle" else None,
+                # Discretionary triggers are spelled on the marker so a reader
+                # (and the economic pass's yield scan) can tell them from the
+                # size and manual passes, whose records stay byte-identical.
+                trigger=reason if reason in ("idle", "economic") else None,
             )
             # Never await speculative capture on the compaction critical path.
             # Binding it to this *committed* marker prevents cancelled/stale
@@ -28280,6 +32315,23 @@ class Session:
             # ...]`` already. The preserved turns carry no tool_call pairing, so
             # none of the orphan invariants can be affected.
             self._context.messages = [marker, *preserved_messages, *kept]
+            # The Team Bridge excerpt memo exists only to keep ALREADY-CACHED
+            # card bytes stable. This swap puts a new marker ahead of every kept
+            # card, so the cache is cold from here regardless, and a frozen
+            # "sent ids-only" decision now protects nothing. Compaction keeps the
+            # kept cards' message ids, so without this a long-lived bridge
+            # session (which rarely restarts) never regained an excerpt for a
+            # card a body turn delivered (agent review R1). ``getattr`` matches
+            # the transform's own read: partial hosts may never have built one.
+            excerpt_memo = getattr(self, "_bridge_excerpt_memo", None)
+            if excerpt_memo is not None:
+                excerpt_memo.clear()
+            # The advisory-guidance memo (``BridgeRuntime.advised_guidance``)
+            # records "this session's context already shows that note". The
+            # summary just replaced the tool results that carried it, so the
+            # memo is now false: drop THIS session's entry and the next bridge
+            # result shows the note once more (deferred #4374 minor).
+            self._forget_bridge_guidance_memo()
             history_after = await self._offloaded(
                 compaction_api, "estimate_messages_tokens", self._render_for_compaction()
             )
@@ -28521,6 +32573,7 @@ class Session:
                     # trigger misfired. The hint is read here only to render
                     # that sentence; nothing about the pass depends on it.
                     detail=_advisor_detail(plan.advisor_hint),
+                    **self._compaction_trigger_fields(plan),
                 )
             )
             return outcome
@@ -28532,6 +32585,74 @@ class Session:
             await _settle_before_end(before_end, failed)
             await self._emit(CompactionEndEvent(reason=reason, success=False))
             return failed
+
+    def _compaction_trigger_fields(self, plan: _CompactionPlan) -> dict[str, Any]:
+        """Which size term fired a pass, and the byte figures either side of it.
+
+        The diagnostic half of ``compaction_end``. The token pair on that event
+        cannot say WHY a pass ran: a screenshot-heavy session compacts on the
+        serialized-request trigger at a small fraction of its token threshold,
+        and with only token figures recorded that reads as the trigger
+        misfiring (three recorded episodes had 25 / 18 / 11 such passes, the
+        first at ~35k tokens of 400k, and their byte sizes had to be estimated
+        from artifact sizes after the fact).
+
+        Read off the SAME resolved trigger the gate uses, not a second notion
+        of it: the token term is the plan's context against
+        ``resolve_threshold_tokens`` (the resolver ``should_compact`` reads for
+        that term, with its strict ``>`` and its "unknown window disables the
+        token term" rule), the byte term is the plan's own payload against the
+        resolved wire trigger (the comparison ``should_compact`` makes).
+
+        It deliberately does NOT call ``should_compact`` again. The gate made
+        the decision once; a diagnostic re-running it is a second evaluation
+        that hosts and test doubles observe (QA round 1, Q2: a resolver double
+        that records each decision saw a third call), and a re-run of the
+        decision is exactly the kind of thing that can drift from the one the
+        gate made. Reading the resolved thresholds is a pure lookup.
+
+        ``wire_bytes_before`` measures ``plan.llm_history``, the payload the
+        pass planned against and the one :meth:`_fires_on_size_alone` reads.
+        ``wire_bytes_after`` measures a fresh render of the committed context,
+        the list the next request sends and the one
+        :meth:`_cleared_wire_headroom` judges. Must be called AFTER the commit.
+
+        Costs one render and two structural byte sums per committed pass (no
+        tokenizer), against a pass that just made a summarization or archive
+        call. Returns ``{}`` on any failure, leaving the event's defaults: a
+        diagnostic must never fail the pass it describes.
+        """
+        compaction_api = plan.compaction_api
+        try:
+            trigger_bytes = self._wire_trigger_bytes(compaction_api, plan.settings) or 0
+            before = self._wire_bytes_of(compaction_api, plan.llm_history)
+            after = self._wire_bytes_of(
+                compaction_api, self._render_history(list(self._context.messages))
+            )
+            over_bytes = trigger_bytes > 0 and before > trigger_bytes
+            # The token term by itself, without advice: the resolved threshold,
+            # never a second ``should_compact`` call (see the docstring).
+            window = self.effective_model.context_window
+            over_tokens = window > 0 and plan.context_tokens > int(
+                compaction_api.resolve_threshold_tokens(window, plan.settings)
+            )
+        except Exception:  # noqa: BLE001 — a diagnostic must never fail the pass
+            logger.debug("compaction trigger diagnostics failed; omitted", exc_info=True)
+            return {}
+        if over_tokens and over_bytes:
+            fired = "tokens+wire_bytes"
+        elif over_bytes:
+            fired = "wire_bytes"
+        elif over_tokens:
+            fired = "tokens"
+        else:
+            fired = "none"
+        return {
+            "trigger": fired,
+            "wire_bytes_before": before,
+            "wire_bytes_after": after,
+            "wire_bytes_trigger": trigger_bytes,
+        }
 
     def _fires_on_size_alone(
         self, compaction_api: Any, context_tokens: int, settings: Any, wire_bytes: int
@@ -28862,8 +32983,27 @@ class Session:
         strategy: str,
         *,
         settings: Any = None,
+        dense_tail: int = 0,
+        dense_previous_chars: int = 0,
+        dense_closed: bool = False,
+        allow_llm_fallback: bool = True,
     ) -> tuple[str, dict[str, Any] | None]:
         """Summary text + optional ``preserve_data`` for one compaction pass.
+
+        ``dense_previous_chars`` is the previous archive's still-live tail
+        (:attr:`_CompactionPlan.dense_tail_previous_chars`), kept on the new
+        tail together with this pass's span while the same task runs.
+        ``dense_closed`` says the task had already outgrown the floor when
+        this span was chosen (:attr:`_CompactionPlan.dense_tail_closed`), so
+        the archive carries it without recording it as continuable.
+
+        ``dense_tail`` is how many TRAILING ``to_summarize`` messages are the
+        live task the plan moved out of the raw window
+        (:meth:`_dense_tail_cut`); snapcompact carries them verbatim on the
+        archive's tail edge. Ignored by the context-full fallback below, which
+        has no such edge: the plan only sets it for snapcompact, and if that
+        branch fails the task is summarized with the rest, as any pre-cut
+        history is.
 
         Snapcompact stores ``{"snapcompact": <archive dump>}`` (JSON-safe:
         base64 frames) and renders the frames back into context through the
@@ -28917,6 +33057,20 @@ class Session:
                 # the snapcompact half of the lift-XOR-keep rule used below for
                 # context-full, and by compaction.pass_ for both strategies.
                 _, archive_span = compaction_api.split_leading_marker(to_summarize)
+                if dense_previous_chars > 0:
+                    # CONTINUING a task (see ``_plan_compaction`` 2b'): the
+                    # whole span is protected, and its head is the previous
+                    # pass's preserved operator turns re-rendered from the
+                    # marker, the task's own request among them. They are
+                    # replayed verbatim outside the archive on every request,
+                    # so carrying them here as well put one more copy of each
+                    # on the tail per pass, and on a session with a wide
+                    # preserved block the tail bound then trimmed real task
+                    # steps to make room for the copies (agent review round
+                    # 2, N1). Left out, the span is the task's own new steps
+                    # and sits directly after the previous tail.
+                    archive_span = [m for m in archive_span if not is_preserved_replay(m)]
+                    dense_tail = len(archive_span)
                 archive = await asyncio.to_thread(
                     snapcompact.compact_to_archive,
                     archive_span,
@@ -28928,12 +33082,22 @@ class Session:
                     threshold_tokens=self._snapcompact_threshold_tokens(
                         compaction_api, effective.context_window, settings
                     ),
+                    # Clamped to the span actually archived: lifting the
+                    # leading marker above can only shorten it from the FRONT.
+                    protected_tail_messages=min(max(0, dense_tail), len(archive_span)),
+                    protected_tail_previous_chars=max(0, dense_previous_chars),
+                    protected_tail_max_tokens=self._dense_tail_cap(settings),
+                    protected_tail_closed=bool(dense_closed),
                 )
                 summary = snapcompact.archive_summary(
                     archive, effective.provider, effective.model_id
                 )
                 return summary or " ", {"snapcompact": _archive_to_json(archive)}
             except Exception:
+                if not allow_llm_fallback:
+                    # Below-size economics priced this strategy as free. A
+                    # paid fallback is a different, unauthorized transaction.
+                    raise
                 logger.warning("snapcompact failed; falling back to context-full", exc_info=True)
         # A pass after the first plans over ``[marker, *kept]``: the previous
         # summary is folded through the template's ``<previous-summary>``
@@ -28974,6 +33138,50 @@ class Session:
         if isinstance(snap, dict) and snap.get("text"):
             return str(snap["text"])
         return entry.payload.get("summary")
+
+    def _previous_live_tail_chars(self) -> int:
+        """``Archive.live_tail_chars`` of the latest pass, or ``0``.
+
+        How many trailing characters of :meth:`_previous_archive_text` the last
+        pass protected as the live task. ``0`` for no prior archive, a
+        context-full prior pass, an archive written before the field existed,
+        or a value that is not a usable count -- each of which means "nothing
+        is still protected", the behaviour before the field existed.
+        """
+        entry = self._transcript.latest_entry("compaction")
+        if entry is None:
+            return 0
+        preserve = entry.payload.get("preserve_data") or {}
+        snap = preserve.get("snapcompact")
+        value = snap.get("live_tail_chars") if isinstance(snap, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+    def _dense_tail_cap(self, settings: Any) -> int:
+        """Token bound on the archive's protected live-task tail.
+
+        Three quarters of the task floor's own cap (:meth:`_advisor_floor_cap`):
+        75,000 on the shipped 1M-window default. Derived from the floor cap
+        because it bounds the same thing in its new carrier (the floor kept at
+        most that many RAW tokens of the live task; the tail holds serialized
+        text, which is denser). The fraction was sized on TWO real pairs of
+        consecutive passes, the only ones in the 14 replayed where today's raw
+        floor still protected the task at the second pass
+        (``docs/design/compaction-dense-tail.md``), so treat it as a starting
+        point with thin support, not a settled constant:
+
+        - at 1.0 the pass lands where today's does (130k against 135k-139k
+          local), which defeats the change;
+        - at 0.75 it keeps about what today's raw floor keeps as text (140
+          of 202 and 139 of 213 steps, against 143 and 141) at 106k-108k,
+          about a fifth smaller;
+        - at 0.6 and 0.5 it keeps clearly fewer (131/122 and 116/111).
+
+        One pass on its own never reaches it on the 25 replayed points (the
+        widest protected span serialized to 73k tokens), so it binds only on a
+        task that runs across passes, where it is also what ends the
+        continuation (see ``Archive.live_tail_chars``).
+        """
+        return self._advisor_floor_cap(settings or self._compaction_settings) * 3 // 4
 
     def _previous_archive_carry(self) -> str | None:
         """The latest archive's carry digest, so a pass MERGES into the retained
@@ -29153,8 +33361,12 @@ class Session:
         propagate: the guardrail turns every failure into a block.
         """
         spec = self._lowest_effort(self.effective_model)
+        # Cache the STATIC judge prompt only (``guardrails/judge.py``, ~1.3k
+        # tokens, re-sent at a 68 s median gap — inside the 5m TTL). The
+        # default marker sat on the unique user turn after it, so the 7-day
+        # ledger showed a 0% hit rate on writes paid for every check.
         request = self._errand_request(spec, system, prompt).model_copy(
-            update={"purpose": "guardrail"}
+            update={"purpose": "guardrail", "cache_markers": "system"}
         )
         return await self._drain_errand(request)
 
@@ -29566,16 +33778,16 @@ class Session:
     async def complete_clearance(self, turns: Sequence[AgentMessage]) -> str:
         """One off-the-record request that reads the live conversation and writes nothing.
 
-        The ask gate's fork (design docs/design/ask-gate.md §2.1), a sibling of
-        :meth:`complete_aside`: it READS exactly what an aside reads — the live
+        The former ask gate's fork (design docs/design/ask-gate.md §2.1), no
+        longer used for queued ask admission. Like :meth:`complete_aside`, it
+        READS the live
         system blocks (including the frozen-vs-desired epoch check and the
         system-state delta message), the wire-legal snapshot of the live
         history (:meth:`_wire_legal_snapshot` pairs pending ``tool_use``s with
         placeholders, so the call is legal mid-batch), the caller's appended
         gate message, and ``bound_replay_payloads`` over the result — and
         WRITES nothing: no transcript entry, no ``_context.messages`` append,
-        no event fan-out. A gated ask must leave the conversation exactly as it
-        found it, on every path including failure.
+        no event fan-out, on every path including failure.
 
         The request shape is the aside's, with the deltas the design tables:
 
@@ -29601,9 +33813,7 @@ class Session:
         Mechanics inherited from :meth:`complete_aside`, including the one
         bounded retry when the answer is a bare tool call (the rejected call is
         handed back, paired, with ``tools=[]`` for this request only). If the
-        retry still yields no text, this raises :class:`AsideUnanswered` — the
-        same class of failure — and ``Session._gate_ask`` maps that to
-        fail-open, so the gate never fails an ask.
+        retry still yields no text, this raises :class:`AsideUnanswered`.
 
         Deliberately NO ``on_delta``/``on_usage`` in v1: no surface watches the
         gate run, and cost accounting is the request ledger's, as for every
@@ -29677,9 +33887,7 @@ class Session:
         if parts:
             return "".join(parts)
         # A second bare call, or an empty answer AFTER being corrected: the
-        # model will not answer this in text. ``AsideUnanswered`` is the same
-        # class of failure the aside raises, and ``_gate_ask`` maps it to
-        # fail-open — the gate never fails an ask.
+        # model will not answer this in text. Use the same failure as the aside.
         from local_operator.session.errors import AsideUnanswered
 
         raise AsideUnanswered()
@@ -30153,6 +34361,12 @@ class Session:
             )
         except Exception:  # noqa: BLE001 — a partial double must not evict
             return DEFAULT_PRESERVED_TURN_CAP
+        # Fail CLOSED on tighter high-wake preservation: a headline/peek hint
+        # after eviction does not preserve a standing operator instruction.
+        # A future tighter bound needs a pre-commit checkpoint through session
+        # memory's admission boundaries and a durable acknowledgement of the
+        # full evicted text first. Until then cadence changes only economics,
+        # never the amount of verbatim operator context kept.
         return max(keep_recent, capacity_cap)
 
     def _wire_legal_snapshot(self) -> list[AgentMessage]:
@@ -30361,7 +34575,9 @@ class Session:
         if self._transcript.has_entry(messages[-1].id):
             return
         # The synthetic assistant/tool exchange is one fork-visible unit.
-        await self._transcript.append_messages(messages)
+        await self._transcript.append_messages(
+            messages, _file_captures=self._file_owner().take(messages)
+        )
         self._context.messages.extend(messages)
 
     async def _flush_shell_records(self) -> None:
@@ -30649,7 +34865,30 @@ class Session:
         if not details:
             return
         monitors: list[MonitorSpec] = []
-        for raw in details.get("monitors", []):
+        raw_rows = [row for row in details.get("monitors", []) if isinstance(row, dict)]
+        try:
+            # A MOVED SESSION'S MONITORS RUN WHERE THEY NOW ARE (2026-11-13: three
+            # monitors carried Mac → Linux kept ``cwd=/Users/damian`` and failed
+            # every first check). The transcript keeps the source host's value —
+            # the move verified it byte-for-byte — so the translation is applied
+            # here, at load, with the promote's own rule (``network/carry.py``);
+            # an untranslatable cwd re-arms at this session's cwd. A no-op for a
+            # session that never moved: every existing cwd is kept as-is.
+            from local_operator.network.carry import moved_in, translate_monitor_cwds
+
+            raw_rows, _counts = translate_monitor_cwds(
+                raw_rows,
+                session_cwd=os.path.abspath(self._cwd),
+                # This host's home, named here rather than defaulted inside the
+                # translator (cwd omission census).
+                home=os.path.expanduser("~"),
+                # A moved-in session's cwds may come from a device sharing this
+                # home path; only then is a missing path under home foreign.
+                moved=moved_in(self._transcript.directory),
+            )
+        except Exception:  # noqa: BLE001 — a load must not fail over a path mapping
+            logger.debug("monitor cwd translation failed", exc_info=True)
+        for raw in raw_rows:
             try:
                 monitors.append(MonitorSpec.model_validate(raw))
             except Exception:
@@ -31225,7 +35464,9 @@ class Session:
             logger.debug("could not restore wake delivery after an abandoned drain", exc_info=True)
             return False
 
-    async def _spool_parked_wake(self, wake_message: CustomMessage) -> None:
+    async def _spool_parked_wake(
+        self, wake_message: CustomMessage, *, for_successor: bool = False
+    ) -> None:
         """Spool one parked wake for the successor on retire. Never raises.
 
         A parked wake is already a fired occurrence with no schedule left to
@@ -31233,8 +35474,20 @@ class Session:
         the durable handoff — the same vehicle ``_spool_wake_to_inbox`` uses
         for a fire arriving while draining. The text is the delivery text
         the parked row carries, so the successor runs the same occurrence.
+
+        ``for_successor`` writes through ``inbox.append_for_successor`` so the
+        row also records the turn the successor owes and raises its reader —
+        the turn-end spool needs that (review round 1, R1-1): its wake was
+        handed to a live turn, so no schedule row is left to engage a runtime.
+        The retire-time caller keeps its plain append unchanged.
         """
-        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import (
+            InboxLine,
+            append_for_successor,
+            append_inbox,
+        )
+        from local_operator.wakes.spooled import await_spool_write
 
         wake_id = str(wake_message.details.get("wake_id", ""))
         text = str(wake_message.details.get("text", ""))
@@ -31242,19 +35495,21 @@ class Session:
         if directory is None or not text:
             logger.warning("parked wake %s could not be spooled (no session dir)", wake_id)
             return
+        line = InboxLine(
+            text=text,
+            sender={},
+            mode="mailbox",
+            written_at=time.time(),
+            wake=True,
+            wake_id=wake_id,
+        )
         try:
-            written = await asyncio.to_thread(
-                append_inbox,
-                Path(directory),
-                InboxLine(
-                    text=text,
-                    sender={},
-                    mode="mailbox",
-                    written_at=time.time(),
-                    wake=True,
-                    wake_id=wake_id,
-                ),
-            )
+            if for_successor:
+                written = await await_spool_write(
+                    append_for_successor, config_dir(), Path(directory), line
+                )
+            else:
+                written = await asyncio.to_thread(append_inbox, Path(directory), line)
         except Exception:  # noqa: BLE001 — a drain must not die on a spool write
             logger.warning(
                 "parked wake %s could not be spooled while draining", wake_id, exc_info=True
@@ -31288,6 +35543,59 @@ class Session:
         fallback: a wake that ended up in neither place is lost work the user is
         waiting on, and a log line is the only trace it existed
         (``design-runtime-autorefresh`` §5.3).
+        """
+        # A FIRE INTO A LIVE TURN IS DELIVERED, not spooled. The divert is
+        # installed when a drain LATCHES, and a build-replaced drain latches on a
+        # busy runtime by construction — so for the whole rest of that turn the
+        # session's own reminders went to a successor that boots only after the
+        # turn ends (node2, 2026-11-17: 6 own wakes held ~40 min behind one
+        # turn). Riding the running turn opens no new work on the leaving build,
+        # which is the only thing the divert exists to prevent; an idle fire
+        # still spools below. ``_deliver_wake``'s busy arm parks it for the next
+        # tool boundary, and a turn that ends first hands the park to
+        # ``_flush_parked_deliveries``, whose leaving arm spools it.
+        # ``getattr``: the cell harnesses bind this method onto hosts without the
+        # session's turn flags, and those hosts are idle by construction.
+        if getattr(self, "_is_streaming", False) and not getattr(self, "_disposed", False):
+            deliver = getattr(self, "_wake_hook_before_drain", None) or self._deliver_wake
+            if deliver != self._spool_wake_to_inbox:
+                if due.final:
+                    # The fire retired its schedule, so if this delivery ends
+                    # up parked past the last boundary the turn-end spool must
+                    # re-arm it rather than write text only (R1-1). Keyed like
+                    # the parked row's details so that spool can find it.
+                    finals = getattr(self, "_live_final_wakes", None)
+                    if finals is None:
+                        finals = self._live_final_wakes = {}
+                    finals[(due.schedule.id, due.occurrence)] = due
+                if deliver == self._deliver_wake:
+                    # ``_deliver_wake`` awaits before it re-samples ``busy``; a
+                    # turn that ends in that gap would take its idle arm, whose
+                    # turn a leaving runtime holds at admission (transcript
+                    # only, nobody woken — R1-3). Hand that arm back here.
+                    await self._deliver_wake(due, idle_fallback=self._spool_wake_fire)
+                else:
+                    await deliver(due)
+                # The busy arm parks AFTER an awaited emit, so the turn may have
+                # ended (and run its turn-end spool) before the park landed.
+                # Nothing else would ever drain it on a leaving runtime, so
+                # sweep it to the successor now; a no-op when nothing is parked.
+                if (
+                    getattr(self, "_leaving_deliveries", False)
+                    and not getattr(self, "_is_streaming", False)
+                    and not getattr(self, "_disposed", False)
+                    and not getattr(self, "_one_shot_exit", False)
+                ):
+                    await self._spool_parked_for_successor()
+                return
+        await self._spool_wake_fire(due)
+
+    async def _spool_wake_fire(self, due: DueWake) -> None:
+        """Re-arm (one-shot) or spool (recurring) one fire for the successor.
+
+        The idle half of :meth:`_spool_wake_to_inbox`, split out so the live
+        arm can hand a fire back to it when the turn it aimed at ended first
+        (``_deliver_wake``'s ``idle_fallback``). Never raises.
         """
         from local_operator.session.runtime.inbox import InboxLine, append_inbox
 
@@ -31873,7 +36181,12 @@ class Session:
         precisely what the supervisor engages to achieve, so this is where
         "the wake machinery got this far" becomes observable."""
         self._write_wake_index_entry(
-            list(self._wake.schedules), clear=("stopped_at",), stamp="last_attempt_at"
+            # ``parked_at`` too: a park is over the moment a runtime exists
+            # again, and a stale stamp would mislabel a live session as parked
+            # (and make the parked-monitor sweep probe a session that is up).
+            list(self._wake.schedules),
+            clear=("stopped_at", "parked_at"),
+            stamp="last_attempt_at",
         )
 
     def _write_wake_index_entry(
@@ -31975,7 +36288,10 @@ class Session:
         EVERY open, which is the self-healing property for the derived file a
         cold reader (cleanup guard, picker, ``lop monitor status``) sees.
         """
-        self._write_monitor_index_entry(list(self._monitors.monitors), clear=("stopped_at",))
+        # ``parked_at`` is cleared for the same reason as on the wake entry.
+        self._write_monitor_index_entry(
+            list(self._monitors.monitors), clear=("stopped_at", "parked_at")
+        )
         self._prune_monitor_store()
 
     def _prune_monitor_store(self) -> None:
@@ -32059,6 +36375,13 @@ class Session:
                 self.refresh_frontend_state()
             except Exception:  # noqa: BLE001 — a paint must not break a tick
                 logger.debug("monitor frontend refresh failed", exc_info=True)
+
+    def _on_quiet_monitor_check(self) -> None:
+        # Keep a continuously attached Run details current without turning a
+        # quiet check into an index write or a full session-state refresh.
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_observed_monitors(self._monitors)
 
     def _ensure_wake_supervisor(self) -> None:
         """Install-on-demand chokepoint (design §4.2a). Best-effort; the hook
@@ -33012,7 +37335,12 @@ class Session:
         except Exception:  # noqa: BLE001 — the ledger is observation
             logger.debug("aida: could not re-owe the withheld greeting", exc_info=True)
 
-    async def _deliver_wake(self, due: DueWake) -> None:
+    async def _deliver_wake(
+        self,
+        due: DueWake,
+        *,
+        idle_fallback: Callable[[DueWake], Awaitable[None]] | None = None,
+    ) -> None:
         """Deliver one fired wake through the prompt path as a user-attributed
         ``wake_prompt`` custom message. A wake resumed PAST its due time is
         annotated as missed — the agent must not read it as punctual, and a
@@ -33105,6 +37433,12 @@ class Session:
         if missed_note:
             text = f"{missed_note}\n\n{text}"
         busy = self._is_streaming
+        if not busy and idle_fallback is not None:
+            # The caller aimed this fire at a live turn that has ended since it
+            # looked (only ``_spool_wake_to_inbox``'s live arm passes this): its
+            # idle arm is the one that knows what an idle fire means for it.
+            await idle_fallback(due)
+            return
         if busy:
             # The resume guidance rides the text itself: the wake reached a
             # turn that was already working, and the message is the only
@@ -35361,6 +39695,25 @@ class Session:
         if unsubscribe_state is not None:
             unsubscribe_state()
             self._unsubscribe_subagent_state = None
+        # A subagent's site cards in its ancestor's queue end with it (S60334-1):
+        # first, so no decision lands on a request whose session is going away.
+        try:
+            await self._release_site_requests()
+        except Exception:  # noqa: BLE001 — the cards' and entries' own TTLs are the floor
+            logger.warning("releasing a subagent's site cards failed", exc_info=True)
+        # A LEAVING RUNTIME'S PARKED PEER MESSAGES AND WAKES GO TO THE SUCCESSOR
+        # FIRST (review round 1, R1-2). A leaving runtime delivers them into its
+        # live turn (``ServingSessionHandle._admits_into_live_turn``), and the
+        # sender was told "delivered mid-turn"; the turn's own turn-end spool
+        # skips once ``_disposed`` is set, and the loop below empties the queue.
+        # A disposal that catches the turn still busy — the signal drain's reap,
+        # a SIGTERM during a build drain — would otherwise drop them. Chosen over
+        # narrowing live admission to the build drain: this covers EVERY exit
+        # that disposes mid-turn, including ones no drain cause names today,
+        # while narrowing would still lose a build drain interrupted by a signal.
+        # The one-shot host has no successor and keeps its own semantics.
+        if self._leaving_deliveries and not self._one_shot_exit:
+            await self._spool_parked_for_successor(disposing=True)
         # No later boundary can drain producer steers once disposal starts.
         # Reject them while rejection subscribers and viewers are still attached so
         # capacity is released and the producer can safely reuse the same ID.

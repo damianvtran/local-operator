@@ -37,7 +37,14 @@ import shutil
 import subprocess
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Coroutine,
+    Sequence,
+)
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1350,6 +1357,8 @@ async def _stdio_transport(
     cfg: MCPStdioServerConfig,
     on_close: Callable[[], None],
     stderr_log: McpServerStderr,
+    *,
+    start_new_session: bool | None = None,
 ) -> AsyncIterator[TransportStreams]:
     """Spawn an MCP stdio server and pump newline-delimited JSON-RPC.
 
@@ -1409,7 +1418,9 @@ async def _stdio_transport(
         # yet bypassed straight to node.
         target = win32_process_target(argv)
     else:
-        kwargs["start_new_session"] = stdio_start_new_session()
+        kwargs["start_new_session"] = (
+            stdio_start_new_session() if start_new_session is None else start_new_session
+        )
         target = argv
 
     process = await anyio.open_process(target, **kwargs)
@@ -1905,8 +1916,17 @@ class McpManager:
         secret_base: os.PathLike[str] | None = None,
         register_secret: Callable[[str], object] | None = None,
         boundary: Path | None = None,
+        detach_stdio: bool | None = None,
     ) -> None:
         self.cwd = str(cwd)
+        # ``None`` keeps the platform rule (:func:`stdio_start_new_session`).
+        # ``False`` is for a manager whose OWNER is reaped by process group:
+        # the wake supervisor's parked-monitor probe is killed with ``killpg``,
+        # and on Linux the default ``setsid`` would carry every stdio server it
+        # spawned out of that group, so a timed-out probe would orphan them.
+        # The probe has no controlling terminal, so the job-control hazard the
+        # default guards against cannot arise there.
+        self._detach_stdio = detach_stdio
         self.secret_base = secret_base
         self._register_secret = register_secret
         # The world boundary a bounded session validated, or ``None`` for the
@@ -2480,7 +2500,13 @@ class McpManager:
         result.tools = self.get_tools()
         return result
 
-    async def wait_settled(self, timeout_s: float) -> bool:
+    async def wait_settled(
+        self,
+        timeout_s: float,
+        *,
+        servers: Collection[str] | None = None,
+        first: bool = False,
+    ) -> bool:
         """Wait, bounded, for servers deferred past the startup gate to settle.
 
         ``reload()`` and ``discover_and_connect()`` return at the 250 ms gate
@@ -2495,11 +2521,33 @@ class McpManager:
         Waits on the continuations only — never cancels them on timeout, so a
         server slower than the bound keeps connecting and honestly reads
         ``connecting``. Returns whether everything settled within the bound.
+
+        ``servers`` narrows the wait to those names' continuations. The
+        declared-tool first-turn gate (``session/declared_mcp_ready.py``) needs
+        exactly the servers a run NAMED, and waiting on every continuation
+        would make it hostage to an unrelated slow server (an OAuth endpoint
+        that takes its whole connect budget to fail) the run never declared.
+        ``None`` keeps the whole-round wait every other caller relies on.
+
+        ``first`` returns as soon as ANY of them settles. The same gate decides
+        on tool reachability, so it re-reads the inventory after each server
+        lands and stops once every declared tool is there; waiting for all of
+        them would make a run whose tool already arrived from ``bd_x`` pay a
+        wedged prefix sibling ``bd``'s whole bound (agent review round 1, R1).
+        The return value still means "nothing in scope is left pending".
         """
-        pending = [continuation for continuation, _ in self._pending_continuations.values()]
+        pending = [
+            continuation
+            for name, (continuation, _) in self._pending_continuations.items()
+            if (servers is None or name in servers) and not continuation.done()
+        ]
         if not pending:
             return True
-        _done, still = await asyncio.wait(pending, timeout=max(0.0, timeout_s))
+        _done, still = await asyncio.wait(
+            pending,
+            timeout=max(0.0, timeout_s),
+            return_when=asyncio.FIRST_COMPLETED if first else asyncio.ALL_COMPLETED,
+        )
         return not still
 
     async def wait_for_connection(self, name: str) -> ServerConnection:
@@ -2690,7 +2738,16 @@ class McpManager:
         # stack, so the only thing serial order bought was the wait.
         names = list(self._connections)
         if in_task:
-            for name in names:
+            # REVERSE (LIFO) ORDER. Each in-task connect entered its transport's
+            # anyio cancel scope in this same task, so with two or more servers
+            # the scopes are NESTED; closing the first-opened one while a later
+            # one is still open exits them out of order, and anyio answers by
+            # cancelling the host task (measured: the parked-monitor probe,
+            # which keeps one connection per server across a run's rows, raised
+            # ``CancelledError`` from here on every run that held two servers).
+            # ``_connections`` preserves connect order, so reversing it unwinds
+            # the scopes innermost-first. A one-server caller is unaffected.
+            for name in reversed(names):
                 await self._teardown_connection(name)
         elif names:
             await asyncio.gather(
@@ -3233,7 +3290,12 @@ class McpManager:
         )
 
         if isinstance(cfg, MCPStdioServerConfig):
-            streams_cm = _stdio_transport(cfg, lambda: conn.closed_event.set(), stderr_log)
+            streams_cm = _stdio_transport(
+                cfg,
+                lambda: conn.closed_event.set(),
+                stderr_log,
+                start_new_session=getattr(self, "_detach_stdio", None),
+            )
         elif isinstance(cfg, MCPHttpServerConfig):
             from mcp.client.streamable_http import (
                 create_mcp_http_client,

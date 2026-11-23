@@ -1,0 +1,195 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3r",
+  "audit_date": "2026-11-16",
+  "key_count": 15,
+  "auditor": {
+    "agent": "Audit daemon Vietnamese",
+    "session": "77442ce206e1",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Current host session declares openai/gpt-6.1-sol; same independent auditor session resumed. No fallback incident observed; no unreported fallback inferred.",
+    "fallback": null,
+    "independent_from_translator_session": true,
+    "translator_session": "7f2b030d2636",
+    "date": "2026-11-16",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7f2b030d2636",
+    "model": null,
+    "actual_model_source": "Requester identifies current job as the same translator; current job actual model/fallback were not separately disclosed or inspected. Earlier original translator actual model was openai/gpt-6.1-sol, not asserted as proof for this job.",
+    "previous_translator_session": "170903662c6e",
+    "fallback": "unknown_not_independently_inspected"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e4e9031bf84e0d6e9edea53f41d54ad03adb96b53d9f0c87872971d2c1aee629"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/cli.serve_readiness.json",
+      "sha256": "686c91ede912480c460dd1eafe041b5107ef5e6aa7000970d88aa33a9bb553f2"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd3r/report.md",
+      "sha256": "7adf116e1c0499e39b9be72b0044790320be37f7f2bf3461495aaa474a65da98"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd3r/audit.log",
+      "sha256": "317c686cb8c9f3f42491dda172c5da4bf820fb237fc96b4ea0d4317d51d96c7b"
+    },
+    "ledger-receipt.json": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd3r/ledger-receipt.json",
+      "sha256": "3a560b07236ccc7ce420672ff7c2ce3bdd1f5e051252c198a74454c725288782"
+    }
+  },
+  "artifact_roles": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "ledger-receipt.json": "append_ready_single_row_dry_run_validated",
+    "receipt.json": "integrity_manifest_with_explicit_record_reference"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "open_finding_ids": [],
+    "unresolved_minor_nit_count": 0
+  },
+  "retained_coverage": {
+    "prior_record": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd3/record.json",
+      "sha256": "d7fcf89aeb3fbf568edece91e8ffff7d360a407c126afba220c02dcf9f8cad87"
+    },
+    "prior_report": {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd3/report.md",
+      "sha256": "6b12faa8b2cc8077ab5336d55bd01964b6f6c3614c9c5297ba973f1fcd5ddc2f"
+    },
+    "prior_target_sha256": "68589105a34916a64d5a66028e9f042b7686128a50b851bd88967142c9d7c347",
+    "changed_key": "cli.serve_readiness.not_this_daemon",
+    "retained_key_count": 14,
+    "only_changed_target_utf8_token_reversal_reproduces_full_prior_file_sha256": true,
+    "only_changed_english_token_reversal_reproduces_prior_sha256": true,
+    "only_changed_context_note_reversal_reproduces_prior_sha256": true,
+    "guidance_hashes_unchanged": true,
+    "source_selection_file_unchanged": true,
+    "prior_source_selection_input": {
+      "path": "local_operator/network/readiness.py",
+      "sha256": "3adbd0122dc704320bd77991299071739057da36d34e39bec7d6591821d5968b"
+    },
+    "source_selection_executed": false,
+    "prior_bundle_hashes": {
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd1/report.md": "6dd44a653faf2b124b527045f21ebe033dfa95b18455e47b4e3d225f9bfc871a",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd1/ledger-receipt.json": "f3868eb3cd6b754df5e05bb65cc3ba72b9ebd0cd75256876ea260bdeea89f6b6",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd1/audit.log": "1ade5d35c85aab1e4596f7abacc3f3477ed898f666babd2847bc0bfb10ac4eb9",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd1/record.json": "d6e820ec3de87bb844927685042b6023276993b80ae7d39fb544e6a9c5f6061b",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd1/receipt.json": "2795573508d7bfd49da62af8a8751ce5f7fb5e074b5446bda450d132986bd7a2",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd2/audit.log": "3945869d6fabbd41cb993fb45b00deb2884b426219f0892bc6055c0989ebbb6b",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd2/rendered.txt": "e6005e518f1f3284dd7beb4b7a670b2ea21935c4a9b565efcbc930947170bebd",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd2/report.md": "e7be32a7e39aded10e3b5446b11125ef412d02d7ec4cbedba06aa5e81207733a",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd2/record.json": "606cc6fb61b038b0f3e8171f8b311b14706c83890faac5f11215cbc6cf28afbb",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd2/receipt.json": "481df94269272e77ed9aedd158e40ebd30c381af512bd4a47460e84fc65220be",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd1r/report.md": "19666d183522c9bc2a35ae3df5d13c4f8968385d1154909c1b8ed385e5c1d438",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd1r/ledger-receipt.json": "ee925bb46be177bdaee22fca571fbef5eec6ba75d4c131f7a22ec119fde07526",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd1r/audit.log": "70295dfdc40ed37a81185a6bd62618475c4717213dc6d39585dcdbdb2277441c",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd1r/record.json": "e6bf9d786c63401a95d47daec2faec7f7c462e08fba0e0c0111a7c3bc1a95c0d",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd1r/receipt.json": "521912dd3bfda878bcff3249c2961b8e3ed06668398bcabc8318d1e7cc91c93a",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd2r/rendered.txt": "59f266b0d9f3c40685eac8ad7f8beba201259829d8493f37a8818565363eb75f",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd2r/delta.json": "742cc3e485d5eeb9022371a76c61b91ea9da4a75db09b8b405d2d048d1f51c96",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd2r/report.md": "0d68c7d1e74f9a37993c421808cfbe332cfe97fd74ea33a2df2f283288ab2baa",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd2r/record.json": "b4297e1645bb70644936af6181a81f8b3d9289aa4866af2cad7b9c10234ba4fc",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd2r/receipt.json": "fa7ae6cc1077d14782e35bfdfc7ae426ff5acc459ac69e93630bd563ee8abb5d",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd4/delta.json": "f0b46e19cfc1194ae945be85623adc47095b9c305360eafc0488535e2e80b47d",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd4/rendered.txt": "7ad3b2d81c9fb8799520af939e1fd7e0e9d9914ce26e8ae0253c399680bd1680",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd4/report.md": "6ce89ff2cbb834fbf56f23b4f402cd2bbbc7124801913e22db1a17496c3b7aa6",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd4/record.json": "fa2e47c937f052c98daa6f33234f172f5ac81bea8ad5700b8537faa546ec5801",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd4/receipt.json": "d1c11fec0922ae1bb5d15772aae560f43996d16b1983c28a952ee08034908413",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd3/report.md": "6b12faa8b2cc8077ab5336d55bd01964b6f6c3614c9c5297ba973f1fcd5ddc2f",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd3/ledger-receipt.json": "54d490fb234fa4bce86b066c2f9a0e93a60d8534d57f463a47a1849b8f62dd4d",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd3/audit.log": "ce41313eed09fcca09e1698371e2b17daa31715a192d0c8d65519b02514d3f1e",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd3/record.json": "d7fcf89aeb3fbf568edece91e8ffff7d360a407c126afba220c02dcf9f8cad87",
+      "i18n/audits/evidence/vi/cli.serve_readiness/sd3/receipt.json": "0e4193052141c000e9b15fa9a36576753a62009512def48394373ceefe7c633c"
+    },
+    "cgroup_N1_deferred": true,
+    "cross_locale_trigger": "RU-SD3-01; not a finding disposition on Russian in this Vietnamese-only audit"
+  },
+  "guidance_hashes": [
+    {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    },
+    {
+      "path": "i18n/audits/evidence/README.md",
+      "sha256": "f98005f6797ad42d3e0c8d8f72516bf684519ad9e6b7ad7ac83812bbdb4a4d3b"
+    }
+  ],
+  "mechanical_validation": {
+    "catalogue_exit_code": 0,
+    "catalogue_problem_count": 0,
+    "parser_render_exit_code": 0,
+    "key_count": 15,
+    "plural_categories": [
+      "other"
+    ],
+    "count_samples": [
+      0,
+      1,
+      2,
+      5,
+      101
+    ],
+    "grouped_pid_counts": [
+      1,
+      2,
+      5
+    ],
+    "opaque_simple_parameters_tested": true,
+    "changed_string_cells": 52,
+    "no_live_ui_or_second_independent_pass_claim": true
+  },
+  "receipt_validation": {
+    "mode": "dry-run",
+    "exit_code": 0,
+    "expected_history_sha256": "0441f654e06455c267e005ac01e56fa40df5753933ad8e54a60c559818e85ad1",
+    "note_length": 168,
+    "history_appended_by_auditor": false
+  },
+  "source_audit_revision": {
+    "head": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+    "uncommitted_remediation": true,
+    "source_selection_input": {
+      "path": "local_operator/network/readiness.py",
+      "sha256": "3adbd0122dc704320bd77991299071739057da36d34e39bec7d6591821d5968b"
+    },
+    "source_selection_validation": "read_only_inspection_not_runtime_execution"
+  },
+  "retention": {
+    "prior_bundles_preserved": true,
+    "source_target_history_edited": false,
+    "committed_by_auditor": false,
+    "parent_owns_append_and_commit": true
+  },
+  "current_bytes_match_audited_hashes": true,
+  "original_lost_evidence": {
+    "status": "not_applicable_no_original_lost"
+  },
+  "backdated": false
+}

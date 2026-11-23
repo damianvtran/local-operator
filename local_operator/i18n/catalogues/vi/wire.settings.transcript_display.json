@@ -1,0 +1,8 @@
+{
+  "wire.settings.transcript_display.choice.by_response.description": "mọi phản hồi đã hoàn tất",
+  "wire.settings.transcript_display.choice.by_response.label": "Theo phản hồi",
+  "wire.settings.transcript_display.choice.by_turn.description": "một câu trả lời mỗi lượt",
+  "wire.settings.transcript_display.choice.by_turn.label": "Theo lượt",
+  "wire.settings.transcript_display.help": "“Theo lượt” gộp mỗi lượt thành câu trả lời của nó. “Theo phản hồi” giữ mọi phản hồi đã hoàn tất trên màn hình, vẫn đánh dấu câu trả lời cuối của lượt.",
+  "wire.settings.transcript_display.label": "Hiển thị bản ghi"
+}

@@ -47,6 +47,7 @@
   "cli.team_bridge.help.setup": "检查此机器是否已准备好接收智能体消息，并让接收器就位。同意声明在Local Operator应用中授予",
   "cli.team_bridge.setup.consent_ui_required": "Team Bridge的同意声明在Local Operator应用中授予，不能从终端授予。打开应用一次并开启智能体消息。",
   "cli.team_bridge.setup.consent_ui_next": "此机器尚未设置，因此暂无可安装的内容。待应用为此配置文件夹开启智能体消息后，再次运行此命令。",
+  "cli.team_bridge.setup.mesh_node_relay": "mesh节点上从不设置智能体消息（Team Bridge），而此设备是以节点身份加入其mesh网络的。要给队友发消息，请让主设备上的幕僚长会话代发：智能体使用`send`工具（会话ID可从`sessions` `list`获取；若找不到，请添加`peer=<primary device>`），人工则直接在该设备上提出请求。参见guide://network。",
   "cli.team_bridge.setup.enable_in_app_required": "已为{account_id}设置智能体消息，但尚未在此机器上开启。打开Local Operator应用一次并开启智能体消息，然后再次运行此命令。",
   "cli.team_bridge.setup.designation_missing": "已为{account_id}设置智能体消息，但尚未为其指定幕僚长会话。打开Local Operator应用，选择负责回复你的智能体的会话。",
   "cli.team_bridge.setup.ready": "智能体消息：已就绪。账号{account_id}，幕僚长会话{session}，接收器已就位。",
@@ -57,5 +58,14 @@
   "cli.team_bridge.notify.budget_exhausted_title": "智能体消息筛查暂停中",
   "cli.team_bridge.notify.budget_exhausted_body": "你的智能体已用完每小时的筛查额度，新的智能体消息正在等待。额度恢复后会自动筛查。来自真人的消息和发给你的智能体的消息会优先筛查。",
   "cli.team_bridge.notify.screening_model_unavailable_title": "智能体消息已暂扣：没有模型能完成筛查",
-  "cli.team_bridge.notify.screening_model_unavailable_body": "每条传入的智能体消息在你的智能体看到之前都要经过安全检查。检查会先尝试通过Anthropic或Radient使用Claude Sonnet 5.5和Claude Opus 5.5，然后尝试你自己的默认模型及其备用模型。这些模型都无法运行，因此新的智能体消息被暂扣。消息不会丢失。解决方法：登录Anthropic或Radient，在Radient控制台充值，或确认你的默认模型可用。暂扣的消息会自动重新筛查。"
+  "cli.team_bridge.notify.screening_model_unavailable_body": "每条传入的智能体消息在你的智能体看到之前都要经过安全检查。检查会先尝试通过Anthropic或Radient使用Claude Sonnet 5.5和Claude Opus 5.5，然后尝试你自己的默认模型及其备用模型。这些模型都无法运行，因此新的智能体消息被暂扣。消息不会丢失。解决方法：登录Anthropic或Radient，在Radient Console充值，或确认你的默认模型可用。暂扣的消息会自动重新筛查。",
+  "cli.team_bridge.notify.owner_action_hold_title": "{reason, select, sign_in_required{请重新登录Radient} consent_required{请重新给予同意} owner_ineligible{请检查智能体消息是否已开启} other{智能体消息已暂扣}}",
+  "cli.team_bridge.notify.owner_action_hold_body": "{reason, select, sign_in_required{你在本机上的Radient登录已过期，或不是账户所有者的登录，因此新的智能体消息已暂扣。消息会保留，不会被丢弃。解决方法：打开Local Operator应用，以账户所有者身份重新登录。} consent_required{智能体消息需要你重新同意，因此新的智能体消息已暂扣。消息会保留，不会被丢弃。解决方法：打开Local Operator应用，开启智能体消息，然后查看并重新给予同意。} owner_ineligible{智能体消息目前未对你的组织或本机启用，因此新的智能体消息已暂扣。消息会保留，不会被丢弃。解决方法：打开Local Operator应用，检查本机是否已开启智能体消息。如果已开启，请你所在Radient组织的管理员检查其使用资格。} other{新的智能体消息已暂扣，需要你处理。消息会保留，不会被丢弃。打开Local Operator应用查看详情。}}",
+  "cli.team_bridge.status.running": "正在运行的接收器：pid {pid}，版本{version}，启动于{started}",
+  "cli.team_bridge.status.running_none": "正在运行的接收器：暂无记录",
+  "cli.team_bridge.status.running_unrecorded": "正在运行的接收器：未记录详细信息。需要重启：由旧版本启动的接收器不会记录这些信息；请重启它以查看。",
+  "cli.team_bridge.status.running_exited": "正在运行的接收器：无——最后记录的接收器（pid {pid}，版本{version}）已退出",
+  "cli.team_bridge.status.running_detail": "正在运行的构建：{generation}；接受的同意版本：{versions}",
+  "cli.team_bridge.status.restart_needed": "需要重启：接收器运行的版本与已安装的版本（{installed}）不同。请重启它以加载已安装的版本。",
+  "cli.team_bridge.status.restart_needed_replaced": "需要重启：接收器正在运行上次更新之前的代码（已安装版本：{installed}）。请重启它以加载已安装的代码。"
 }

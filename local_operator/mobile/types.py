@@ -777,6 +777,11 @@ class TranscriptEntry:
     # when the artifact carried one (absence renders reduced, never a
     # synthesized zero).
     videos: list[dict[str, Any]] = field(default_factory=list)
+    # Retained input documents, with a family-specific index like images and
+    # videos. No origin/stored path or digest grants byte access: the session
+    # attachment route resolves this row+index at its owner. Sparse on wire so
+    # ordinary rows and older readers keep their existing byte-shaped contract.
+    files: list[dict[str, Any]] = field(default_factory=list)
     # assistant rows stream: ``final`` flips true on message_end
     final: bool = True
     # Settled streaming is not the same as complete representation: transport
@@ -828,6 +833,8 @@ class TranscriptEntry:
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
+        if not self.files:
+            data.pop("files", None)
         # SPARSE: each condensation fact goes out only when it differs from its
         # default. The fields are defaulted-and-omitted rather than
         # ``None``-valued because every reader's rule is "unknown is absent",
@@ -1080,6 +1087,22 @@ class PendingRequest:
         return asdict(self)
 
 
+def _title_with_command(title: str, command: Any) -> str:
+    """The legacy single-slot ``title`` with the ask's suggested command folded in.
+
+    The legacy ``PendingRequest`` card has ONE text slot, and every client that
+    reads it (an old desktop app, the native app, the blocking
+    ``LOP_ASK_NONBLOCKING=0`` arm) predates ``AskQuestion.command``: without
+    this, a question like "Sign in to GitLab first?" would reach them with the
+    command that makes it answerable silently gone. Appending it as its own
+    paragraph keeps it visible and copyable on every one of them; newer
+    surfaces read the structured field instead.
+    """
+    if isinstance(command, str) and command.strip():
+        return f"{title}\n\n{command.strip()}"
+    return title
+
+
 def ask_mirror_request(card: Mapping[str, Any]) -> PendingRequest:
     """The legacy single-slot card for the mirrored question of a QUEUED ask (§4).
 
@@ -1100,7 +1123,9 @@ def ask_mirror_request(card: Mapping[str, Any]) -> PendingRequest:
     return PendingRequest(
         request_id=str(card.get("request_id") or ""),
         kind="ask",
-        title=str(card.get("title") or "the agent is asking"),
+        title=_title_with_command(
+            str(card.get("title") or "the agent is asking"), card.get("command")
+        ),
         detail="",
         options=[
             AskOptionWire(
@@ -1153,7 +1178,10 @@ def ask_pending_request(
     return PendingRequest(
         request_id=request_id,
         kind="ask",
-        title=str(getattr(question, "question", "") or "the agent is asking"),
+        title=_title_with_command(
+            str(getattr(question, "question", "") or "the agent is asking"),
+            getattr(question, "command", None),
+        ),
         detail="",
         options=options,
         secret=bool(getattr(question, "secret", False)),
@@ -1257,6 +1285,18 @@ class SessionProjection:
     #: stated here. SPARSE: absent means false, which is what an older daemon
     #: and an uncapped projection both mean.
     transcript_head_pinned: bool = False
+    #: WHERE EACH DELIVERED PHONE STEER SITS IN THE JOURNAL: steer row id -> the
+    #: id of the row it follows there. A phone steer is painted at SEND time
+    #: (``ProjectionFold.note_user_message``) and upgraded in place when the
+    #: drain delivers it at a later tool boundary, while the journal — and so
+    #: ``/history`` and every fresh mount — records it at DELIVERY. This map is
+    #: the delivery slot, written by the fold (which lives in the runtime) so
+    #: the relay can reorder per client: only a stream that declared
+    #: ``?steer_journal_order=1`` gets the move (``steer_journal_order_frame``).
+    #: RELAY-INTERNAL: the relay strips it from every SSE frame, so no phone
+    #: ever holds it. SPARSE: an empty map is popped by ``to_json`` so a
+    #: steer-free projection stays byte-identical to the pre-capability wire.
+    steer_journal_order: dict[str, str] = field(default_factory=dict)
     # Optional DISPLAY capability, never inferred from raw entry details. Old
     # owners omit it; only the updated owner source binding sets version 1.
     peer_cycles: int | None = None
@@ -1375,6 +1415,8 @@ class SessionProjection:
             data["transcript"] = [row.to_json() for row in self.transcript]
         if not self.transcript_head_pinned:
             data.pop("transcript_head_pinned", None)
+        if not self.steer_journal_order:
+            data.pop("steer_journal_order", None)
         if self.peer_cycles is None:
             data.pop("peer_cycles", None)
         data["pending"] = self.pending.to_json() if self.pending else None

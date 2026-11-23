@@ -1,0 +1,217 @@
+{
+  "wire.voice.title": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.description": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.max_spoken_chars.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.max_spoken_chars.help": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.not_enabled": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.unknown_session": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited. {session_id} is an opaque 12-hex conversation id."
+  },
+  "wire.voice.unknown_source": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.invalid_request": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.empty_transcript": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.store_busy": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.session_syncing": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "Refusal while the app cannot yet tell whether an approval or question is waiting; nothing was sent, so retrying is safe. English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.invalid_request_id": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.invalid_message": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "No placeholder: the two reasons a transcript is refused (over the size limit, or a whole line that is a slash command) are named in one fixed sentence. A command is a line that starts with a slash, such as /help. English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.approval_pending": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.invalid_text_origin": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.unknown_segment": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.unavailable": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.stt_unavailable": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.unsupported_audio": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.upload_too_large": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.rate_limited_minute": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.rate_limited_day": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.rate_limited_unknown": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.on_screen_first": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.voice_off": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.switched": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.failed": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.still_working": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.truncated": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.spoken.approval_needed": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); the first words read when an approval card is read aloud",
+    "tone": "brief, plain, spoken register",
+    "note": "{title} is the name of the tool that is asking, for example bash; keep it exactly as given. It is followed by the tool's own approval summary, so end with a full stop. English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.spoken.approval_needed_untitled": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); the first words read when an approval card is read aloud",
+    "tone": "brief, plain, spoken register",
+    "note": "Used when the approval has no tool name. English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.spoken.code_omitted": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short stand-in for skipped code",
+    "tone": "brief, plain, spoken register",
+    "note": "Said in place of a whole block of code that is skipped, in the middle of a reply. Keep it short; a pair of parentheses around it is optional. English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.spoken.link": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a one-word stand-in for a web address",
+    "tone": "brief, plain, spoken register",
+    "note": "Said in place of a web address, in the middle of a sentence. One short word for \"link\". English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.provider.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.provider.help": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.provider.choice.none.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.provider.choice.none.description": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.provider.choice.radient.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.provider.choice.radient.description": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.provider.choice.elevenlabs.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.provider.choice.elevenlabs.description": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.provider_unset": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  }
+}

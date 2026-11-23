@@ -1,0 +1,21 @@
+# mech.py (scratch ~/.local-operator/sessions/375851fcc4e9/scratchpad/fr-reaudit-3958/mech.py), run at ~/local-operator/.worktrees/tunnel-remedy-no-commands @ 14b76fafa, isolated HOME/LOCAL_OPERATOR_CONFIG_DIR, CMUX_* unset
+# Negative control: the same U+202F detector run over 14b76faf~1 flags account_plain, verification_plain, failed_plain with no-U+202F-before-; (the a3 FR3-01 defect); at 14b76faf it flags none.
+# Pre-receipt control: set_active_locale('fr') resolved to 'en' (fr not shipped) and plain_remedy matched the fr catalogue 0/12.
+### mech.py post-receipt
+== fr ( 106 keys; en 106 )
+  stopped_plain: en_cells=118 cells=132 maxCells=None u202f=0 apos=1 flags=none
+  owner_missing_plain: en_cells=139 cells=154 maxCells=None u202f=0 apos=3 flags=none
+  login_plain: en_cells=75 cells=90 maxCells=None u202f=0 apos=1 flags=none
+  choose_account_plain: en_cells=119 cells=159 maxCells=None u202f=0 apos=1 flags=none
+  account_plain: en_cells=123 cells=136 maxCells=None u202f=1 apos=3 flags=none
+  cloudflared_plain: en_cells=172 cells=206 maxCells=None u202f=0 apos=5 flags=none
+  mobile_bundle_plain: en_cells=158 cells=190 maxCells=None u202f=0 apos=4 flags=none
+  supervisor_plain: en_cells=160 cells=197 maxCells=None u202f=0 apos=2 flags=none
+  apply_plain: en_cells=52 cells=55 maxCells=None u202f=0 apos=1 flags=none
+  verification_plain: en_cells=89 cells=112 maxCells=None u202f=1 apos=1 flags=none
+  failed_plain: en_cells=73 cells=115 maxCells=None u202f=1 apos=2 flags=none
+  complete_plain: en_cells=79 cells=93 maxCells=None u202f=0 apos=1 flags=none
+active locale after set_active_locale('fr'): fr
+runtime plain_remedy == fr catalogue: 12 / 12 
+mechanical flags: 0
+rc=0

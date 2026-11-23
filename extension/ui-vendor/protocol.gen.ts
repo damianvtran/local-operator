@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: protocol.gen.ts (wire declarations).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (13 modules: access-flow.ts, access-queue.ts, ax-compact.ts, ax-locator.ts, deadline.ts, element-query.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: f73d53042a10bc164542caee3b7d97c6e325f9e896e23fadb380b7258bea124b
+// Inputs sha256: fc5f52b879884189afae2f5978ede081dfed73a1db50af09da85a67be73903d2
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -13,7 +13,7 @@ export const PROTO_VERSION = 1 as const;
 // ADVISORY ONLY: nothing is refused for being older (`MIN_SUPPORTED_PROTO` is
 // the compatibility floor). Generated so the popup's update line and the
 // daemon's agree by construction.
-export const EXPECTED_EXTENSION_VERSION = '0.1.26' as const;
+export const EXPECTED_EXTENSION_VERSION = '0.1.28' as const;
 // The ONE spelling of the "a newer extension exists" advisory. `{have}` and
 // `{want}` are the reported and the expected extension versions; the
 // contingency is on the Chrome Web Store because nothing here can know what the
@@ -87,7 +87,7 @@ export const CAPABILITY_SWITCHES: Record<string, { label: string; permission: st
   "upload": { label: 'Allow uploads', permission: '' },
 };
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'press' | 'hover' | 'select' | 'setvalue' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'copy' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'press' | 'hover' | 'select' | 'setvalue' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'copy' | 'request_access' | 'await_access' | 'cancel_access' | 'submit_signed_decision' | 'list_access' | 'revoke_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
 // Wire methods ONLY the desktop app's browser host serves. They are in `Method`
 // because the vocabulary is shared, but this build must not serve or advertise
 // them: network capture needs a standing channel the extension's worker lifetime

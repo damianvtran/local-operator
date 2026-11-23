@@ -149,6 +149,56 @@ def test_every_deferred_name_is_a_real_tool_with_a_purpose() -> None:
     assert not ({"project", "sessions", "send", "agent", "secret", "network"} & DEFERRED_TOOLS)
 
 
+def test_zero_use_schemas_are_deferred_with_a_direct_call_phrase() -> None:
+    """Wave 2 (2026-11-19): ten tools the 7-day ledger saw called 0-19 times
+    ride on demand. A valid direct call needs no ``tool://`` read, so the line
+    must say what each does; ``no_reply`` must say it takes no arguments (the
+    ledger showed ~2.2 schema reads per using session for an empty schema)."""
+    wave2 = {
+        "generate_image",
+        "generate_video",
+        "video_status",
+        "generate_voiceover",
+        "generate_sound_effect",
+        "generate_music",
+        "modify_music",
+        "music_status",
+        "tags",
+        "harness_import",
+    }
+    assert wave2 <= DEFERRED_TOOLS
+    assert "no arguments so call it directly" in DEFERRED_TOOL_PURPOSES["no_reply"]
+    # The inventory line joins entries with ", ": a comma inside a phrase
+    # reads as a second tool name (to a model and to the inventory parser in
+    # test_late_capability_tools).
+    assert not [n for n in wave2 | {"no_reply"} if "," in DEFERRED_TOOL_PURPOSES[n]]
+
+
+def test_each_deferred_media_generator_names_its_guide_in_its_phrase() -> None:
+    """REGRESSION (PR #4326 review R4): the media tools' "read the guide first"
+    pointer lived only in their descriptions, which a valid direct call to a
+    deferred tool never publishes. The phrase is the one text such a call is
+    guaranteed to have seen, so it must carry the pointer — and the pointer
+    must name a guide that exists."""
+    from pathlib import Path
+
+    import local_operator
+
+    guides = Path(local_operator.__file__).parent / "guides"
+    wanted = {
+        "generate_image": "guide://image-generation",
+        "generate_video": "guide://video-generation",
+        "generate_voiceover": "guide://sound-generation",
+        "generate_sound_effect": "guide://sound-generation",
+        "generate_music": "guide://music-generation",
+        "modify_music": "guide://music-generation",
+    }
+    for name, guide in wanted.items():
+        assert name in DEFERRED_TOOLS
+        assert f"{guide} first" in DEFERRED_TOOL_PURPOSES[name], name
+        assert (guides / guide.removeprefix("guide://") / "GUIDE.md").is_file(), guide
+
+
 def test_a_pin_keeps_a_named_tool_published() -> None:
     assert "team" in deferred_tool_names()
     assert "team" not in deferred_tool_names(pinned=("team", "read"))
@@ -499,7 +549,7 @@ async def test_the_inventory_block_is_identical_before_and_after_activation(tmp_
     assert before == after
     assert "- read" in before and "- console" not in before
     assert "Schema on demand" in before and "console (drive an interactive terminal)" in before
-    assert "call these directly by name" in before
+    assert "call by name" in before
     await session.dispose()
 
 

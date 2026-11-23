@@ -1,0 +1,83 @@
+"""Read-only scoped repository-validator and actual message-render evidence."""
+import sys, os, json, hashlib, importlib.util, re, unicodedata, subprocess
+from pathlib import Path
+ROOT=Path('/Users/damian/local-operator/.worktrees/github-designation-ux-4052')
+OUT=Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])
+sys.path.insert(0,str(ROOT))
+os.chdir(ROOT)
+from local_operator.i18n import runtime, catalogues, messages
+from local_operator.i18n.format import plural_categories
+from rich.cells import cell_len
+spec=importlib.util.spec_from_file_location('repo_check',ROOT/'scripts/i18n/check.py')
+check=importlib.util.module_from_spec(spec); sys.modules[spec.name]=check; spec.loader.exec_module(check)
+locales=['fr','es','zh-CN','ru','vi','ur','hi']
+manifest=json.loads((ROOT/'docs/design/github-designation-ux-i18n.json').read_text())
+keys=manifest['new_keys']+manifest['changed_keys']
+# Restrict discovery, not validator rules. No catalogue/history/generator writes.
+orig_ns=catalogues.namespaces
+catalogues.namespaces=lambda locale: [n for n in orig_ns(locale) if n in ('wire.github','wire.settings')]
+problems=check.check_catalogues()
+catalogues.namespaces=orig_ns
+print('REPO check.check_catalogues scoped discovery wire.github/wire.settings:',json.dumps(problems))
+assert not problems, problems
+paths=[]
+for locale in ['en']+locales:
+ for ns in ['wire.github','wire.settings']:
+  paths.append(f'local_operator/i18n/catalogues/{locale}/{ns}.json')
+for ns in ['wire.github','wire.settings']:
+ paths.append(f'local_operator/i18n/catalogues/en/{ns}.context.json')
+hashes={p:hashlib.sha256((ROOT/p).read_bytes()).hexdigest() for p in paths}
+counts=[0,1,2,3,5,11,21,22,25,101,1.5,1000000]
+base={'repo':'octo-org/website','names':'octo-org/website, octo-org/api','owner':'owner-device-7','command':'lop network credential github repos','action':'exclude','error':'PermissionError','count':3,'limit':100,'reason':'REASON','remedy':'REMEDY','source':'SOURCE','ago':'AGO','opted':'','failure':'','ttl':'TTL','pointer':'','head':'octo-org/website','last':'octo-org/api','detail':'DETAIL','form':'other','which':'WHICH'}
+records=[]; issues=[]; rendered_total=0; stats={}; compositions={}
+production_controls={locale: {'text': messages.render_record('wire.github.progress',{},locale=locale).text, 'source_locale':messages.render_record('wire.github.progress',{},locale=locale).source_locale} for locale in locales}
+print('Unmodified production eligibility controls:',json.dumps(production_controls,ensure_ascii=False))
+for locale in locales:
+ data={}
+ for ns in ['wire.github','wire.settings']: data.update(json.loads((ROOT/f'local_operator/i18n/catalogues/{locale}/{ns}.json').read_text()))
+ en={}
+ for ns in ['wire.github','wire.settings']: en.update(json.loads((ROOT/f'local_operator/i18n/catalogues/en/{ns}.json').read_text()))
+ for key in keys:
+  text=data[key]; args=runtime.message_arguments(text)
+  assert {n for n,k in args}=={n for n,k in runtime.message_arguments(en[key])}
+  assert not any(0x202A<=ord(c)<=0x202E or 0x2066<=ord(c)<=0x2069 or ord(c) in (0x200E,0x200F) for c in text),(locale,key,'manual bidi')
+  if locale=='vi': assert unicodedata.normalize('NFC',text)==text
+  for token in re.findall(r'--[a-z][a-z-]*|/settings|owner/repo|octo-org/website|lop network credential github exclude <owner/repo>|lop network credential github repos --use-default',en[key]):
+   assert token in text,(locale,key,token)
+  for selectors in runtime.plural_selectors(text): assert set(plural_categories(locale)).issubset(selectors)
+  numeric=any(kind in ('number','plural') for n,kind in args)
+  forms=['one','other'] if any(kind=='select' for n,kind in args) else ['other']
+  for count in counts if numeric else [3]:
+   for form in forms:
+    params={**base,'count':count,'form':form}
+    actual=runtime.render_message(text,params,locale)
+    rendered_total+=1
+    if (count==3 and form=='other') or key.endswith(('age_days','age_hours','readiness_list')):
+     records.append({'locale':locale,'key':key,'count':count,'form':form,'text':actual,'max_line_cells':max(map(cell_len,actual.splitlines()))})
+ def r(s,**p): return runtime.render_message(data['wire.github.'+s],{**base,**p},locale)
+ failure=' ('+r('failure_unknown_login')+')'
+ ttl=r('ttl',count=5)
+ ago=r('age_days',count=2)
+ reason=r('reason_unavailable_remote',failure=failure)
+ remedy=r('remedy_unavailable',command='lop network credential github repos --refresh')
+ detail=r('refusal_detail',reason=reason,remedy=remedy)
+ source=r('readiness_last_good',ago=ago,failure=failure,opted=r('readiness_opted',count=2))
+ compositions[locale]={
+ 'borrower_no_matching_account':r('borrower_unset',detail=detail),
+ 'denied_repo':r('wrapper_denied'),
+ 'stale_readiness':r('readiness_list',source=source,pointer=r('readiness_pointer')),
+ 'all_opted_out':r('repos_empty',reason=r('reason_excluded_local',count=3),remedy=r('remedy_excluded',command='lop network credential github include octo-org/website')),
+ 'opt_out_timing':r('exclude_added',ttl=ttl),
+ 'clear_vs_never_set':data[manifest['changed_keys'][0]],
+ 'auth_request_failure':r('failure_auth'),
+ }
+ stats[locale]={'key_count':len(keys),'plural_categories':plural_categories(locale),'representative_render_count':sum(x['locale']==locale for x in records)}
+result={'source_sha':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'scope':'95fff90559ae..0b754ce89567','input_hashes':hashes,'validator':{'entry':'scripts/i18n/check.py:check_catalogues','discovery_scope':['wire.github','wire.settings'],'problems':problems},'locale_stats':stats,'scoped_key_count_per_locale':len(keys),'scoped_locale_key_pairs':len(keys)*len(locales),'render_execution_count':rendered_total,'production_eligibility_controls':production_controls,'render_path':'local_operator.i18n.runtime.render_message with explicit locale; catalogue candidate proof, NOT production activation','representative_renders':records,'composed_safety_messages':compositions,'limitations':['No browser/native/app visual capture; actual message render text and measured cell widths only.','CLI/TUI Urdu shaping and terminal bidi are not certified. No manual bidi controls inserted.','No catalogue edits, ledger appends, generators, installs or worktree creation.']}
+(OUT/'second-pass-execution.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+with (OUT/'second-pass-rendered.txt').open('w') as f:
+ for locale,scenarios in compositions.items():
+  f.write('\n### '+locale+'\n')
+  for name,text in scenarios.items(): f.write(name+': '+text+'\n')
+print('PASS',len(keys)*len(locales),'locale-key pairs;',rendered_total,'actual locale render executions;',len(records),'retained representative renders')
+print(json.dumps(stats,ensure_ascii=False))
+print('evidence:',OUT/'second-pass-execution.json',OUT/'second-pass-rendered.txt')

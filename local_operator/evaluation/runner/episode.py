@@ -69,6 +69,7 @@ from local_operator.evaluation.adapters.supervisor import (
     run_rescue,
     verify_artifact,
 )
+from local_operator.evaluation.completion_verifier import CompletionVerifierConfig
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
     AgentStopPayload,
@@ -202,14 +203,16 @@ DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
         # /var/lib/snapd/snaps, NOT the 4096-byte /var/lib/snapd/cache an
         # earlier revision named, and NOT the x11grab recorder the revision
         # before that named -- no ffmpeg process was ever found on a failing
-        # guest). The override is DISCLOSED but INERT as the adapter stands:
-        # the guest's filesystem measured 30,993,747,968 bytes in both a 40 GiB
-        # and a 120 GiB volume, because `DesktopEnv(...)` is constructed without
-        # `volume_size=`, so upstream's `expand_guest_volume` never runs. It is
-        # disclosed anyway, and deliberately: a run whose operator asked for
-        # different guest hardware must be identifiable from its bundle alone,
-        # and the disclosure is what makes a later adapter that DOES act on the
-        # size comparable to the runs before it.
+        # guest). The override is LIVE since PR #3867: the adapter grows the
+        # guest's root filesystem to the requested size, following upstream's
+        # precedence -- a task's own `volume_size` wins, and the override only
+        # sizes tasks that declare none. Upstream's documented run sets no
+        # override, so for those non-declaring tasks it grants disk upstream
+        # does not, and a run that sets it must disclose that as a deviation.
+        # (Before #3867 it was inert: the filesystem measured 30,993,747,968
+        # bytes in both a 40 GiB and a 120 GiB volume.) The disclosure is what
+        # makes a run whose operator asked for different guest hardware
+        # identifiable from its bundle alone.
         "AWS_ROOT_VOLUME_SIZE": "aws_root_volume_size_override",
         # Network policy changes comparability too: older adapters must refuse
         # this request rather than seal a disabled-policy claim while enabling it.
@@ -217,6 +220,25 @@ DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
         # The settle frequency changes the benchmark's action pacing. The
         # companion metadata is derived from this value by the run script.
         "OSWORLD_ACTION_SETTLE_POLICY": "osworld_action_settle_policy",
+        # Directories whose host tools a task evaluator may shell out to.
+        # The worker environment is constructed, never copied
+        # (``supervisor.minimal_environment``), and carries no PATH at all,
+        # so an evaluator sees only the interpreter's default search path:
+        # a tool installed anywhere else either raises or -- where the
+        # evaluator swallows the failure -- silently scores lower. Upstream
+        # harnesses run evaluators under the operator's ordinary environment,
+        # so that is a fidelity gap, and closing it changes what a score
+        # means: a run that sets this is comparable only to runs that
+        # disclose the same directories. Hence a disclosed value rather than
+        # a PATH passthrough. It rides this channel, not the launch
+        # environment, because the worker is launched BEFORE
+        # ``inspect_requirements`` can say whether this adapter build
+        # understands it: the adapter applies it in its own process at
+        # ``prepare``, after the gate, and a build that predates it is
+        # refused instead of sealing a tool path its evaluators never had.
+        # The adapter accepts only absolute, normalised, existing
+        # directories, so the requested string IS the applied list.
+        "EVALUATOR_TOOL_PATH": "evaluator_tool_path",
     }
 )
 _DISCLOSED_INFRA_VALUES = frozenset(DISCLOSED_INFRA_METADATA_KEYS)
@@ -434,6 +456,13 @@ class EpisodeConfig:
     completion_gate: bool = True
     completion_challenges: int = 1
     premature_terminal_gate: bool = True
+    #: The session arm's completion verifier (``evaluation/completion_verifier
+    #: .py``). Default ``rounds=0``: no verifier, and every record the arm
+    #: writes is byte-identical to an arm that predates the field. The reply
+    #: channel (this module's runner) does not read it.
+    completion_verifier: CompletionVerifierConfig = field(
+        default_factory=lambda: CompletionVerifierConfig()
+    )
 
     def __post_init__(self) -> None:
         rate = self.execution_overhead_seconds_per_action

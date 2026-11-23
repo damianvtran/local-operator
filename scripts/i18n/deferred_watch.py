@@ -204,9 +204,16 @@ def new_references(
 #: ``render_resolved`` (``i18n.messages``) is the in-process seam for display text a
 #: backend composes outside the TUI; ``_lang_t`` / ``_kind_t`` are ``tr(<namespace>)``
 #: resolvers bound under their own names where ``_t`` already means another
-#: namespace in the same module (``tui/app.py``).
+#: namespace in the same module (``tui/app.py``); ``_sessions_copy`` is
+#: ``tools/builtin.py``'s ``tr("wire.sessions")``, named for its namespace in a
+#: module that binds several resolvers. ``_github_text`` is the same
+#: ``tr("wire.github")`` resolver, bound under one name in each of
+#: ``network/cli.py``, ``network/readiness.py``, ``network/credentials/github.py``
+#: and ``network/credentials/messages.py``, named for its namespace the way
+#: ``_sessions_copy`` is (PR #4052 deferred ``wire.github``).
 RENDER_WRAPPERS = frozenset(
     {
+        "_sessions_copy",
         "_t",
         "_tr",
         "_desc",
@@ -216,6 +223,7 @@ RENDER_WRAPPERS = frozenset(
         "render_resolved",
         "_lang_t",
         "_kind_t",
+        "_github_text",
     }
 )
 

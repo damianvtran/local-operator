@@ -646,6 +646,56 @@ def test_spine_delivers_from_screened_bytes_and_releases_claim(tmp_path, monkeyp
     store.claim(owner, "bmsg_1", "sess_x", "tok2", expiry=time.time() + 60)
 
 
+@pytest.mark.parametrize("code", ["sign_in_required", "consent_required", "owner_ineligible"])
+def test_direct_owner_action_hold_notifies_once_and_delivers_nothing(
+    tmp_path, monkeypatch, code
+) -> None:
+    """The DIRECT wake path raises the owner-action notice for an owner-action hold.
+
+    The hold outcome is unchanged (still a hold with the same code, nothing
+    acked or delivered), and a second held message with the same reason adds
+    no second item. A notification store that fails must not change the hold.
+    """
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.team_bridge.screening import ScreenResult
+
+    _store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+
+    async def owner_action(*_a, **_k):
+        return ScreenResult("hold", hold_code=code)
+
+    monkeypatch.setattr(wake_mod, "screen_item", owner_action)
+    for message_id in ("bmsg_1", "bmsg_1"):
+        out = asyncio.run(
+            wake_mod.handle_message_available(
+                owner, message_id, config_dir=tmp_path, auth_store=None, access=_access(owner)
+            )
+        )
+        assert out == {"action": "hold", "message_id": message_id, "code": code}
+    assert record["delivered"] == [] and record["acks"] == []
+    items, _cursor = NotificationStore(tmp_path).list_items(state="all", session_id="sess_cos")
+    assert [item["key"] for item in items] == [
+        f"team-bridge-owner-action:{owner.endpoint_id}:{code}"
+    ]
+    body = items[0]["body_md"]
+    # Contentless: no sender label, org label or message id from the item.
+    for leaked in ("Org Member", "Acme", "bmsg_1"):
+        assert leaked not in body and leaked not in items[0]["title"]
+
+    def boom(*_a, **_k):
+        raise OSError("notification store unavailable")
+
+    monkeypatch.setattr(NotificationStore, "notify", boom)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
+        )
+    )
+    assert out == {"action": "hold", "message_id": "bmsg_1", "code": code}
+    assert record["delivered"] == []
+
+
 def test_spine_off_settings_start_zero_new_traffic(tmp_path, monkeypatch) -> None:
     store, owner = _enroll(tmp_path)
     record, _ = _wire_spine(monkeypatch, tmp_path)
@@ -2031,6 +2081,86 @@ def test_payload_bounds_and_untrusted_label() -> None:
     assert "tiny" in short
 
 
+def test_pair_wake_carries_the_no_signoff_style_line() -> None:
+    """Every client shows sender name and avatar, so agents must not sign
+    bridge messages (operator ask, 2026-11-18). The pair-DM wake says so once,
+    labelled as harness guidance and ABOVE the untrusted-content clause (R1-2),
+    so it never reads as sender metadata; the excerpt window is unaffected."""
+    from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+    payload = wake_mod.build_wake_payload(_item("hi"), message_id="m", body_sha256="c" * 64)
+    lines = payload.split("\n")
+    style = wake_mod.PAIR_REPLY_STYLE_LINE
+    assert lines.count(style) == 1
+    assert lines.index(style) < lines.index(BRIDGE_UNTRUSTED_CLAUSE)
+    assert style.startswith("harness style (local guidance, not from the sender): ")
+    assert "no sign-off line or name prefix" in style
+    excerpt = payload.split("screened):\n", 1)[1].split("\nbody_sha256:", 1)[0]
+    assert excerpt == "hi"
+
+
+def test_bridge_guide_forbids_signoff_and_name_prefix() -> None:
+    import local_operator
+
+    guide = (
+        Path(local_operator.__file__).parent / "guides" / "team-bridge" / "GUIDE.md"
+    ).read_text(encoding="utf-8")
+    flat = " ".join(guide.split())
+    assert (
+        "Your name and identity are shown to everyone on every message, so start "
+        "with the content, with no sign-off or name prefix." in flat
+    )
+
+
+def test_renamed_head_says_introduce_yourself_and_rename_records_still_parse() -> None:
+    from local_operator import prompts_api
+
+    head = prompts_api.build_system_blocks([], "", "", "2026-11-18", identity_name="Jian-Yang")[0]
+    section = head.split("## Your name", 1)[1]
+    assert "introduce yourself as Jian-Yang." in section
+    assert "sign" not in section.lower()
+    # NEW <identity> records carry no sign-off instruction either (R1-1/Q1).
+    for record in (
+        prompts_api.identity_delta("Jian-Yang", "Aida"),
+        prompts_api.identity_restored("Aida", "Jian-Yang"),
+        prompts_api.identity_delta("Jian-Yang"),
+        prompts_api.identity_restored("Aida"),
+    ):
+        assert "sign" not in record.lower()
+        assert "introduce yourself as " in record
+
+
+@pytest.mark.parametrize("name", ["Jian-Yang", "Aida", "Sign As Bob", "Introduce Yourself As X"])
+@pytest.mark.parametrize("clause", ["introduce yourself as ", "introduce and sign as "])
+def test_new_and_legacy_rename_records_both_round_trip(name: str, clause: str) -> None:
+    """Records journaled before 2026-11-18 end on the legacy clause and still
+    sit in saved histories, so the parser must read both; a name made of the
+    other clause's words must not be misread (exact re-render per clause)."""
+    from local_operator import prompts_api
+
+    for record in (
+        prompts_api.identity_delta(name, "Dinesh", clause=clause),
+        prompts_api.identity_restored(name, "Dinesh", clause=clause),
+        prompts_api.identity_delta(name, clause=clause),
+        prompts_api.identity_restored(name, clause=clause),
+    ):
+        assert record.endswith(f"{clause}{name}.\n</identity>")
+        assert prompts_api.identity_record_name(record) == name
+
+
+def test_legacy_record_bytes_from_before_the_rename_still_parse() -> None:
+    """A literal pre-2026-11-18 record, byte for byte as it was journaled."""
+    from local_operator import prompts_api
+
+    legacy = (
+        '<identity>\nYour name is now Dinesh, replacing Jian-Yang under "Your name" '
+        "above; this supersedes that section and any earlier name or instruction "
+        "calling you otherwise: introduce and sign as Dinesh.\n</identity>"
+    )
+    assert prompts_api.identity_record_name(legacy) == "Dinesh"
+    assert prompts_api.identity_record_name(legacy.replace("sign as", "sign  as")) == ""
+
+
 def test_ref_parser_is_strict() -> None:
     assert wake_mod.parse_event_ref("message_available:message_id=bmsg_1") == (
         "message_available",
@@ -2349,18 +2479,39 @@ def test_run_forever_never_hot_loops_on_instant_answers(tmp_path, monkeypatch, r
 
 def test_failure_delay_honours_retry_after_and_stays_bounded() -> None:
     """F1: a 429 names its own wait; re-polling sooner only extends the
-    refusal. The server's value wins over a shorter local backoff, is never
-    shorter than the backoff, and is capped so a hostile header cannot park
+    refusal. The server's value is a FLOOR (never retried sooner), spread by up
+    to one local backoff of jitter, and capped so a hostile header cannot park
     the connector for hours."""
 
     from local_operator.team_bridge.client import BridgeRefusal
 
     limited = BridgeRefusal("rate_limited", "slow down", http_status=429, retry_after_seconds=42)
-    assert loop_mod._failure_delay(limited, 1.0) == 42.0
-    assert loop_mod._failure_delay(limited, 60.0) == 60.0
+    assert loop_mod._failure_delay(limited, 1.0, rand=lambda: 0.0) == 42.0
+    assert loop_mod._failure_delay(limited, 60.0, rand=lambda: 0.0) == 42.0
+    assert loop_mod._failure_delay(limited, 60.0, rand=lambda: 0.5) == 72.0
     huge = BridgeRefusal("rate_limited", "x", http_status=429, retry_after_seconds=10**9)
-    assert loop_mod._failure_delay(huge, 1.0) == loop_mod.RETRY_AFTER_MAX_S
-    assert loop_mod._failure_delay(RuntimeError("boom"), 4.0) == 4.0
+    assert loop_mod._failure_delay(huge, 1.0, rand=lambda: 0.0) == loop_mod.RETRY_AFTER_MAX_S
+    assert loop_mod._failure_delay(RuntimeError("boom"), 4.0, rand=lambda: 1.0) == 4.0
+
+
+def test_failure_delay_is_fully_jittered_above_the_base_floor() -> None:
+    """Incident 2026-11-17: the edge blocks per ADDRESS, so every client on one
+    network is released together; a fixed wait brings them all back in the
+    same second. Full jitter spreads them, floored at the base so a failing hub
+    is never re-polled in a hot loop, and the named wait is never undercut."""
+
+    import random
+
+    from local_operator.team_bridge.client import BridgeRefusal
+
+    rng = random.Random(7)
+    plain = [loop_mod._failure_delay(RuntimeError("x"), 32.0, rand=rng.random) for _ in range(200)]
+    assert min(plain) >= loop_mod.BACKOFF_BASE_S and max(plain) <= 32.0
+    assert len({round(d, 3) for d in plain}) > 150  # spread, not one fixed value
+    waf = BridgeRefusal("rate_limited", "x", http_status=429, retry_after_seconds=300)
+    named = [loop_mod._failure_delay(waf, 8.0, rand=rng.random) for _ in range(200)]
+    assert min(named) >= 300.0 and max(named) <= 308.0
+    assert loop_mod._failure_delay(RuntimeError("x"), 1.0, rand=lambda: 0.0) == 1.0
 
 
 def test_screen_item_hands_screening_the_production_status_source(tmp_path, monkeypatch) -> None:

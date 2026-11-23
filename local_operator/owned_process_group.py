@@ -376,15 +376,34 @@ def strict_linux(
 
         Raises Unknown for every other outcome (EACCES, EIO, a short or
         unparseable row, a stat row missing beside a live directory). The
+        message carries the errno name so a witness names the real cause.
+
+        ESRCH is treated like ENOENT on the FIRST read only, and only as a
+        trigger for the same stat(path) proof. Believed (NOT reproduced) cause
+        of the witness (PR #3879 gate, xdist churn, census refused with
+        "unreadable /proc row", 170 PIDs scanned): on Linux a read() of
+        /proc/<pid>/stat for a task that exits after open() can return ESRCH
+        rather than ENOENT. ESRCH never excuses a PID by itself: gone is still
+        proven only by stat(path) raising ENOENT; a live directory gets the
+        one retry, and a second ESRCH there stays Unknown (the errno is named).
+        To extend: add exception types to the first `except` only if the
+        kernel documents them as "task no longer exists"; EACCES/EIO must
+        never join. The
         opening scan and the closing-delta reconciliation share this one
         proof so an added PID can never be excused by a weaker rule.
         """
         nonlocal phase
         path = f"/proc/{entry}"
         phase = "row-read"
+
+        def unreadable(exc):
+            code = getattr(exc, "errno", None)
+            name = errno.errorcode.get(code) if isinstance(code, int) else None
+            return Unknown(f"unreadable /proc row ({name})" if name else "unreadable /proc row")
+
         try:
             raw = read(path + "/stat")
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             try:
                 stat(path)
             except FileNotFoundError:
@@ -397,9 +416,9 @@ def strict_linux(
             except FileNotFoundError:
                 raise Unknown("stat row missing for existing PID")
             except (OSError, UnicodeError) as exc:
-                raise Unknown("unreadable /proc row") from exc
+                raise unreadable(exc) from exc
         except (OSError, UnicodeError) as exc:
-            raise Unknown("unreadable /proc row") from exc
+            raise unreadable(exc) from exc
         phase = "row-parse"
         try:
             left, tail = (
@@ -1576,10 +1595,42 @@ class OwnedGroup:
                 )
                 self._terminal_result = self.last
                 return self.last
+            dropped = set()
             for pid in live:
-                parent, group, sid = self.identity(pid)
+                try:
+                    view = self.identity(pid)
+                except Unknown as exc:
+                    view, failure = None, exc
+                except ProcessLookupError:
+                    # Review R2: `kernel_identity` reads /proc/<pid>/stat and THEN
+                    # calls getpgid/getsid; a reap between the two raises ESRCH
+                    # straight out of the syscall. It is the same departure race
+                    # in a narrower window, so it takes the same proof below
+                    # instead of escaping as an unnamed refusal.
+                    view, failure = None, Unknown("actual parent/PG/SID unavailable")
+                else:
+                    failure = Unknown("actual parent/PG/SID unavailable")
+                # A provider answering None (or any non-triple) instead of raising
+                # is the same "unreadable" fact; unpacking it used to TypeError
+                # out of the proof instead of reaching a named refusal.
+                if not (isinstance(view, tuple) and len(view) == 3):
+                    if self._live_member_departed(pid, deadline):
+                        dropped.add(pid)
+                        continue
+                    raise failure
+                parent, group, sid = view
                 if (group, sid) != (self.pgid, self.sid):
                     raise Unknown("member outside the recorded group/session")
+            if dropped:
+                # Review R4: pruned exactly as the `_departed` path prunes, so the
+                # published proof, Verdict members and any later residuals describe
+                # the members that remain rather than contradicting `vanished`.
+                # The leader/pgid is never dropped, so `kept` is empty only if the
+                # census never held it; that shape refuses, as `_departed`'s does.
+                kept = [pid for pid in members if pid not in dropped]
+                if not kept:
+                    raise Unknown("every census member departed: no member to prove")
+                members = kept
             # The witness must still hold at the END of the proof.
             final_state, final_witness = self._leader_witness(deadline)
             if final_state == "reaped":
@@ -1812,6 +1863,92 @@ class OwnedGroup:
                 return False
             return False
         return True
+
+    def _live_member_departed(self, pid, deadline):
+        """Whether a member sampled LIVE, whose identity read then failed, has left.
+
+        WHY THIS EXISTS. `refresh` samples members, then re-reads each live one's
+        parent/PG/SID. A healthy fast-forking command's child can exit and be
+        reaped in that gap: `/proc/<pid>/stat` answers ENOENT,
+        `resources._linux_ppid_pgid` maps it to None, `kernel_identity` raises
+        "actual parent/PG/SID unavailable", and the wrapper reported exit 126
+        (cleanup unproven) for a child that exited 0 with nothing signalled
+        (main jobs 134939000460 and 135515724004,
+        test_a_healthy_gate_survives_spawn_churn_and_records_its_group). That is
+        the same bug class `_departed` and `_rerunnable` cure one step earlier.
+
+        The member may be dropped from the identity proof only under ALL of:
+
+        - it is neither the leader nor the pgid (the witness is never amnestied);
+        - a FRESH complete strict census (`_members`, which raises on incomplete
+          visibility, inside the same deadline) no longer lists it -- a zombie or
+          a still-running member is still listed, so this refuses both;
+        - `getpgid(pid)` then raises ProcessLookupError (the kernel agrees it is
+          gone; a reused pid returns a number and refuses), via the injected
+          departure probe when one is given; an injected sampler without one
+          grants nothing, exactly as in `_departed`;
+        - `/proc/self` names our pid (C10): the census and getpgid must describe
+          the same pid namespace. Platforms without `/proc` keep refusing.
+
+        THE LATE-FORK QUESTION. A child the departed member forked before dying
+        is in our group and therefore in the fresh census; it is not proved here
+        and need not be: a live-member VERIFIED authorises only a signal to the
+        whole group (which reaches it), and every later verdict re-runs the full
+        census->sample proof. That is the same window a fork right after this
+        loop already has. Anything else -- an identity failure for a pid still
+        listed, an unreadable census, an unexpected probe answer -- refuses.
+        """
+        if pid in (self.leader, self.pgid):
+            return False
+        if self._departure is None and self.samples is not None:
+            # An injected sampler carries no trustworthy kernel facts.
+            return False
+        # `getattr`, not `os.getpgid` (review R1 / QA Q1): getpgid does not exist
+        # on Windows, and the xplat battery's `static.posix_attributes` rule fails
+        # CI on any unguarded `os.getpgid` use in a module that must import there.
+        # Without the syscall no kernel answer can confirm departure, so the
+        # member is NOT dropped -- the honest refusal, not an AttributeError. The
+        # injected probe (tests, any platform) is still honoured.
+        probe = self._departure or getattr(os, "getpgid", None)
+        if probe is None:
+            return False
+        try:
+            own = (self._proc_self or (lambda: os.readlink("/proc/self")))()
+        except Exception:  # noqa: BLE001 - an unreadable namespace grants nothing
+            return False
+        if own != str(os.getpid()):
+            return False
+        # Unknown from an incomplete census propagates: it is a refusal on its own.
+        # Review R5: like the cycle census and `_late_members`, a failed census
+        # re-reads the witness once so a reaped/reused pin reports as loss (and
+        # revokes signal authority) instead of hiding behind "census incomplete".
+        try:
+            fresh = self._members(deadline)
+        except Exception:
+            lost, _ = self._leader_witness(deadline)
+            if lost == "reaped":
+                raise PinLost("reservation lost during the departure census") from None
+            raise
+        if pid in fresh:
+            return False
+        try:
+            probe(pid)
+        except ProcessLookupError:
+            # Recorded under `vanished` so it inherits that key's lifecycle: popped
+            # per refresh, per discarded cycle and on refusal, and published in the
+            # run record beside the proof it belongs to.
+            self.probe.setdefault("vanished", []).append(
+                {
+                    "pid": pid,
+                    "reason": "identity-unreadable",
+                    "getpgid": "ProcessLookupError",
+                    "census": "absent-after-identity",
+                }
+            )
+            return True
+        except Exception:  # noqa: BLE001 - anything but ESRCH is not departure
+            return False
+        return False
 
     def signal(self, signum, *, deadline):
         result = self.refresh(deadline=deadline)

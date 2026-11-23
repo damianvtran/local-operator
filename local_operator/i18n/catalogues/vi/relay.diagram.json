@@ -1,0 +1,10 @@
+{
+  "relay.diagram.close": "Đóng sơ đồ",
+  "relay.diagram.copied": "Đã sao chép",
+  "relay.diagram.copy": "Sao chép mã",
+  "relay.diagram.copy_failed": "Không sao chép được",
+  "relay.diagram.error.title": "Không vẽ được sơ đồ này",
+  "relay.diagram.full_size": "Kích thước gốc",
+  "relay.diagram.save": "Lưu SVG",
+  "relay.diagram.view": "Sơ đồ"
+}

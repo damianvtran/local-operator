@@ -1,0 +1,10 @@
+{
+  "relay.diagram.close": "Close diagram",
+  "relay.diagram.copied": "Copied",
+  "relay.diagram.copy": "Copy source",
+  "relay.diagram.copy_failed": "Couldn't copy",
+  "relay.diagram.error.title": "Couldn't draw this diagram",
+  "relay.diagram.full_size": "Full size",
+  "relay.diagram.save": "Save SVG",
+  "relay.diagram.view": "Diagram"
+}

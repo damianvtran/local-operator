@@ -15,7 +15,7 @@ import os
 import socket
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import pytest
 
@@ -231,6 +231,35 @@ def _no_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(github_mod, "_resolve_program", lambda name, path=None: None)
 
 
+class _OfflineGithubTransport:
+    """Every request fails as a transport error: GitHub is "offline" in this suite."""
+
+    def request(self, method: str, url: str, **_kwargs: Any) -> Any:
+        raise OSError(f"no unit test reaches {url}")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_github_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test in this suite may call api.github.com (the enumeration's default client).
+
+    The GitHub designation enumerates what the owner's login can push to, and the
+    CLI's share receipt and ``credential github repos`` build their client through
+    ``github.default_minter``. Pinning that seam to an offline transport here means
+    an un-stubbed cell sees an honest "could not list" instead of a live request
+    with a test token; cells that exercise enumeration pass their own loopback
+    minter or override this pin.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    monkeypatch.setattr(
+        github_mod,
+        "default_minter",
+        lambda: github_mod.GithubMinter(
+            base_url="http://127.0.0.1:9", transport=_OfflineGithubTransport()
+        ),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _no_first_contact_nudge(monkeypatch: pytest.MonkeyPatch) -> None:
     """The definitions syncer's first-contact nudge is OFF unless a cell opts in.
@@ -250,3 +279,83 @@ def _no_first_contact_nudge(monkeypatch: pytest.MonkeyPatch) -> None:
     from local_operator.network import definitions
 
     monkeypatch.setattr(definitions, "_on_link_up", lambda _server, _link: None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_renew_nudge(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """The owner's link-up renew nudge is OFF unless a cell opts in (PR #3946, R4-M1).
+
+    Every relay link coming up schedules ``renew_push.on_link_up`` on the owner end:
+    after a random 0-5 s jitter, the owner nudges each member it lends a key to, and
+    that member's relay re-asks through the ordinary grant path. Cells in this
+    directory share a key over real relays and then count IdP POSTs, grants, holds
+    and audit rows they drive BY HAND; a nudge landing inside that window adds a
+    rotation, a fresh grant or a restarted hold the cell did not cause. Measured by
+    pinning the jitter into the cell's window (review round 4): the line-567 cell in
+    ``test_credentials_real_link`` (3/200 unpinned), ``test_credential_binding_two_root``
+    ``test_e4``, the outage cell in ``test_credentials_offline_hold``,
+    ``test_owner_return_clears_access_band`` and ``test_credentials_held_offline``
+    all fail, as did ``test_credential_refresh_real_link`` (an extra IdP POST in 10/60
+    local runs, every one on ``mesh-credential-renew-ask``). Pinning the seam here
+    keeps every file, present and future, on the quiet contract they were written
+    against — the same shape as ``_no_first_contact_nudge`` above.
+    ``test_credentials_renew_on_reconnect`` is the nudge's own coverage and re-arms
+    it (fixture ``renew_nudge``).
+
+    The seam is the module attribute: the relay hook registered in
+    ``credentials.register`` resolves ``renew_push_mod.on_link_up`` at call time.
+    Returns the real function so ``renew_nudge`` can restore it without a second
+    import-time capture.
+    """
+    from local_operator.network.credentials import renew_push
+
+    real = renew_push.on_link_up
+    monkeypatch.setattr(renew_push, "on_link_up", lambda *_a, **_k: None)
+    return real
+
+
+@pytest.fixture()
+def renew_nudge(_no_renew_nudge: Callable[..., None], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-arm the real link-up renew nudge for the cells that exercise it.
+
+    Requests the autouse pin explicitly so it has run first, and restores the very
+    function it replaced.
+    """
+    from local_operator.network.credentials import renew_push
+
+    monkeypatch.setattr(renew_push, "on_link_up", _no_renew_nudge)
+
+
+@pytest.fixture(autouse=True)
+def _uplink_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The uplink readings are ``unknown`` unless a cell scripts one.
+
+    ``network.uplink`` reads the RUNNER's own route table, which a test cannot
+    fix: a sealed CI sandbox has no default route, a laptop on a v6-only network
+    has no IPv4 one. ``unknown`` is the fail-safe reading — no ``local_offline``,
+    no redial kick, no ``uplink`` row — so every cell written before the
+    reading existed keeps its exact rows. Cells that exercise the reading patch
+    ``read_uplink`` (or pass a reader) themselves.
+    """
+    from local_operator.network import uplink
+
+    monkeypatch.setattr(uplink, "read_uplink", lambda *args, **kwargs: uplink.unknown_reading())
+    # The per-endpoint lookup too (``local_offline``, the redial kick): bound by
+    # ``RelayServer.__init__`` and resolved at call time by ``uplink_checks``.
+    monkeypatch.setattr(uplink, "endpoint_has_route", lambda endpoint: None)
+
+
+@pytest.fixture(autouse=True)
+def _forget_github_outage_notes() -> Iterator[None]:
+    """Every cell starts with no GitHub owner outage already told.
+
+    The bash tool says the outage note once per session per outage episode
+    (``builtin._GITHUB_OUTAGE_TOLD``, in-process). Cells here reuse synthetic
+    session ids, so an episode one cell left open would silence the next cell's
+    first note.
+    """
+    from local_operator.tools import builtin
+
+    builtin._reset_github_outage_notes()  # noqa: SLF001
+    yield
+    builtin._reset_github_outage_notes()  # noqa: SLF001

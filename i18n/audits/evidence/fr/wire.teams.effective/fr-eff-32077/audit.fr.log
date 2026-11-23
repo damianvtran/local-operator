@@ -1,0 +1,3 @@
+PASS: pinned SHA-256 inputs; strict JSON/duplicate members; 9/9 keys and context; repository ICU parser/argument/plural validator routines; independent ordered placeholders/technical literals/markup/bidi checks.
+CLDR: zero plural/select messages; French one/many/other need no arms in plain interpolation messages.
+Scope: direct repository validator routines on external scratch candidate, NOT full scripts/i18n/check.py CLI, generated check, build, test suite or rendered UI.

@@ -146,6 +146,18 @@ CREDENTIAL_SHARE_PUSH_V1 = "credential-share-push-v1"
 #: predates this one answers the pull exactly as it always did and is never sent a field
 #: it does not know.
 CREDENTIAL_PLACEMENT_DIGEST_V1 = "credential-placement-digest-v1"
+#: The owner's RENEW NUDGE on (re)connect (``credentials/renew_push.py``): when a link
+#: to a holder comes up, or the owner wakes with links that survived, the owner tells
+#: the holder "ask me again now" for the keys it lends it, and the holder's relay asks
+#: through its ordinary grant path. WHY: the 24 h offline hold restarts only on a fresh
+#: grant, and an idle node never asks, so a daily owner login did not keep it working.
+#: A distinct string (no shipped capability is reused for a new frame kind): a peer
+#: without it is not nudged and keeps counting from its last own ask, as before.
+CREDENTIAL_RENEW_PUSH_V1 = "credential-renew-push-v1"
+#: The working-set move gate (``mobility.request_move``; docs/design/move-working-set.md
+#: §11.1): the ``workset_preflight``/``workset_probe`` phases of ``net_session_move`` and
+#: the ``dry_run``/``working_set`` fields of a local move request.
+SESSION_MOVE_WORKSET_V1 = "session-move-workset-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
@@ -165,15 +177,25 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     CREDENTIAL_PLACEMENT_PUSH_V1,
     CREDENTIAL_SHARE_PUSH_V1,
     CREDENTIAL_PLACEMENT_DIGEST_V1,
+    CREDENTIAL_RENEW_PUSH_V1,
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
+    # The mesh skill sync (``skillsync.py``); see SKILLS_SYNC_V1 below.
+    "skills-sync-v1",
     "memory-sync-v1",
     "memory-item-512",
     "pair-offer-v1",
     "mesh-update-v1",
     "mesh-restart-v1",
     "zlib-records-v1",
+    # THIS BUILD'S LISTENER SIGNS ITS WELCOME AND ITS DIALER REQUIRES THAT PROOF
+    # (``handshake.verify_welcome``, mesh-listener-auth). DIAGNOSTIC ONLY: it never
+    # gates enforcement — the dialer requires the proof whatever the challenge
+    # advertises, so stripping this string downgrades nothing. It lets ``peers``
+    # say which members verify listeners. ``MESH_PROTOCOL_VERSION`` is NOT bumped,
+    # so an old dialer still links to a new listener (the update path).
+    "listener-proof-v1",
     # THE COMPLETE PEER-SOURCE CONTRACT'S STORED-READ HALF. Advertised by every
     # build that can serve typed source purposes (metadata/payload/availability)
     # on the stored-history op, and it is what a viewer's relay checks BEFORE
@@ -184,6 +206,19 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "peer-journal-source-v1",
     # The remote peek (``network/peek.py``): see SESSION_PEEK_V1 below.
     "session-peek-v1",
+    # THE WORKING-SET MOVE GATE (docs/design/move-working-set.md §11.1; review R1,
+    # round 1). Advertised on the relay's own peer record as well as on links, and
+    # read by ``mobility.request_move`` BEFORE it forwards ``dry_run`` or a consent:
+    # a relay that predates the gate (one left running across an update) ignores
+    # both and performs a real, ungated move — so a CLI newer than its relay must
+    # refuse rather than send them. Additive: an older peer ignores the string.
+    SESSION_MOVE_WORKSET_V1,
+    # Owner-folded mobile history/projection; never infer this schema from a
+    # legacy journal page whose entries use the desktop transcript vocabulary.
+    "mobile-session-read-v1",
+    # Turn-supplement (Highlights) bytes on that same owner-folded read; see
+    # MOBILE_SESSION_SUPPLEMENTS_V1 below.
+    "mobile-session-supplements-v1",
     # Conditional member-table pull; see MEMBER_LIST_DIGEST_V1 below for why.
     "member-list-digest-v1",
     # Change-only member tables permit a long anti-entropy interval, without
@@ -191,9 +226,14 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "member-list-push-v1",
     # The single-file pull (``files.py``'s ``net_file_get``); see MESH_FILE_V1.
     "mesh-file-v1",
+    # A peer session's Files index (``file_index.py``'s ``net_session_files``).
+    "mesh-file-index-v1",
     # Origin-only completion/notice fields on catalogue rows; see
     # REMOTE_ATTENTION_V1 below.
     "remote-attention-v1",
+    # The operator's device presents its signed onboarding decision; see
+    # OPERATOR_BINDING_V1 below.
+    "operator-binding-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: Catalogue rows carry ``attention``/``notices`` (and ``attention_unknown`` when
@@ -204,6 +244,12 @@ MESH_NET_V1 = "mesh-net-v1"
 #: always did. Named here so the tuple above, the owner's condition and the tests
 #: read ONE spelling of the string.
 REMOTE_ATTENTION_V1 = "remote-attention-v1"
+#: ``net_operator_binding`` (``network/operator_binding.py``): the operator's Mac
+#: presents the onboarding decision the operator already signed, so a node can
+#: forward asks/notices of sessions STARTED on it to that device. A peer without
+#: it is never sent the op, and a node only treats a link as the operator's while
+#: that link advertises it — an old Mac degrades to "shown on this node only".
+OPERATOR_BINDING_V1 = "operator-binding-v1"
 #: The complete peer-source stored-read capability (``relay.py``'s source
 #: purposes). The runtime-record half of the same promise lives in
 #: ``session/runtime/types.PEER_JOURNAL_SOURCE_CAPABILITY`` — one string, two
@@ -222,6 +268,11 @@ PEER_READINESS_V1 = "peer-readiness-v1"
 #: did not ask to make. Named here so the tuple above, the push's ask condition
 #: and the tests read ONE spelling of the string.
 MCP_DEFS_V1 = "mcp-defs-v1"
+#: The user-skill sync's capability (``skillsync.py``). Advertised by every build
+#: that serves ``net_skills``; the sender checks it BEFORE its first request, so a
+#: peer that predates skill sync is reported ``peer_too_old`` with its remedy and
+#: never asked an op it would have to refuse.
+SKILLS_SYNC_V1 = "skills-sync-v1"
 #: The remote peek's capability (``network/peek.py``: ``net_session_peek``).
 #: Advertised by every build that can answer a peek from its own journal with
 #: the local readers; a viewer's relay checks it BEFORE asking, and a peer
@@ -257,6 +308,19 @@ MESH_RESTART_V1 = "mesh-restart-v1"
 #: answered by some other route (the base64-through-the-model path this replaces is
 #: what corrupted bytes).
 MESH_FILE_V1 = "mesh-file-v1"
+#: Turn-supplement bytes (a Highlight's component document, featured file or sound)
+#: over the owner-folded mobile read: ``peer_session_history`` with
+#: ``mobile_session_read="supplement"`` (``mobile/remote_sessions.py``). It adds no op,
+#: only a purpose on ``net_session_history``. BOTH ends check it — the viewer before
+#: forwarding and the owner before serving — so an owner that predates it is
+#: answered ``unsupported`` (the phone's 409 ``remote_unsupported``, "Update
+#: <owner>") instead of reading a purpose it would refuse as a protocol error.
+MOBILE_SESSION_SUPPLEMENTS_V1 = "mobile-session-supplements-v1"
+#: A peer session's Files index (``network/file_index.py``; remote-files-parity.md §2).
+#: Checked by the viewer BEFORE asking, so an owner that predates it is answered with
+#: ``peer_update_required`` (the desktop says "update <device>") rather than asked an op
+#: it would refuse as unknown — and never answered by a viewer-side scan.
+MESH_FILE_INDEX_V1 = "mesh-file-index-v1"
 #: The pair ceremony's share list (``handshake.pair_offer_frame``). Advertised by
 #: every build that SENDS or READS ``net_pair_offer``; the owner checks it against
 #: the joiner's hello before sending, and the joiner's bounded drain checks it

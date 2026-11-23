@@ -17,7 +17,10 @@ Two decisions look odd until the reasons are on the table:
   because the relay is the only party with a credential on both sides. The
   forward step (S7) does not exist yet; until it does, the token is validated
   and dropped, and ``token`` must appear NOWHERE in a stored record (a test
-  asserts the string never reaches the file).
+  asserts the string never reaches the file). What IS kept is an equality-only
+  SHA-256 of it (:data:`PUSH_HANDLE_FIELD`), because the token is the one fact
+  that tells two rows apart as one installation when the app's ``install_id``
+  forks — see :func:`_supersede_locked`.
 - **The register payload is DECLARATIVE.** Re-registering for the same
   ``(install_id, platform)`` REPLACES the record's metadata — ``environment``,
   ``app_version``, and the optional ``name`` label (an omitted ``name`` clears
@@ -133,6 +136,7 @@ lapse is safe (§4 rule 2).
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -189,12 +193,20 @@ PRECEDENCE = " > ".join(state for state, _marker in _STATE_MARKERS)
 #: gone, or a row an operator asks about after a 60-day drop — and the one word
 #: that needs explaining must not be the one word that is not explained.
 STATE_ABSENT = "absent"
+#:
+#: Each is a whole SENTENCE (capitalised, full stop): the app's Settings renders
+#: it on its own line under the device's name, where a lowercase fragment read as
+#: broken copy (operator report, 2026-11-16). The CLI legend prints it after the
+#: state word, where a sentence reads as well.
 STATE_DESCRIPTIONS: dict[str, str] = {
-    STATE_LIVE: "registered, and push resumes on its next authenticated read",
-    STATE_EXPIRED: "notifications are paused for this device until you sign in again",
-    STATE_UNPAIRED: "this computer is no longer paired",
-    STATE_REVOKED: "this device was revoked on this computer",
-    STATE_ABSENT: "not in this computer's registry; it may register again",
+    # Not "notifications are delivered": neither this registry nor the phone
+    # observes delivery (APNs/FCM do), so the live state claims only what is
+    # known here (review R1-2 / D1).
+    STATE_LIVE: "Registered with this computer.",
+    STATE_EXPIRED: "Notifications are paused for this device until you sign in again.",
+    STATE_UNPAIRED: "This computer is no longer paired.",
+    STATE_REVOKED: "This device was revoked on this computer.",
+    STATE_ABSENT: "Not in this computer's registry; it may register again.",
 }
 #: The order the descriptions are rendered in: the four row states by precedence
 #: (weakest first, so the legend reads bottom-up as the escalation it is), then
@@ -275,6 +287,37 @@ MAX_FIELD_CHARS = 1024
 #: a healthy fleet approaches.
 MAX_DEVICE_ENTRIES = 256
 
+#: The stored stand-in for the push token: ``sha256(PUSH_HANDLE_LABEL + token)``.
+#:
+#: WHY THE REGISTRY NEEDS ONE. ``install_id`` is the app's claim about which
+#: installation it is, and the registry trusts that claim for identity — so a
+#: client that loses or fails to read its install record forks into a new row on
+#: every registration. That is not hypothetical: on 2026-11-15 one iPhone
+#: produced 33 rows in bursts of up to six a second, because the app read
+#: "keystore unavailable" as "never minted" (local-operator-mobile
+#: ``install-id.ts``). Every one of those rows was forwarded to the cloud as its
+#: own device with the SAME token, so the phone was 33 push targets. The token
+#: is the one fact in the request the client cannot fork by accident: APNs/FCM
+#: issue it per app installation on a device, so two rows presenting the same
+#: token on one platform are one installation, whatever ``install_id`` says.
+#:
+#: WHY A DIGEST AND NOT THE TOKEN. ADR §4 keeps the token out of this machine's
+#: files (the cloud's registry is its custody), and that rule stands: an APNs/FCM
+#: token is high-entropy, so its SHA-256 identifies nothing offline and cannot be
+#: turned back into a deliverable address. It is only ever compared for equality.
+PUSH_HANDLE_LABEL = "lop-push-handle-v1:"
+PUSH_HANDLE_FIELD = "push_handle_digest"
+
+#: The marker on a row another registration of the SAME installation replaced
+#: (same push handle, newer ``install_id``) or a pre-digest ghost the upgrade
+#: sweep retired. Such a row also carries ``expired_at`` — that, not this field,
+#: is what stops delivery, because ``expired_at`` is the marker the emit gate,
+#: :func:`credential_live_at` and the credential report already honour, so the
+#: cloud is told "not live" through the path it already reads. This field only
+#: hides the row from the Settings list (it is a dead identity of a device that
+#: is listed under its live one) and dates its eventual removal.
+SUPERSEDED_AT_FIELD = "superseded_at"
+
 #: One lock over the store's read-modify-write cycle. The routes run their
 #: store calls on worker threads (``asyncio.to_thread``), so two concurrent
 #: registrations could otherwise interleave load/save and lose one. In-process
@@ -311,8 +354,23 @@ _OPTIONAL_RECORD_FIELDS = frozenset(
         "last_authenticated_at",
         "expired_at",
         "unpaired_at",
+        # Pairing design v2 §2.4 (push link): the OPERATOR device id this push row
+        # belongs to, set only when the register request proved it with that
+        # device's operator-signed certificate. Removing the paired phone then
+        # tombstones this row too, instead of leaving a phone that can no longer
+        # approve still receiving approval notifications.
+        "operator_device_id",
         "revoked_at",
         "sound_cached",
+        # Per-device push preferences (Settings → Notifications). Absent on
+        # every row an earlier build wrote, and absent means "all on" — see
+        # :data:`PREFERENCE_KEYS`.
+        "preferences",
+        # One-installation dedupe (:data:`PUSH_HANDLE_FIELD`). Absent on every
+        # row a pre-dedupe build wrote; that absence is what the upgrade sweep
+        # in :func:`_supersede_locked` keys on.
+        PUSH_HANDLE_FIELD,
+        SUPERSEDED_AT_FIELD,
     }
 )
 _RECORD_FIELDS = _REQUIRED_RECORD_FIELDS | _OPTIONAL_RECORD_FIELDS
@@ -324,8 +382,145 @@ _STORE_FIELDS = frozenset({"devices", OPERATOR_KEY_FIELD})
 
 #: The register body's canonical keys; an unknown key refuses (below).
 _REGISTER_FIELDS = frozenset(
-    {"platform", "token", "environment", "app_version", "install_id", "name"}
+    {
+        "platform",
+        "token",
+        "environment",
+        "app_version",
+        "install_id",
+        "name",
+        # The optional push link (design v2 §2.4): all four or none. The certificate
+        # proves the operator issued the id; the signature and its timestamp prove the
+        # caller HOLDS that device's key (round-1 R4/Q2). An id alone is never accepted.
+        "operator_device_id",
+        "operator_cert",
+        "operator_link_sig",
+        "operator_link_at",
+        # Per-device push preferences (Settings → Notifications); see
+        # :data:`PREFERENCE_KEYS`.
+        "preferences",
+    }
 )
+
+#: The domain label of the push link's device-key signature. Its own label, distinct
+#: from ``pair_requests.WITHDRAW_LABEL`` (neither is a prefix of the other), so a
+#: withdraw signature can never be replayed as a link and vice versa.
+LINK_LABEL = b"lop-push-link-v1"
+
+#: How far ``operator_link_at`` may sit from this computer's clock, either way.
+#: MEASURE-BEFORE-CAP: no new number — this is the relay's existing phone-clock
+#: allowance (``mobile.auth._SKEW_S``, 60 s, the drift it already tolerates on cookie
+#: expiry from the same phones). It bounds how long a captured register body could be
+#: replayed; the replay could only re-link the SAME install to the SAME device anyway,
+#: because the message binds both (``link_message``).
+LINK_SKEW_S = 60
+
+
+def link_message(
+    *, at: int, operator_device_id: str, install_id: str, platform: str, token: str
+) -> bytes:
+    """The exact bytes the phone signs to link a push row to its operator device.
+
+    ``LINK_LABEL || "\\n" || at || "\\n" || device_id || "\\n" || install_id || "\\n"
+    || platform || "\\n" || sha256_hex(token)``. Newline-joined because no field can hold
+    one (decimal, hex, canonical lowercase UUID, a closed platform set, a hex digest);
+    the token is hashed so its arbitrary bytes never need escaping. ``install_id`` is
+    the CANONICAL spelling (lowercase, hyphenated) the store records, so a client that
+    sent an uppercase UUID must sign the lowercase form. The PWA's ``pushLinkFields``
+    and the native app build the same bytes.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    parts = (str(at), operator_device_id, install_id, platform, digest)
+    return LINK_LABEL + b"\n" + "\n".join(parts).encode("ascii")
+
+
+#: The per-device push preference switches, and the ONLY keys a ``preferences``
+#: object may carry (register body and stored row alike).
+#:
+#: Why they exist, in the operator's words: "there should be notification
+#: preferences in the settings, I have no way to turn off notifications or turn
+#: off certain types of notifications so now I just have to deal with
+#: notification spam until this setting is available". iOS cannot filter a
+#: remote push on the device, so the filter has to live where the emit is
+#: DECIDED — this daemon's push worker (``push_worker._preference_gate``).
+#:
+#: - ``enabled`` — the master switch: ``False`` silences every push type for
+#:   that device, the silent attention correction included.
+#: - ``completions`` — run endings: ``complete`` and ``retired``, and also
+#:   ``interrupted`` and ``closed`` (a run that stopped without an error is
+#:   the same "your run is done" signal to the reader, so it rides this switch
+#:   rather than growing a fourth one the app does not render). Since #3989
+#:   (the push worker's ``_desktop_would_announce`` gates on
+#:   ``desktop_sessions.BRIDGE_NOTIFIABLE_KINDS``) ``interrupted`` and ``closed``
+#:   are no longer push candidates at all; they stay mapped here so a kind the
+#:   worker starts pushing again lands on a defined switch.
+#: - ``errors`` — runs that ended in ``error``.
+#: - ``previews`` — whether a completion banner may show the session's name and
+#:   a preview of the turn (or an error's failure line) instead of the generic
+#:   house text. ON by default (operator decision, 2026-11-14, PR #3990 comment
+#:   6881635039: "follow the precedent" of ChatGPT and Claude on mobile). Unlike
+#:   the three above it gates CONTENT, not delivery, and it is honoured per
+#:   COMPUTER: the cloud fans a completion out to every device with no
+#:   per-device ``exclude``, so one live phone with previews off makes the
+#:   banner generic for all of them (``push_worker._previews_allowed``). The
+#:   text it allows is kept by Radient's cloud (agent-server
+#:   ``session_push_emits``) for 14 days.
+#:
+#: A missing ``preferences`` object, or a missing key inside one, means
+#: ``True``: a phone that never sent preferences, and every row an earlier
+#: build wrote, keeps exactly the behaviour it had. The app only sends the
+#: field to a daemon advertising the ``push_preferences`` capability, because
+#: this register body refuses unknown fields and an older daemon would refuse
+#: the whole registration — and, for the same reason, sends ``previews`` only
+#: to a daemon that also advertises ``push_previews`` (a ``push_preferences``-
+#: only daemon refuses the key). The one deliberate exception to "keeps the
+#: behaviour it had" is ``previews`` itself: an older row resolves it to true,
+#: so banners become descriptive on upgrade, which is the operator's decision.
+#:
+#: ADR 0009 (mobile repo ``docs/adr/0009-notification-routing-by-origin.md``
+#: §3 core edit 5, §4) adds two ENUM keys, so the model is no longer boolean-only:
+#:
+#: - ``completions_scope`` — ``phone`` (default): a completion pushes only when
+#:   the run's origin is ``mobile`` (the operator: "if started on mobile it
+#:   should notify on mobile"); ``all``: every completion is a candidate, under
+#:   ADR 0008's desk hold. "Off" stays ``completions: false``.
+#: - ``attention`` — ``away`` (default): a run that ended on an ask it opened
+#:   (``needs_user``) of non-mobile origin is held while the desk is active and
+#:   released when it goes away; ``always``: pushed at once; ``never``: not
+#:   pushed. Independent of ``completions``: turning "Agent finished" off must
+#:   never mute a question.
+#:
+#: Both absent-default to the operator's policy rather than to "on" (ADR 0009
+#: §4: "the defaults are the operator's policy, not opt-in"), and the app sends
+#: them only to a daemon advertising the ``push_routing`` capability.
+PREFERENCE_KEYS = (
+    "enabled",
+    "completions",
+    "errors",
+    "previews",
+    "completions_scope",
+    "attention",
+)
+
+#: Per enum key: its allowed values, first is the absent-default.
+ENUM_PREFERENCES: dict[str, tuple[str, ...]] = {
+    "completions_scope": ("phone", "all"),
+    "attention": ("away", "always", "never"),
+}
+
+#: Every key's absent-default: ``True`` for the boolean switches (a row written
+#: before preferences keeps the behaviour it had), the policy default for enums.
+PREFERENCE_DEFAULTS: dict[str, Any] = {
+    key: (ENUM_PREFERENCES[key][0] if key in ENUM_PREFERENCES else True) for key in PREFERENCE_KEYS
+}
+
+
+def _valid_preference(key: str, value: object) -> bool:
+    if key in ENUM_PREFERENCES:
+        return isinstance(value, str) and value in ENUM_PREFERENCES[key]
+    return isinstance(value, bool)
 
 
 class PushDeviceRefusal(Exception):
@@ -557,7 +752,11 @@ def register(
     carrying both markers refuses as the same state ``list`` reports. An
     ``expired`` row is NOT refused: authenticating and re-registering IS the act
     that clears ``expired_at`` (that is why it is a different marker from
-    ``revoked_at``), and a fresh ``install_id`` is refused on nothing at all.
+    ``revoked_at``). A fresh ``install_id`` is refused only when its push handle
+    is a REVOKED row's (the same installation under a forked id, so the revoke
+    still binds it — :data:`PUSH_HANDLE_FIELD`), and a successful register
+    retires the other rows of its own installation (:func:`_supersede_locked`),
+    so one installation is one listed, deliverable row.
 
     A successful call also mints this device's per-device key (ADR §3.1) —
     returned ONCE, in this response only — and stores it in the device's own row.
@@ -589,7 +788,7 @@ def register(
     old and a device's liveness on that route is the CLOUD's grant, not this
     clock (ADR §4 rule 2).
     """
-    fields = _checked_registration(body)
+    fields = _checked_registration(body, config_dir, now=now)
     with _LOCK:
         store = _load_store(config_dir)
         records = store["devices"]
@@ -601,6 +800,27 @@ def register(
                 raise PushDeviceStateRefusal(DEVICE_REVOKED_CODE, DEVICE_REVOKED_MESSAGE)
             if state == STATE_UNPAIRED:
                 raise PushDeviceStateRefusal(DEVICE_UNPAIRED_CODE, DEVICE_UNPAIRED_MESSAGE)
+        # A revoke binds the INSTALLATION, not just the install id it was issued
+        # under: a phone that lost (or failed to read) its install record and
+        # comes back under a fresh id still presents the same push handle, and
+        # without this check that fresh id would register "on nothing at all"
+        # and quietly undo the operator's revoke. A reinstall gets a new token
+        # from the OS, so it is a new installation and is not caught here.
+        # A SUPERSEDED row is skipped: it is a dead identity of a device whose
+        # live row speaks for it. ``revoke_linked`` tombstones those hidden rows
+        # too, but ``unrevoke`` (driven from the list, which hides them) only
+        # clears the live row — counting the hidden tombstone here would keep an
+        # un-revoked phone refused until the supersede aged out (review R1-1).
+        digest = fields[PUSH_HANDLE_FIELD]
+        for other in records:
+            if (
+                other is not record
+                and not other.get(SUPERSEDED_AT_FIELD)
+                and other["platform"] == fields["platform"]
+                and other.get(PUSH_HANDLE_FIELD) == digest
+                and device_state(other) == STATE_REVOKED
+            ):
+                raise PushDeviceStateRefusal(DEVICE_REVOKED_CODE, DEVICE_REVOKED_MESSAGE)
         # Minted per call (ADR §3.1: "the relay mints that device's per-device
         # key here"), so a re-register replaces the key as it replaces the
         # metadata — the app that just registered is the only holder of the
@@ -623,10 +843,27 @@ def register(
             record["environment"] = fields["environment"]
             record["app_version"] = fields["app_version"]
             record["last_seen_at"] = stamp
+        # Rewritten on every register, so a rotated token moves the handle with
+        # the row it belongs to (the row is keyed by install id, never by this).
+        record[PUSH_HANDLE_FIELD] = digest
+        # This installation is registering under this id right now, so the row
+        # is nobody's ghost: lift a supersede (``expired_at`` goes just below,
+        # with the ordinary lapse).
+        record.pop(SUPERSEDED_AT_FIELD, None)
+        if fields.get("operator_device_id"):
+            record["operator_device_id"] = fields["operator_device_id"]
         if fields["name"] is not None:
             record["name"] = fields["name"]
         else:
             record.pop("name", None)
+        # DECLARATIVE like ``name``: a re-register REPLACES the stored switches,
+        # and a body without ``preferences`` clears them back to absent (= all
+        # on). The app sends its whole Settings state on every register, so
+        # the latest register is the device's current choice.
+        if fields["preferences"] is not None:
+            record["preferences"] = fields["preferences"]
+        else:
+            record.pop("preferences", None)
         # The re-register clears the credential LAPSE and nothing else: this is
         # ADR §3.1's "expired_at does NOT refuse", implemented where it matters.
         # The two refusal markers are untouched — a row that reaches here has
@@ -649,6 +886,7 @@ def register(
         # them).
         if not store.get(OPERATOR_KEY_FIELD):
             store[OPERATOR_KEY_FIELD] = secrets.token_urlsafe(32)
+        records = _supersede_locked(records, record, stamp)
         store["devices"] = _prune_locked(records)
         _save(config_dir, store)
         return {
@@ -873,6 +1111,82 @@ def _checked_sound_cache(stems: object) -> list[str]:
     return cached
 
 
+def resolved_preferences(record: Mapping[str, Any]) -> dict[str, Any]:
+    """One row's push switches, with absence resolved to ``True``.
+
+    A row written before preferences existed carries no ``preferences`` key,
+    and a stored object may name only some keys; both mean "on" (see
+    :data:`PREFERENCE_KEYS`), so every reader resolves through here rather
+    than spelling the default twice.
+    """
+    stored = record.get("preferences")
+    stored = stored if isinstance(stored, Mapping) else {}
+    resolved: dict[str, Any] = {}
+    for key in PREFERENCE_KEYS:
+        value = stored.get(key, PREFERENCE_DEFAULTS[key])
+        if key in ENUM_PREFERENCES:
+            # An unknown stored value resolves to the key's DEFAULT, never to
+            # "on": a value this build cannot read must not widen what pushes.
+            resolved[key] = value if _valid_preference(key, value) else PREFERENCE_DEFAULTS[key]
+        else:
+            resolved[key] = bool(value)
+    return resolved
+
+
+def device_preferences(config_dir: Path) -> dict[str, dict[str, Any]]:
+    """READ-ONLY ``{device_id: resolved preferences}`` for the emit gate.
+
+    A sibling of :func:`credential_facts` rather than more fields on it: those
+    facts feed the credential report block the cloud decodes strictly, and the
+    preferences must never reach any cloud body (the cloud's register and emit
+    bodies are ``extra="forbid"``). A duplicate ``device_id`` (only a foreign
+    file can hold one) keeps its first row, as :func:`_by_id` does.
+    """
+    with _LOCK:
+        records = _load(config_dir)
+    preferences: dict[str, dict[str, Any]] = {}
+    for record in records:
+        preferences.setdefault(record["device_id"], resolved_preferences(record))
+    return preferences
+
+
+def preview_snapshot(
+    config_dir: Path, *, now: float | None = None
+) -> tuple[list[str], dict[str, bool]]:
+    """READ-ONLY ``(live device ids, {device_id: previews})`` from ONE load.
+
+    The preview gate (``push_worker._previews_allowed``) needs two facts about
+    the same devices — which are live, and what each one's ``previews`` switch
+    says — and reading them through :func:`credential_facts` and
+    :func:`device_preferences` loaded the registry twice. A phone that
+    registered with ``previews: false`` between those loads appeared live with
+    no switch on record, and fell back to "on" (security review r2, N-1). One
+    load answers both, so in production a live device always has its row.
+
+    "Live" is spelled exactly as gate 4 spells it
+    (``push_worker._live_device_ids``): ``STATE_LIVE`` and a credential live at
+    ``now``. ``previews`` is resolved through :func:`resolved_preferences`, so a
+    row WITHOUT the key is still on — the operator's default-on rule for rows an
+    older app wrote — while a device with no row at all is simply absent from
+    the map, which the gate reads as OFF.
+    """
+    stamp = float(time.time() if now is None else now)
+    with _LOCK:
+        records = _load(config_dir)
+    live: list[str] = []
+    previews: dict[str, bool] = {}
+    for record in records:
+        device = str(record["device_id"])
+        if device in previews:
+            # A duplicate id (only a foreign file can hold one) keeps its first
+            # row, as :func:`device_preferences` and :func:`_by_id` do.
+            continue
+        previews[device] = resolved_preferences(record)["previews"]
+        if device_state(record) == STATE_LIVE and credential_live_at(record, stamp):
+            live.append(device)
+    return live, previews
+
+
 def credential_facts(config_dir: Path, *, now: float | None = None) -> list[dict[str, Any]]:
     """READ-ONLY per-device credential facts — the emit path's only input.
 
@@ -1009,6 +1323,11 @@ def list_devices(config_dir: Path, *, now: float | None = None) -> dict[str, Any
         records = _load(config_dir)
     devices: list[dict[str, Any]] = []
     for record in records:
+        # A superseded row is a dead identity of a device listed under its live
+        # row (:func:`_supersede_locked`); rendering it is the 33-identical-rows
+        # defect this marker exists to end.
+        if record.get(SUPERSEDED_AT_FIELD):
+            continue
         entry: dict[str, Any] = {
             "device_id": record["device_id"],
             "platform": record["platform"],
@@ -1023,6 +1342,12 @@ def list_devices(config_dir: Path, *, now: float | None = None) -> dict[str, Any
             entry["credential_live"] = credential_live_at(record, stamp)
         if "last_authenticated_at" in record:
             entry["last_authenticated_at"] = record["last_authenticated_at"]
+        if "operator_device_id" in record:
+            entry["operator_device_id"] = record["operator_device_id"]
+        # Always rendered, RESOLVED: unlike a credential fact, "absent" has a
+        # defined answer here (all on), so the resolved switches are the truth
+        # rather than an invented value.
+        entry["preferences"] = resolved_preferences(record)
         devices.append(entry)
     return {"devices": devices, "precedence": PRECEDENCE}
 
@@ -1062,6 +1387,42 @@ def revoke(config_dir: Path, device_id: str, *, now: float | None = None) -> dic
             record["revoked_at"] = int(time.time() if now is None else now)
             _save(config_dir, store)
     return {"ok": True}
+
+
+def revoke_linked(
+    config_dir: Path, operator_device_id: str, *, now: float | None = None
+) -> list[str]:
+    """Tombstone every push row linked to ``operator_device_id``; returns their ids.
+
+    The unified revoke's second phase (design v2 §2.4), deliberately BEFORE the
+    privileged anchor write: notifications stop the moment the person removes the
+    phone, whether or not they finish the OS prompt. Same tombstone as :func:`revoke`.
+    """
+    stamp = int(time.time() if now is None else now)
+    revoked: list[str] = []
+    with _LOCK:
+        store = _load_store(config_dir)
+        for record in store["devices"]:
+            if record.get("operator_device_id") == operator_device_id:
+                if "revoked_at" not in record:
+                    record["revoked_at"] = stamp
+                revoked.append(str(record["device_id"]))
+        if revoked:
+            _save(config_dir, store)
+    return revoked
+
+
+def live_linked(config_dir: Path, operator_device_id: str) -> bool:
+    """Whether any push row linked to ``operator_device_id`` is not tombstoned."""
+    try:
+        with _LOCK:
+            records = _load(config_dir)
+    except Exception:  # noqa: BLE001 - an unreadable store answers "unknown" as live
+        return True
+    return any(
+        record.get("operator_device_id") == operator_device_id and "revoked_at" not in record
+        for record in records
+    )
 
 
 def unrevoke(config_dir: Path, device_id: str, *, now: float | None = None) -> dict[str, Any]:
@@ -1126,8 +1487,14 @@ def unrevoke(config_dir: Path, device_id: str, *, now: float | None = None) -> d
 # -- payload validation ---------------------------------------------------------
 
 
-def _checked_registration(body: object) -> dict[str, Any]:
-    """One register body, field by field, strictly — or a refusal sentence."""
+def _checked_registration(
+    body: object, config_dir: Path | None = None, *, now: float | None = None
+) -> dict[str, Any]:
+    """One register body, field by field, strictly — or a refusal sentence.
+
+    ``config_dir`` is the root whose issued certificates and revocations the push
+    link is checked against; ``None`` (a caller with no root) refuses any link.
+    """
     if not isinstance(body, dict):
         raise PushDeviceRefusal("a JSON object body is required")
     # Unknown keys refuse in BOTH directions — the register body like a stored
@@ -1167,12 +1534,221 @@ def _checked_registration(body: object) -> dict[str, Any]:
         name = _bounded(name.strip(), "name")
     else:
         raise PushDeviceRefusal("name must be a string when provided")
+    preferences = body.get("preferences")
+    if preferences is not None:
+        preferences = _checked_preferences(preferences)
     return {
         "platform": platform,
         "environment": environment,
         "app_version": app_version,
         "install_id": install_id,
         "name": name,
+        "operator_device_id": _checked_operator_link(
+            body,
+            install_id=install_id,
+            platform=platform,
+            token=token,
+            config_dir=config_dir,
+            now=time.time() if now is None else now,
+        ),
+        "preferences": preferences,
+        PUSH_HANDLE_FIELD: push_handle_digest(token),
+    }
+
+
+def push_handle_digest(token: str) -> str:
+    """The stored, equality-only stand-in for a push token (:data:`PUSH_HANDLE_FIELD`)."""
+    return hashlib.sha256((PUSH_HANDLE_LABEL + token).encode("utf-8")).hexdigest()
+
+
+def _supersede_locked(
+    records: list[dict[str, Any]], current: dict[str, Any], stamp: int
+) -> list[dict[str, Any]]:
+    """Retire every OTHER row that is this installation under a stale id.
+
+    One installation must be one row: Settings lists it once, and the cloud —
+    which fans a computer's push out to every device it was told about —
+    delivers to it once. ``current`` has just registered with its push handle;
+    two kinds of row are retired against it, both on the same platform and
+    both only when live or expired (a ``revoked``/``unpaired`` row is an
+    operator's or the pairing's decision and is never rewritten here):
+
+    1. a row carrying the SAME handle under another ``install_id`` — the same
+       installation, which forked its id (:data:`PUSH_HANDLE_FIELD`);
+    2. a row a pre-dedupe build wrote (no handle at all) whose device key was
+       never presented (no ``last_authenticated_at``). That is the measured
+       ghost: a client that could not read its install record could not have
+       stored the key its registration minted either, so the key was never
+       seen again. The sweep runs on the first register after the upgrade and
+       then finds nothing, because every row written since carries a handle.
+       Its one false positive is self-healing: a genuine other phone of the
+       same platform that registered pre-upgrade and never presented its key
+       is paused, and its next launch's register finds its own row by
+       ``install_id`` and lifts both markers.
+
+    Retiring sets ``expired_at`` (the marker delivery already honours, so the
+    credential report tells the cloud "not live") plus
+    :data:`SUPERSEDED_AT_FIELD` (hidden from ``list``). Retired rows are kept
+    until :data:`CLOUD_IDLE_DROP_DAYS` after retirement — long enough for the
+    report to have carried the change — and then dropped here.
+    """
+    platform = current["platform"]
+    digest = current[PUSH_HANDLE_FIELD]
+    for other in records:
+        if other is current or other["platform"] != platform:
+            continue
+        if other.get(SUPERSEDED_AT_FIELD) or device_state(other) not in (
+            STATE_LIVE,
+            STATE_EXPIRED,
+        ):
+            continue
+        handle = other.get(PUSH_HANDLE_FIELD)
+        same_installation = handle == digest
+        legacy_ghost = handle is None and "last_authenticated_at" not in other
+        if same_installation or legacy_ghost:
+            other[SUPERSEDED_AT_FIELD] = stamp
+            other.setdefault("expired_at", stamp)
+    horizon = stamp - CLOUD_IDLE_DROP_DAYS * 86400
+    return [
+        record
+        for record in records
+        if not (record.get(SUPERSEDED_AT_FIELD) and record[SUPERSEDED_AT_FIELD] < horizon)
+    ]
+
+
+_LINK_FIELDS = ("operator_device_id", "operator_cert", "operator_link_sig", "operator_link_at")
+
+
+def _checked_operator_link(
+    body: Mapping[str, Any],
+    *,
+    install_id: str,
+    platform: str,
+    token: str,
+    config_dir: Path | None,
+    now: float,
+) -> str | None:
+    """The proven operator device id for a push row, or ``None`` when none was offered.
+
+    WHAT THE LINK PROVES, AND WHAT IT DOES NOT (round-1 R4/Q2/Q1). Four checks, all
+    required, so a push row is tied to a paired phone only by the phone itself:
+
+    1. ``operator_cert`` verifies under this computer's installed anchor and names
+       exactly ``operator_device_id``. Certificates are PUBLIC (``GET
+       /api/pair/{device_id}`` serves them), so this alone proves only that the
+       operator once issued that id -- never that the caller is that phone.
+    2. ``operator_link_sig`` is the DEVICE KEY's signature (DER P-256, the withdraw's
+       pattern) over :func:`link_message` -- the id, this install, this platform and
+       this token's hash -- under the certificate's own ``spki``. That is the proof of
+       possession: another phone holding a fetched certificate cannot produce it.
+    3. ``operator_link_at`` is within ``LINK_SKEW_S`` of now, so a captured body
+       cannot be replayed later (e.g. after a revoke) to re-link.
+    4. The id is one THIS computer issued (its certificate is still stored here) and
+       is not revoked (``devices.is_revoked``: the local record or the anchor). A
+       revoked phone keeps a certificate that still verifies, so without this a
+       re-register on launch would flip its row from ``revoked`` back to ``removing``.
+
+    A link offered without a valid proof refuses the registration rather than silently
+    registering unlinked, so the app learns its link did not take.
+    """
+    offered = [field for field in _LINK_FIELDS if body.get(field) is not None]
+    if not offered:
+        return None
+    device_id = body.get("operator_device_id")
+    certificate = body.get("operator_cert")
+    signature_hex = body.get("operator_link_sig")
+    at = body.get("operator_link_at")
+    if (
+        not isinstance(device_id, str)
+        or not isinstance(certificate, str)
+        or not isinstance(signature_hex, str)
+        or isinstance(at, bool)
+        or not isinstance(at, int)
+    ):
+        raise PushDeviceRefusal(
+            "operator_device_id needs operator_cert, operator_link_sig and operator_link_at"
+        )
+    if abs(now - at) > LINK_SKEW_S:
+        raise PushDeviceRefusal("operator_link_at is outside the accepted clock window")
+    from local_operator.operator import devices
+    from local_operator.operator.trust import load_anchor
+    from local_operator.operator.verify import (
+        read_device_cert,
+        verify_device_cert,
+        verify_signature,
+    )
+
+    refused = "operator_cert does not prove operator_device_id on this computer"
+    parsed = read_device_cert(certificate)
+    loaded = load_anchor()
+    if (
+        parsed is None
+        or parsed.device_id != device_id
+        or not loaded.usable
+        or loaded.anchor is None
+        or verify_device_cert(
+            certificate, operator_spki=loaded.anchor.spki, now=int(now), parsed=parsed
+        )
+        is None
+    ):
+        raise PushDeviceRefusal(refused)
+    if (
+        config_dir is None
+        or devices.read_device(config_dir, device_id) is None
+        or devices.is_revoked(config_dir, device_id)
+    ):
+        raise PushDeviceRefusal("operator_device_id is not a phone paired with this computer")
+    try:
+        signature = bytes.fromhex(signature_hex) if len(signature_hex) <= 512 else b""
+    except ValueError:
+        signature = b""
+    message = link_message(
+        at=at,
+        operator_device_id=device_id,
+        install_id=install_id,
+        platform=platform,
+        token=token,
+    )
+    if not signature or not verify_signature(
+        spki=parsed.spki, message=message, signature=signature
+    ):
+        raise PushDeviceRefusal("operator_link_sig is not this device's signature")
+    return device_id
+
+
+def _checked_preferences(value: object) -> dict[str, Any]:
+    """The register body's ``preferences``: an object of known bool switches.
+
+    Strict like the body around it: a non-object, an unknown key (echoed
+    BOUNDED, the same rule as the body's own unknown-field refusal) or a
+    non-bool value refuses the whole register. A BOOLEAN key the app left out
+    is stored resolved to ``True``, so the row always holds every switch.
+
+    An ENUM key (ADR 0009) is stored only when the app SENT it (review round 1,
+    m3): absent already resolves to its default (:func:`resolved_preferences`),
+    and writing the default would put a key a pre-1b build does not know into
+    every row, which that build's ``_validated_record`` refuses wholesale on a
+    rollback, taking every registry route down with it.
+    """
+    if not isinstance(value, dict):
+        raise PushDeviceRefusal("preferences must be an object when provided")
+    unknown = sorted(str(key) for key in set(value) - set(PREFERENCE_KEYS))
+    if unknown:
+        names = ", ".join(unknown)[:MAX_FIELD_CHARS]
+        raise PushDeviceRefusal(f"unknown preferences field(s): {names}")
+    for key, flag in value.items():
+        if _valid_preference(key, flag):
+            continue
+        if key in ENUM_PREFERENCES:
+            # ADR 0009: per key, so an enum outside its set is refused (422)
+            # rather than stored as something the worker would have to guess at.
+            allowed = ", ".join(ENUM_PREFERENCES[key])
+            raise PushDeviceRefusal(f"preferences.{key} must be one of: {allowed}")
+        raise PushDeviceRefusal(f"preferences.{key} must be true or false")
+    return {
+        key: value.get(key, PREFERENCE_DEFAULTS[key])
+        for key in PREFERENCE_KEYS
+        if key not in ENUM_PREFERENCES or key in value
     }
 
 
@@ -1353,7 +1929,15 @@ def _validated_record(entry: object, index: int) -> dict[str, Any]:
             f"push device registry record {index} has an invalid environment;"
             " refusing to rewrite it"
         )
-    for field in ("device_id", "app_version", "install_id", "name", "device_key"):
+    for field in (
+        "device_id",
+        "app_version",
+        "install_id",
+        "name",
+        "device_key",
+        "operator_device_id",
+        PUSH_HANDLE_FIELD,
+    ):
         if field not in entry:
             continue
         value = entry[field]
@@ -1389,6 +1973,7 @@ def _validated_record(entry: object, index: int) -> dict[str, Any]:
         "revoked_at",
         "last_authenticated_at",
         "credential_expires_at",
+        SUPERSEDED_AT_FIELD,
     ):
         if field not in entry:
             continue
@@ -1403,6 +1988,24 @@ def _validated_record(entry: object, index: int) -> dict[str, Any]:
             f"push device registry record {index} has an invalid sound_cached;"
             " refusing to rewrite it"
         )
+    if "preferences" in entry:
+        stored = entry["preferences"]
+        # An enum key holding a STRING this build does not know is readable,
+        # not corrupt (review round 1, m3): a later build may have added the
+        # value before a rollback, and ``resolved_preferences`` resolves it to
+        # the key's default. Refusing it would refuse every registry route.
+        if (
+            not isinstance(stored, dict)
+            or set(stored) - set(PREFERENCE_KEYS)
+            or not all(
+                isinstance(flag, str) if key in ENUM_PREFERENCES else _valid_preference(key, flag)
+                for key, flag in stored.items()
+            )
+        ):
+            raise PushRegistryCorrupt(
+                f"push device registry record {index} has invalid preferences;"
+                " refusing to rewrite it"
+            )
     if "credential_live" in entry and not isinstance(entry["credential_live"], bool):
         raise PushRegistryCorrupt(
             f"push device registry record {index} has an invalid credential_live;"

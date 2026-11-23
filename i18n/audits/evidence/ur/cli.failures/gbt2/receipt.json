@@ -1,0 +1,34 @@
+{
+  "locale": "ur",
+  "namespace": "cli.failures",
+  "source_sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea",
+  "translator": {
+    "agent": "i18n-translator (timeout-ur)",
+    "model": "openai/gpt-6.1-sol (fallback anthropic/claude-opus-5-5 during the run, as reported by parent)",
+    "date": "2026-11-16"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (audit2-ur subagent)",
+    "model": "anthropic/claude-opus-5-5 (harness quota fallback from primary openai/gpt-6.1-sol, HTTP 429, switched before any catalogue string was read; the fallback performed the audit)",
+    "date": "2026-11-16",
+    "result": "passed",
+    "findings": 1,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "ur cli.failures 5 keys incl new github_borrow_timeout: passed, 0 BLOCKER/0 MAJOR, 1 MINOR U1 (Latin-first {owner} makes line LTR; put {seconds} first). Auditor claude-opus-5-5 (fallback from gpt-6.1-sol). Record: i18n/audits/evidence/ur/cli.failures/gbt2/record.json",
+  "companions": [
+    {
+      "path": "i18n/audits/evidence/ur/cli.failures/gbt2/record.json",
+      "sha256": "89c05f2fcbc8b5d5f0eacadbb06b54f750f6740bc9772eedc11d0ba2c25fb709"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.failures/gbt2/report.md",
+      "sha256": "d8ed3d79d3d577150d78fec52f5089f88a83c71dda0fdb8bce255b72d7246a97"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.failures/gbt2/audit.log",
+      "sha256": "ca5ed98e78f08552ff269246ce43145fb7e1e19cfe17e80bc2617974e54c0696"
+    }
+  ]
+}

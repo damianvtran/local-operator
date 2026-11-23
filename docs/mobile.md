@@ -379,6 +379,22 @@ Screens, following branding.md §7's agent-output hierarchy:
   it would resend — because the field is not where that text necessarily is any
   more.
 
+### Starting a chat as an agent or team (`GET /api/start-targets`)
+
+`POST /api/sessions/start` accepts an optional, mutually exclusive `agent` or
+`team` (a profile or team name). The relay validates it with the desktop's own
+new-chat validator and writes the session's `attachment.json` before the child
+spawns, so the first turn already runs as that agent, or as the team's manager
+with the team brief and roster. The model is not taken from the target. The
+picker's rows come from `GET /api/start-targets` (`agents`, `teams`, painted
+`label`s, avatar hashes, and `degraded` when the registries cannot be read).
+
+Both are licensed by `capabilities.session_start.agent` / `.team`. A client
+MUST read them before offering a picker or sending a field: an older relay's
+unkeyed start silently drops unknown fields, which would start an unbound chat.
+Fields, refusal codes and idempotency rules:
+[mobile-start-receipts.md](design/mobile-start-receipts.md).
+
 ### The armed index — wakes and monitors (`GET /api/schedules`)
 
 The machine-wide read of what is ARMED: every conversation carrying wakes and
@@ -474,6 +490,82 @@ peer-held file is named but not previewed), the phone app's own WebView frame is
 pending its own lane, and static preview URLs are not yet token-enforced (tokens are
 minted and accepted, but a request without one is not refused).
 
+### Team Bridge card bodies (`team_bridge_card_body`) — `GET /api/sessions/{id}/bridge-cards/{entry_id}/body`
+
+An inbound Team Bridge delivery reaches the phone as a `notice` row with
+`custom_type: "team_bridge_message"` (the live arm also sets
+`details.custom_kind`) whose text is only the receipt line
+(`<sender> · <conversation>`, `harness/bridge_copy.py`). The journal never holds
+the body — it is replayed, forked, exported and compacted, and a body there could
+be neither revoked nor kept out of the model's context. The admitted body lives in
+core's display store and is read separately, keyed by that row:
+
+- **Capability**: `capabilities.features.team_bridge_card_body >= 1` on the
+  session-list frame (the same `server/features.py` flag `/v1/capabilities`
+  carries). Absent, a client must not call the route and keeps today's receipt
+  line unchanged.
+- **Auth**: the cookie gate (`gate()`); `401` without it, like every relay route.
+- **Scope**: only a durable user conversation on THIS machine (`404 {"error":
+  "unknown session"}` otherwise, including a peer's remote row) and only an
+  `entry_id` that names a `team_bridge_message` row in it (`404 {"error": "no such
+  bridge card"}` otherwise) — never an arbitrary message id.
+- **Response** (bare JSON, no envelope; `Cache-Control: private, no-store`):
+
+  ```
+  {v: 1,
+   items: [{message_id, conversation_id,
+            state: "admitted" | "pending" | "held" | "refused" | "not_admitted" | "unavailable",
+            body?: str,              // admitted only; UNTRUSTED markdown
+            source?: "local" | "hub",
+            hold?: {class: "awaiting_review" | "transient", held_for_s},
+            reason?: "signed_out" | "other_account" | "not_member" | "deleted" | "hub_unsupported" | "offline"}],
+   more: int,                        // ≤20 items; a coalesced card's rest is counted here
+   card?: {received_at?: str,        // ISO-8601 UTC ("2026-11-21T14:56:48.454293Z") of the card's journal row
+           thread_reply: bool}}      // the card is a reply inside a thread
+  ```
+
+  `card` is additive within `v: 1` and describes the card ROW, not a body: it
+  comes from the card's own journal row (no hub read), so it is present on every
+  answer for a found card — local-only, held, pending and every `unavailable`
+  reason alike — and absent only on the nothing-to-resolve answer below. The
+  relay transcript row carries no timestamp and no thread marker, so this is
+  where a client gets the time and thread-reply marker it shows beside the body.
+
+- **States are the server's word.** `held` with `hold.class: "transient"` means
+  screening has not run yet (not a moderation decision); any other class is
+  "held for review" (a review hold can still be released or refused). `refused` comes only from the hub's rejection and carries
+  no reason to show. `reason` qualifies `unavailable` (`deleted` = the message was
+  deleted; `offline` = the computer could not reach Radient). A client maps an
+  unknown state, an `admitted` item without a body, or a malformed frame to
+  unavailable — never to a guessed outcome.
+- **Not yet written.** A live receipt can reach the phone before its journal row
+  is written (an idle or steered session emits the receipt, then persists under
+  the turn lock), so the first read of the newest card can answer `404 {"error":
+  "no such bridge card"}`. The phone web treats that one body (not every 404) as
+  "not yet": it keeps Loading and re-asks after 0.5 s and 1.5 s, abandoning the
+  waits on unmount, and shows the generic unavailable line only if the row is
+  still missing. An empty `items` list with `more: 0` (a card from before
+  receipts carried message ids) is "nothing to resolve": no panel, the receipt
+  line alone, as in the TUI.
+- **Re-read while on screen, never cache past it.** `pending`, `held` (either
+  class) and `unavailable`/`offline` are NOT final: a pending body is handed off
+  at the receiving session's next turn, measured (n=4005) at p50 45 s, p90
+  21 min, p99 100 min, max 8 h. So a mounted card re-reads such an answer on a
+  5 s, 10 s, 20 s, 30 s, then every-60 s backoff with no overall give-up,
+  re-reads at once when the app becomes visible again, keeps the last answer on
+  screen during a re-read (no flash back to Loading), and stops on a final
+  answer, on a non-"not yet" 404, or on unmount (aborting the in-flight read).
+  A failed read (network, 5xx, malformed frame) is asked again on the same
+  backoff. Re-reading a pending/held item is a local read in core. A remount
+  reads again; revocation (sign-out, leave, account switch, hub delete) shows
+  on the next read. Policy module: `mobile/web/src/lib/bridge-card-reread.ts`
+  (the TUI's twin is `tui/bridge_card_body.py`). Render the body as data under
+  an "External message · untrusted content" frame.
+
+Desktop twin and resolution order: `docs/DESKTOP_API.md` (`.../bridge-cards/{entry_id}/body`).
+The web relay's card is `mobile/web/src/components/bridge-card-body.tsx` over
+`lib/bridge-card-body.ts`.
+
 ### The peers' rows — other devices' sessions (`GET /api/sessions?include_peers`)
 
 The relay half of "sessions and delegation": the sessions OTHER devices hold,
@@ -513,6 +605,252 @@ a 200. The list's SSE stream takes the same flag
 (`/api/sessions/events?include_peers=true`) so a phone's screen cannot flap
 between the two answers on its next repaint; without the flag both answers are
 byte-identical to what they were before.
+
+### Remote conversations — owner-bound view, history, commands and media
+
+A remote row opens through the **same** `/api/sessions/{id}/events`, `/history`,
+`/command`, `/image` and `/attachment` routes as a local conversation. Opening is
+not recall: the session and its runtime remain on their owner. Explicit transfer
+remains a separate action. The phone supplies a session id, never a peer URL,
+control key, attachment digest or filesystem path. The relay resolves the owner
+through the same trusted mesh catalogue as the desktop and retains that
+owner/session binding for each operation and upstream viewer.
+
+Feature-detect this object on the authenticated capabilities payload:
+
+```json
+{"remote_sessions":{"available":true,"version":1,"view":true,"history":true,
+"supported_command_ops":["prompt","steer"],"media":true,
+"supported_media_kinds":["image","video","file"],"file_sources":["retained_document"],
+"document_upload":false,"audio_upload":false,"skill_invocation":false,"supplements":true,
+"supplement_kinds":["document","file","sound"]}}
+```
+
+`available` describes this relay's implemented baseline, **not** every peer's
+build or grants. Owner reads separately negotiate `mobile-session-read-v1` on
+the authenticated mesh link. An old peer is unsupported, not an empty chat.
+Only `prompt` and `steer` are currently admitted remotely; model/slash/stop/ask
+controls must not be enabled by this capability. Prompts/steers carry their
+original `command_id` UUID and inline image bytes through existing owner
+admission and staging. A retry retains that UUID; a missing acknowledgement is
+ambiguous and must not cause automatic resubmission. Remote skill expansion,
+audio and document **upload** are explicitly unsupported; the UI must not drop
+these payloads or infer support from a local capability. Highlights (turn
+supplements) are a separate contract, described below under "Remote Highlights";
+`supplements:true` with `supplement_kinds` says this relay serves them.
+
+Reading a stopped conversation does not engage a runtime. History is folded at
+the owner using the mobile schema and the existing durable/journal reader,
+including backward pagination across compactions and forward `after` cursors.
+Desktop journal envelopes are never passed through as mobile transcript rows.
+A live view uses `RemoteSessionClient` projections, with one upstream reader per
+owner/session shared by active HTTP viewers. The final SSE release closes that
+reader, including cancellation before headers or while sending a body. A cold
+stream can observe a runtime subsequently started elsewhere without starting
+one merely to read. `?have=` retains the existing projection seed contract.
+
+Media references are row id plus family-specific index. Images use `/image`;
+video uses `/attachment?kind=video`; retained input documents add sparse
+`files:[{index,filename,mime_type,bytes}]` transcript refs and use
+`/attachment?kind=file`. Files are downloads, not remote document-upload
+support. No reference exposes an origin path, retained path or digest as byte
+access authority. The owner resolves the exact user-session transcript block
+(including tool-row ids), honors prune markers, then reads retained bytes. A
+missing object is a media miss, never a request to read the original file path.
+
+The mesh courier reuses the session-view-authorized history carrier with an
+explicit `mobile_session_read` purpose (`history`, `projection`, `media`). Media
+requests carry only `entry_id,index,kind,offset,length,expected_media_id?` beside
+the session. Coordinates are exact integers, not booleans; chunks reuse the
+existing mesh sync chunk bound, and the actual encoded acknowledgement must fit
+the existing history reply budget. Responses bind session, entry, index, kind,
+content identity, MIME, total, offset and base64 bytes. Subsequent chunks must
+match that identity; the HTTP relay validates every answer before yielding it.
+Video bodies are streamed through bounded chunks, not buffered as whole videos.
+The existing Range parser supplies full `200`, exact single-range `206`, and
+unsatisfiable `416` with `Content-Range`; malformed/multipart ranges retain its
+full-body fallback. Cancellation closes the request-owned local courier socket
+and stops further chunk requests. An owner read already dispatched may finish
+within the existing bounded mesh deadline; it owns no persistent media viewer.
+
+Remote failures carry `{error:<code>,code:<code>,remote:true}`. Preserve loaded
+content on these errors; SSE sends `remote_error` rather than replacing the
+projection with an empty one.
+
+| Status | Remote code | Meaning |
+|---|---|---|
+| 503 | `remote_owner_unresolved`, `remote_unreachable` | ownership or transport could not be established; retry without recall |
+| 409 | `remote_unsupported` | owner build/operation does not implement this contract |
+| 403 | `remote_forbidden` | the authenticated mesh member lacks this operation's grant |
+| 404 | `remote_session_missing`, `remote_media_missing` | owner session or retained object is missing |
+| 409 | `remote_cursor_missing` (`reset:true`) | discard the history cursor and reload |
+| 409 | `remote_media_changed` | byte identity/coordinates changed; do not concatenate versions |
+| 409 | `remote_command_ambiguous` | no reliable admission acknowledgement; retain the UUID |
+| 409 | `remote_supplement_needs_running` | a Highlight file is cwd-relative and the owner has no live runtime; "Open on <owner>" |
+| 413 | `remote_too_large` | the Highlight file is over the 10 MB preview cap (component over 1 MiB) |
+
+A genuine phone authentication failure remains HTTP **401**. No peer permission,
+old-build or offline result is translated into phone logout. A view grant does
+not grant drive: the existing mesh authorizer checks every history/media read,
+and every forwarded control frame independently.
+
+#### Remote Highlights — component documents, featured files and sounds
+
+A remote row's Highlights use the **same** URLs as a local conversation's:
+`/api/sessions/{id}/supplements/{digest}/document`,
+`/api/sessions/{id}/supplements/{job}/file?i=<index>` and
+`/api/sessions/{id}/sound?digest=<digest>`. The projection already carries each
+Highlight row from the owner; only the bytes cross the mesh, on request — nothing is
+snapshotted at turn time, so a featured file is read as it is NOW on the owner,
+exactly as the owner's own phone would read it.
+
+- **Carrier.** `peer_session_history` with `mobile_session_read="supplement"` and only
+  `kind` (`document|file|sound`), `ref` (a 12-hex job for `file`, else a 32-hex
+  digest), `index` (0 for digest kinds), `offset`, `length`, `expected_media_id?`.
+  Both peers validate the shape; 512 KiB chunks under the history reply budget; the
+  answer binds session, ref, index, kind, sha256 identity, MIME and total, and later
+  chunks must match that identity (a changed file is `remote_media_changed`).
+- **Featured files are collected, then sent; sounds stream.** A featured file is
+  capped at 10 MB, so the viewer fetches every chunk of the requested window
+  (each still its own re-authorized, identity-checked frame) BEFORE it sends a
+  header: a file rewritten or a grant revoked mid-transfer is a real `409
+  remote_media_changed` / `403 remote_forbidden`, never a short `200`. A declared
+  total over the cap is `413 remote_too_large` at the viewer too — it does not
+  trust the owner's cap. Sounds (and retained media) have no cap and keep
+  streaming: once their `200`/`206` is sent, a later refusal can only end the body
+  early, so **a short read on a streamed body must be treated as
+  `remote_media_changed`** — discard it, never concatenate a retry onto it.
+- **Range differs by transport, not policy.** A remote featured file honours
+  `Range` (`206`/`416`); a LOCAL conversation's featured-file route answers `200`
+  with the whole body (pre-existing, unchanged here). Clients must accept either.
+- **Capability.** `mobile-session-supplements-v1`, checked by the viewer before
+  forwarding AND by the owner before serving. An owner without it is
+  `409 remote_unsupported` ("Update <owner>").
+- **Authorization.** Every chunk is its own mesh frame, so the view grant and the
+  session/owner binding are re-checked per chunk (#4057's S1 rule): a grant revoked
+  mid-download stops the next chunk with `403 remote_forbidden`.
+- **Documents.** The owner checks a `supplement_v1` row references the digest and
+  returns the raw component (capped at 1 MiB); the **viewer** assembles it with its
+  own `assemble_stored_component`, so the CSP comes from the build serving the phone.
+  Still JSON `{html}`, never `text/html`.
+- **Sounds.** The owner checks the digest is in a row's `sounds[]` and the stored
+  type is `audio/*`; Range is supported.
+- **Featured files — the whole local policy (operator decision, 2026-11-15).** The
+  owner runs `session/media.resolve_supplement_file`, the function its own phone route
+  runs: the path the row recorded, resolved under the owner's cwd, `~` or the
+  session's scratchpad, the §4.3 denylist, regular files only, the 10 MB cap and the
+  suffix allowlist (never `.html`/`.svg`/`+xml`). cwd comes only from the **owner's
+  own** live registry record — never from the viewer — and a cwd-relative path with no
+  live owner runtime is `409 remote_supplement_needs_running`. **This means a view
+  grant can now read files a Highlight names under the owner's cwd or home**, within
+  the denylist and cap. That is wider than `network/files.py`'s pull scope (pad +
+  referenced digests) and was chosen deliberately by the operator ("every file the
+  Highlight names, with the same rules as on that computer"), because view grants go
+  to the operator's own devices: opening a Highlight's file on the phone discloses
+  what opening it on the computer does. The policy lives in one place
+  (`resolve_supplement_file` and the scope note above it); narrowing it again is a
+  change there.
+- **The viewer never trusts the peer's MIME.** A file's type must be one of the local
+  allowlist's own values (else `application/octet-stream`); a sound's must be
+  `audio/*` (else 404). Responses carry `no-store`, `nosniff` and a sandbox CSP;
+  non-image files add `Content-Disposition: attachment`.
+
+### Delta resume — forward history and skip-unchanged seeds
+
+A phone returning from the background already holds a cached copy of the list
+and of the conversation it was viewing. Two additive contracts let it fetch only
+what moved instead of the whole seed (up to ~700 KB for a long session) plus a
+backward heal. Both are RELAY capabilities on the list frame, so a client
+feature-detects them and never probes: an older relay **ignores** both
+parameters (it answers `?after=` with the newest page and `?have=` with the full
+seed), which is indistinguishable from success without the flag.
+
+| Capability | Contract |
+|---|---|
+| `capabilities.history_after = {"available": true}` | forward history cursor |
+| `capabilities.seed_digest = {"available": true}` | `?have=` seed elision on both SSE streams |
+
+**Forward history — `GET /api/sessions/{id}/history?after=<row id>&limit=`.**
+Answers `{entries, has_more}` with the rows strictly NEWER than `after`, oldest
+first, at most `limit` (the route's existing 1–200 bound, default 80). Page on
+with the last returned row's id while `has_more` is true. The cursor row itself
+is not re-served: its newer state (a tool call that finished) arrives on the
+live projection the client opens alongside. `after` at the newest row is a
+valid **empty** page (`200 {"entries": [], "has_more": false}`) — the client is
+current.
+
+A cursor the relay cannot continue from answers **`409 {"error", "reset":
+true, "reason"}`**, never an empty 200 (a forward reader would read an empty 200
+as "already current" and silently lose rows). The client drops its cursor and
+takes a full (cursor-less) read. Reasons: the id is not in the conversation's
+render (never this conversation's, a replaced journal, a reasoning row the
+journal never holds), the id is a row the newest compaction re-injected at the
+render's head (its marker, a preserved user turn, the carried tier — journal
+rows from below the cut, so "the rows after it" would include older rows), or
+the transcript is missing or failed to fold. A transcript this build cannot
+decode keeps the existing `200 {"entries": [], "unavailable": …}`. `before` and
+`after` together are a `400`. Requests without `after` are byte-identical to
+before.
+
+**Seed elision — `?have=<digest>` on `GET /api/sessions/{id}/events` and
+`GET /api/sessions/events`.** A query parameter, not `If-None-Match`, because
+header pass-through on an SSE request through the gateway and every React
+Native fetch path is unverified.
+
+- **Absent:** the stream is byte-identical to a relay without the feature.
+- **Present (any value, including empty — the opt-in with nothing cached):**
+  every `projection`/`sessions` frame on that connection carries `digest`.
+- **Equal to the current digest:** the FIRST event is `event: unchanged` with
+  `{"digest"}` (list) or `{"digest", "version", "activity_started_s"}`
+  (session) instead of the full snapshot. The client keeps its hydrated copy as
+  authoritative for the connection, patching the session's clock fields onto
+  it; later repaints arrive as ordinary stamped frames.
+
+The digest is the first 32 hex characters (128 bits) of sha256 over the frame's
+canonical JSON (sorted keys, `,`/`:` separators) — the CAPPED frame the phone
+actually receives, without `digest` itself. The session frame's clock fields
+(`version`, which bumps every repaint, and `activity_started_s`, an age
+re-dated at every serialization) are excluded, which is why the session's
+`unchanged` event carries their current values. A digest that does not match
+for any reason (including a field that moves with time) costs only the full
+seed the legacy path always sent; it can never elide a changed frame.
+
+### Steer journal order — `?steer_journal_order=1`
+
+| Capability | Contract |
+|---|---|
+| `capabilities.steer_journal_order = {"available": true}` | delivered phone steers sit at their journal slot on the session stream |
+
+A phone steer is painted on the live projection at SEND time and upgraded in
+place when the drain delivers it at a later tool boundary. The journal — so
+`/history`, a fresh mount and a resume — records it at DELIVERY. Without this
+capability the live frame reads `steer, tool, tool` while every page reads
+`tool, tool, user`: the "messages load out of order" report.
+
+`GET /api/sessions/{id}/events?steer_journal_order=1` declares the fix for that
+connection (only the exact value `1`; the parameter is per stream, like
+`?have=`). On a declaring stream, once a steer is delivered its row moves to
+just after the row it follows in the journal and its `kind` becomes `user` —
+the page's kind, since the journal carries no steer marker. Its `id` does not
+change, so a client keyed by id repaints the row instead of adding one. An
+undelivered steer stays where it was painted (`kind: "steer"`), and a steer
+whose anchor row is outside the capped frame keeps its slot (only the kind
+changes). Several steers drained at one boundary keep their send order.
+
+A stream that does not declare it is byte-identical to a relay without the
+feature: send-time slot, `kind: "steer"`. That is deliberate:
+local-operator-mobile builds before #359 mis-place a held row that moves later,
+and installed phones never update in step with the relay. The ordering hint
+(`steer_journal_order` on the projection, written by the runtime's fold) is
+relay-internal and stripped from every SSE frame. An older relay ignores the
+parameter, so a client feature-detects the capability rather than assuming the
+order.
+
+| Client | Declares | Sees after delivery |
+|---|---|---|
+| Phone app before #359 | no | send-time slot, `steer` (unchanged) |
+| Phone app that declares it | yes | journal slot, `user` — matches `/history` |
+| Relay web SPA | yes | held tab: the row keeps its held slot and repaints (upsert by id); fresh mount: journal order |
 
 ### The transfer verb — a conversation's move (`POST /api/sessions/{id}/transfer`)
 

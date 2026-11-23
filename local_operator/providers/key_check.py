@@ -58,6 +58,11 @@ class KeyCheck:
 
     valid: bool | None
     reason: str | None
+    #: Optional machine category for a REJECTION (``valid is False``), e.g.
+    #: ``bedrock_sso_expired``. Only providers whose connect surface switches on
+    #: it set one (Bedrock's desktop panel, design §7 route 4); every other
+    #: provider leaves it ``None`` and its callers never read it.
+    code: str | None = None
 
 
 def _label(definition: ProviderDefinition) -> str:
@@ -78,6 +83,14 @@ def _base_url(definition: ProviderDefinition) -> str | None:
     return definition.base_url
 
 
+#: Minimal Vertex AI ``countTokens`` payload used to verify an API key.
+#: Vertex AI exposes no ``GET /v1beta/models`` listing on ``aiplatform.googleapis.com``,
+#: so ``countTokens`` is the cheapest authenticated read-only call (no tokens
+#: generated, no billing for output).
+_VERTEX_COUNT_TOKENS_MODEL = "gemini-3.8-flash"
+_VERTEX_COUNT_TOKENS_BODY = {"contents": [{"role": "user", "parts": [{"text": "ping"}]}]}
+
+
 def _request(definition: ProviderDefinition, key: str) -> tuple[str, dict[str, str]] | None:
     """The URL and headers of the cheapest authenticated request, or ``None``."""
     base = _base_url(definition)
@@ -87,6 +100,13 @@ def _request(definition: ProviderDefinition, key: str) -> tuple[str, dict[str, s
     if definition.wire == "anthropic":
         url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
         return url, {"x-api-key": key, "anthropic-version": _ANTHROPIC_VERSION}
+    if definition.id == "google-vertex":
+        # Vertex AI has no /v1beta/models GET listing; countTokens is the
+        # cheapest authenticated probe and takes the key in x-goog-api-key.
+        return (
+            f"{base}/v1/publishers/google/models/{_VERTEX_COUNT_TOKENS_MODEL}:countTokens",
+            {"x-goog-api-key": key},
+        )
     if definition.wire == "google":
         # The header form, not ``?key=``: a query string is what access logs keep.
         return f"{base}/v1beta/models?pageSize=1", {"x-goog-api-key": key}
@@ -165,17 +185,42 @@ def has_invalid_characters(key: str) -> bool:
     return any(character not in _KEY_CHARACTERS for character in key)
 
 
-#: The sentence for :func:`has_invalid_characters`; shared so every refusal of a
-#: pasted key says the same thing.
-INVALID_CHARACTERS_REASON = (
-    "This key contains characters an API key cannot have. Re-copy it and try again."
-)
+def _text(message) -> str:  # noqa: ANN001
+    """A verdict sentence in the language the config resolves NOW.
+
+    ``KeyCheck.reason`` is finished prose: the desktop paints it from the
+    ``{error}`` of its refusal envelope and the CLI/TUI print it, so no client
+    can re-render a code later. ``render_resolved`` (not the active locale)
+    because this runs in the server, the CLI and the TUI alike, the same choice
+    ``providers/bedrock/check.py`` made for its sibling verdicts.
+    """
+    from local_operator.i18n.messages import render_resolved
+
+    return render_resolved(message)
+
+
+def _keys():  # noqa: ANN202
+    # Lazy like the render: the save route imports this module, and the
+    # generated key module is only needed once a verdict is phrased.
+    from local_operator.i18n.keys import wire_providers_connect
+
+    return wire_providers_connect
+
+
+def invalid_characters_reason() -> str:
+    """The sentence for :func:`has_invalid_characters`.
+
+    A function rather than the old module constant so the sentence follows a
+    language switch instead of freezing at import; shared so every refusal of a
+    pasted key says the same thing.
+    """
+    return _text(_keys().key_invalid_characters())
 
 
 def classify(definition: ProviderDefinition, status: int, body: str) -> KeyCheck:
     """The verdict for one response. Split out so it is testable without a socket."""
     label = _label(definition)
-    rejected = KeyCheck(False, f"{label} rejected this API key. Check it and try again.")
+    rejected = KeyCheck(False, _text(_keys().key_rejected(label=label)))
     if 200 <= status < 300:
         return KeyCheck(True, None)
     lowered = body.casefold()
@@ -196,11 +241,9 @@ def classify(definition: ProviderDefinition, status: int, body: str) -> KeyCheck
 
 
 def _unverified(label: str, status: int) -> KeyCheck:
-    return KeyCheck(
-        None,
-        f"{label} could not check this key right now (HTTP {status}). "
-        "It was saved without being verified.",
-    )
+    # ``status`` as a string: it is a protocol token, and ICU number formatting
+    # would group it in locales that group three-digit numbers differently.
+    return KeyCheck(None, _text(_keys().key_unverified(label=label, status=str(status))))
 
 
 async def check_api_key(
@@ -218,10 +261,17 @@ async def check_api_key(
     if has_invalid_characters(key):
         # Before anything else, including the provider lookup: this is a definite
         # "not a key" for every provider, and sending it would raise in httpx.
-        return KeyCheck(False, INVALID_CHARACTERS_REASON)
+        return KeyCheck(False, invalid_characters_reason())
     definition = get_provider_definition(credential_provider_id(provider_id))
     if definition is None or definition.allows_missing_api_key:
         return KeyCheck(None, None)
+    if definition.wire == "bedrock":
+        # A connection descriptor or Bedrock API key, validated by a signed
+        # control-plane read in the credential's Region (``_request`` would
+        # aim it at a base_url Bedrock does not have). Lazy: botocore.
+        from local_operator.providers.bedrock.check import check_connection
+
+        return await check_connection(key, timeout, client=client)
     request = _request(definition, key)
     if request is None:
         return KeyCheck(None, None)
@@ -230,7 +280,15 @@ async def check_api_key(
     owned = client is None
     http = client or httpx.AsyncClient(timeout=timeout)
     try:
-        response = await http.get(url, headers=headers, timeout=timeout)
+        if definition.id == "google-vertex":
+            response = await http.post(
+                url,
+                headers=headers,
+                json=_VERTEX_COUNT_TOKENS_BODY,
+                timeout=timeout,
+            )
+        else:
+            response = await http.get(url, headers=headers, timeout=timeout)
         return classify(definition, response.status_code, response.text[:2048])
     except Exception as error:  # noqa: BLE001 -- "never raises" is the route's contract
         # Broad on purpose: the save route has no guard of its own, and an
@@ -239,10 +297,7 @@ async def check_api_key(
         # an error's message can carry the URL or header material, and logging
         # less is free.
         logger.debug("API key check for %s could not complete: %s", definition.id, type(error))
-        return KeyCheck(
-            None,
-            f"Could not reach {label} to check this key. It was saved without being verified.",
-        )
+        return KeyCheck(None, _text(_keys().key_unreachable(label=label)))
     finally:
         if owned:
             await http.aclose()

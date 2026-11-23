@@ -71,6 +71,7 @@ from local_operator.action_class import normalize as normalize_action_class
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.agents import AgentData, AgentRegistry
+    from local_operator.i18n.messages import Msg, RenderedMessage
     from local_operator.profile_scope import Scope
 
 logger = logging.getLogger(__name__)
@@ -481,9 +482,37 @@ def is_role(agent: "AgentData") -> bool:
     One implementation, because two readers that disagree about what a role is
     are how ``op='list'`` came to hide a row that ``task(agent=...)`` would
     happily run.
+
+    Two markers qualify, and nothing weaker:
+
+    * the explicit ``role`` tag (``agent(op='create')``, ``install_seed``);
+    * hub pull provenance (a well-formed ``hub:<id>`` tag) on a row that is
+      not a specialist. This is the ONLY marker a hub pull can carry: the
+      publication document strips ``role`` as a local profile encoding
+      (``agents.PROFILE_ENCODING_TAG_KEYS``) and publishes ``kind: role`` for
+      every non-specialist row instead (``instruction_set_fields``), so a
+      pulled role arrives without the ``role`` tag. (Import itself keeps an
+      archive's non-provenance tags; it is the publication step that drops
+      ``role``, so the tag cannot be relied on after a pull.) Without this arm a
+      pulled role landed as an ordinary chat agent: ``task(agent=...)`` fell
+      through to nothing and every team whose roster named it failed to
+      validate (the desktop "model was not resolved" chip on a hub team).
+
+    Why provenance is not a coincidental marker: ``hub:`` is EARNED, never
+    imported — ``strip_provenance_tags`` drops it from every archive and only
+    ``AgentRegistry._stamp_hub_provenance`` (a real pull) writes it — so a
+    private chat agent cannot become a role by name or by importing a file.
+    Reading it here, rather than repairing rows on disk, keeps already-pulled
+    rows working with no migration and keeps the one classifier the only
+    source of truth for every reader (list, attach, delegation, teams).
     """
 
-    return any(str(tag).strip().lower() == ROLE_TAG for tag in (agent.tags or []))
+    if any(str(tag).strip().lower() == ROLE_TAG for tag in (agent.tags or [])):
+        return True
+    # Lazy: ``agents`` imports this module at load time.
+    from local_operator.agents import hub_origin
+
+    return hub_origin(agent) is not None and not is_specialist(agent)
 
 
 def is_specialist(agent: "AgentData") -> bool:
@@ -584,7 +613,72 @@ def profile_from_definition(
     )
 
 
+@dataclass(frozen=True)
+class AgentFact:
+    """Stable meaning beside raw data; translated display text is never a tag.
+
+    Settings keeps these immutable facts across language switches, while older
+    listing consumers receive only the localized string adapter below.
+    """
+
+    code: str
+    value: str
+
+
+AgentFacts = tuple[AgentFact, ...]
+
+
+def agent_fact_message(fact: AgentFact) -> Msg | str:
+    """Return typed copy for exact known semantics, otherwise the raw value.
+
+    In particular a model called ``proactive`` is NOT an action-class marker.
+    Effort's configured tier remains an opaque identifier inside keyed prose.
+    """
+    from local_operator.i18n.keys import tui_authoring, tui_small, wire_agent_badges
+
+    known = {
+        ("kind", "role"): tui_authoring.role,
+        ("kind", "specialist"): tui_authoring.specialist,
+        ("source", "packaged"): wire_agent_badges.packaged,
+        ("action_class", "proactive"): tui_authoring.proactive,
+        ("scope", "session"): tui_authoring.scope_conversation,
+    }
+    helper = known.get((fact.code, fact.value))
+    if helper is not None:
+        return helper()
+    if fact.code == "effort":
+        return tui_small.model_picker_effort(value=fact.value)
+    return fact.value
+
+
+def agent_fact_record(fact: AgentFact) -> RenderedMessage:
+    """Resolve raw copy with actual-source provenance, before terminal fitting."""
+    from local_operator.i18n.messages import RenderedMessage
+    from local_operator.i18n.text import tr_record
+
+    message = agent_fact_message(fact)
+    if isinstance(message, str):
+        return RenderedMessage(message, None)
+    namespace = "tui.authoring"
+    if fact.code == "effort":
+        namespace = "tui.small"
+    elif (fact.code, fact.value) == ("source", "packaged"):
+        namespace = "wire.agent_badges"
+    return tr_record(namespace)(message)
+
+
 def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
+    """Legacy four-string contract, projected once from the ONE enumeration.
+
+    No terminal controls enter routed agent_list triples or picker identifiers.
+    """
+    return [
+        (name, label, " · ".join(agent_fact_record(f).text for f in facts), summary)
+        for name, label, facts, summary in agent_listing_facts(registry)
+    ]
+
+
+def agent_listing_facts(registry: Any | None) -> list[tuple[str, str, AgentFacts, str]]:
     """``(name, label, kind-facts, summary)`` per role/specialist, roles first.
 
     ONE enumeration feeding the listing block, the argument picker AND the
@@ -614,25 +708,17 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
     """
     from local_operator.action_class import class_from_tags
     from local_operator.action_class import normalize as normalize_action_class
-
-    # The scope token is USER COPY and localized at build time; this function is
-    # the ONE enumeration the TUI, the argument picker and a detached runtime all
-    # paint, so a locally-worded token here is what keeps those surfaces in one
-    # language (S2 design §3.3).
-    from local_operator.i18n.keys import tui_authoring as author_keys
-    from local_operator.i18n.text import tr
     from local_operator.profile_scope import row_scope
 
-    session_token = tr("tui.authoring")(author_keys.scope_conversation())
-    rows: list[tuple[str, str, str, str]] = []
+    rows: list[tuple[str, str, AgentFacts, str]] = []
     seen: set[str] = set()
     if registry is not None and hasattr(registry, "list_agents"):
         try:
             agents = list(registry.list_agents())
         except Exception:
             agents = []
-        roles: list[tuple[str, str, str, str]] = []
-        specialists: list[tuple[str, str, str, str]] = []
+        roles: list[tuple[str, str, AgentFacts, str]] = []
+        specialists: list[tuple[str, str, AgentFacts, str]] = []
         for agent in agents:
             try:
                 key = str(getattr(agent, "name", "") or "").strip().lower()
@@ -648,7 +734,7 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
                     continue
                 if is_role(agent):
                     profile = profile_from_agent(registry, agent)
-                    facts = "role"
+                    facts = (AgentFact("kind", "role"),)
                     # The CLASS leads the optional facts (design round 1, D1):
                     # the settings pane truncates this line to 27 cells, and a
                     # marker appended after a configured role's model/effort was
@@ -656,36 +742,40 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
                     # where the class is visible could not show it on exactly the
                     # agents that carry config detail.
                     if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
-                        facts += " · proactive"
+                        facts += (AgentFact("action_class", "proactive"),)
                     # The store this row lives in, after the class token (design
                     # round 1, D1 keeps the class first because it is the fact a
                     # narrow pane must not lose). Only a CONVERSATION row is
                     # marked: the account is the default a reader already assumes,
                     # and marking every existing row would rewrite every listing.
                     if row_scope(registry, agent) == "session":
-                        facts += f" · {session_token}"
+                        facts += (AgentFact("scope", "session"),)
                     # Model/effort are facts a user picks a hat by; the rest of
                     # the profile is what the attach applies.
                     if profile.model:
-                        facts += f" · {profile.model}"
+                        facts += (AgentFact("model", profile.model),)
                     if profile.effort:
-                        facts += f" · effort {profile.effort}"
+                        facts += (AgentFact("effort", profile.effort),)
                     summary = (profile.when_to_use or profile.description or "").strip()
                     roles.append((profile.name, profile.label, facts, summary))
                     seen.add(profile.name.lower())
                 elif is_specialist(agent):
                     summary = str(agent.description or "").strip()
                     class_fact = (
-                        " · proactive" if class_from_tags(agent.tags) == PROACTIVE_CLASS else ""
+                        (AgentFact("action_class", "proactive"),)
+                        if class_from_tags(agent.tags) == PROACTIVE_CLASS
+                        else ()
                     )
                     scope_fact = (
-                        f" · {session_token}" if row_scope(registry, agent) == "session" else ""
+                        (AgentFact("scope", "session"),)
+                        if row_scope(registry, agent) == "session"
+                        else ()
                     )
                     specialists.append(
                         (
                             str(agent.name),
                             str(getattr(agent, "label", "") or ""),
-                            f"specialist{class_fact}{scope_fact}",
+                            (AgentFact("kind", "specialist"),) + class_fact + scope_fact,
                             summary,
                         )
                     )
@@ -694,7 +784,7 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
                 continue
         rows.extend(sorted(roles, key=lambda row: row[0].lower()))
         rows.extend(sorted(specialists, key=lambda row: row[0].lower()))
-    seeds: list[tuple[str, str, str, str]] = []
+    seeds: list[tuple[str, str, AgentFacts, str]] = []
     for seed_name in list_seeds():
         if seed_name.lower() in seen:
             continue
@@ -702,9 +792,9 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
         if profile is None:
             continue
         summary = (profile.when_to_use or profile.description or "").strip()
-        seed_facts = "role · packaged"
+        seed_facts = (AgentFact("kind", "role"), AgentFact("source", "packaged"))
         if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
-            seed_facts += " · proactive"
+            seed_facts += (AgentFact("action_class", "proactive"),)
         seeds.append((profile.name, profile.label, seed_facts, summary))
     rows.extend(sorted(seeds, key=lambda row: row[0].lower()))
     return rows
@@ -735,7 +825,9 @@ DELIVERY_POINTER_ROLES = frozenset(
 DELIVERY_POINTER = (
     "Read guide://delivery before engineering work or review: it carries the "
     "current scope, batched-remediation, review-economy and worktree rules. "
-    "Reuse the manager-owned PR worktree; no clone, install or new worktree by default."
+    "Reuse the manager-owned PR worktree; no clone, install or new worktree by default. "
+    "One you must make goes in `<repo>/.worktrees/`, never a scratchpad; remove your "
+    "own when the round ends."
 )
 
 

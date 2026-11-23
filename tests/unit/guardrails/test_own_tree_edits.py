@@ -78,7 +78,11 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for sid in (S, S2):
         (state / "sessions" / sid / "scratchpad").mkdir(parents=True)
     (state / "config.yml").write_text("version: 1\n")
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
+    # Own trees take a fresh ``cwd_holders`` scan instead (PR #3987): stub the
+    # inventory too, or an unreadable same-uid ``/proc/<pid>/cwd`` on CI's
+    # Linux runner fails it closed and own cleanups read HIGH (train t6).
+    monkeypatch.setattr(prov, "_cwd_entries", lambda *, fresh=False: ())
     monkeypatch.setattr(prov, "_github_repo", lambda _: "damianvtran/local-operator-ui")
     # ``worktree_activity`` asks the PR-history lookup (``_gh_prs``) first
     # (#3782, on main since this PR was cut), so "no PR" needs it stubbed as

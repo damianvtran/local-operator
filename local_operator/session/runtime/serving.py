@@ -50,6 +50,7 @@ from typing import (
     cast,
 )
 
+from local_operator.asks.surfaces import UNVERIFIED as UNVERIFIED_SURFACE
 from local_operator.buildwatch import UpdateLock
 from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
@@ -136,6 +137,7 @@ from local_operator.session.runtime.types import (
 )
 from local_operator.session.transcript import (
     Transcript,
+    custom_type_proven_absent,
     is_bookkeeping_entry,
     is_bookkeeping_message,
     transcript_is_bookkeeping_only,
@@ -529,8 +531,57 @@ _ANNOUNCE_FAILED = "failed"
 #: so a test or worker that moves ``LOCAL_OPERATOR_CONFIG_DIR`` gets its own.
 _display_watch_attached: set[str] = set()
 
+#: Config directories this process already subscribed to ``language`` changes
+#: (:func:`attach_language_config_watch`). Same one-per-directory rule as
+#: :data:`_display_watch_attached`: the active locale is process-global.
+_language_watch_attached: set[str] = set()
 
-def _session_may_announce(session: Any) -> bool:
+
+def _notice_text_for_viewer(payload: dict[str, Any]) -> dict[str, Any]:
+    """A catalogued notice's ``text`` re-rendered in this process's language.
+
+    WHY HERE. ``session._notice`` / ``loop._notice`` pin ``text`` to English
+    because the same event object is persisted to the transcript and replayed,
+    and a journal must not depend on the language the runtime happened to have
+    when it wrote the row. The viewers on this relay (the desktop's
+    ``transcript-reducer`` ``case "notice"``, the attached TUI's
+    ``_handle_notice``) paint ``text`` verbatim and carry no ``tui.notices``
+    catalogue, so the pinned English reached a French operator's screen (the
+    2026-11 desktop fr census, row 10). RFC §2.6 allows ``text`` to be "en, or
+    the resolved locale when known": this is the DISPLAY boundary, the last
+    place before bytes, and it is downstream of the transcript write — the
+    journal keeps English and ``code``/``params`` stay for re-rendering.
+
+    The active locale is the runtime's own (``process.main`` activates it at
+    boot; :func:`attach_language_config_watch` follows later switches).
+    Notices without a ``code`` are free prose nobody catalogued and pass
+    through untouched, as does anything that fails to render: copy is never
+    a reason to drop an event.
+    """
+    if payload.get("type") != "notice":
+        return payload
+    code = payload.get("code")
+    if not isinstance(code, str) or not code:
+        return payload
+    try:
+        from local_operator.i18n.messages import render_record
+        from local_operator.i18n.text import active_locale
+
+        params = payload.get("params")
+        rendered = render_record(
+            code, params if isinstance(params, dict) else {}, locale=active_locale()
+        )
+    except Exception:  # noqa: BLE001 — copy is never a reason to drop an event
+        logger.debug("notice re-render failed; keeping the English text", exc_info=True)
+        return payload
+    # An unknown code renders as the code itself (``render_record``'s contract);
+    # the English sentence the producer already wrote is the better fallback.
+    if rendered.text and rendered.text != code:
+        payload["text"] = rendered.text
+    return payload
+
+
+def session_may_announce(session: Any) -> bool:
     """Whether ``session`` is one the operator's OWN listings would show.
 
     THE RULE, stated once: a session the operator's own listings HIDE must not
@@ -574,6 +625,14 @@ def _session_may_announce(session: Any) -> bool:
     except Exception:  # noqa: BLE001 — an unanswered question must not silence a toast
         logger.debug("could not read the session origin for the announce gate", exc_info=True)
         return True
+
+
+# PUBLIC since the mobile push worker asks the same question (push parity with
+# the desktop banner, PR #3989 review R2): a cross-module caller must not hang
+# off a private name in this module, where a rename would break pushes silently
+# inside a tick whose exceptions are only logged. The private alias stays so
+# this module's own call sites and existing tests keep reading unchanged.
+_session_may_announce = session_may_announce
 
 
 def _already_bounded(images: Any) -> bool:
@@ -624,8 +683,58 @@ def _question_prose(question: Any) -> str:
 REMOTE_ORIGIN_SENDER_KEY = "remote_origin"
 
 
-def _owner_sender(owner_typed: bool) -> dict[str, Any]:
-    return {} if owner_typed else {REMOTE_ORIGIN_SENDER_KEY: True}
+def _origin_kwargs(fn: Any, mesh_origin: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``{"mesh_origin": ...}`` for a session seam that takes it, else ``{}``.
+
+    Probed like every optional keyword this handle threads into its session
+    (``harness_injected``, ``owner_typed``): a reduced or third-party session
+    from before the mesh-origin carriage keeps its exact old call shape, and
+    there is nothing to pass when no stamp was minted (local, legacy).
+    """
+    if mesh_origin is None:
+        return {}
+    try:
+        accepts = "mesh_origin" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {"mesh_origin": dict(mesh_origin)} if accepts else {}
+
+
+def _file_admission_for(
+    locality: str | None, capabilities: Iterable[str] | None, operation: str
+) -> Any:
+    """The native file-provenance admission for an in-process admission path.
+
+    ``valid_admission(None)`` is False (R1, PR #4108): a caller that names no
+    admission never mints a ``user`` proof. Paths that admit a turn without the
+    control server's dispatch (headless exec, an action receipt the runtime
+    completes for an old viewer) build theirs here from the SAME connection facts
+    ``RuntimeServer._dispatch`` would weigh, so a relayed/unknown locality, or a
+    remote caller lacking ``operation``, is refused exactly as on the wire.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.session.file_provenance import user_admission
+
+    return user_admission(
+        SimpleNamespace(locality=locality, capabilities=frozenset(capabilities or ())),
+        operation,
+    )
+
+
+#: The sender stamp naming the SURFACE a spooled owner line was typed on (ADR
+#: 0009), read back by ``session.spooled_input_surface`` so a prompt spooled
+#: across a runtime swap keeps its notification routing. An in-process caller
+#: (``input_surface=None``) is the owner's own TUI, which ``Session.prompt``
+#: would stamp ``tui`` live, so its line says so too; only a line from a build
+#: before the key lacks it, and that reads ``unknown``.
+INPUT_SURFACE_SENDER_KEY = "input_surface"
+
+
+def _owner_sender(owner_typed: bool, input_surface: str | None = None) -> dict[str, Any]:
+    sender: dict[str, Any] = {} if owner_typed else {REMOTE_ORIGIN_SENDER_KEY: True}
+    sender[INPUT_SURFACE_SENDER_KEY] = input_surface if input_surface is not None else "tui"
+    return sender
 
 
 @dataclass
@@ -649,6 +758,7 @@ class _PromptCommand:
     #: delivery, a compaction) before handing this command to ``Session.prompt``.
     #: See ``ServingSessionHandle.prompt``'s ``wait_for_turn``.
     wait_for_turn: bool = True
+    goal_context: tuple[str, int] | None = None
     #: The terminal event's own error text, when this command's turn failed.
     #: Recorded by the drain's outcome observer because ``completed`` carries only
     #: the VERDICT: a ``wait_complete`` caller that got a bare "did not complete"
@@ -674,6 +784,15 @@ class _PromptCommand:
     documents: list["DocumentContent"] | None = None
     #: False for a prompt from a remote connection (see ``prompt``).
     owner_typed: bool = True
+    #: The receiving runtime's mesh origin stamp for a remote prompt
+    #: (``network/origin.py``), threaded to ``Session.prompt`` so the durable row
+    #: carries it. ``None`` for a local prompt and for every legacy producer.
+    mesh_origin: dict[str, Any] | None = None
+    # Frozen before queue/spool; never serialized into inbox/receipt JSON.
+    _file_capture: Any = None
+    #: ADR 0009: the connection's surface, decided by the control server, or
+    #: ``None`` for an in-process caller (``Session.prompt`` then stamps ``tui``).
+    input_surface: str | None = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -1103,6 +1222,8 @@ class ServingSessionHandle(SessionHandle):
         #: Whether the goal judge may still admit continuation turns. Only a
         #: headless run closes it (:meth:`close_goal_continuations`).
         self._goal_continuations_open = True
+        self._goal_stopping = False
+        self._goal_recovery_queued = False
         self._active_prompt_command_id: str | None = None
         self._desktop_mcp: Any = None
         self._desktop_cwd = cwd
@@ -1148,10 +1269,6 @@ class ServingSessionHandle(SessionHandle):
         # ``config.yml`` change (:meth:`follow_config`) move it without
         # reconstructing the handle.
         self._auto_approve = auto_approve
-        #: Whether the conversation's live ``auto`` was chosen while it already
-        #: held Team Bridge content (team-bridge-egress.md: "Grants"). Only such a grant keeps
-        #: covering calls in a latched session; persisted beside the record.
-        self._approve_granted_while_latched = False
         #: The FILE's ``tool_approval_mode`` as last known, independent of the
         #: live gate (which an explicit conversation choice may override). The
         #: pending-gate projection publishes it beside the mode so a viewer can
@@ -1203,6 +1320,15 @@ class ServingSessionHandle(SessionHandle):
         #: without this a gate opened under a watching terminal is never
         #: announced after that terminal closes (round 3, B2).
         self._parked_announcement: tuple[str, str, str] | None = None
+        #: Whether this conversation has an OPEN queued ask (the ask fold's
+        #: outstanding count, last seen by ``_ask_state_changed``). A queued ask
+        #: never parks a gate, so before this flag nothing set the record's
+        #: ``pending`` for it: a node session's question was invisible to every
+        #: device that reads ``pending`` off the peer listing (the Mac's
+        #: "needs" badge, ``lop sessions``), and the operator never learned a
+        #: remote agent was waiting on them (2026-11-13). See
+        #: ``_sync_queued_ask_pending``.
+        self._queued_asks_open = False
         #: In-flight MCP reloads after a `/mcp add|remove` wrote the config.
         #: Held only so a fire-and-forget task is not garbage-collected while
         #: it runs — asyncio keeps no strong reference of its own.
@@ -1336,7 +1462,8 @@ class ServingSessionHandle(SessionHandle):
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
         #: Set by :meth:`refuse_gates_for_exit` once a SIGNAL has committed this
         #: runtime to leaving: every gate opened afterwards answers at once with
-        #: the deny/escape answer instead of parking. See that method for why.
+        #: the deny/escape answer instead of parking. See that method for why;
+        #: :meth:`reopen_gates_after_yield` is its single reversal.
         self._gates_closed_for_exit = False
         # request_id -> (monotonic instant, settled value) for gates that LANDED
         # recently. The desktop answer path retries ONCE under the same id when an
@@ -1584,22 +1711,22 @@ class ServingSessionHandle(SessionHandle):
             # account profile save is the exception: auto-approve is not
             # consent to rewriting account-wide agents (``never_auto_approved``).
             #
-            # Team Bridge (team-bridge-egress.md: "Grants"): a SESSION auto granted before the
-            # conversation latched no longer covers calls after it -- the call
-            # falls through to the card. Global auto is untouched: closed for
-            # ask mode; accepted risk in auto/yolo. The session's own
-            # latch is consulted too, so a card whose raiser passed no flag (a
+            # Team Bridge (team-bridge-egress.md: "Grants"): an auto grant
+            # covers a latched session whichever scope it came from -- a
+            # conversation's own ``auto`` exactly as the machine default
+            # (#3928). The latch's protection lives elsewhere and is unchanged:
+            # the read-tier egress gate, ``bridge_ack`` on a routed loosening
+            # (``_approvals_slash``) and the latched card. The session's own latch is consulted
+            # for the CARD below, so a card whose raiser passed no flag (a
             # profile save, an ``@path`` read) is still person-only.
             from local_operator.harness.bridge_egress import (
                 bridge_card_notice,
                 session_grant_covers,
             )
 
-            latched = bool(bridge_latched) or self._session_bridge_latched()
-            if session_grant_covers(
-                self._approval_grant(), title=tool_name, bridge_latched=latched
-            ):
+            if session_grant_covers(self._approval_grant(), title=tool_name):
                 return True
+            latched = bool(bridge_latched) or self._session_bridge_latched()
             if self._gates_closed_for_exit:
                 # Leaving on a signal: nobody will be asked before the exit, and
                 # a card parked now would hold the drain open (see
@@ -1794,7 +1921,9 @@ class ServingSessionHandle(SessionHandle):
         ``/approvals``, a desktop "Set auto", a record read back on resume);
         ``global`` only when the gate follows the machine default or a run pin.
         Derived from the same attributes the mode is, so no assignment line
-        can move one without the other.
+        can move one without the other. Since #3928 the latch no longer reads
+        the scope (both scopes cover a latched session alike); it stays on the
+        grant as provenance.
         """
         from local_operator.harness.bridge_egress import ApprovalGrant
 
@@ -1804,31 +1933,23 @@ class ServingSessionHandle(SessionHandle):
         return ApprovalGrant(
             auto=bool(getattr(self, "_auto_approve", False)),
             scope=scope,
-            granted_while_latched=bool(getattr(self, "_approve_granted_while_latched", False)),
-        )
-
-    def _bridge_grant_suspended(self) -> bool:
-        """Whether a live session auto is void because the session latched."""
-        from local_operator.harness.bridge_egress import session_grant_covers
-
-        grant = self._approval_grant()
-        if not grant.auto or grant.scope != "session":
-            return False
-        return not session_grant_covers(
-            grant, title="", bridge_latched=self._session_bridge_latched()
         )
 
     def _watch_bridge_latch(self) -> None:
-        """Announce, once, that a pre-latch session auto stopped covering calls."""
+        """Re-publish parked cards as latched cards the moment the session latches.
+
+        Until #3928 this also announced that a pre-latch SESSION auto had
+        stopped covering calls. No grant is suspended by the latch any more
+        (a session auto is honoured exactly as the machine default), so there
+        is nothing to announce: a notice saying "paused" would contradict the
+        gate, the band and ``/approvals``.
+        """
         latch = getattr(self._session, "bridge_taint_latch", None)
         if latch is None:
             return
 
         def announce() -> None:
-            from local_operator.harness.bridge_egress import (
-                bridge_card_notice,
-                grant_suspended_notice,
-            )
+            from local_operator.harness.bridge_egress import bridge_card_notice
 
             # Cards parked while the session was clean are re-published as
             # latched cards (security r7 lead on #3796): every attached viewer,
@@ -1841,10 +1962,7 @@ class ServingSessionHandle(SessionHandle):
                 relatched = self._fold.latch_pending(bridge_card_notice(latch))
             except Exception:  # noqa: BLE001 - the gate still enforces; logged at warning
                 logger.warning("could not re-publish parked cards as latched", exc_info=True)
-            if self._bridge_grant_suspended():
-                self._emit_notice(grant_suspended_notice(latch), "warning", headline="Approvals")
-                self._notify()
-            elif relatched:
+            if relatched:
                 self._notify()
 
         latch.on_latched.append(announce)
@@ -1917,9 +2035,49 @@ class ServingSessionHandle(SessionHandle):
             self._ask_fold_installed_at = time.monotonic()
         except Exception:  # noqa: BLE001 -- a repaint is never worth a turn
             logger.debug("ask: could not install the wire fold", exc_info=True)
+        self._sync_queued_ask_pending(outstanding_count)
         self._publish_pending_gate()
         if self._on_projection is not None:
             self._on_projection()
+
+    def _sync_queued_ask_pending(self, outstanding_count: Any) -> None:
+        """Claim (or drop) the record's ``pending="ask"`` for open QUEUED asks.
+
+        WHY: ``pending`` is the one field a PEER listing carries for "a person
+        is owed here" (``relay._op_catalog`` -> ``types.row_needs_claim``), and
+        until now only the BLOCKING gates set it (``_announce_pending``). A
+        queued ask -- the default since the ask queue shipped -- left it
+        ``None``, so a session running on a mesh node asked its question into
+        a void: no badge on the origin's sidebar, no row in ``lop sessions``.
+
+        CONSTRAINTS. The record write ONLY (``set_record_pending``), never
+        ``_announce_pending``: the queue already raised its own notification
+        through the ask path, and a second OS toast for the same question is
+        exactly the duplicate ``asks/dedupe.py`` exists to prevent. A parked
+        gate owns the field while it is parked (its kind is the more urgent
+        remedy); ``_announce_settled`` hands it back to this flag when the gate
+        resolves. ``"ask"`` is the existing ``NEEDS_ASK`` kind every consumer
+        already paints, so no surface needs a new vocabulary. No authority is
+        added: the claim is a FACT on the listing, and answering still travels
+        the permissioned ``ask_respond`` wire op.
+        """
+        try:
+            open_now = int(outstanding_count or 0) > 0
+        except (TypeError, ValueError):
+            open_now = False
+        self._queued_asks_open = open_now
+        if getattr(self, "_parked_announcement", None) is not None:
+            return
+        setter = getattr(getattr(self, "_registrant", None), "set_record_pending", None)
+        if not callable(setter):
+            return
+        try:
+            if open_now:
+                setter("ask", queued=True)
+            else:
+                setter(None)
+        except Exception:  # noqa: BLE001 -- a listing fact is never worth a turn
+            logger.debug("ask: could not publish the queued-ask pending state", exc_info=True)
 
     def _ask_reach_probe(self) -> list[str]:
         """Surface names something is attached as, for a queued ask's receipt.
@@ -1977,13 +2135,8 @@ class ServingSessionHandle(SessionHandle):
             return
         self._explicit_approvals_mode = override
         self._auto_approve = override == "auto"
-        # Absent/unreadable reads False: a pre-latch (or pre-S1) record is void
-        # once the session latches (team-bridge-egress.md: "Grants").
-        from local_operator.session.approval_policy import read_granted_while_latched
-
-        self._approve_granted_while_latched = override == "auto" and read_granted_while_latched(
-            directory
-        )
+        # A legacy ``granted_while_latched`` key in the record is ignored: the
+        # latch no longer distinguishes a pre- from a post-latch grant (#3928).
 
     def follow_config(self, watcher: Any) -> None:
         """Subscribe the gate to ``tool_approval_mode`` changes on ``watcher``.
@@ -3296,6 +3449,7 @@ class ServingSessionHandle(SessionHandle):
         source: str = SOURCE_PEER,
         command_id: str = "",
         harness_injected: bool = False,
+        mesh_origin: Mapping[str, Any] | None = None,
         message_id: str = "",
         custom_type: str = "",
         bridge_meta: dict[str, Any] | None = None,
@@ -3386,6 +3540,13 @@ class ServingSessionHandle(SessionHandle):
                     source=source,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    # OWNER rows only (M-2): a peer row is the sender's to shape,
+                    # so it never carries a stamp, whatever a caller passed.
+                    mesh_origin=(
+                        dict(mesh_origin)
+                        if mesh_origin is not None and source == SOURCE_USER
+                        else None
+                    ),
                     # The peer sender's identity, carried across the handover so
                     # the successor's delivery is idempotent against a row that
                     # was spooled twice (see ``inbox.InboxLine.message_id``).
@@ -3614,6 +3775,8 @@ class ServingSessionHandle(SessionHandle):
         now requires positive evidence for ``interrupted``) would have to guess.
         """
         self._note_deliberate_stop()
+        self._goal_stopping = True
+        self._goal_continuations_open = False
         self._deny_pending_gates()
         trigger = self.on_stop_requested
         if trigger is not None:
@@ -3678,12 +3841,27 @@ class ServingSessionHandle(SessionHandle):
         Gates opened AFTER this answer immediately too, without parking: the
         model's next step after a denial is often another gated call, and a
         fresh card would hold the drain open exactly as the first one did.
-        One-way for the life of the process — it is only called on an exit
-        that has already been committed to. Returns how many parked gates were
+        One-way except for :meth:`reopen_gates_after_yield` — it is only called
+        on an exit that has already been committed to. Returns how many parked gates were
         settled, for the log.
         """
         self._gates_closed_for_exit = True
         return self._deny_pending_gates()
+
+    def reopen_gates_after_yield(self) -> None:
+        """Let gates park again: an unattended signal drain admitted the owner's prompt.
+
+        ``process._yield_signal_drain_to_owner`` lifts the admission latch so an
+        operator's prompt runs here instead of waiting behind a subagent for a
+        successor. That operator is present and can answer a card, so the reason
+        :meth:`refuse_gates_for_exit` gives (nobody can answer before the exit)
+        no longer holds; left closed, every approval in their turn was silently
+        denied and every ask read as "escaped" (agent review round 1 on #4355,
+        R1). A card parked afterwards reads as a step in flight, which the
+        signal bound spares rather than reaps — acceptable with the operator at
+        the composer. Settled gates stay settled; this only affects new ones.
+        """
+        self._gates_closed_for_exit = False
 
     def _deny_pending_gates(self) -> int:
         """Refuse every parked approval/ask so teardown cannot hang on them.
@@ -3976,7 +4154,13 @@ class ServingSessionHandle(SessionHandle):
         await self._session.record_shell(command, result)
 
     @_on_session_loop
-    async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
+    async def history_page(
+        self, before: str, anchor: str = "", *, bound_oversized: bool = False
+    ) -> dict[str, Any]:
+        # Only a non-local viewer asks for the bounded form; a session class
+        # that predates the keyword is called exactly as before.
+        if bound_oversized:
+            return self._session.history_page(before, anchor, bound_oversized=True)
         return self._session.history_page(before, anchor)
 
     @property
@@ -4024,7 +4208,7 @@ class ServingSessionHandle(SessionHandle):
                 # fixture measures a 531,082-byte payload, and
                 # ``fit_frame_for_wire`` returns it byte-identical.
                 payload = bound_agent_end_for_wire(
-                    event.model_dump(mode="json"),
+                    _notice_text_for_viewer(event.model_dump(mode="json")),
                     session_id=getattr(self._session, "session_id", None),
                 )
                 on_event(payload)
@@ -4199,6 +4383,7 @@ class ServingSessionHandle(SessionHandle):
             self._fold.fold_history(self._session.history())
         except Exception:  # noqa: BLE001 — history is a convenience, not a gate
             logger.debug("owned session history fold failed", exc_info=True)
+        self._seed_supplements()
         # Seed the live flag ONCE at attach (a phone subscribing mid-turn never
         # saw the AgentStartEvent). After this the fold's own lifecycle events
         # own ``streaming`` — see ``_reconcile_streaming``.
@@ -4227,6 +4412,40 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         return unsubscribe
 
+    def _seed_supplements(self) -> None:
+        """Seed the projection's supplement map from the journal, once at attach.
+
+        ``fold_history`` reads messages only and a supplement (a pin or a card) is a
+        journal ``custom`` row, so an owner that did not run the turn — a resumed,
+        idle-exited or restarted session — would serve a projection with
+        ``supplements == {}`` and every earlier Highlight would vanish from the
+        relay, which serves this projection live. The newest row per anchor is
+        taken by the cold open's own rule (``newest_per_anchor``); the fold keeps
+        only anchors of the current tail and lets an equal-version live beat win.
+        Best effort like the history fold beside it: a journal that cannot be read
+        costs the seed, never the attach.
+        """
+        try:
+            transcript = self._session.transcript
+            # The byte scan first: a journal that never wrote a supplement (most of
+            # them) must not pay a walk of every entry at attach.
+            if custom_type_proven_absent(transcript.directory, SUPPLEMENT_CUSTOM_TYPE):
+                return
+            rows: list[dict[str, Any]] = []
+            for entry in transcript.entries():
+                if entry.type != "custom":
+                    continue
+                payload = entry.payload if isinstance(entry.payload, dict) else {}
+                details = payload.get("details")
+                if payload.get("custom_type") == SUPPLEMENT_CUSTOM_TYPE and isinstance(
+                    details, dict
+                ):
+                    rows.append(details)
+            if rows:
+                self._fold.fold_supplement_rows(newest_per_anchor(rows).values())
+        except Exception:  # noqa: BLE001 — the seed is a convenience, not a gate
+            logger.debug("owned session supplement seed failed", exc_info=True)
+
     @_on_session_loop
     async def prompt(
         self,
@@ -4243,8 +4462,22 @@ class ServingSessionHandle(SessionHandle):
         harness_injected: bool = False,
         wait_for_turn: bool = True,
         owner_typed: bool = True,
+        mesh_origin: Mapping[str, Any] | None = None,
+        _goal_context: tuple[str, int] | None = None,
+        _file_admission: Any = None,
+        input_surface: str | None = None,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``mesh_origin`` is the stamp the control server minted for a REMOTE
+        connection (``network/origin.py``; never from a frame). It rides beside
+        ``owner_typed`` to ``Session.prompt`` and, when this runtime is leaving,
+        onto the spooled line's own ``InboxLine.mesh_origin`` field — never into
+        its ``sender``, which peer rows share (mesh-origin-stamp M-2).
+
+        ``input_surface`` is the ADR 0009 origin the control server derived from
+        the authenticated connection (``mobile``/``remote``/``desktop``/``tui``/
+        ``unknown``); ``None`` leaves ``Session.prompt``'s in-process default.
 
         ``owner_typed=False`` is set by the control server for a prompt from a
         REMOTE connection (``RuntimeServer._dispatch``): it rides to
@@ -4411,6 +4644,11 @@ class ServingSessionHandle(SessionHandle):
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
+        from local_operator.session.file_provenance import admitted_ticket
+
+        file_capture = admitted_ticket(
+            self._session, text, command_id, _file_admission, harness_injected
+        )
         # THE UPDATE WINDOW: an idle handover that QUEUES instead of refusing.
         #
         # This arm is the 2026-09-19 incident's repair. The idle rung leaves in
@@ -4429,6 +4667,11 @@ class ServingSessionHandle(SessionHandle):
         # expired), the runtime re-admits this same spool itself
         # (``process._refresh_for``), so the queue is never a promise to a
         # successor that does not come.
+        if _goal_context is not None and not self._goal_prompt_current(_goal_context):
+            # Unlike an operator prompt, a continuation must never be spooled
+            # to a successor: the verdict belongs to this owner's context.
+            self._refuse_admitted(command_id)
+            raise RuntimeError("goal continuation no longer current")
         if self._updating:
             if blocks or document_blocks_decoded:
                 # An inbox row is text, so carrying an image- or document-
@@ -4438,23 +4681,27 @@ class ServingSessionHandle(SessionHandle):
                 # window's own phrase would claim "the one it loaded is gone
                 # from disk", which is false for a superseded tree (the
                 # D10/MAJOR-2 class).
-                self._command_reservations.reject(command_id)
+                self._refuse_admitted(command_id)
                 raise self._retiring_refusal()
             try:
                 receipt = await self._spool_for_successor(
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender=_owner_sender(owner_typed),
+                    sender=_owner_sender(owner_typed, input_surface),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    mesh_origin=mesh_origin,
                 )
-            finally:
-                # Rejected on both outcomes, for the reason the refusal below
-                # rejects: this command is not in the transcript, so the
-                # identity must not be spent. A retry that re-spools is
-                # deduplicated by whoever drains it against the durable index.
+            except BaseException:
+                # No durable spool owns the message on failure/cancellation: release
+                # the frozen ticket too, just as an ordinary admission refusal does.
+                self._refuse_admitted(command_id)
+                raise
+            else:
+                # The successor's drain needs the frozen ticket, but not this
+                # process's reservation: its durable index deduplicates retries.
                 self._command_reservations.reject(command_id)
             return receipt
         if self._retiring_cause:
@@ -4496,22 +4743,23 @@ class ServingSessionHandle(SessionHandle):
                         text,
                         mode="mailbox",
                         wake=True,
-                        sender=_owner_sender(owner_typed),
+                        sender=_owner_sender(owner_typed, input_surface),
                         source=SOURCE_USER,
                         command_id=command_id,
                         harness_injected=harness_injected,
+                        mesh_origin=mesh_origin,
                     )
-                finally:
-                    # Rejected on BOTH outcomes, and for the same reason the
-                    # refusal below rejects: this command is not in the
-                    # transcript, so the identity must not be spent. A retry
-                    # that re-spools is deduplicated by the successor instead
-                    # (``process._drain_inbox_into`` consults the durable index
-                    # with this same id), which is the only place the answer is
-                    # authoritative — this process is leaving.
+                except BaseException:
+                    # A failed/cancelled spool has no successor-owned message to
+                    # consume the ticket. Keep neither it nor the reservation.
+                    self._refuse_admitted(command_id)
+                    raise
+                else:
+                    # Preserve only the ticket for the successor's drain. Its
+                    # durable index, not this leaving process, deduplicates retries.
                     self._command_reservations.reject(command_id)
                 return receipt
-            self._command_reservations.reject(command_id)
+            self._refuse_admitted(command_id)
             raise self._retiring_refusal()
         if not wait_for_turn and (
             getattr(self._session, "is_streaming", False) or self._prompt_queue
@@ -4543,10 +4791,10 @@ class ServingSessionHandle(SessionHandle):
             # join the turn running now, they do not queue behind other input.
             from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
 
-            self._command_reservations.reject(command_id)
+            self._refuse_admitted(command_id)
             raise TurnInFlight(TURN_IN_FLIGHT)
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
-            self._command_reservations.reject(command_id)
+            self._refuse_admitted(command_id)
             raise RuntimeError(
                 f"prompt queue is full ({MAX_QUEUED_PROMPTS}); wait for an admitted turn to start"
             )
@@ -4561,11 +4809,15 @@ class ServingSessionHandle(SessionHandle):
             completed,
             harness_injected,
             wait_for_turn,
+            goal_context=_goal_context,
             input_mode=input_mode,
             input_path=input_path,
             audio=audio_blocks_decoded,
             documents=document_blocks_decoded,
             owner_typed=owner_typed,
+            mesh_origin=dict(mesh_origin) if mesh_origin is not None else None,
+            _file_capture=file_capture,
+            input_surface=input_surface,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -4662,6 +4914,24 @@ class ServingSessionHandle(SessionHandle):
                 self._goal_loop.state = dict(store.state.loop)
         return self._goal_loop
 
+    def _goal_context_available(self) -> bool:
+        return not (
+            self._disposing
+            or self._draining
+            or self._updating
+            or self._retiring_cause
+            or self._goal_stopping
+        )
+
+    def _goal_prompt_current(self, context: tuple[str, int]) -> bool:
+        return (
+            not (self._disposing or self._draining or self._updating or self._retiring_cause)
+            and self._goal_continuations_open
+            and not self._loop_owns_the_verdict()
+            and self._session.goal_status == "active"
+            and (self._session.goal_token, self._session.goal_turn_serial) == context
+        )
+
     def _goal_judge_driver(self):
         """The standing goal's judge — the sibling of :meth:`_loop_driver`.
 
@@ -4733,6 +5003,8 @@ class ServingSessionHandle(SessionHandle):
                         command_id=command_id,
                         wait_complete=True,
                         harness_injected=True,
+                        owner_typed=False,
+                        _goal_context=(self._session.goal_token, self._session.goal_turn_serial),
                     )
                 except BaseException:
                     # The judge never retries: it publishes `waiting` and re-arms
@@ -4784,6 +5056,8 @@ class ServingSessionHandle(SessionHandle):
                 judge_state=lambda: self._session.goal_judge_state,
                 loop_running=self._loop_owns_the_verdict,
                 continuations=lambda: self._goal_continuations_open,
+                context_available=self._goal_context_available,
+                recovery_idle=lambda: not self.is_conversationally_active(),
             )
         return self._goal_judge
 
@@ -4883,38 +5157,39 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the event path never fails on this feature
             logger.debug("supplement trigger failed", exc_info=True)
 
-    def rearm_goal_judge(self) -> None:
-        """Trigger 3, once per boot: re-engage a goal whose judge was in flight.
-
-        Called through ``server._handle_call_on_session_loop`` immediately after
-        the fold subscription is installed, so this runs once per OWNED session,
-        on that session's loop, after the restored record is readable. The rule
-        of who re-arms lives in the driver (RULINGS R3): a ``waiting``/``stalled``
-        goal is NOT re-armed by a restart, because nothing was in flight and
-        *checkpoint state is not an instruction to spend more tokens*.
-
-        Synchronous by design: the plan that holds it cannot await, so it
-        schedules the probe as a background task on this loop.
-        """
-        # A session outside the record's contract has no judge to re-arm, and
-        # scheduling a task that would fail on that read is how the
-        # `test_exec_mode` cells got an unretrieved exception instead of a
-        # verdict — checked BEFORE the task exists, so nothing outlives this
-        # call (QA round 1, Q3).
-        driver = self._goal_judge_driver()
-        if driver is None:
+    def tick_goal_recovery(self) -> None:
+        """Nudge the workload loop without making the serving heartbeat await it."""
+        if self._goal_recovery_queued or self._loop.is_closed():
             return
-        # ASK THE PROBE'S OWN QUESTION FIRST, because scheduling is not free:
-        # ``_background_tasks`` is the set ``is_busy`` reads as "work a clean exit
-        # would destroy", and a probe that would immediately find nothing in
-        # flight still puts a task in it. That made an idle runtime report busy
-        # for as long as the no-op took — the commonest boot of all is a session
-        # that never used ``/goal`` — and ``is_busy`` is what ``is_pristine`` and
-        # the reaper read, so an empty conversation could not be recognised as
-        # pristine and retired. Refusing HERE keeps the task set meaning what it
-        # says; a goal that IS in flight is unaffected, because this is the same
-        # ``needs_rearm`` predicate the probe itself applies.
-        if not driver.needs_rearm():
+        self._goal_recovery_queued = True
+
+        def probe() -> None:
+            try:
+                self.rearm_goal_judge()
+            except Exception:  # noqa: BLE001 — recovery probes must not break serving
+                logger.debug("goal recovery probe failed", exc_info=True)
+            finally:
+                self._goal_recovery_queued = False
+
+        try:
+            self._loop.call_soon_threadsafe(probe)
+        except RuntimeError:  # loop closed between the probe and the enqueue
+            self._goal_recovery_queued = False
+
+    def rearm_goal_judge(self) -> None:
+        """Probe on boot and heartbeat, on the session's owning loop."""
+        from local_operator.session.goal_judge import owns_the_session
+
+        if (
+            not self._goal_continuations_open
+            or not self._goal_context_available()
+            or not owns_the_session(self._session)
+            or self.is_busy()
+        ):
+            return
+        driver = self._goal_judge_driver()
+        due = getattr(self._session, "goal_recovery_due", None)
+        if driver is None or not driver.needs_rearm() or not callable(due) or not due():
             return
         task = asyncio.ensure_future(driver.rearm_on_resume())
         self._background_tasks.add(task)
@@ -4966,7 +5241,12 @@ class ServingSessionHandle(SessionHandle):
         self._last_prompt_failure = ""
         try:
             await self.prompt(
-                text, command_id=str(uuid.uuid4()), wait_complete=True, owner_typed=owner_typed
+                text,
+                command_id=str(uuid.uuid4()),
+                wait_complete=True,
+                owner_typed=owner_typed,
+                # Headless exec runs in the owner's own process: a local admission.
+                _file_admission=_file_admission_for("local", (), "prompt"),
             )
             return True
         except RuntimeError:
@@ -5009,6 +5289,9 @@ class ServingSessionHandle(SessionHandle):
         A long-lived runtime never calls this and keeps the full chain.
         """
         self._goal_continuations_open = False
+        disable = getattr(self._session, "disable_goal_recovery", None)
+        if callable(disable):
+            disable()
 
     @_on_session_loop
     async def settle_goal_judge_headless(self) -> None:
@@ -5478,6 +5761,10 @@ class ServingSessionHandle(SessionHandle):
                     # ``wait_for_turn=False`` existed. A streaming turn still takes
                     # the immediate refusal and the steer path.
                     await self._await_turn_lock_free()
+                if command.goal_context is not None and not self._goal_prompt_current(
+                    command.goal_context
+                ):
+                    raise RuntimeError("goal continuation no longer current")
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {
@@ -5493,8 +5780,14 @@ class ServingSessionHandle(SessionHandle):
                         # keyword's whole job is to stamp a marker those hosts
                         # never read.
                         fields["harness_injected"] = command.harness_injected
+                    if "_file_capture" in parameters:
+                        fields["_file_capture"] = command._file_capture
                     if "owner_typed" in parameters and not command.owner_typed:
                         fields["owner_typed"] = False
+                    if "mesh_origin" in parameters and command.mesh_origin is not None:
+                        fields["mesh_origin"] = command.mesh_origin
+                    if "input_surface" in parameters and command.input_surface is not None:
+                        fields["input_surface"] = command.input_surface
                     if "input_mode" in parameters:
                         fields["input_mode"] = command.input_mode
                     if "input_path" in parameters:
@@ -5561,7 +5854,20 @@ class ServingSessionHandle(SessionHandle):
                 # projection: a turn that RAISES emits no error event, so this
                 # string is the only description of what went wrong.
                 self._last_prompt_failure = str(exc)
-                logger.exception("mobile prompt failed after admission")
+                # Imported here: only a failed admission pays for it.
+                from local_operator.session.declared_mcp_ready import (
+                    DeclaredMcpToolsUnavailable,
+                )
+
+                if isinstance(exc, DeclaredMcpToolsUnavailable):
+                    # An EXPECTED refusal whose message already names the tools,
+                    # servers and reason: exec prints it as ``exec failed: …``.
+                    # A 13-line ERROR traceback ahead of that line is noise in a
+                    # pipeline worker's stderr (review N1 / QA O3), so the stack
+                    # stays available at debug only.
+                    logger.debug("mobile prompt refused before any request", exc_info=True)
+                else:
+                    logger.exception("mobile prompt failed after admission")
             except BaseException:
                 # KeyboardInterrupt/SystemExit retain their process semantics;
                 # the finally block still removes exactly the failed admission.
@@ -5588,8 +5894,14 @@ class ServingSessionHandle(SessionHandle):
         harness_injected: bool = False,
         owner_typed: bool = True,
         delivery: str | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
+        _file_admission: Any = None,
+        input_surface: str | None = None,
     ) -> str:
         # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
+        # ``mesh_origin``: see ``prompt`` — the receiver-minted stamp, carried to
+        # the queued row and to the spooled line alike.
+        # ``input_surface``: see ``prompt`` — the ADR 0009 origin of this steer.
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
         # Bounded BEFORE the reservation, deliberately: the bound is a thread
@@ -5654,6 +5966,9 @@ class ServingSessionHandle(SessionHandle):
                     harness_injected=harness_injected,
                     owner_typed=owner_typed,
                     delivery=delivery,
+                    mesh_origin=mesh_origin,
+                    _file_admission=_file_admission,
+                    input_surface=input_surface,
                 )
             )
             receipt, raise_successor = await self._await_steer_admission(admission)
@@ -5733,6 +6048,9 @@ class ServingSessionHandle(SessionHandle):
         harness_injected: bool,
         owner_typed: bool = True,
         delivery: str | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
+        _file_admission: Any = None,
+        input_surface: str | None = None,
     ) -> tuple[str, bool]:
         """The admission half of :meth:`steer`, once its blocks are decoded.
 
@@ -5748,6 +6066,11 @@ class ServingSessionHandle(SessionHandle):
         """
         if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted", False
+        from local_operator.session.file_provenance import admitted_ticket
+
+        file_capture = admitted_ticket(
+            self._session, text, command_id, _file_admission, harness_injected
+        )
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
         # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
         # by construction (the window only opens when ``may_refresh`` reports
@@ -5762,17 +6085,18 @@ class ServingSessionHandle(SessionHandle):
         # carriage instead (see that block).
         if self._updating:
             if carries_attachments:
-                self._command_reservations.reject(command_id)
+                self._refuse_admitted(command_id)
                 raise self._retiring_refusal()
             try:
                 receipt = await self._spool_for_successor(
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender=_owner_sender(owner_typed),
+                    sender=_owner_sender(owner_typed, input_surface),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    mesh_origin=mesh_origin,
                     raise_reader=False,
                 )
             finally:
@@ -5813,17 +6137,18 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender=_owner_sender(owner_typed),
+                    sender=_owner_sender(owner_typed, input_surface),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    mesh_origin=mesh_origin,
                     raise_reader=False,
                 )
             except Exception:
                 # Nowhere durable to put the message, so it is refused rather than
                 # queued — and the producer identity stays retryable, which is what
                 # lets the same id be admitted once the spool can be written.
-                self._command_reservations.reject(command_id)
+                self._refuse_admitted(command_id)
                 raise
         # Images ride the steer too. Producer identity follows the queued user
         # row so a reconnect cannot inject the same correction twice.
@@ -5866,6 +6191,12 @@ class ServingSessionHandle(SessionHandle):
         # when the wire carried one, so a legacy steer stays byte-identical.
         if "delivery" in parameters and delivery is not None:
             fields["delivery"] = delivery
+        if "mesh_origin" in parameters and mesh_origin is not None:
+            fields["mesh_origin"] = dict(mesh_origin)
+        if "_file_capture" in parameters:
+            fields["_file_capture"] = file_capture
+        if "input_surface" in parameters and input_surface is not None:
+            fields["input_surface"] = input_surface
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:
@@ -5893,6 +6224,26 @@ class ServingSessionHandle(SessionHandle):
         )
         self._notify()
         return "steering queued", not carries_attachments
+
+    def _admits_into_live_turn(self) -> bool:
+        """Whether a peer message can still ride the turn that is running NOW.
+
+        True only while the session is streaming a turn AND this runtime has not
+        stopped admitting: no committed exit (``begin_retire`` commits only from
+        the idle decision, so a streaming turn normally implies none — checked
+        anyway because the order is not this method's to assume) and no
+        disposal (which cancels the turn, so a message handed to it would die
+        with it). Everything else — idle, retiring at idle, disposing — keeps
+        the spool/refusal the windows were built for.
+
+        A SNAPSHOT, and that is safe in one direction only: a turn that ends
+        right after this reads True leaves the delivery parked for a boundary
+        it never reaches. ``Session._flush_parked_deliveries`` owns that tail —
+        on a leaving runtime it spools what was parked instead of dropping it.
+        """
+        if getattr(self, "_disposing", False) or getattr(self, "_exit_committed", False):
+            return False
+        return bool(getattr(self._session, "is_streaming", False))
 
     @_on_session_loop
     async def receive_peer_message(
@@ -5957,7 +6308,25 @@ class ServingSessionHandle(SessionHandle):
         # peer's wake is spooled instead of refused (see ``types.UPDATING``). The
         # window is checked as its own term because it is open BEFORE the cause
         # is latched — the announce and the latch come after it.
-        if (self._retiring_cause or self._updating) and (wake or mode != "mailbox"):
+        #
+        # A LIVE TURN STILL ADMITS, and that check comes first. Both of the
+        # deferring windows above may be open while a turn is mid-flight: the
+        # build-replaced drain latches on a BUSY runtime by construction, and a
+        # checkpointed move opens the update window without sampling idleness.
+        # Spooling there held every local ``send`` (``now=True`` steers too)
+        # for a successor that only boots once the turn ends — measured on
+        # node2, 2026-11-17 10:31–11:15Z: a 0.106.5 runtime busy ~40 min after
+        # ``lop update`` answered every local send "held for the next runtime —
+        # it runs it" and delivered nothing (3 peer rows + 6 own wakes) until
+        # it rolled at idle, while mesh-relayed sends arrived. Delivering into
+        # the turn that is already running starts no NEW work, which is all
+        # invariant (i) forbids; once that turn is gone the spool is right
+        # again. See ``_admits_into_live_turn``.
+        if (
+            (self._retiring_cause or self._updating)
+            and (wake or mode != "mailbox")
+            and not self._admits_into_live_turn()
+        ):
             if self._updating or (self._draining and not self._exit_committed):
                 receipt = await self._spool_for_successor(
                     text,
@@ -7206,9 +7575,30 @@ class ServingSessionHandle(SessionHandle):
         await self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 
+    def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None] | None:
+        """ADR 0009 R10: record which surface answered, before the answer lands.
+
+        Synchronous and called by the control server just ahead of the answer
+        op, so the note is in place when the answer's row reaches the run. Two
+        plain attribute writes on the session (``Session.note_answer_surface``),
+        which is why it needs no loop hop. Returns the session's undo (run by
+        the server when the answer is refused), or ``None`` from a session
+        without the capability.
+        """
+        note = getattr(self._session, "note_answer_surface", None)
+        if callable(note):
+            undo = note(ask_id, surface)
+            return cast(Callable[[], None], undo) if callable(undo) else None
+        return None
+
     @_on_session_loop
     async def ask_answer(
-        self, request_id: str, value: str, question_index: int | None = None
+        self,
+        request_id: str,
+        value: str,
+        question_index: int | None = None,
+        by: str = UNVERIFIED_SURFACE,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> str:
         # ``question_index`` is accepted for protocol parity with the TUI handle
         # (U8 guard). An owned session assigns a DISTINCT request_id per question
@@ -7222,7 +7612,11 @@ class ServingSessionHandle(SessionHandle):
         # synthetic id has to resolve onto the whole-ask queue rather than onto a
         # gate future that never existed. Nothing else is touched: every other
         # request id is an approval or a live picker and falls through unchanged.
-        mirrored = await self._mirror_ask_answer(request_id, value)
+        # ``by`` is the label the RUNTIME stamped for this connection
+        # (``asks/surfaces.stamp_answer_surface``): ``mirror`` only when the
+        # frame proved the operator capability. The fail-closed default is for
+        # a caller that never went through that seam.
+        mirrored = await self._mirror_ask_answer(request_id, value, by=by, mesh_origin=mesh_origin)
         if mirrored is not None:
             return mirrored
         # Resolve with the QUESTION id the harness asked under — never our
@@ -7235,7 +7629,14 @@ class ServingSessionHandle(SessionHandle):
             raise ValueError("that question was already answered") from exc
         return "answered"
 
-    async def _mirror_ask_answer(self, request_id: str, value: str | None) -> str | None:
+    async def _mirror_ask_answer(
+        self,
+        request_id: str,
+        value: str | None,
+        *,
+        by: str = UNVERIFIED_SURFACE,
+        mesh_origin: Mapping[str, Any] | None = None,
+    ) -> str | None:
         """Answer a queued ask through the legacy mirrored card id, or ``None``.
 
         ``None`` is "this is not a mirrored ask id" — the ordinary case on every
@@ -7259,7 +7660,7 @@ class ServingSessionHandle(SessionHandle):
         if not value:
             # An EMPTY value is today's Esc and settles the WHOLE ask: a decline
             # is not a step of the multi-step flow.
-            outcome = self._session.decline_ask(ask_id, by="mirror")
+            outcome = self._session.decline_ask(ask_id, by=by)
             if not outcome.get("ok"):
                 raise ValueError(str(outcome.get("error") or "the decline was refused"))
             return "declined"
@@ -7273,7 +7674,10 @@ class ServingSessionHandle(SessionHandle):
         # settle the ask in one atomic write. ``ask_respond`` stays atomic and
         # still refuses a partial map — a whole-ask client has no reason to send
         # one, and accepting it there would be a second, weaker contract.
-        outcome = self._session.answer_ask_question(ask_id, key, [value], by="mirror")
+        # The receiver-minted mesh origin (``network/origin.py``) rides only when
+        # there is one, so a session from before the carriage keeps its call shape.
+        origin_kwargs = _origin_kwargs(self._session.answer_ask_question, mesh_origin)
+        outcome = self._session.answer_ask_question(ask_id, key, [value], by=by, **origin_kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         if not outcome.get("settled"):
@@ -7292,6 +7696,27 @@ class ServingSessionHandle(SessionHandle):
         await self._session.reconcile_asks()
         return "answered"
 
+    def ask_minted_here(self, ask_id: str) -> bool:
+        """Whether this runtime process minted ``ask_id`` (F2 Part C).
+
+        Read by the runtime's answer stamp OFF the session loop, so it reads
+        only the session id and the process-local minted set
+        (``asks/surfaces``). It must NOT call ``Session.ask_queue()`` there:
+        that getter constructs the queue lazily, and racing the session loop's
+        own construction could leave two queues. A session double with no
+        ``session_id`` is asked through its queue instead; neither reads
+        ``True`` for an ask this process did not mint (fail-closed).
+        """
+        from local_operator.asks.surfaces import minted_here
+
+        session_id = getattr(self._session, "session_id", None)
+        if isinstance(session_id, str) and session_id:
+            return minted_here(session_id, ask_id)
+        getter = getattr(self._session, "ask_queue", None)
+        queue = getter() if callable(getter) else None
+        probe = getattr(queue, "minted_here", None)
+        return bool(probe(ask_id)) if callable(probe) else False
+
     @_on_session_loop
     async def ask_respond(
         self,
@@ -7299,6 +7724,7 @@ class ServingSessionHandle(SessionHandle):
         answers: dict[str, list[str]],
         by: str = "",
         attachments: Mapping[str, Sequence["ImageContent"]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> str:
         """Answer a QUEUED ask (design §2.4). Additive op: an old registrant
         answers ``unknown op``, and a runtime without the queue refuses in words.
@@ -7318,6 +7744,8 @@ class ServingSessionHandle(SessionHandle):
         # a handle that takes it keeps the pictures, one that does not is
         # refused-not-stripped by every sender.
         kwargs: dict[str, Any] = {"attachments": attachments} if attachments else {}
+        # Stored as ``answered_by.mesh_origin`` (mesh-origin-stamp §4).
+        kwargs.update(_origin_kwargs(self._session.respond_ask, mesh_origin))
         outcome = self._session.respond_ask(ask_id, answers, by=by or "remote", **kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
@@ -7333,7 +7761,24 @@ class ServingSessionHandle(SessionHandle):
         signature over the composite ask#question#word target) and which minted
         the one-shot grant the dispatcher consumes at the point of effect. A
         plain ``ask_respond`` on a bridge ask is refused by the session.
+
+        A ``site:v1:`` question (a headless node's per-site browser approval,
+        ``browser_bridge/site_approval.py``) takes the session's async site door
+        instead: its effect is a browser-bridge call, and it needs no Team
+        Bridge runtime. A refusal keeps its typed ``code`` in the message so
+        the surface can tell "unsigned" from "expired".
         """
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        site_door = getattr(self._session, "site_decide", None)
+        if is_site_question_id(question_id) and site_door is not None:
+            site_outcome = await cast(
+                Callable[[str, str, str], Awaitable[Mapping[str, Any]]], site_door
+            )(ask_id, question_id, word)
+            if not site_outcome.get("ok"):
+                raise ValueError(str(site_outcome.get("error") or "the decision was refused"))
+            await self._session.reconcile_asks()
+            return "decided"
         outcome = self._session.bridge_decide(ask_id, question_id, word)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the decision was refused"))
@@ -7341,7 +7786,13 @@ class ServingSessionHandle(SessionHandle):
         return "decided"
 
     @_on_session_loop
-    async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
+    async def ask_revise(
+        self,
+        ask_id: str,
+        answers: dict[str, list[str]],
+        by: str = "",
+        mesh_origin: Mapping[str, Any] | None = None,
+    ) -> str:
         """REVISE a queued ask's recorded answer before it is delivered (design §10).
 
         The same op family, the same atomic whole-ask body and the same awaited
@@ -7362,7 +7813,10 @@ class ServingSessionHandle(SessionHandle):
         the loop, which is exactly the accepted-and-then-dropped interleaving
         §10 forbids.
         """
-        outcome = self._session.revise_ask(ask_id, answers, by=by or "remote")
+        # A revision's stamp is folded with the first answer's by the store, so an
+        # unstamped or unverified revision voids ``verified`` (§2 rule 4, M-8).
+        origin_kwargs = _origin_kwargs(self._session.revise_ask, mesh_origin)
+        outcome = self._session.revise_ask(ask_id, answers, by=by or "remote", **origin_kwargs)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the revision was refused"))
         # Awaited for the same reason ``ask_respond`` awaits it: it starts the
@@ -7945,7 +8399,13 @@ class ServingSessionHandle(SessionHandle):
         if not callable(setter):
             return
         try:
-            setter(None)
+            # An open QUEUED ask still owes the operator an answer after the
+            # gate settles: hand the claim back to it rather than clearing a
+            # fact that is still true (``_sync_queued_ask_pending``).
+            if getattr(self, "_queued_asks_open", False):
+                setter("ask", queued=True)
+            else:
+                setter(None)
         except Exception:  # noqa: BLE001
             logger.debug("could not clear the pending state", exc_info=True)
 
@@ -8260,6 +8720,17 @@ class ServingSessionHandle(SessionHandle):
                 or not state.get("notify", True)
             ):
                 return _ANNOUNCE_SETTLED
+            # ADR 0009 §2 footnote 1: a MOBILE-origin completion or error is the
+            # phone's to announce while the phone would be told
+            # (``notifications.routing.phone_would_emit``, the predicate the push worker
+            # asks). SETTLED and no claim, like the quiet arm above: the unseen
+            # mark stays for the sidebar and inbox. When the phone would not
+            # emit, the ladder runs as before so the item is never silent on
+            # every surface.
+            from local_operator.notifications.routing import desktop_defers_to_phone
+
+            if desktop_defers_to_phone(state, root):
+                return _ANNOUNCE_SETTLED
             if desktop_delivery_present(root, kind):
                 # Rung 2. DEFERRED rather than settled (R7): this answer is a
                 # CACHED lease with a 2 s TTL, and the app behind it may be
@@ -8425,12 +8896,8 @@ class ServingSessionHandle(SessionHandle):
                     # session-ask card over a global-auto file would otherwise
                     # have to invent "global Ask" (the U4 defect).
                     payload["approval_global_mode"] = global_mode
-                    if self._bridge_grant_suspended():
-                        # The EFFECTIVE mode (team-bridge-egress.md: "Grants"): the conversation's
-                        # auto predates its Team Bridge content, so this gate
-                        # asks. Claiming auto here would contradict the card.
-                        payload["approval_mode"] = "ask"
-                        payload["approval_suspended"] = "bridge"
+                    # No ``approval_suspended`` fold any more (#3928): the latch
+                    # suspends no grant, so the resolved mode IS the effect.
                 else:
                     payload["approval_mode"] = ""
                     payload["approval_provenance"] = ""
@@ -8965,7 +9432,9 @@ class ServingSessionHandle(SessionHandle):
                 code=("applied" if ok else (str(data_code) if data_code else "failed")),
                 message=str(result.text or ""),
             )
-        result = await self._complete_unconsumed_action(result, images, consumers)
+        result = await self._complete_unconsumed_action(
+            result, images, consumers, locality=locality, capabilities=capabilities
+        )
         return result.model_dump(mode="json")
 
     async def _complete_unconsumed_action(
@@ -8973,6 +9442,9 @@ class ServingSessionHandle(SessionHandle):
         result: Any,
         images: list[dict[str, str]] | None,
         consumers: Iterable[str] | None,
+        *,
+        locality: str | None = None,
+        capabilities: frozenset[str] | None = None,
     ) -> Any:
         """Run an attach receipt's request here when the client will not.
 
@@ -9038,9 +9510,18 @@ class ServingSessionHandle(SessionHandle):
             # note the echo) and it returns on its first step. ``prompt``
             # emphatically CAN park — see below.
             if self._session.is_streaming:
-                await self.steer(request, images=images, command_id=str(uuid.uuid4()))
+                await self.steer(
+                    request,
+                    images=images,
+                    command_id=str(uuid.uuid4()),
+                    _file_admission=_file_admission_for(locality, capabilities, "steer"),
+                )
             else:
-                await self._admit_without_waiting_for_the_turn(request, images)
+                await self._admit_without_waiting_for_the_turn(
+                    request,
+                    images,
+                    _file_admission=_file_admission_for(locality, capabilities, "prompt"),
+                )
         except Exception as exc:  # noqa: BLE001 — the attach happened; say what did not
             # The attach ALREADY landed and stays; only the turn failed to
             # start (session closing, queue full, a rejected prompt). Reporting
@@ -9056,8 +9537,26 @@ class ServingSessionHandle(SessionHandle):
             )
         return result
 
+    def _refuse_admitted(self, command_id: str) -> None:
+        """Release a refused command's reservation AND its frozen file ticket.
+
+        ``admitted_ticket`` freezes the ticket into ``OwnerProvenance.admissions``
+        before the update-window/queue checks; a refusal raised after it would
+        otherwise keep that ticket for the runtime's life (R3, PR #4108). Only
+        RAISING refusals call this: a spooled command keeps its ticket, because
+        the spool's drain takes it back by command id (``CONTINUATION``).
+        """
+        self._command_reservations.reject(command_id)
+        take = getattr(self._session, "_take_file_continuation", None)
+        if callable(take):
+            take(command_id)
+
     async def _admit_without_waiting_for_the_turn(
-        self, request: str, images: list[dict[str, str]] | None
+        self,
+        request: str,
+        images: list[dict[str, str]] | None,
+        *,
+        _file_admission: Any = None,
     ) -> None:
         """Admit ``request`` as a turn, reporting only the IMMEDIATE refusals.
 
@@ -9106,7 +9605,12 @@ class ServingSessionHandle(SessionHandle):
         # attachments.
         blocks = await _image_blocks_async(images)
         task = asyncio.ensure_future(
-            self.prompt(request, images=blocks, command_id=str(uuid.uuid4()))
+            self.prompt(
+                request,
+                images=blocks,
+                command_id=str(uuid.uuid4()),
+                _file_admission=_file_admission,
+            )
         )
         # One turn is enough today — nothing before ``prompt``'s first suspension
         # point yields — but a couple of extra turns costs nothing and keeps this
@@ -11389,8 +11893,8 @@ class ServingSessionHandle(SessionHandle):
         return remedy
 
     @staticmethod
-    def _uninstalled_anchor_clause() -> str:
-        """The missing-anchor remedy, or ``""`` when this host has an anchor.
+    def _uninstalled_anchor_report(live: str, saved: str) -> str | None:
+        """The whole report line for a host with no usable anchor, else ``None``.
 
         THIS REPLACES THE DELETED "retire and reopen the session here" clause, and
         it replaces it with the one thing that clause was standing in for: a
@@ -11403,12 +11907,23 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.operator import operator_authority_unusable
 
         if not operator_authority_unusable():
-            return ""
-        return (
-            "; but operator authority is not installed on this machine yet: neither can run "
-            "until it is set up here — ask Local Operator to set up operator authority for "
-            "you (one approval and one admin password prompt)"
-        )
+            return None
+        # U17 (design v2 A2): the remedy names where a person turns approvals on —
+        # Settings → Phone access in the desktop app, `/mobile approvals on` in the
+        # terminal app — instead of "ask Local Operator to set up operator
+        # authority", which sent a non-technical user to a terminal-only verb.
+        #
+        # THE WHOLE LINE IS ONE KEY (design round 1 on #3950, D2/D3). It used to be
+        # a keyed clause appended to the English report, so every other locale got
+        # a sentence that switched language halfway. Only this state's line is
+        # keyed; its only caller reaches it with the session asking (`live` is
+        # "ask"), which is why the effect words are part of the message. ONE key for
+        # both mirrors so they cannot drift apart.
+        from local_operator.i18n.keys import wire_operator_setup as _ws
+        from local_operator.i18n.text import tr
+
+        report = _ws.tui_approvals_report_not_set_up(live=live, saved=saved)
+        return tr("wire.operator_setup")(report)
 
     def _approvals_slash(
         self,
@@ -11545,7 +12060,13 @@ class ServingSessionHandle(SessionHandle):
                     # capability that now exists (a pane attached to another
                     # process's runtime can loosen), so a reader with a working lever
                     # was told to retire a runtime instead of using it.
-                    remedy += self._uninstalled_anchor_clause()
+                    keyed = (
+                        None
+                        if self._auto_approve
+                        else self._uninstalled_anchor_report(live, on_disk)
+                    )
+                    if keyed is not None:
+                        return SlashResult(kind="notice", text=keyed, style="info")
                 return SlashResult(
                     kind="notice",
                     text=(
@@ -11599,24 +12120,27 @@ class ServingSessionHandle(SessionHandle):
             # rendered the latched sentence, from the picker) or a typed command
             # the TUI marks may make a post-latch session grant. Same receipt
             # shape as the unattributed-loosening refusal.
+            if self._auto_approve:
+                # ALREADY AUTO IS NOT A LOOSENING (design r1 D2 on #4080). A
+                # session already in auto -- its own choice or the machine
+                # default -- loses nothing to this request, so refusing it told
+                # the operator "auto is still off" while every tool ran without
+                # asking. Answer with the truthful report instead, and write
+                # nothing: recording a session override here would pin a
+                # machine-default auto onto this conversation, a change the
+                # unacknowledged frame may not make. ask->auto still refuses.
+                return self._already_auto_receipt(session, SlashResult, may_loosen)
             refusal = self._bridge_ack_refusal(SlashResult, latched=latched)
             if refusal is not None:
                 return refusal
         self._auto_approve = wanted_auto
-        # Stamped only for a grant made while ALREADY latched: that is the
-        # deliberate post-latch loosening, which keeps covering calls and
-        # survives resume. Every other grant is void once the session latches.
-        self._approve_granted_while_latched = bool(wanted_auto and latched)
         # A human typed the mode in this session, so the FILE no longer moves
         # this gate in either direction (see :meth:`_on_config_change`). The MODE
         # is recorded, not merely the fact of a choice (review round 2, R6) —
         # and since 2026-10-23 it is recorded with the CONVERSATION too, so the
         # choice survives a resume instead of living in this handle's memory.
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
-        saved_failure = self._persist_approval_override(
-            "auto" if wanted_auto else "ask",
-            granted_while_latched=self._approve_granted_while_latched,
-        )
+        saved_failure = self._persist_approval_override("auto" if wanted_auto else "ask")
         self._notify()
         # "(this session)" on the LIVE half, matching the app's own receipt word
         # for word (UX round 1, U5): the two hosts answer the same gesture, and
@@ -11665,7 +12189,6 @@ class ServingSessionHandle(SessionHandle):
         mode: str | None,
         *,
         had_record: bool = True,
-        granted_while_latched: bool = False,
     ) -> str | None:
         """Record (or clear) this conversation's choice; return a failure clause.
 
@@ -11700,7 +12223,7 @@ class ServingSessionHandle(SessionHandle):
         if directory is None:
             return None
         try:
-            _write_approval_override(directory, mode, granted_while_latched=granted_while_latched)
+            _write_approval_override(directory, mode)
         except Exception as error:  # noqa: BLE001 — surfaced in the receipt, never fatal
             logger.warning(
                 "could not save %s beside the transcript",
@@ -11719,6 +12242,20 @@ class ServingSessionHandle(SessionHandle):
                 f"({error.__class__.__name__})"
             )
         return None
+
+    def _already_auto_receipt(self, session: Any, SlashResult: Any, may_loosen: bool | None) -> Any:
+        """The receipt for an unacknowledged ``auto`` while auto is in effect.
+
+        Reuses the bare ``/approvals`` report verbatim, so no new copy exists
+        to translate and the sentence names the mode's real provenance (this
+        session vs config.yml) instead of claiming a session switch. ``data``
+        carries the same ``ok``/``approval_mode`` keys every approvals receipt
+        sends, because the card keys on them, never on the sentence.
+        """
+        report = self._approvals_slash(session, "", SlashResult, may_loosen=may_loosen)
+        return report.model_copy(
+            update={"data": {**report.data, "approval_mode": "auto", "ok": True}}
+        )
 
     def _bridge_ack_refusal(self, SlashResult: Any, *, latched: bool | None = None) -> Any:
         """The receipt refusing an unacknowledged loosening while latched, or ``None``.
@@ -12714,6 +13251,7 @@ async def spawn_owned_session(
     birth_fast: bool = False,
     resume: str | None = None,
     model_selection_override: bool = True,
+    goal_wake_due: int | None = None,
 ) -> ServingSessionHandle:
     """Build a session for the phone with the CLI's composition root.
 
@@ -12813,6 +13351,7 @@ async def spawn_owned_session(
         birth_effort=birth_effort,
         birth_fast=birth_fast,
         model_selection_override=model_selection_override,
+        goal_wake_due=goal_wake_due,
     )
 
     # PAY THE COMPOSITION ROOT'S IMPORTS HERE, AND IN A THREAD.
@@ -12941,6 +13480,7 @@ async def spawn_owned_session(
     )
     attach_gate_config_watch(handle, config_directory)
     attach_display_config_watch(config_directory)
+    attach_language_config_watch(config_directory)
     return handle
 
 
@@ -12995,3 +13535,51 @@ def attach_display_config_watch(config_directory: Path) -> None:
         logger.warning(
             "config watcher could not be attached to the runtime display folds", exc_info=True
         )
+
+
+def attach_language_config_watch(config_directory: Path) -> None:
+    """Keep this process's active locale on the configured ``language``.
+
+    A runtime outlives a language switch (the desktop's Settings, the TUI's
+    ``/language``, ``lop config``, all in OTHER processes), and the copy it
+    renders for viewers — notices via :func:`_notice_text_for_viewer`, and
+    every ``tr``/``envelope()`` call that reads the active locale — must move
+    with it rather than stay on the boot language until a restart. The move
+    itself is ``i18n.boot.follow_language``, the same one the server's
+    settings route and desktop feed make, so the registry copy refreshers run
+    here too. Subscribed at the same spawn seams as the display watcher and
+    degraded the same way: a runtime that cannot follow keeps its boot locale.
+    """
+    key = str(config_directory)
+    if key in _language_watch_attached:
+        return
+    unsubscribe = None
+    try:
+        from local_operator.config_watch import process_watcher
+        from local_operator.i18n.boot import follow_language
+
+        def _on_change(change: Any) -> None:
+            if "language" not in change.changed_keys:
+                return
+            raw = change.values.get("language")
+            # ``auto``/absent exercises the chain (``LOP_LANG`` -> OS) without a
+            # second config read, exactly as the desktop feed passes it.
+            follow_language(raw if isinstance(raw, str) else "auto")
+
+        watcher = process_watcher(config_directory)
+        # Subscribe BEFORE start: start's synchronous poll may deliver a write
+        # since construction. Then reconcile the latest snapshot, since a write
+        # since boot may already be the watcher's baseline (no delta to deliver).
+        # All three steps run on this loop without yielding, so later ticks use
+        # the listener and cannot be overwritten by an older captured snapshot.
+        unsubscribe = watcher.subscribe(_on_change)
+        watcher.start(asyncio.get_running_loop())
+        raw = watcher.values.get("language")
+        follow_language(raw if isinstance(raw, str) else "auto")
+        _language_watch_attached.add(key)
+    except Exception:  # noqa: BLE001 — the runtime keeps its boot locale
+        # A failed attachment must not leave a listener behind for the retry.
+        # The watcher is shared with other consumers; do not stop it here.
+        if unsubscribe is not None:
+            unsubscribe()
+        logger.warning("config watcher could not be attached to the runtime locale", exc_info=True)

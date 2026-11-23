@@ -17,6 +17,8 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
+import traceback
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -119,8 +121,62 @@ _REAL_CLIENT_INIT = tb_client.TeamBridgeClient.__init__
 _REAL_POPEN_INIT = subprocess.Popen.__init__
 
 
+#: Parallel diagnostics to ``_TRIPWIRE["trips"]`` (kept name-only so the
+#: declared-trip controls that compare it keep working): one record per trip.
+#: Why it exists: CI run 43600785935 (test (3.12,3) gw0) failed two teardowns
+#: with ``httpx.HTTPTransport`` trips in cells that cannot build a sync
+#: transport themselves. INFERENCE (not reproduced): a thread leaked from an
+#: earlier cell on the same xdist worker constructed it. The log named no
+#: thread, so these records name the constructing thread and its stack the
+#: next time it happens. Diagnostics only — the audit condition is unchanged.
+_TRIP_DETAIL: list[dict[str, Any]] = []
+
+#: ``threading.get_ident()`` of the thread that armed the guard (the cell's).
+_ARMED_IDENT: list[int] = []
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _short_stack(limit: int = 8) -> list[str]:
+    """The last ``limit`` frames as ``file:line func``, repo-relative paths."""
+
+    frames = traceback.extract_stack()[:-2][-limit:]
+    out: list[str] = []
+    for f in frames:
+        try:
+            shown = str(Path(f.filename).resolve().relative_to(_REPO_ROOT))
+        except ValueError:
+            shown = f.filename
+        out.append(f"{shown}:{f.lineno} {f.name}")
+    return out
+
+
+def _describe_trips(trips: list[str], detail: list[dict[str, Any]]) -> str:
+    """The audit's failure text: trip names plus who constructed each."""
+
+    lines = [str(trips)]
+    for d in detail:
+        where = "the cell's own thread" if d["same_thread"] else "a DIFFERENT thread"
+        lines.append(
+            f"  {d['name']} built by thread {d['thread_name']!r} "
+            f"(ident {d['thread_ident']}), {where}; stack (oldest first): "
+            + " <- ".join(d["stack"])
+        )
+    return "\n".join(lines)
+
+
 def _trip(name: str) -> NoReturn:
     _TRIPWIRE["trips"].append(name)
+    cur = threading.current_thread()
+    _TRIP_DETAIL.append(
+        {
+            "name": name,
+            "thread_name": cur.name,
+            "thread_ident": cur.ident,
+            "same_thread": bool(_ARMED_IDENT) and cur.ident == _ARMED_IDENT[0],
+            "stack": _short_stack(),
+        }
+    )
     raise AssertionError(f"GUARD TRIPPED: {name}")
 
 
@@ -269,6 +325,8 @@ def _install_wire_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _TRIPWIRE["trips"].clear()
     _TRIPWIRE["expected"].clear()
+    _TRIP_DETAIL.clear()
+    _ARMED_IDENT[:] = [threading.get_ident()]
     _OUTER_ATTEMPTS.clear()
     _retain_outer_noio_layer(monkeypatch)
     _arm_tripwire(monkeypatch)
@@ -279,7 +337,7 @@ def _audit_wire_guard() -> None:
 
     assert len(_TRIPWIRE["trips"]) == len(_TRIPWIRE["expected"]), (
         "a real wire object was constructed in a cell that did not declare it: "
-        f"{_TRIPWIRE['trips']}"
+        f"{_describe_trips(_TRIPWIRE['trips'], _TRIP_DETAIL)}"
     )
 
 
@@ -492,6 +550,22 @@ class FakeClient:
     ):
         FakeClient.behavior["last_lifecycle"] = (conversation_id, action)
         return self._answer("conversation_lifecycle")
+
+    async def conversation_update(self, conversation_id, **fields):
+        FakeClient.behavior["last_update"] = (conversation_id, fields)
+        return self._answer("conversation_update")
+
+    async def conversation_rename(
+        self,
+        conversation_id: str,
+        name: str,
+        *,
+        tenant_id=None,
+        access: Any = None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_rename"] = (conversation_id, name, tenant_id)
+        return self._answer("conversation_rename")
 
     async def conversation_delete(
         self,
@@ -866,7 +940,6 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
         # M1a: the detail read and the list excerpts EXIST on this build, and
         # both answer only through the shared admission predicate.
         "screened_detail": True,
-        "read_ack": False,
         "local_events": False,
     }
     assert result["surface_state"] == "B"
@@ -1204,6 +1277,42 @@ async def test_status_carries_the_screening_summary_and_survives_damage(api):
     assert summary["held"]["count"] == 1
     assert summary["held"]["by_code"] == {"delivery_failed": 1}
     assert summary["rejected_24h"]["by_category"] == {"unknown": 1}
+
+
+async def test_status_store_reads_run_off_the_event_loop(api, monkeypatch):
+    """Serve stall, 2026-11-15: ``read_screening_status`` ran on the loop thread.
+
+    The dump showed ``status`` -> ``read_screening_status`` -> ``_live_generation``
+    on MAIN: a SQLite read that waits out the store's busy timeout inside the
+    call, so a contended store held every other route (``/health`` included).
+    Both of the route's store reads (screening and the F8 delivery hold) must
+    run on a worker thread.
+    """
+
+    from local_operator.team_bridge import store as tb_store
+
+    threads: dict[str, str] = {}
+    real_screening = tb_store.read_screening_status
+    real_hold = desktop_team_bridge._delivery_hold
+
+    def screening(config_dir):
+        threads["screening"] = threading.current_thread().name
+        return real_screening(config_dir)
+
+    def hold(config_manager):
+        threads["hold"] = threading.current_thread().name
+        return real_hold(config_manager)
+
+    monkeypatch.setattr(tb_store, "read_screening_status", screening)
+    monkeypatch.setattr(desktop_team_bridge, "_delivery_hold", hold)
+    client, _root, _discipline = api
+
+    response = await client.get("/v1/desktop/team-bridge/status")
+
+    assert response.status_code == 200
+    loop_thread = threading.current_thread().name
+    assert set(threads) == {"screening", "hold"}
+    assert loop_thread not in threads.values(), threads
 
 
 async def test_status_screening_summary_survives_non_finite_timestamps(api):
@@ -3350,6 +3459,7 @@ async def test_every_desktop_write_refuses_a_scope(api):
         ("post", "/v1/desktop/team-bridge/conversations?scope=account", {"kind": "dm"}),
         ("post", f"{base}/archive?scope=account", None),
         ("post", f"{base}/unarchive?scope=account", None),
+        ("post", f"{base}/rename?scope=account", {"name": "Renamed"}),
         ("delete", f"{base}?scope=account", None),
         (
             "post",
@@ -3423,6 +3533,7 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
         ("get", "/v1/desktop/team-bridge/conversations/nope/messages", None),
         ("post", "/v1/desktop/team-bridge/conversations/nope/archive", None),
         ("post", "/v1/desktop/team-bridge/conversations/nope/unarchive", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/rename", {"name": "Renamed"}),
         ("delete", "/v1/desktop/team-bridge/conversations/nope", None),
         (
             "post",
@@ -3559,6 +3670,47 @@ async def test_conversation_reactions_require_the_owner_receipt(api, put_body, d
     assert (await client.put(path, json=put_body)).status_code == 422
     assert (await client.put(path)).status_code == 422
     assert (await client.delete(path + delete_query)).status_code == 422
+    assert FakeClient.instances == []
+
+
+@pytest.mark.parametrize(
+    "given,canonical",
+    [
+        ("thumbsup", "👍"),
+        (":white_check_mark:", "✅"),
+        ("\u2764", "\u2764\ufe0f"),
+        # The shared table with the hub: CLDR skin-tone names resolve here too.
+        ("thumbs_up_medium_skin_tone", "👍🏽"),
+        (":✅:", "✅"),
+    ],
+)
+async def test_conversation_reactions_canonicalise_shortcodes(api, given, canonical):
+    """A UI/relay shortcode reaches the hub as the same key an agent sends."""
+    from urllib.parse import quote
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_react"] = {"message_id": "bcmsg_abcdef12", "reactions": []}
+    path = "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+    receipt = {"tenant_id": "tnt_1", "expected_account_id": "acc_1"}
+    response = await client.put(path + quote(given, safe=""), json=receipt)
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_react"][2] == canonical
+
+
+async def test_conversation_reactions_refuse_an_unknown_shortcode_before_upstream(api):
+    client, _root, _d = api
+    path = "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+    receipt = {"tenant_id": "tnt_1", "expected_account_id": "acc_1"}
+    response = await client.put(path + "not_an_emoji_name", json=receipt)
+    assert response.status_code == 422
+    # QA round 1 Q1: the refusal names the accepted forms (shared wording with
+    # the agent tool), keeps the classifiable code, and never echoes the input.
+    from local_operator.team_bridge.emoji_names import ACCEPTED_FORMS_HINT
+
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_request"
+    assert ACCEPTED_FORMS_HINT in detail["message"]
+    assert "not_an_emoji_name" not in detail["message"]
     assert FakeClient.instances == []
 
 
@@ -4736,3 +4888,209 @@ async def test_put_settings_clears_the_choice_with_an_empty_string(api):
     )
     assert response.status_code == 200, response.text
     assert response.json()["result"]["screening"]["preferred"] is None
+
+
+def test_trip_from_a_helper_thread_is_named_in_the_audit_message() -> None:
+    """A trip from another thread yields a message naming that thread.
+
+    Calls ``_trip`` from a helper thread (its AssertionError is expected and
+    swallowed there), formats with ``_describe_trips``, then restores the ledger
+    so the autouse audit still passes for this cell.
+    """
+
+    def worker() -> None:
+        with contextlib.suppress(AssertionError):
+            _trip("httpx.HTTPTransport")
+
+    t = threading.Thread(target=worker, name="leaky-helper-thread")
+    t.start()
+    t.join()
+    msg = _describe_trips(list(_TRIPWIRE["trips"]), list(_TRIP_DETAIL))
+    # Undo before asserting so a failure here is not masked by the audit.
+    _TRIPWIRE["trips"].clear()
+    _TRIP_DETAIL.clear()
+    assert "httpx.HTTPTransport" in msg
+    assert "leaky-helper-thread" in msg
+    assert "a DIFFERENT thread" in msg
+    assert "test_desktop_team_bridge.py" in msg and "worker" in msg
+
+
+RENAME = "/v1/desktop/team-bridge/conversations/bcv_abc12345/rename"
+
+
+async def test_rename_answers_the_updated_conversation(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {
+        "conversation_id": "bcv_abc12345",
+        "kind": "channel",
+        "name": "Renamed",
+    }
+    response = await client.post(RENAME, json={"name": "Renamed", "tenant_id": "tnt_1"})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["name"] == "Renamed"
+    assert FakeClient.behavior["last_rename"] == ("bcv_abc12345", "Renamed", "tnt_1")
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "details"),
+    [
+        (409, "conversation_name_taken", {"conversation_id": "bcv_other123", "name": "x"}),
+        (409, "conversation_archived", None),
+        (409, "invalid_transition", {"rule": "dm"}),
+        (409, "invalid_transition", {"rule": "builtin"}),
+        (400, "invalid_request", {"field": "name", "rule": "empty"}),
+        (400, "invalid_request", {"field": "name", "rule": "too_long"}),
+        (400, "invalid_request", {"field": "name", "rule": "control_character"}),
+        (400, "invalid_request", {"field": "name", "rule": "invisible_character"}),
+        (400, "invalid_request", {"field": "name", "rule": "unsupported_space"}),
+        (400, "not_allowed", None),
+        (403, "forbidden", None),
+        (404, "conversation_not_found", None),
+        (503, "messaging_unavailable", None),
+    ],
+)
+async def test_rename_refusals_pass_through_untouched(api, status, code, details):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = BridgeRefusal(
+        code, "refused", http_status=status, details=details
+    )
+    response = await client.post(RENAME, json={"name": "x"})
+    assert response.status_code == status
+    expected = {"code": code, "message": "refused"}
+    if details:
+        expected["details"] = details
+    assert response.json()["detail"] == expected
+
+
+@pytest.mark.parametrize("body", [{}, {"name": "x", "topic": "nope"}, {"name": "x" * 129}])
+async def test_rename_refuses_a_malformed_body_before_io(api, body):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.post(RENAME, json=body)
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+async def test_rename_forwards_a_name_over_the_server_limit(api):
+    """65 code points is the server's ``too_long`` to refuse, with its rule;
+    the daemon must not pre-empt it with a rule-less 422."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {"name": "ok"}
+    response = await client.post(RENAME, json={"name": "é" * 65})
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_rename"][1] == "é" * 65
+
+
+@pytest.mark.parametrize("name", ["", "   "], ids=["empty", "blank"])
+async def test_rename_forwards_an_empty_name_for_the_server_rule(api, name):
+    """The server is the authority on name rules: an empty name is not a local
+    422 (no ``min_length``), so ``""`` reaches it and its ``rule=empty`` refusal
+    is what the renderer shows, exactly as for a whitespace-only name."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {"name": "ok"}
+    response = await client.post(RENAME, json={"name": name})
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_rename"][1] == name
+
+
+# ASGI route-contract fixtures: FakeClient is intentional; these do not claim
+# a live hub, MongoDB transaction or production write.
+UPDATE = "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"topic": ""},
+        {"name": "new"},
+        {"topic": "  line 1\nline 2  "},
+        {"name": None},
+        {"topic": None},
+        {},
+    ],
+)
+async def test_metadata_update_preserves_field_presence(api, fields):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_update"] = {"name": "new"}
+    body = {"expected_account_id": "acc_1", "tenant_id": "tnt_1", **fields}
+    response = await client.patch(UPDATE, json=body)
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_update"] == ("bcv_abc12345", body)
+    assert "topic" not in response.json()["result"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "description",
+        "members",
+        "visibility",
+        "kind",
+        "agent_capable",
+        "builtin",
+        "status",
+        "actor_endpoint_id",
+        "endpoint_id",
+        "notify",
+    ],
+)
+async def test_metadata_update_rejects_unknown_metadata_before_io(api, extra):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.patch(UPDATE, json={"topic": "x", extra: "no"})
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+@pytest.mark.parametrize(
+    "suffix,body",
+    [
+        ("?tenant_id=tnt_1", {"topic": "x"}),
+        ("?expected_account_id=acc_1", {"topic": "x"}),
+        ("", {"expected_account_id": "acc_1", "topic": "x"}),
+        ("", {"expected_account_id": "acc_1", "tenant_id": "  ", "topic": "x"}),
+        ("", {"topic": 123}),
+    ],
+)
+async def test_metadata_update_rejects_malformed_receipts_before_io(api, suffix, body):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.patch(UPDATE + suffix, json=body)
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+async def test_metadata_update_refuses_account_scope(api):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.patch(UPDATE + "?scope=account", json={"topic": "x"})
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+@pytest.mark.parametrize(
+    "status,code,details",
+    [
+        (400, "invalid_request", {"field": "topic", "rule": "not_allowed"}),
+        (400, "invalid_request", {"rule": "no_fields"}),
+        (401, "unauthorized", None),
+        (403, "conversation_not_permitted", None),
+        (404, "conversation_not_found", None),
+        (409, "conversation_name_taken", {"name": "x"}),
+        (429, "rate_limited", None),
+        (503, "messaging_unavailable", None),
+    ],
+)
+async def test_metadata_update_refusals_pass_through(api, status, code, details):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_update"] = BridgeRefusal(
+        code, "refused", http_status=status, details=details
+    )
+    response = await client.patch(UPDATE, json={"topic": ""})
+    assert response.status_code == status, response.text
+    expected = {"code": code, "message": "refused"}
+    if details:
+        expected["details"] = details
+    assert response.json()["detail"] == expected

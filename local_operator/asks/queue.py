@@ -58,12 +58,23 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from local_operator.asks import policy, render, store
+from local_operator.asks.surfaces import (
+    UNVERIFIED,
+    by_record,
+    minted_here,
+    note_minted,
+    weakest_surface,
+)
 from local_operator.harness.message_types import (
     ASK_RELAY_MESSAGE_TYPE,
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
 )
-from local_operator.harness.types import CustomMessage, ImageContent
+from local_operator.harness.types import (
+    CustomMessage,
+    ImageContent,
+    ask_command_problem,
+)
 from local_operator.team_bridge.ask_issuance import bridge_scope_digest
 
 logger = logging.getLogger(__name__)
@@ -126,6 +137,26 @@ def _lapsed_visible_ms(config_dir: Path) -> int:
     return lapsed_visible_ms(config_dir)
 
 
+def _answer_by(surface: str, mesh_origin: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The ``by`` of an answered/revised event: the surface, plus the mesh origin.
+
+    ``mesh_origin`` is the receiving runtime's stamp (``network/origin.py``) and is
+    ABSENT, never null, when there is none — so every local or legacy row stays
+    byte-identical and a reader that never heard of it never sees the key.
+
+    Built ON ``by_record`` (F2), never beside it: the surface and any app-signature
+    ``proof`` are exactly what ``by_record`` records, and the stamp is only added
+    after. The stamp is the RECEIVING runtime's own connection fact, so it is not
+    part of the content the desktop app signs (``asks/app_attest``) — an attested
+    answer is always a local one, and a stamped answer is always a relayed one,
+    which ``stamp_answer_surface`` never lets an attestation vouch for.
+    """
+    by: dict[str, Any] = dict(by_record(surface))
+    if isinstance(mesh_origin, Mapping):
+        by["mesh_origin"] = dict(mesh_origin)
+    return by
+
+
 class AskQueue:
     """The session's queued asks: enqueue, answer, withdraw, fold, deliver."""
 
@@ -180,8 +211,25 @@ class AskQueue:
         #: a runtime death simply returns the ask to its open state, which is the
         #: truthful outcome for a partial answer nobody finished submitting.
         self._drafts: dict[str, dict[str, list[str]]] = {}
+        #: WHO WROTE EACH DRAFT CELL (agent review round 1, R1-2): question id
+        #: -> the runtime-stamped surface of the tap that answered it. The draft
+        #: settles as ONE row, so without this the last tap's label would cover
+        #: every earlier cell — an unproven tap on "Delete ~/X?" completed by a
+        #: proved tap on a harmless second question read as proved consent. The
+        #: settle stamps the WEAKEST (``asks.surfaces.weakest_surface``): whole-
+        #: ask, fail-closed, because the guard reads consent per ask, not per
+        #: question. Kept beside ``_drafts`` and dropped with it everywhere.
+        self._draft_surfaces: dict[str, dict[str, str]] = {}
+        #: The per-cell mesh origin stamps of the same legacy draft, kept and
+        #: dropped beside ``_draft_surfaces`` for the same reason (mesh-origin-
+        #: stamp §2 rule 4): one unstamped cell must not ride a verified one.
+        self._draft_origins: dict[str, dict[str, dict[str, Any] | None]] = {}
 
     # -- paths -------------------------------------------------------------
+
+    def minted_here(self, ask_id: str) -> bool:
+        """Whether THIS process minted ``ask_id`` (F2 Part C, ``asks/surfaces``)."""
+        return minted_here(self._session_id, ask_id)
 
     @property
     def session_dir(self) -> Path:
@@ -436,6 +484,10 @@ class AskQueue:
                 "ok": False,
                 "error": "the ask could not be recorded on this session's ask log.",
             }
+        # F2 Part C: this process minted it, so a capability proof presented
+        # by whoever started this runtime may vouch for it; an ask inherited
+        # from an earlier runtime is never added here (``asks/surfaces``).
+        note_minted(self._session_id, ask_id)
         self._arm_deadline_wake(record)
         self._refresh(now)
         receipt = render.receipt_text(record, self._reach())
@@ -673,7 +725,10 @@ class AskQueue:
             None,
         )
         if origin is None:
-            return {"ok": False, "error": render.RELAY_ORIGIN_UNKNOWN}
+            # No local log holds it: the ref may name a NODE session's card this
+            # device's inbox carries as a forwarded row. Decided only on a local
+            # miss, so a local relay never reaches this branch.
+            return self._relay_remote(origin_session, origin_ask)
         if origin.get("relay"):
             return {"ok": False, "error": render.RELAY_OF_RELAY}
         origin_status = str(origin.get("status") or "")
@@ -769,6 +824,81 @@ class AskQueue:
             },
         }
 
+    def _relay_remote(self, origin_session: str, origin_ask: str) -> dict[str, Any]:
+        """Re-surface a NODE session's forwarded card instead of pointing at it.
+
+        WHY NO RELAY ROW. A local relay is a pointer whose status, questions and
+        answer are DERIVED from the origin's log on every fold
+        (:meth:`_apply_relay_derivation`) and whose answer is written into that
+        log (:meth:`_relay_respond`). For a node session none of that is
+        reachable from here without a live attach:
+
+        * this device holds only the forwarded inbox row — the first question's
+          120-char title, a "runs on" body and the key
+          (``notifications/remote_attention.raise_notice_item``), and the
+          catalogue block it came from is ``(key, revision, priority, title,
+          at)`` (``network/projection._notices_block``) — no question ids,
+          options, ``site`` block, digest or deadline, so a pointer would have
+          nothing to render and ``respond``'s complete-map contract nothing to
+          check against;
+        * the only answer path is the async attach to the node's runtime
+          (``session/attached.AttachedSession.respond_ask``/``bridge_decide``,
+          reached from ``server/routes/desktop_sessions`` and the phone daemon),
+          while ``respond`` here is a synchronous log write and the fold runs on
+          every read.
+
+        So the relay raises THE ONE EXISTING CARD again
+        (``remote_attention.resurface_forwarded_ask``): nothing is minted,
+        copied or reworded, the operator answers on the existing path (the
+        operator's signature stays on ``bridge_decide`` for a site card), and
+        that one answer settles the node's ask and — through the watcher's
+        retire-on-absence — the inbox row.
+
+        THE TRADE-OFF, stated to the model in the receipt and the ask tool's
+        notes: there is no row in this session, so this session never receives
+        the answer, cannot withdraw the relay (``ask_withdraw`` has nothing to
+        settle), and neither :data:`policy.RELAY_CAP` nor the held-check
+        (``RELAY_ALREADY_HELD``) applies — both count rows this session holds.
+        A repeat relay re-raises again; the store's per-row banner cooldown
+        bounds what a loop can do. A SECRET question cannot be detected from the
+        row and need not be: the answer is typed only on the node's own card,
+        which is exactly the boundary ``RELAY_SECRET_ORIGIN`` protects.
+        """
+        from local_operator.notifications import remote_attention
+
+        verdict, device = remote_attention.resurface_forwarded_ask(
+            self._config_dir, origin_session, origin_ask
+        )
+        if verdict == remote_attention.RESURFACE_SETTLED:
+            return {"ok": False, "error": render.RELAY_REMOTE_SETTLED.format(device=device)}
+        if verdict == remote_attention.RESURFACE_PUT_AWAY:
+            return {"ok": False, "error": render.RELAY_REMOTE_PUT_AWAY.format(device=device)}
+        if verdict == remote_attention.RESURFACE_UNREADABLE:
+            return {"ok": False, "error": render.RELAY_REMOTE_UNREADABLE}
+        if verdict == remote_attention.RESURFACE_PENDING:
+            receipt, status = render.RELAY_REMOTE_PENDING, "pending"
+        elif verdict == remote_attention.RESURFACED:
+            receipt, status = render.RELAY_REMOTE_RECEIPT, "resurfaced"
+        else:
+            return {"ok": False, "error": render.RELAY_ORIGIN_UNKNOWN}
+        return {
+            "ok": True,
+            "text": receipt.format(
+                origin_ask=origin_ask, origin_session=origin_session, device=device
+            ),
+            "details": {
+                # No ``ask_id``: nothing was queued here, and a surface that keyed
+                # a card on one would show a row this log does not hold.
+                "status": status,
+                "relay": {
+                    "session_id": origin_session,
+                    "ask_id": origin_ask,
+                    "device": device,
+                    "remote": True,
+                },
+            },
+        }
+
     def _relay_respond(
         self,
         record: Mapping[str, Any],
@@ -860,6 +990,7 @@ class AskQueue:
         by: str = "unknown",
         tool_call_id: str = "",
         attachments: Mapping[str, Sequence[ImageContent]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Append ``answered`` for the whole ask, atomically, and reconcile.
 
@@ -948,7 +1079,7 @@ class AskQueue:
             "kind": store.EVENT_ANSWERED,
             "ask_id": ask_id,
             "at": now,
-            "by": {"surface": by},
+            "by": _answer_by(by, mesh_origin),
             "answers": cleaned,
         }
         if refs:
@@ -975,6 +1106,7 @@ class AskQueue:
         by: str = "unknown",
         tool_call_id: str = "",
         attachments: Mapping[str, Sequence[ImageContent]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """SUPERSEDE a recorded answer while it is still UNDELIVERED (design §10).
 
@@ -1049,7 +1181,7 @@ class AskQueue:
             "kind": store.EVENT_REVISED,
             "ask_id": ask_id,
             "at": now,
-            "by": {"surface": by},
+            "by": _answer_by(by, mesh_origin),
             "answers": cleaned,
             # The ``at`` of the write this supersedes: the newest revision's when
             # one exists, else the first answer's. Naming it keeps the log a chain
@@ -1323,6 +1455,7 @@ class AskQueue:
         values: Sequence[str],
         *,
         by: str = "unknown",
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """LEGACY INCREMENTAL ANSWER: one question of an ask, settled later.
 
@@ -1365,18 +1498,34 @@ class AskQueue:
                 "answer the questions still waiting.",
             }
         draft[key] = [str(item) for item in (values or ())]
+        self._draft_surfaces.setdefault(ask_id, {})[key] = str(by)
+        # Per cell, like the surface: the settled answer's mesh origin is the
+        # first cell's, verified only if EVERY cell came from that same verified
+        # device (the store's revision rule, applied to the legacy draft).
+        self._draft_origins.setdefault(ask_id, {})[key] = (
+            dict(mesh_origin) if mesh_origin is not None else None
+        )
         waiting = [qid for qid in ids if qid not in draft]
         if waiting:
             # Publish the partial so the mirrored card advances to the next
             # question: the draft is what ``mirror_card`` reads to choose it.
             self._refresh(now)
             return {"ok": True, "settled": False, "waiting": waiting}
-        outcome = self.respond(ask_id, draft, by=by)
+        cells_by = self._draft_surfaces.get(ask_id, {})
+        settle_by = weakest_surface(*(cells_by.get(qid, UNVERIFIED) for qid in ids))
+        from local_operator.network.origin import fold_answer_origin
+
+        origins = self._draft_origins.pop(ask_id, {})
+        cell_origins = [origins.get(qid) for qid in ids]
+        settle_origin = fold_answer_origin(cell_origins[0], cell_origins[1:]) if ids else None
+        outcome = self.respond(ask_id, draft, by=settle_by, mesh_origin=settle_origin)
         if not outcome.get("ok"):
             # A refusal at settle time (a lost race against another surface)
             # discards the draft with it: keeping it would let the next tap
             # settle an ask the log has already closed.
             self._drafts.pop(ask_id, None)
+            self._draft_surfaces.pop(ask_id, None)
+            self._draft_origins.pop(ask_id, None)
             return outcome
         return {"ok": True, "settled": True, "waiting": []}
 
@@ -1407,7 +1556,7 @@ class AskQueue:
             "kind": store.EVENT_DECLINED,
             "ask_id": ask_id,
             "at": now,
-            "by": {"surface": by},
+            "by": by_record(by),
         }
         if not store.append_event(self.session_dir, payload):
             return {"ok": False, "error": "the decline could not be recorded."}
@@ -1459,7 +1608,7 @@ class AskQueue:
             "kind": store.EVENT_DISMISSED,
             "ask_id": ask_id,
             "at": now,
-            "by": {"surface": by},
+            "by": by_record(by),
             "reason": reason or store.DISMISS_REASON_DEFAULT,
         }
         if not store.append_event(self.session_dir, payload):
@@ -1712,6 +1861,8 @@ class AskQueue:
         # became the log's answers or the ask was declined/dismissed out from
         # under it, and keeping it would advance a card for a closed ask.
         self._drafts.pop(str(ask_id), None)
+        self._draft_surfaces.pop(str(ask_id), None)
+        self._draft_origins.pop(str(ask_id), None)
         self._refresh()
         self._kick()
 
@@ -1730,6 +1881,8 @@ class AskQueue:
         for record in records:
             if record.get("status") != store.STATUS_OPEN:
                 self._drafts.pop(str(record.get("ask_id")), None)
+                self._draft_surfaces.pop(str(record.get("ask_id")), None)
+                self._draft_origins.pop(str(record.get("ask_id")), None)
 
     def _kick(self) -> None:
         """Ask the session to reconcile soon. Best-effort, no loop required.
@@ -3110,6 +3263,13 @@ def _question_shape(question: Any) -> dict[str, Any]:
         # when present — an ask without it keeps the exact pre-scope shape, so
         # existing logs fold and serialize byte-identically.
         shape["bridge"] = dict(bridge)
+    site = raw.get("site")
+    if isinstance(site, Mapping):
+        # A headless node's site approval carries the inputs its ``site:v1:``
+        # question id binds, so the signer can check the card before signing
+        # (``browser_bridge/site_approval.verify_site_card``). Key added only
+        # when present, like ``bridge``: other asks keep their exact shape.
+        shape["site"] = dict(site)
     recommended_all = raw.get("recommended_all")
     if recommended_all is not None:
         # A multi-select's recommendation SET (`AskQuestion.recommended_all`),
@@ -3117,7 +3277,45 @@ def _question_shape(question: Any) -> dict[str, Any]:
         # always carried, and every ask without a set keeps the exact prior
         # shape, so existing logs fold byte-identically. Never emit it as None.
         shape["recommended_all"] = list(recommended_all)
+    command = _carried_command(raw, shape)
+    if command is not None:
+        # The suggested terminal command (`AskQuestion.command`) and the device
+        # it is meant for, added ONLY when present — same rule as
+        # `bridge`/`recommended_all`, so every ask without one keeps the exact
+        # prior shape and existing logs fold byte-identically. Both ride to the
+        # desktop/fleet frames unchanged. The target is ALWAYS stamped with the
+        # command, so a surface deciding whether to offer one-click Run never
+        # has to guess a default; anything but an explicit "user" reads as
+        # "agent" (the tool's own default).
+        shape["command"] = command
+        shape["command_target"] = "user" if raw.get("command_target") == "user" else "agent"
     return shape
+
+
+def _carried_command(raw: Mapping[str, Any], shape: Mapping[str, Any]) -> str | None:
+    """The command a stored row may carry for ``raw``, or ``None``.
+
+    Two refusals on top of "absent":
+
+    * A BRIDGE row (another team's agent asking through the carriage — the same
+      structural reading as ``tui/app._is_bridge_ask_row``: a ``bridge`` block
+      or a carriage ``question_id``) never carries one. The desktop offers the
+      command as a one-click terminal action, and the operator must not be
+      handed a command by an agent outside their own team.
+    * A value that fails ``ask_command_problem`` is dropped rather than stored.
+      The tool's validator already refused it on the normal path; this covers a
+      question that reaches the queue as a plain mapping without passing
+      ``AskQuestion``, so the row a surface renders is always within the rule.
+    """
+    command = raw.get("command")
+    if not isinstance(command, str):
+        return None
+    if shape.get("bridge") or str(shape.get("question_id") or "").strip():
+        return None
+    command = command.strip()
+    if ask_command_problem(command) is not None:
+        return None
+    return command
 
 
 __all__ = ["AskQueue"]

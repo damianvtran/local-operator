@@ -169,6 +169,7 @@ async def start_exec_control(
     yolo: bool = False,
     supervised: bool = True,
     resumed: bool = False,
+    workstream: bool = False,
     supervisor_fd: int | None = None,
 ) -> ExecControl:
     """Publish a record and serve the control socket for ``session``.
@@ -238,6 +239,17 @@ async def start_exec_control(
     owed response rows belong to the conversation, while a parked approval card
     has nobody to answer it here — which is also why ``sessions`` withholds
     ``--control`` from a resume worker.
+
+    ``workstream`` is set by the runner from ``--workstream`` (what
+    ``sessions spawn`` launches) and earns the same ask surface as ``resumed``,
+    for a different reason: a spawned workstream is listed, retained,
+    operator-visible work, and the only way its questions reach the operator's
+    inbox without someone resuming it is a durable, queued ``ask`` of its own.
+    Before this, a fresh spawn had no ``ask`` until its first resume, so a
+    review/QA workstream that needed the operator could only guess or stop.
+    Ephemeral spawns, plain ``lop exec`` and ``task`` subagents stay without
+    one (the SA-D2 decision: nobody owns their queue), and the approval gates
+    stay ``supervised``-only for the same reason as a resume worker's.
     """
     import asyncio
 
@@ -252,6 +264,7 @@ async def start_exec_control(
         ServingSessionHandle,
         attach_display_config_watch,
         attach_gate_config_watch,
+        attach_language_config_watch,
     )
 
     loop = asyncio.get_running_loop()
@@ -333,7 +346,9 @@ async def start_exec_control(
     # belt-and-braces for a host that installs the surface directly.
     from local_operator.asks import policy
 
-    install_ask_surface = not supervised and resumed and policy.enabled()
+    # ``workstream`` joins ``resumed`` here: see the docstring. Notify is NOT
+    # widened with it — agent workstreams still withhold ``notify`` (session.py).
+    install_ask_surface = not supervised and (resumed or workstream) and policy.enabled()
 
     handle = ServingSessionHandle(
         session,
@@ -360,6 +375,8 @@ async def start_exec_control(
     # ``display.*`` writes: a viewer must not fold with flags frozen at this
     # process's boot (design review round 1 on #1746, D1).
     attach_display_config_watch(config_directory)
+    # The same reason for the viewer copy: a run outlives a language switch.
+    attach_language_config_watch(config_directory)
     # The ``stop`` control op (and therefore `lop stop`, which can now see this
     # run because it publishes a record) reaches ``request_stop`` -> this hook.
     # Without one the handle falls back to disposing in place, UNDER the prompt
@@ -472,6 +489,7 @@ async def maybe_start_exec_control(
     cwd: str,
     yolo: bool = False,
     resumed: bool = False,
+    workstream: bool = False,
     supervisor_fd: int | None = None,
 ) -> ExecControl | None:
     """Start the surface when asked, disposing the session if it cannot start.
@@ -491,7 +509,12 @@ async def maybe_start_exec_control(
         return None
     try:
         return await start_exec_control(
-            session, cwd=cwd, yolo=yolo, resumed=resumed, supervisor_fd=supervisor_fd
+            session,
+            cwd=cwd,
+            yolo=yolo,
+            resumed=resumed,
+            workstream=workstream,
+            supervisor_fd=supervisor_fd,
         )
     except BaseException:
         try:

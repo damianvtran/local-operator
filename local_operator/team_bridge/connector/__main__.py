@@ -44,6 +44,7 @@ import os
 import signal
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,11 @@ SELF_CHECK_MIN_UPTIME_S = 300.0
 #: run (``python -m``, a launched binary). A test shrinks the uptime gate by
 #: patching this, not by sleeping.
 _PROCESS_STARTED_S = time.monotonic()
+
+#: The same start on the wall clock, for the runtime record ``receiver status``
+#: prints (``runtime_record``): an owner reads "started 2026-11-15 09:12", not
+#: a monotonic offset that means nothing outside this process.
+_PROCESS_STARTED_WALL_S = time.time()
 
 #: The marker the plist and the systemd unit set in their OWN environment
 #: (``install.render_plist`` / ``render_systemd``), and nothing else on the host
@@ -310,6 +316,13 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
     # Restart-scoped transport root: read HERE, once.
     base_url = args.base_url or DEFAULT_RADIENT_API_BASE_URL
 
+    # Remote rollout confirmation: record which build this process IS before
+    # the (possibly endless) wait for an owner, so `receiver status` can name
+    # an idle receiver's version too. Never clobbers a live peer's record.
+    from local_operator.team_bridge.connector import runtime_record as _runtime
+
+    _runtime.record_start(config_dir, started_at=_PROCESS_STARTED_WALL_S)
+
     store = Store(config_dir)
     if args.credential_id and args.account_id and args.tenant_id and args.endpoint_id:
         # A pinned namespace stays pinned across re-arms: only that exact
@@ -333,6 +346,7 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
         logger.info("bridge connector idle: stage=idle code=no_owner")
     while owner is None:
         if stop is not None and stop.is_set():
+            _runtime.clear_own_record(config_dir)
             return 0
         await _loop.idle_until_owner_changes(
             None, config_dir=config_dir, owner_source=owner_source, stop=stop
@@ -359,11 +373,14 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
                 # It came back, or a third process took it in the window. There
                 # is nothing further to do from here; the supervisor's retry is
                 # the next attempt.
+                _runtime.clear_own_record(config_dir)
                 return 75
         else:
             # Task Scheduler retries failures, not clean exits. A foreground
             # owner may relinquish this lock later; exit nonzero so the logon
             # receiver cannot remain permanently stopped after losing that race.
+            # A loser leaves no record naming itself as the running build.
+            _runtime.clear_own_record(config_dir)
             return 75
 
     # F4 (live E2E): the store the screener reads its provider key from. The
@@ -374,7 +391,27 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
     # the screening cycle's live-identity check, and the bridge client is
     # deliberately never served a bearer lent by a paired device (see
     # ``TeamBridgeClient._auth_store``). Values are never read or logged here.
+    # The singleton is ours: this process now serves the config dir, so its
+    # record wins over whatever an earlier holder left.
+    held_facts = _runtime.record_singleton_held(config_dir, started_at=_PROCESS_STARTED_WALL_S)
+    # ...and keeps it named while it serves: a starter that lost the start race
+    # can overwrite this record and then remove its own (review m1).
+    keeper = (
+        asyncio.create_task(_runtime.keep_own_record(config_dir, held_facts))
+        if held_facts is not None
+        else None
+    )
     auth_store = AuthStore(db_path=config_dir / "auth.db", config_dir=config_dir)
+    # A chief-of-staff rename reaches the hub as soon as it lands locally, not
+    # at the next fresh status read (identity_publisher's module doc). Started
+    # only once the singleton is ours, so one process per machine publishes.
+    from local_operator.team_bridge.connector import identity_publisher as _identity
+
+    identity_stop = stop if stop is not None else asyncio.Event()
+    identity_task = asyncio.create_task(
+        _identity.run(config_dir, base_url=base_url, stop=identity_stop),
+        name="bridge-identity-publisher",
+    )
     try:
         while owner is not None:
             # A fresh client per owner: it pins ``credential_id``, so a
@@ -403,8 +440,17 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
                 stop=stop,
             )
     finally:
-        auth_store.close()
-        lock.release()
+        identity_task.cancel()
+        try:
+            # The next lock holder must not race an old publisher unwinding.
+            with suppress(asyncio.CancelledError):
+                await identity_task
+        finally:
+            if keeper is not None:
+                keeper.cancel()
+            auth_store.close()
+            _runtime.clear_own_record(config_dir)
+            lock.release()
     return 0
 
 

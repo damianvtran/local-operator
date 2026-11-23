@@ -1,0 +1,209 @@
+{
+  "round": 2,
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev, as-au-fr)",
+    "session": "9bf062d8d179",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "system prompt 'Model:' line of this session",
+    "fallback": "none observed",
+    "independent_from_translator_session": true,
+    "translator": "i18n-translator, job dc77cce34bd4 resumed as d17d4900b5c3, anthropic/claude-sonnet-5-5",
+    "native_speaker": false
+  },
+  "locale": "fr",
+  "namespaces": [
+    "wire.settings"
+  ],
+  "keys_in_scope": 8,
+  "commit_audited": "cc66c51cb3add48bd1e88700fa1ba743bcdb252c (+ uncommitted translator working-tree edits; audited bytes = hashes below)",
+  "diff_base": "cc66c51c",
+  "audit_date": "2026-11-16",
+  "scope": "round 2: own round-1 findings + every changed value; unchanged keys (updates.title, updates.description, choice.false.description) retained from round 1 (byte-identical to round-1 audited values)",
+  "input_hashes_sha256": {
+    "local_operator/i18n/catalogues/fr/wire.settings.json": "761d53d12a8a4720ce9dd628473db042a98c2cdc6898fa6820b30fd8a6244e8e",
+    "local_operator/i18n/catalogues/en/wire.settings.json": "4216621551341578051621a89c3c08ae290f728d7bb6389e561e7ee59e31458f",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json": "ebe0faa8bb9d26922c67493ba2ea8508f51df3897257e08dfac3b97dbad40cfe",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/fr.md": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7 (unchanged vs cc66c51c)"
+  },
+  "mechanical": {
+    "hashes_match_brief": true,
+    "check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s), exit 0",
+    "git_diff_stat_fr_vs_cc66c51c": "local_operator/i18n/catalogues/fr/wire.settings.json | 14 +++++++------- (7 insertions, 7 deletions); i18n/style-guides/fr.md no change",
+    "changed_keys_vs_draft": 7,
+    "changed_keys_all_in_scope": true,
+    "key_sets_equal_en": true,
+    "key_count": 877,
+    "nfc_all_8": true,
+    "stray_bidi_zero_width": "none",
+    "u202f": {
+      "choice.false.description": "before ';'",
+      "update_keep_generations.help": "before ':'"
+    },
+    "backticked_commands_byte_identical": true,
+    "placeholders_or_icu_added": false,
+    "ascii_apostrophe": false,
+    "cell_len": {
+      "updates.title": 12,
+      "updates.description": 122,
+      "update_auto_prune.label": 29,
+      "update_auto_prune.help": 93,
+      "update_auto_prune.choice.true.description": 45,
+      "update_auto_prune.choice.false.description": 30,
+      "update_keep_generations.label": 22,
+      "update_keep_generations.help": 207
+    },
+    "choice_true_row_cells_derived": "4+2+2+'activé'6+'  (par défaut)'14+2+45 = 75 <= list width 78 (80 cols) and 84 (120 cols)",
+    "help_band_derived_from_code": "settings_view.py _paint_detail: for non-bridge rows the rungs are [[help,key],[help_alone]] (or clause variants); the two-row wrap rung (None) exists only for bridge rows. updates.* rows therefore paint help on ONE line of _detail_width = cols-2, truncated with '…'. Not rendered."
+  },
+  "per_key": [
+    {
+      "key": "wire.settings.updates.title",
+      "text": "Mises à jour",
+      "verdict": "PASS (retained, unchanged)"
+    },
+    {
+      "key": "wire.settings.updates.description",
+      "text": "Ce qu’une mise à jour fait des anciennes installations qu’elle laisse derrière elle. Prend effet au prochain `lop update`.",
+      "verdict": "PASS (retained, unchanged)"
+    },
+    {
+      "key": "wire.settings.update_auto_prune.label",
+      "text": "Purge anciennes installations",
+      "cells": 29,
+      "verdict": "PASS",
+      "note": "Keeps the 'anciennes' qualifier; telegraphic (no article) but standard compact UI French. Keeping 'purge' over 'élaguer' accepted: consistent across label, choice.false and keep help."
+    },
+    {
+      "key": "wire.settings.update_auto_prune.help",
+      "text": "Après chaque mise à jour, supprimer les installations inutilisées, comme `lop install prune`.",
+      "cells": 93,
+      "verdict": "FINDING (MINOR fr-A4, still open)"
+    },
+    {
+      "key": "wire.settings.update_auto_prune.choice.true.description",
+      "text": "garder l’actuelle, les actives, les dernières",
+      "cells": 45,
+      "verdict": "PASS (NIT fr-A6)",
+      "note": "Row 75 cells fits 80 and 120 cols. 'les dernières' = newest; consistent with keep help 'dernières installations inutilisées'."
+    },
+    {
+      "key": "wire.settings.update_auto_prune.choice.false.description",
+      "text": "tout garder ; purger à la main",
+      "verdict": "PASS (retained, unchanged)"
+    },
+    {
+      "key": "wire.settings.update_keep_generations.label",
+      "text": "Inutilisées conservées",
+      "cells": 22,
+      "verdict": "PASS with MINOR fr-A3 (accepted exception, not yet recorded in fr.md)"
+    },
+    {
+      "key": "wire.settings.update_keep_generations.help",
+      "text": "Nombre des dernières installations inutilisées gardées par purge. Toujours conservées : l’actuelle, la précédente, celle qui exécute la mise à jour et celles enregistrées par une session ou un service actif.",
+      "cells": 207,
+      "verdict": "PASS (NIT fr-A7)",
+      "safety": "all four always-kept classes present after 'Toujours conservées :' — current (l’actuelle), previous (la précédente), running the update (celle qui exécute la mise à jour), registered by a running session or service (celles enregistrées par une session ou un service actif). 'Toujours' fronted, not weakened. Dropping 'comme utilisée' matches English 'registered' (no 'as in use' in the English text). Feminine anaphora to 'installations' is unambiguous."
+    }
+  ],
+  "round1": {
+    "verdict": "BLOCKED (fr hash a6e161c8…), counts blocker 0 / major 1 / minor 3 / nit 1",
+    "dispositions": [
+      {
+        "id": "fr-A1",
+        "severity": "MAJOR",
+        "was": "choice.true 57 cells, row 87 truncated at 80/120 cols; 'en exécution' calque",
+        "translator": "adopted (variant)",
+        "now": "'garder l’actuelle, les actives, les dernières' 45 cells, row 75",
+        "status": "RESOLVED"
+      },
+      {
+        "id": "fr-A2",
+        "severity": "MINOR",
+        "was": "label dropped 'old'",
+        "translator": "adopted 'Purge anciennes installations'; rejected 'élaguer'",
+        "status": "RESOLVED (élaguer was an observation, rejection accepted)"
+      },
+      {
+        "id": "fr-A3",
+        "severity": "MINOR",
+        "was": "keep label without noun",
+        "translator": "accepted as width exception",
+        "status": "OPEN-MINOR: exception not recorded in i18n/style-guides/fr.md (hash unchanged); non-gating"
+      },
+      {
+        "id": "fr-A4",
+        "severity": "MINOR",
+        "was": "help widths 93/271",
+        "translator": "rejected for auto_prune.help (premise: help wraps to two rows); keep help shortened 271→207",
+        "status": "OPEN-MINOR for auto_prune.help: rejection premise not borne out by code (single truncated line for this row, see mechanical.help_band_derived_from_code); keep help part moot — see out_of_scope_observation"
+      },
+      {
+        "id": "fr-A5",
+        "severity": "NIT",
+        "was": "'service en cours'",
+        "translator": "now 'service actif'",
+        "status": "RESOLVED"
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "fr-A3",
+      "severity": "MINOR",
+      "key": "wire.settings.update_keep_generations.label",
+      "text": "Inutilisées conservées",
+      "evidence": "Accepted label-without-noun exception but i18n/style-guides/fr.md (sha 5315e1ac…) carries no record of it, unlike the other recorded fr width exceptions.",
+      "fix": "Add a 'Recorded width exception' bullet for wire.settings.update_keep_generations.label to fr.md (36 cells with noun vs 29 budget)."
+    },
+    {
+      "id": "fr-A4",
+      "severity": "MINOR",
+      "key": "wire.settings.update_auto_prune.help",
+      "text": "Après chaque mise à jour, supprimer les installations inutilisées, comme `lop install prune`.",
+      "evidence": "Derived from settings_view.py (not rendered): updates.* rows are not bridge rows, so help paints on ONE line of cols-2 cells with '…'. At 80 cols (78 cells) the 93-cell fr help loses the `lop install prune` cross-reference; the 72-cell English fits. Fits from ~95 cols up. Meaning of the kept part is intact, hence MINOR.",
+      "fix": "Après une mise à jour, supprimer les inutilisées, comme `lop install prune`. (76 cells)"
+    },
+    {
+      "id": "fr-A6",
+      "severity": "NIT",
+      "key": "wire.settings.update_auto_prune.choice.true.description",
+      "text": "garder l’actuelle, les actives, les dernières",
+      "evidence": "'les actives' (my own round-1 suggestion) can be read as near-synonym of 'l’actuelle' (an 'installation active' is often the selected one). Both are kept, so no safety effect.",
+      "fix": "Optional: 'garder l’actuelle, les lancées, les dernières' (45 cells)."
+    },
+    {
+      "id": "fr-A7",
+      "severity": "NIT",
+      "key": "wire.settings.update_keep_generations.help",
+      "text": "…inutilisées gardées par purge. Toujours conservées…",
+      "evidence": "Two verbs (gardées/conservées) for one concept in one string, and 'par purge' reads as either 'per purge' or 'by the purge'.",
+      "fix": "Nombre des dernières installations inutilisées conservées à chaque purge."
+    }
+  ],
+  "out_of_scope_observation_non_gating": "Not locale-specific, not a translation defect: per settings_view.py the update_keep_generations.help (en 189 cells, fr 207) is painted on one truncated line for this non-bridge row, so the always-kept guarantee sentence is cut in English too below ~191 columns (likely shed further if a 'default: N' clause shows). The brief's 'help = two rows' holds only for bridge rows. Code-derived, not rendered; for manager/designer.",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 2
+  },
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "ledger_status_recommended": "passed",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "fr-A3",
+      "fr-A4",
+      "fr-A6",
+      "fr-A7"
+    ]
+  },
+  "not_verified": [
+    "native-speaker judgement (LLM reasoning only, no native review claimed)",
+    "rendered fit: row/band widths derived from settings_view.py, no screenshot",
+    "fonts"
+  ],
+  "audit_notes_not_execution_log": "commands run: shasum -a 256 (fr, en, context, fr guide); scripts/i18n/check.py --catalogues-only (rc 0, '0 problem(s)'); git diff cc66c51c --stat; read-only python key-diff/NFC/bidi/backtick/cell_len; reading settings_view.py _paint_detail and _detail_width. Read-only: no edits, generator or ledger."
+}

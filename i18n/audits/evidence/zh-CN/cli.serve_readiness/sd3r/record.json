@@ -1,0 +1,199 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3r",
+  "audit_date": "2026-11-16",
+  "key_count": 15,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9d590e061719",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-16",
+    "independent_from_translator_session": "acf0a84cd992",
+    "independent_from_translator_job": "7f2b030d2636",
+    "actual_model_source": "Host session metadata: Model openai/gpt-6.1-sol; no fallback observed",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "job": "7f2b030d2636",
+    "model": null,
+    "previously_disclosed_model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requesting task identifies same original translator/final job; current-job actual model and fallback not supplied or independently verified. Null preserves that uncertainty."
+  },
+  "source_audit_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+  "audited_working_tree_contains_uncommitted_copy": true,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e4e9031bf84e0d6e9edea53f41d54ad03adb96b53d9f0c87872971d2c1aee629"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/cli.serve_readiness.json",
+      "sha256": "d3836560eb7aa4cbefd2e331c8c3971da0aa9522184fd940f8796bcdb255298c"
+    }
+  },
+  "policy_input_hashes": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/zh-CN.md",
+      "sha256": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+    }
+  ],
+  "caller_input_hash": {
+    "path": "local_operator/network/readiness.py",
+    "sha256": "3adbd0122dc704320bd77991299071739057da36d34e39bec7d6591821d5968b"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3r/report.md",
+      "sha256": "406e788e95b4cdddde257bbc66d7283d4dc87cac019817b1c46a8cce239431bb"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3r/audit.log",
+      "sha256": "5cd828400e253c3449f16ebe08b888172b627c08ae014eac44a21af174b71030"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3r/verify.py.txt",
+      "sha256": "ff632f97821b49db3802eb087f2a0984f84272fbd3dd6c10e72ec133ee675900"
+    }
+  ],
+  "report": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3r/report.md",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "coverage": {
+    "changed_key": "cli.serve_readiness.not_this_daemon",
+    "direct_neighbors": [
+      "cli.serve_readiness.pid_reason",
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.and_more",
+      "cli.serve_readiness.unproven",
+      "cli.serve_readiness.not_reporting",
+      "cli.serve_readiness.unknown_state"
+    ],
+    "retained_key_count": 14,
+    "retained_keys": [
+      {
+        "key": "cli.serve_readiness.unproven",
+        "raw_json_member_line_sha256": "68ff6d2a6818f2f1e90de2d44b261a216d5618e292cae4fa2f77b3b3a81ab7fd",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.not_reporting",
+        "raw_json_member_line_sha256": "ab83e54ebeb33ac9b327f873fb9ec95f5d92cf406cb5582dd6b0850d146bbefe",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.unknown_state",
+        "raw_json_member_line_sha256": "5ccb12afc872c312f6346038f1598bccae25edf942afbfb154c2d208ae13f661",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.install_unknown",
+        "raw_json_member_line_sha256": "c87a1df061d84fc9c6fac41a5e1199e7c58f43a2e97755874f0fc744f8d60064",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.cgroup_unknown",
+        "raw_json_member_line_sha256": "0857febc94bb3a1cfba15feeaac5c8fb0f88158a2799a90b03e62329d82de266",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.recorded_gap",
+        "raw_json_member_line_sha256": "531ea42754b66bd7abbda4955e11b0d51c796a1a11732a23ce85107595f47dfd",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.unknown",
+        "raw_json_member_line_sha256": "b07ed6db719b5d66a024aca4f92a9f2ecbce8120869265ea967474d8da4ecf23",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.stale",
+        "raw_json_member_line_sha256": "181dc32299ca361caab725cd81394da64584e8057c4577387fe0e9a1a16983ea",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.other_unit",
+        "raw_json_member_line_sha256": "a788c889c81f66506a34f10be257783eb098a04d8b6f8732c9c05ad1f26b7eba",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.identity_restart",
+        "raw_json_member_line_sha256": "5b4e953aa6d148c1eeae3a2633638aa7dd3dfa1254ec7e5f92c57dd950a24369",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.pid_reason",
+        "raw_json_member_line_sha256": "4589ab88797ab17906703ed0b15f14456d5572d802cefd3acf550b2c2d1de78b",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.and_more",
+        "raw_json_member_line_sha256": "6798d310ab6263fdd60311e9c14bfe8789f4b63eadc6fde922190ac438d18305",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.identity_no_action",
+        "raw_json_member_line_sha256": "ba299d3dd0b25040c9d7fadd5d39b46496ccb2dd0b673dd6873d87300812b630",
+        "byte_identical_to_sd3": true
+      },
+      {
+        "key": "cli.serve_readiness.identity_restart_manual",
+        "raw_json_member_line_sha256": "fd66e61866c5b2235e32c864e5626cf9645c7de552cdf47506e14e13af2e8976",
+        "byte_identical_to_sd3": true
+      }
+    ],
+    "retained_audit_record": {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3/record.json",
+      "sha256": "9b79f2769bc6a2d469064a158f544c39cc30ec9faf2495f0b3d7664a4ef288a0"
+    },
+    "retained_audit_report": {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3/report.md",
+      "sha256": "780b0c001281116e50d79241a2aeb70a8657a7a865982acc59db3577fc1064b9"
+    },
+    "proof": "Reverse the exact target/source replacement and context-note replacement to recover complete prior SHA-256 values, preserving all other member bytes and formatting",
+    "mechanical_key_count": 15,
+    "source_context_exact_delta_verified": true,
+    "prior_artifact_policy_caller_hashes_intact": true
+  },
+  "remediation": {
+    "locale_finding_ids_fixed": [],
+    "open_finding_ids": [],
+    "upstream_cross_locale_finding": "RU-SD3-01",
+    "upstream_finding_disposition": "Not applicable to Chinese ledger; analogous number-neutral wording verified here, no Russian closure claimed"
+  },
+  "current_bytes_match_audited_hashes": true,
+  "audit_notes_not_execution_log": {
+    "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3r/report.md",
+    "description": "Human reasoning only; actual command output is in audit.log and ledger-dry-run.log"
+  },
+  "second_independent_audit_claimed": false,
+  "post_record_companions": {
+    "ledger-receipt.json": "Append-ready row hashes this record; excluded from artifact list to avoid circular hashing",
+    "ledger-dry-run.log": "Actual dry-run and history hash output; explicit record reference"
+  },
+  "limitations": [
+    "No new second-independent auditor, rendered frame, live services or release proof",
+    "Final translator-job actual model/fallback unavailable in auditor scope"
+  ],
+  "evidence_retention": "New repository-only sd3r bundle awaiting parent commit; original bundles/source/translation/history untouched"
+}

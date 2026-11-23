@@ -2380,10 +2380,14 @@ def test_a_numeric_row_inside_an_open_block_is_not_charged_per_line(
     row = _numeric_rows(1, columns=8, start=1000)
     redactor = builtin._PipeRedactor([])
     redactor._in_key_block = True
-    start = time.process_time()
+    # `thread_time`, not `process_time`: the arm's question is THIS call's CPU,
+    # and process CPU also bills every other thread in the worker -- measured
+    # 18.4 ms -> 112 ms for the 140-row payload with four busy threads beside it,
+    # thread CPU unchanged (docs/TEST_TIME_ASSERTIONS.md, "Reviewed and kept").
+    start = time.thread_time()
     redactor.feed(row.encode())
     redactor.feed(b"", final=True)
-    cpu = time.process_time() - start
+    cpu = time.thread_time() - start
     assert spy.calls >= 1, "the body classifier was skipped, so this proves nothing"
     assert cpu < 0.5, f"one 65-character table row inside an open block cost {cpu:.3f} s of CPU"
 
@@ -2553,14 +2557,18 @@ def test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap() -> None:
     cheap by dropping that match would publish a credential rather than burn.
     """
     header = '"private_key": "' + _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    # `thread_time`, not `process_time`: the arm's question is THIS call's CPU,
+    # and process CPU also bills every other thread in the worker -- measured
+    # 18.4 ms -> 112 ms for the 140-row payload with four busy threads beside it,
+    # thread CPU unchanged (docs/TEST_TIME_ASSERTIONS.md, "Reviewed and kept").
     for columns in (5, 6, 8):
         rows = _numeric_rows(1, columns=columns, start=1000)
         with _bounded(
             _DENSE_WALK_BOUND_SECONDS, f"the table's block rule on a {columns}-column row"
         ):
-            start = time.process_time()
+            start = time.thread_time()
             scrubbed = redaction_shapes.scrub_shapes(f"{header}\n{rows}")
-            cpu = time.process_time() - start
+            cpu = time.thread_time() - start
         assert cpu < 0.05, f"an anchored {columns}-column row cost {cpu:.3f} s of CPU in the table"
         assert (
             REDACTION_MARKER in scrubbed
@@ -2568,9 +2576,9 @@ def test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap() -> None:
         assert rows in scrubbed, "only the header is a credential here; the row must survive"
     payload = f"{header}\n{_numeric_rows(140, columns=8, start=1000)}"
     with _bounded(_DENSE_WALK_BOUND_SECONDS, "the table's block rule on the 140-row payload"):
-        start = time.process_time()
+        start = time.thread_time()
         scrubbed = redaction_shapes.scrub_shapes(payload)
-        cpu = time.process_time() - start
+        cpu = time.thread_time() - start
     assert cpu < 0.5, f"the 140-row dense payload cost {cpu:.3f} s of CPU in the table"
     assert (
         REDACTION_MARKER in scrubbed
@@ -2611,10 +2619,14 @@ def test_the_short_arms_lookahead_is_load_bearing_on_its_own_population() -> Non
     # One sub-floor line, then the dense row: `{1,7}` then a full line behind a prefix.
     payload = f"{header}\nQw9z\n{_numeric_rows(1, columns=8, start=1000)}\n"
 
+    # `thread_time`, not `process_time`: the arm's question is THIS call's CPU,
+    # and process CPU also bills every other thread in the worker -- measured
+    # 18.4 ms -> 112 ms for the 140-row payload with four busy threads beside it,
+    # thread CPU unchanged (docs/TEST_TIME_ASSERTIONS.md, "Reviewed and kept").
     with _bounded(_DENSE_WALK_BOUND_SECONDS, "the shipped spelling on the short-mid payload"):
-        start = time.process_time()
+        start = time.thread_time()
         scrubbed = redaction_shapes.scrub_shapes(payload)
-        cpu = time.process_time() - start
+        cpu = time.thread_time() - start
     assert cpu < 0.05, f"the short-mid payload cost {cpu:.3f} s of CPU shipped"
     assert REDACTION_MARKER in scrubbed, "the short-mid payload's header stopped being masked"
 
@@ -3252,14 +3264,25 @@ class TestPlainWordValueIsMatchedOnWordBoundaries:
         masker = redaction_shapes.StreamMasker([PLAIN_WORD])
         assert masker.push(text, final=True) == f"a [redacted] store, un{PLAIN_WORD}ally\n"
 
-    def test_the_variable_store_registers_the_word_and_masks_it_as_a_word(
+    def test_the_shape_pass_masks_the_word_in_place_but_never_promotes_it(
         self, tmp_path: Path
     ) -> None:
-        """The real path: SCRUB ``PASSWORD=<word>``, never ``register_redaction`` by hand."""
+        """2026-11-13: an ordinary word a rule matched is masked THERE, never session-wide.
+
+        The promotion is what corrupted a header name in minervaai core-svc d20e5acb
+        (see ``redaction_shapes.is_ordinary_word_value``).
+        """
         store = VariableStore(cwd=str(tmp_path))
         first, _ = store.redact_with_report(f"PASSWORD={PLAIN_WORD}")
-        assert PLAIN_WORD not in first
-        assert PLAIN_WORD in store.redaction_values(), "premise: the shape pass registered it"
+        assert PLAIN_WORD not in first, "the in-place mask was lost"
+        assert store.redaction_values() == [], "an ordinary word was promoted session-wide"
+        assert store.redact(f"a {PLAIN_WORD} store") == f"a {PLAIN_WORD} store"
+
+    def test_a_known_word_secret_still_masks_as_a_word(self, tmp_path: Path) -> None:
+        """The other direction: a value the session KNOWS is a secret (the broker sink a
+        ``lop secret get`` retrieval registers through) keeps its word-boundary mask."""
+        store = VariableStore(cwd=str(tmp_path))
+        store.register_redaction(PLAIN_WORD)
         assert store.redact(f"a {PLAIN_WORD} store") == "a [redacted] store"
         prose = f"un{PLAIN_WORD}ally {PLAIN_WORD.capitalize()} {PLAIN_WORD.upper()}"
         assert store.redact(prose) == prose

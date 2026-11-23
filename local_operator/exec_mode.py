@@ -1188,6 +1188,12 @@ def run_exec(command: str | None, args: ExecArgs) -> int:
     to STDERR because stdout is the payload stream.
     """
     from local_operator.exec_startup import resolve_startup
+    from local_operator.secrets import access as secrets_access
+
+    # A `lop exec` started from a tool's shell hosts a NEW session (here, or in the
+    # ``--background`` worker spawned from this environment), so the tool's
+    # ``LOCAL_OPERATOR_SESSION_ID`` names its parent, not it (#3436 review R1-1).
+    secrets_access.forget_inherited_session_id()
 
     refusal = reject_detached_supervisor_fd(args)
     if refusal is not None:

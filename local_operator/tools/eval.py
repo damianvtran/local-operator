@@ -58,6 +58,8 @@ from typing import Any, Awaitable, Callable, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from local_operator import procstate
+from local_operator.agent_shell import AGENT_SHELL_ENV
+from local_operator.guardrails import spawned as guard_spawned
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_python as _scan_secret_cell
 from local_operator.harness.secret_sinks import steer_text as _secret_sink_steer
@@ -788,6 +790,13 @@ async def _spawn(
                 # tool's three arms. The worker is per session, so the id is
                 # this kernel's own for its whole life.
                 **session_id_env_injection(session_id),
+                # The bash tool's agent-descent marker, which the worker lacked:
+                # a cell's `subprocess.run(["lop", ...])` is as much an agent's
+                # call as a bash command, so every `in_agent_shell()` consumer
+                # (the exec/interactive refusals, the human-only owner-audit
+                # gate of `lop team-bridge holds`) must see it here too
+                # (#4251 security review S-1).
+                AGENT_SHELL_ENV: "1",
             },
         )
         spawn_options["env"] = env
@@ -808,25 +817,30 @@ async def _spawn(
     # `executable=` follows from the same helper: the argv-only rung is safe
     # precisely because the image is always supplied alongside the label.
     spawn_options["executable"] = executable
-    process = await asyncio.create_subprocess_exec(
-        # ``SAFE_PATH_FLAG`` even though this worker is the one child that WANTS
-        # the cwd importable: this spawn passes ``cwd=`` explicitly, so without
-        # the flag a session whose directory is a checkout of this project would
-        # load the harness protocol module from that checkout and could speak a
-        # different protocol version than the parent. The worker restores its
-        # own cwd for USER code after its own imports have resolved — see
-        # ``eval_worker._enable_cwd_imports``, which is what keeps
-        # ``import my_module`` working in a cell.
-        # ``argv0`` above is the process LABEL and replaces only argv[0]; the
-        # flag must follow it, since interpreter options are recognised only
-        # before ``-m``. Both properties are required on this one spawn.
-        argv0,
-        SAFE_PATH_FLAG,
-        "-u",
-        "-m",
-        "local_operator.tools.eval_worker",
-        **spawn_options,
-    )
+    # In flight until recorded (QA Q3, PR #3987): see ``spawned.spawning``.
+    with guard_spawned.spawning():
+        process = await asyncio.create_subprocess_exec(
+            # ``SAFE_PATH_FLAG`` even though this worker is the one child that WANTS
+            # the cwd importable: this spawn passes ``cwd=`` explicitly, so without
+            # the flag a session whose directory is a checkout of this project would
+            # load the harness protocol module from that checkout and could speak a
+            # different protocol version than the parent. The worker restores its
+            # own cwd for USER code after its own imports have resolved — see
+            # ``eval_worker._enable_cwd_imports``, which is what keeps
+            # ``import my_module`` working in a cell.
+            # ``argv0`` above is the process LABEL and replaces only argv[0]; the
+            # flag must follow it, since interpreter options are recognised only
+            # before ``-m``. Both properties are required on this one spawn.
+            argv0,
+            SAFE_PATH_FLAG,
+            "-u",
+            "-m",
+            "local_operator.tools.eval_worker",
+            **spawn_options,
+        )
+        # The kernel's spawning session, for the delete guard's holder attribution
+        # (review m1, PR #3987): every session's kernel shares the harness pid.
+        guard_spawned.record(process.pid, session_id, process)
     windows_job: int | None = None
     if procstate.is_windows():
         try:

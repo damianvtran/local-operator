@@ -1,0 +1,6 @@
+{
+ "tui.model_persistence.persist": "/model default lưu lựa chọn này cho các phiên mới",
+ "tui.model_persistence.settings": "/settings cũng sửa mô hình mặc định khi mở phiên",
+ "tui.model_persistence.saved": "chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved",
+ "tui.model_persistence.with_model": "mô hình: {label} — {routes}"
+}

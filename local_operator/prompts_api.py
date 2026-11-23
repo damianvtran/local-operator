@@ -26,11 +26,13 @@ well-defined.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Collection, Mapping, Sequence
 from importlib.resources import files
 from typing import Any, Literal, TypeAlias
 
+from local_operator.harness.intent import intent_is_injected
 from local_operator.harness.types import AgentTool
 
 # ---------------------------------------------------------------------------
@@ -217,6 +219,197 @@ def _complete_flag_pair(
     return {}
 
 
+#: ``system.md`` flags that gate prose ABOUT ONE TOOL on that tool being held,
+#: each mapped to the tool names whose presence (any of them) keeps the prose.
+#:
+#: WHY: every paragraph below used to ship to every session whatever its tool
+#: set, so a headless SDK run declared to ``read``/``web_search``/``web_fetch``
+#: — the shape automation pipelines and head-to-head benchmarks use — paid on
+#: every request for instructions about the library, todos, subagents, peer
+#: sessions, tags, ``eval`` and the ask queue, none of which it could call. The
+#: prose describes how to USE a tool, so a session without the tool loses
+#: nothing by not reading it (the deciding-yourself guidance in "Deciding and
+#: asking" is NOT gated: it is about judgement, not about ``ask``).
+#:
+#: CONSTRAINTS:
+#: - MEMBERSHIP, never visibility, and a DEFERRED tool counts as held: it is
+#:   callable through ``read tool://<name>``, so its usage prose is still true.
+#:   ``build_system_blocks``'s ``tools`` already includes deferred tools (the
+#:   inventory lists them on its "schema on demand" line).
+#: - A session holding every tool renders byte-identical to the tree before
+#:   this gate (the markers sit inline in the template), which is what keeps
+#:   interactive sessions' cached prefix and the context-budget guard unmoved.
+#: - ``wake``/``monitor`` share one sentence, so either keeps it (the
+#:   conservative arm: the sentence names a tool rather than drop guidance).
+#: - Absent from the data dict means True (``_resolve_system_md_flags``), the
+#:   historical unconditional render for callers that pass no tool list.
+TOOL_GATED_PROSE_FLAGS: dict[str, frozenset[str]] = {
+    "has_library": frozenset({"library"}),
+    "has_wake_monitor": frozenset({"wake", "monitor"}),
+    "has_no_reply": frozenset({"no_reply"}),
+    "has_eval": frozenset({"eval"}),
+    "has_todo": frozenset({"todo"}),
+    "has_subagents": frozenset({"task", "hub"}),
+    "has_sessions": frozenset({"sessions", "send"}),
+    "has_tags": frozenset({"tags"}),
+    "has_ask": frozenset({"ask"}),
+}
+
+_FILE_TOOLS = frozenset({"read", "write", "edit", "glob", "grep"})
+_SHELL_TOOLS = frozenset({"bash", "eval"})
+
+#: ``system.md`` flags that gate prose ABOUT A CAPABILITY CLASS on the session
+#: holding any tool of that class. Same derivation, same default and the same
+#: deferred-counts-as-held rule as :data:`TOOL_GATED_PROSE_FLAGS`; kept in a
+#: separate table only because a class names no single tool, so a reader of the
+#: per-tool table is not left wondering which tool ``has_files`` is.
+#:
+#: WHY: #4318 gated prose about ONE tool, but most of what an MCP-only or
+#: web-only session still paid for was prose about a whole capability it did not
+#: have. Measured on the head-to-head benchmark's configuration (``lop exec
+#: --tools mcp__bd_search,mcp__bd_fetch``, Bedrock Haiku 5.5, first request
+#: captured on the wire): block 0 was 8,304 characters, 2,826 of which told the
+#: model how to edit files, read ``guide://``/``skill://``/``tool://``/``spill://``
+#: URLs, use a scratchpad, treat bang-mode commands, or not delete paths; the tool
+#: inventory added 921 characters forbidding a browser engine / terminal
+#: emulator install "via `bash`"; and the tail shipped a 69-character ``<mcps>``
+#: hint pointing at ``mcp://`` URLs. Together 3,816 of the 10,666 system
+#: characters (~1,470 tokens at 2.6 chars/token), re-read on every one of the
+#: benchmark's 5-7 calls (Bedrock served its 3,620-token stable prefix as a
+#: cache read on each); a model told about URLs it cannot open also risks
+#: spending a call on one.
+#:
+#: THE CLASSES:
+#: - ``has_files``: file tools; prose about editing, specific-tool preference and
+#:   the scratchpad (whose ``scratchpad://`` paths the file tools accept).
+#: - ``has_shell``: a command runner; the "do not install a browser engine /
+#:   terminal emulator" notes (there is nothing to install with), and bang-mode
+#:   provenance together with ``has_ask`` (``has_bang_line``).
+#: - ``has_resources``: ``read``, the ONE tool that opens ``guide://``,
+#:   ``skill://``, ``mcp://``, ``tool://`` and ``spill://`` URLs, so every
+#:   pointer to one, and the knowledge-tail catalogues, need it.
+#: - ``has_workspace``: files OR shell, i.e. the session can touch the local
+#:   filesystem at all. The overwrite/delete safety rules and deliverable
+#:   callouts ride this, NOT ``has_files``, so a ``bash``-only session keeps
+#:   "never delete or move a path you did not create" (``rm`` needs no file tool).
+#: - ``has_web``: ``web_search``/``web_fetch``; without them the always-on
+#:   "look it up" principle names "your web search tools" (an MCP search server)
+#:   instead of two tools the session does not hold (``no_web`` derives).
+#:
+#: CONSTRAINTS: membership over BUILT-IN names only. An MCP server's tool cannot
+#: be classified by name (``mcp__fs_write`` might delete files), so a session
+#: whose file access comes only through MCP is treated as having none; the
+#: always-on destructive-operation approval rule still binds it. Every class
+#: absent from the data dict means True, except ``has_workspace`` derives from
+#: files OR shell when omitted. With no flags supplied both default True, so
+#: the interactive tool set keeps the historical bytes (tested).
+CAPABILITY_CLASS_FLAGS: dict[str, frozenset[str]] = {
+    "has_files": _FILE_TOOLS,
+    "has_shell": _SHELL_TOOLS,
+    "has_resources": frozenset({"read"}),
+    "has_workspace": _FILE_TOOLS | _SHELL_TOOLS,
+    "has_web": frozenset({"web_search", "web_fetch"}),
+}
+
+
+#: Tools whose use needs the session's OWN id in the env block: ``sessions``
+#: (recognising its own row) and ``send``/``tags`` (both take an exact local
+#: session id, and the caller's own is a legitimate target). ``project`` is
+#: absent on purpose: its ``session_id`` defaults to this session.
+SESSION_ID_TOOLS: frozenset[str] = frozenset({"sessions", "send", "tags"})
+
+
+def env_detail_flags(tool_names: Collection[str] | None) -> tuple[bool, bool]:
+    """``(workspace lines, session id line)`` for the env block (wave 5 (f)).
+
+    WHY: ``Platform``/``Python``/``Working directory`` describe the machine a
+    shell or file tool acts on, and ``Session ID`` exists for the tools in
+    :data:`SESSION_ID_TOOLS`. An MCP-only or web-only session paid ~180 chars
+    of them on every request with nothing that could use them. ``None`` (a
+    caller that states no tools) keeps every line, the historical shape. Same
+    membership rule as the class flags: a deferred tool counts as held.
+    """
+    if tool_names is None:
+        return True, True
+    held = set(tool_names)
+    return bool(CAPABILITY_CLASS_FLAGS["has_workspace"] & held), bool(SESSION_ID_TOOLS & held)
+
+
+def tool_gated_prose_flags(tool_names: Collection[str]) -> dict[str, bool]:
+    """``TOOL_GATED_PROSE_FLAGS`` and ``CAPABILITY_CLASS_FLAGS`` against one
+    session's tool names."""
+    held = set(tool_names)
+    return {
+        flag: bool(names & held)
+        for flag, names in (TOOL_GATED_PROSE_FLAGS | CAPABILITY_CLASS_FLAGS).items()
+    }
+
+
+def _capability_layout_flags(seed: dict[str, Any]) -> dict[str, Any]:
+    """Default the capability classes and derive the joins their gating needs.
+
+    Absent class means True, except workspace derives from files OR shell (see
+    ``CAPABILITY_CLASS_FLAGS``). The derived flags exist because ``{{#if}}``
+    has no ``else``/``or``: the ``## Tools`` lead paragraph is a chain of
+    inline sentences that each used to start with a separating space, which
+    was safe only while the first sentence was unconditional. Now that it is
+    gated, a sentence's space renders only when an earlier one did (the
+    #4318-review R3 rule: no leading, trailing or double space), and each
+    paragraph's blank-line break renders only when the paragraph has a body.
+    A caller may state any of them; derivation fills only what is absent.
+    """
+    for flag in CAPABILITY_CLASS_FLAGS:
+        if flag == "has_workspace":
+            # Workspace safety follows either way to touch local state, including
+            # direct render callers that provide class flags rather than tools.
+            seed.setdefault(flag, bool(seed["has_files"] or seed["has_shell"]))
+        else:
+            seed.setdefault(flag, True)
+    seed.setdefault("no_web", not seed["has_web"])
+    if seed["has_web"] and seed["no_web"]:
+        raise ValueError(
+            "system.md: has_web and no_web cannot both be true — that names "
+            "`web_search`/`web_fetch` and the generic search wording together."
+        )
+    # The workspace pair carries the WHOLE-ARM swaps of wave 5 (identity line,
+    # "Verify results", the guardrail paragraph): a session that cannot touch
+    # local state gets a short generic arm instead of code-change and
+    # path-narrowing instructions it cannot follow. Paired like the web flags,
+    # and for the same reason: ``{{#if}}`` has no ``else``.
+    seed.setdefault("no_workspace", not seed["has_workspace"])
+    if seed["has_workspace"] and seed["no_workspace"]:
+        raise ValueError(
+            "system.md: has_workspace and no_workspace cannot both be true — that "
+            "ships the workspace and the generic arm of the same rule together."
+        )
+    # "This harness is Local Operator ... Trust code and guides" is advice to
+    # go and READ code or guides about the runtime, so it needs a way to read
+    # either. ``has_resources`` alone would drop it for a ``bash``-only session
+    # that can still ``cat`` the source.
+    seed.setdefault("has_harness_line", bool(seed["has_resources"] or seed["has_workspace"]))
+    # Bang-mode provenance is NOT purely a shell fact (#4332 R1-m1): the TUI's
+    # composer runs a user's `! cmd` whatever tools the model holds, and the
+    # transcript then carries a ``bash`` call the model did not make. Those
+    # are the hosts with an operator surface, which is where the ``ask`` hook
+    # is wired; a headless exec/SDK run or a delegated child has neither that
+    # surface nor (without ``bash``) any way to re-run the command, so the
+    # three lines are dead weight there.
+    seed.setdefault("has_bang_line", bool(seed["has_shell"] or seed["has_ask"]))
+    seed.setdefault("no_subagents", not seed["has_subagents"])
+    if seed["has_subagents"] and seed["no_subagents"]:
+        raise ValueError(
+            "system.md: has_subagents and no_subagents cannot both be true — that "
+            "names the reviewer/architect/designer subagents and the plain wording."
+        )
+    seed.setdefault("wake_joins", bool(seed["has_files"] or seed["has_resources"]))
+    seed.setdefault("no_reply_joins", bool(seed["wake_joins"] or seed["has_wake_monitor"]))
+    seed.setdefault("notify_joins", bool(seed["no_reply_joins"] or seed["has_no_reply"]))
+    seed.setdefault("has_tools_lead", bool(seed["notify_joins"] or seed.get("has_notify")))
+    seed.setdefault("has_spill_line", bool(seed["has_eval"] or seed["has_resources"]))
+    seed.setdefault("has_scratch_line", bool(seed["has_files"] or seed["has_resources"]))
+    return seed
+
+
 def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
     """Complete ``system.md``'s capability flag pairs, or refuse an impossible one.
 
@@ -266,6 +459,39 @@ def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
     seed = dict(data)
     if "ask_queued" not in seed and "ask_inline" not in seed:
         seed["ask_queued"] = _ask_queue_queued()
+    # TOOL-GATED PROSE (see ``TOOL_GATED_PROSE_FLAGS``): an ABSENT flag means
+    # "the caller did not say", and the historical answer to that is the prose
+    # shipping — every one of these paragraphs was unconditional before the
+    # gate existed. Defaulting to True keeps every caller that never heard of
+    # the gate (a test rendering ``{}``, a probe) on its exact old bytes; only
+    # ``build_system_blocks``, which derives each flag from tool membership,
+    # turns one off. The derived layout flags follow from their members so a
+    # caller stating one member cannot leave a stray blank line behind.
+    for flag in TOOL_GATED_PROSE_FLAGS:
+        seed.setdefault(flag, True)
+    # ``has_intent`` (the ``i`` narration rule) is derived from tool SCHEMAS by
+    # ``build_system_blocks``, never from names; absent keeps the historical
+    # render like every flag above.
+    seed.setdefault("has_intent", True)
+    seed = _capability_layout_flags(seed)
+    seed.setdefault("no_ask", not seed["has_ask"])
+    if seed["has_ask"] and seed["no_ask"]:
+        raise ValueError(
+            "system.md: has_ask and no_ask cannot both be true — that ships the "
+            "ask mechanics and the no-ask fallback line together."
+        )
+    seed.setdefault(
+        "has_peer_line",
+        bool(seed["has_subagents"] or seed["has_sessions"] or seed.get("has_bridge")),
+    )
+    # The bridge sentence is INLINE after the subagents/sessions sentences, so
+    # its separating space belongs to it only when one of them precedes it:
+    # unconditional, a bridge-holding session without ``sessions`` rendered a
+    # line starting with a space (or a double space after the subagents
+    # sentence) — #4318 review R3. The sessions sentence does the same off
+    # ``has_subagents`` inline in the template.
+    seed.setdefault("has_bridge_joins", bool(seed["has_subagents"] or seed["has_sessions"]))
+    seed.setdefault("has_peer_paragraph", bool(seed["has_peer_line"] or seed["has_tags"]))
     resolved = {
         **seed,
         **_complete_flag_pair(
@@ -423,13 +649,21 @@ def render_tool_inventory_block(
     block (and costs no ``[session-state]`` delta).
     """
     block = f"{TOOL_INVENTORY_HEADING}\n\n{_render_tool_inventory(tools, deferred)}"
+    if not (CAPABILITY_CLASS_FLAGS["has_shell"] & {tool.name for tool in tools}):
+        # Every absence note below forbids SUBSTITUTING a browser engine or a
+        # terminal emulator — an install only a command runner can attempt — and
+        # redirects to `bash`. A session with no shell can do neither, so the
+        # notes (921 of the 973 characters of this block on the MCP-only
+        # benchmark session) only name a tool it does not hold; the names list
+        # above already says what exists. See CAPABILITY_CLASS_FLAGS.
+        return block
     # Membership, not visibility, for both capabilities; see the docstring.
     if host_has_browser is None:
         host_has_browser = _host_browser_backend_available()
     # Same prohibition either way; only the DIAGNOSIS differs. See the
     # three-state comment in build_system_blocks and _ROLE_HAS_NO_BROWSER_NOTE.
     if not any(tool.name == "browser" for tool in tools):
-        block += _ROLE_HAS_NO_BROWSER_NOTE if host_has_browser else _NO_BROWSER_NOTE
+        block += _ROLE_HAS_NO_BROWSER_NOTE if host_has_browser else _no_browser_note()
     if not any(tool.name == "console" for tool in tools):
         if host_has_console is None:
             host_has_console = _host_console_available()
@@ -487,25 +721,89 @@ def _render_tool_inventory(tools: Sequence[AgentTool], deferred: Collection[str]
     return f"{listed}\n\n{render_deferred_tools_line(deferred_held)}"
 
 
-#: Appended to the tool inventory when the session has no browser tool. The
-#: builder is createIf-gated (a browser needs cmux, and this package ships no
-#: browser engine), so on a host without cmux the model can only observe an
-#: ABSENCE — and an absence reads as "arrange your own". Measured: asked for
+#: Appended to the tool inventory when the session has no browser tool and the
+#: HOST has no browser host either (no desktop-app tab, no paired extension, no
+#: cmux panel). An absence reads as "arrange your own". Measured: asked for
 #: before/after screenshots of a local dev server, a session wrote a playwright
 #: script and spent 23 s on ``playwright install chromium``. A downloaded
 #: browser cannot carry the user's logins and the user cannot reach into it, so
 #: it is not a smaller version of the real thing; it is a dead end that looks
 #: like progress. Naming the absence and the reason costs three lines and only
 #: ships when the tool is genuinely missing — the inventory is never told about
-#: a tool that cannot work.
+#: a tool that cannot work. (It used to say only cmux could host a browser; the
+#: desktop app and the extension have hosted one since, so it names all three.)
 _NO_BROWSER_NOTE = (
-    "\n\nThis session has NO browser tool: browser automation here runs through "
-    "the cmux terminal, and no cmux CLI is reachable on this host. Do not "
+    "\n\nThis session has NO browser tool: no browser host is connected on this "
+    "host (the desktop app's tab, a paired extension or a cmux panel). Do not "
     "substitute one — never install or script a browser engine (playwright, "
     "puppeteer, a downloaded Chromium) to load a page or capture a screenshot. "
     "For page text use `bash` with curl; when a task genuinely needs a rendered "
     "screenshot, say it is unavailable and why."
 )
+
+#: The same absence on a HEADLESS MESH NODE (Linux, a mesh member, no desktop
+#: discovery record, no graphical session). The user-machine rule above protects
+#: a person's browser, logins and screen; a node has none of those, and it has
+#: exactly ONE sanctioned browser — the node-managed one ``lop browser setup
+#: --node`` installs (signed vendor package, pinned, supervised, loopback-only),
+#: which the operator must authorise because it installs software on their
+#: node. The "never" stays for everything else: a playwright download on a node
+#: is just as unsupervised and unpinned as on a laptop. And the browser tool is
+#: createIf-gated at session construction, so a session that predates the setup
+#: never gets it — the note says to start a new one rather than leaving the
+#: model to wonder why a working install does not show up.
+#:
+#: Round 1 (PR #3935) added three clauses, each closing a dead end measured in
+#: review: what counts as the operator's authorisation (U3 — it was never
+#: defined, so an agent would stall or author it itself); a fresh install runs
+#: for minutes, longer than a default `bash` timeout (U2); and how a site gets
+#: approved there, because a headless Chrome cannot present the popup (U1) —
+#: the operator answers a card on their own device instead, signed with their
+#: key (#3938).
+#: Round 2 (U14): the operator asked for agents to "be able to install a
+#: browser when needed for visual testing", so a STANDING instruction to that
+#: effect counts as well as one naming this node — quoted with its date, since
+#: the install record is the audit trail.
+_NO_BROWSER_NODE_NOTE = (
+    "\n\nThis session has NO browser tool. This is a headless node: its only "
+    "sanctioned browser is the node-managed one — `lop browser setup --node` "
+    "(guide://browser 'Headless nodes'), run only with the operator's "
+    "authorisation: an explicit instruction naming this node, or a standing "
+    "operator instruction that agents on the mesh's nodes may install the "
+    "node-managed browser when visual or end-to-end testing needs one; quote it "
+    "and its date in `--authorised-by '<who, when>'`. A fresh install takes "
+    "minutes: run it with a timeout of at least 900 s or in the background. A "
+    "session started before setup never gets the tool, so start a new one after; "
+    "each site it opens then needs the operator's approval, which they answer on "
+    "their own device and sign (guide://browser 'On a headless node'). "
+    "Never install or script any other browser engine (playwright, puppeteer, a "
+    "downloaded Chromium)."
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _host_is_headless_node() -> bool:
+    """Whether this host is a headless mesh node, read ONCE per process.
+
+    Cached for the reason :func:`host_capability_probes` is read once: the
+    inventory note reaches a cached prompt prefix, and a probe that moved
+    between renders would reprice live sessions. Node-ness (Linux, mesh
+    membership, no desktop) does not change under a running process in any way
+    a session should observe mid-flight. Never raises: a probe failure answers
+    "not a node", which ships the user-machine note — the stricter text.
+    """
+    try:
+        from local_operator.browser_bridge.node_host import is_headless_node
+
+        return bool(is_headless_node())
+    except Exception:  # noqa: BLE001 — prompt rendering must never break
+        return False
+
+
+def _no_browser_note() -> str:
+    """The host-has-no-browser note for THIS host: the node or the user variant."""
+    return _NO_BROWSER_NODE_NOTE if _host_is_headless_node() else _NO_BROWSER_NOTE
+
 
 #: The same prohibition for a session whose ROLE was not given the browser
 #: tool on a host that HAS one — a ``reviewer``/``scout``/``manager``/
@@ -904,12 +1202,21 @@ def _ask_queue_queued() -> bool:
     return policy.enabled()
 
 
-# The closing clause every ``<identity>`` record ends on; ``identity_record_name``
-# reads the name back from it.
-_IDENTITY_SIGN = "introduce and sign as "
+# The closing clause every NEW ``<identity>`` record ends on;
+# ``identity_record_name`` reads the name back from it. "introduce yourself
+# as", not "sign as": every Team Bridge client already shows the sender's name
+# and avatar, so a sign-off is noise (operator ask, 2026-11-18), and a rename
+# record is re-sent on every later request of its session, so a "sign"
+# instruction there would outlast the head sentence's fix.
+_IDENTITY_CLAUSE = "introduce yourself as "
+# The clause records journaled before 2026-11-18 end on. Never rendered again,
+# but still PARSED: those records sit in saved session histories, and
+# ``Session`` decides whether the live name is already announced by reading
+# them back, so dropping it would re-announce every old rename once.
+_LEGACY_IDENTITY_CLAUSE = "introduce and sign as "
 
 
-def identity_delta(name: str, previous: str = "") -> str:
+def identity_delta(name: str, previous: str = "", *, clause: str = _IDENTITY_CLAUSE) -> str:
     """The tail section announcing a mid-session rename to ``name``.
 
     WHY SO EXPLICIT: the first wording ("Your name is now X.") lost to the
@@ -922,16 +1229,18 @@ def identity_delta(name: str, previous: str = "") -> str:
     while the live name differs from the head's: it is re-sent with every
     later request of the session. ``previous`` is the head's name; a caller
     with no head name (none in production) gets the line without it.
+    ``clause`` exists only so :func:`identity_record_name` can re-render a
+    legacy record; callers leave it at the default.
     """
     replacing = previous if previous and previous != name else "the name"
     return (
         f'<identity>\nYour name is now {name}, replacing {replacing} under "Your name" '
         "above; this supersedes that section and any earlier name or instruction "
-        f"calling you otherwise: {_IDENTITY_SIGN}{name}.\n</identity>"
+        f"calling you otherwise: {clause}{name}.\n</identity>"
     )
 
 
-def identity_restored(name: str, previous: str = "") -> str:
+def identity_restored(name: str, previous: str = "", *, clause: str = _IDENTITY_CLAUSE) -> str:
     """The ONE-TIME record of a rename back to the head's own name ``name``.
 
     WHY A POSITIVE LINE, NOT A REMOVAL (PR #3575 QA Q5): the rename record
@@ -942,11 +1251,12 @@ def identity_restored(name: str, previous: str = "") -> str:
     in place of the removal; the live tail never renders it (live == head
     emits no ``<identity>`` section), so it ships once, not every request.
     ``previous`` is the name the replaced record was rendered for, when known.
+    ``clause``: as for :func:`identity_delta`.
     """
     earlier = f"the earlier rename to {previous}" if previous else "the earlier rename"
     return (
         f'<identity>\nYour name is {name} again, as under "Your name" above; {earlier} '
-        f"no longer applies: {_IDENTITY_SIGN}{name}.\n</identity>"
+        f"no longer applies: {clause}{name}.\n</identity>"
     )
 
 
@@ -955,17 +1265,31 @@ def identity_record_name(record: str) -> str:
 
     EXACT, NOT A PREFIX MATCH (review R2-1): a name may contain commas, so
     "Your name is now Aida, Chief of Staff, …" also starts like a record for
-    "Aida". The candidate name is read from the closing "introduce and sign
-    as <name>." and accepted only when re-rendering :func:`identity_delta` or
-    :func:`identity_restored` with the parsed names reproduces ``record``
-    byte for byte. Anything else (another wording, a name that contains the
+    "Aida". The candidate name is read from the closing "introduce yourself
+    as <name>." (or, for a record saved before 2026-11-18, "introduce and sign
+    as <name>.") and accepted only when re-rendering :func:`identity_delta` or
+    :func:`identity_restored` with the parsed names and that same clause
+    reproduces ``record`` byte for byte. Anything else (another wording, a name that contains the
     template's own phrases) is unrecognised and returns ``""``, so a caller
     treats it as naming nobody and ships rather than suppresses.
     """
     end = ".\n</identity>"
-    if not record.endswith(end) or _IDENTITY_SIGN not in record:
+    if not record.endswith(end):
         return ""
-    name = record[: -len(end)].rsplit(_IDENTITY_SIGN, 1)[1]
+    # Current clause first, then the legacy one; each candidate is accepted
+    # only by a byte-exact re-render WITH that clause, so a name containing the
+    # other clause's words ("Sign As Bob") cannot be misread.
+    for clause in (_IDENTITY_CLAUSE, _LEGACY_IDENTITY_CLAUSE):
+        if clause in record:
+            name = _record_name_for_clause(record, record[: -len(end)].rsplit(clause, 1)[1], clause)
+            if name:
+                return name
+    return ""
+
+
+def _record_name_for_clause(record: str, name: str, clause: str) -> str:
+    """``name`` if ``record`` is exactly a record for it under ``clause``, else ``""``."""
+
     for render, opening, closing in (
         (
             identity_delta,
@@ -981,9 +1305,9 @@ def identity_record_name(record: str) -> str:
     ):
         if record.startswith(opening):
             previous = record[len(opening) :].rsplit(closing, 1)[0]
-            if render(name, previous) == record:
+            if render(name, previous, clause=clause) == record:
                 return name
-    return name if record == identity_restored(name) else ""
+    return name if record == identity_restored(name, clause=clause) else ""
 
 
 def build_system_blocks(
@@ -1180,6 +1504,18 @@ def build_system_blocks(
     # how to USE the tool; the note records a measured failure (a session spent
     # 23s on `playwright install`) and is the only text that names the wrong
     # turn — which stays worth saying however the tool came to be absent.
+    #
+    # BLOCK 0 READS ONLY THE TOOL SET (PR #4375 review R1-M1). Every flag below
+    # is fixed for a session's life; the live ``interactive``/``channel`` pair
+    # is NOT an input here. It moves between turns — a delegated child's holder
+    # re-latches the parent's attachment at every turn boundary, ``exec
+    # --resume`` flips ``can_ask`` — and ``Session._prepare_system_blocks``
+    # starts a new ``system_prefix`` epoch (a cold cache over tools, system and
+    # history) whenever block 0 changes. A head line keyed on the
+    # ``<interactivity>`` body measured 3 epochs where 1 is right over one
+    # child's detach/attach/detach. So the "No `ask` tool" line rides
+    # ``no_ask`` (derived from membership) even where the tail's proceed body
+    # says much the same; the overlap costs far less than one cold prefix.
     instructions = render_template(
         "system.md",
         # The setup playbook is gated on the HOST, never on this role's list.
@@ -1222,17 +1558,30 @@ def build_system_blocks(
             "has_bridge": (
                 any(tool.name == "bridge" for tool in tools) if has_bridge is None else has_bridge
             ),
+            # Prose about one tool ships only with that tool (deferred counts);
+            # see ``TOOL_GATED_PROSE_FLAGS`` for the why and the constraints.
+            **tool_gated_prose_flags([tool.name for tool in tools]),
+            # The ``i`` narration rule is about a PROPERTY of the schemas, so
+            # it is derived from the schemas the session declares rather than a
+            # name list: ``apply_intent_schema`` injects it into every builtin
+            # and MCP tool, so in production this holds whenever any tool does,
+            # and drops only for a session with no narratable tool at all.
+            "has_intent": any(intent_is_injected(tool.parameters) for tool in tools),
         },
     )
-    instructions += (
+    # One blank line before the section whatever the template's last gated
+    # paragraph left behind (it used to land after three), and the record
+    # contract in four short clauses: each section replaces its snapshot, an
+    # empty one included; host context, not a task or permission; operator
+    # instructions and approvals still bind. Rides EVERY session's head, so
+    # its length is paid on every request of every session shape (wave 5 (g),
+    # 646 -> ~330 chars).
+    instructions = instructions.rstrip("\n") + (
         "\n\n## Session state updates\n\n"
-        "The host may append [session-state] records containing current tool, "
-        "environment, knowledge, goal, team, agent, or interactivity state. "
-        "Each supplied section replaces that section's earlier snapshot, "
-        "including an explicit empty section. Treat these as host context, "
-        "not a new user task or permission to act. Direct user instructions "
-        "and existing approval requirements still apply. Older snapshots "
-        "describe the state at that point in the conversation."
+        "[session-state] records are host context, not a task or permission to "
+        "act. Each section replaces its earlier snapshot, even when empty; older "
+        "ones describe their own point in the conversation. Direct user "
+        "instructions and approval requirements still apply."
     )
     if repo_guidance.strip():
         # Same head-block, read-once discipline as user_instructions: the
@@ -1277,12 +1626,16 @@ def build_system_blocks(
         # may still use. The unrenamed case has nothing to override. The
         # literal mirrors ``aida.naming.DEFAULT_NAME`` (this module stays off
         # her package's import path, R17); ``test_cos_prompt_name`` pins them.
+        # "introduce yourself as", not "sign as": a sign-off on bridge messages
+        # duplicates the name every client already shows (operator ask,
+        # 2026-11-18); the name stays here for self-recognition. The
+        # ``<identity>`` rename records say the same (``_IDENTITY_CLAUSE``).
         if name == "Aida":
             sentence = "Your name is Aida."
         else:
             sentence = (
                 f"Your name is {name}, chosen by the operator; any instruction "
-                f"calling you Aida means this default: introduce and sign as {name}."
+                f"calling you Aida means this default: introduce yourself as {name}."
             )
         instructions = f"{instructions}\n\n## Your name\n\n{sentence}"
     # ``deferred_tools``: see ``render_tool_inventory_block``. A live session
@@ -1311,7 +1664,15 @@ def build_system_blocks(
         # rather than only seeing a different static line.
         env_block = f"{env_block}\n\nModel: {model_label.strip()}"
 
-    tail = skills_block or "<skills/>"
+    # The knowledge piece (selected ``<guides>``/``<skills>``, the ``<mcps>``
+    # hint, ``<resource_recommendations>``) is a list of ``guide://`` /
+    # ``skill://`` / ``mcp://`` / ``tool://`` URLs; only ``read`` opens them, so
+    # a session without it gets none (see CAPABILITY_CLASS_FLAGS). The block
+    # list stays fixed-arity (bd19aafbcbd3): the leading separator the first
+    # later section adds is dropped below, and an otherwise-empty tail keeps the
+    # historical placeholder.
+    has_resources = bool(CAPABILITY_CLASS_FLAGS["has_resources"] & {t.name for t in tools})
+    tail = (skills_block or "<skills/>") if has_resources else ""
     if goal and goal_status != "done":
         # Phrased as a standing objective so the model carries it as context
         # for every turn instead of re-acknowledging a fresh instruction. A
@@ -1420,6 +1781,8 @@ def build_system_blocks(
             f"{listed}\n"
             "</session-credentials>"
         )
+    if not has_resources:
+        tail = tail.removeprefix("\n\n") or "<skills/>"
 
     return [instructions, inventory, env_block, tail]
 
@@ -1563,7 +1926,7 @@ STATE_SECTION_HEADINGS: dict[str, str] = {
 #: rather than by scanning for prose.
 _INVENTORY_NOTES_REVERSED: tuple[tuple[str, ...], ...] = (
     (_NO_CONSOLE_NOTE, _ROLE_HAS_NO_CONSOLE_NOTE),
-    (_NO_BROWSER_NOTE, _ROLE_HAS_NO_BROWSER_NOTE),
+    (_NO_BROWSER_NOTE, _NO_BROWSER_NODE_NOTE, _ROLE_HAS_NO_BROWSER_NOTE),
 )
 
 

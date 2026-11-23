@@ -572,3 +572,28 @@ async def test_legacy_pair_wake_is_not_a_conversation_card(tmp_path):
         assert PENDING_CARD not in rendered
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("kind", "expected"), [("channel", "channel"), (None, None), (7, None)])
+async def test_session_fetch_carries_the_hub_conversation_kind(tmp_path, kind, expected):
+    """``Session._fetch_pending_body`` reads ``conversation_kind`` off the body
+    response (pinned in the body-response fixture) so the frame can carry the
+    channel participation rule; a missing or non-string value is "did not say"."""
+
+    class Kinded(FakeBridgeClient):
+        async def conversation_body(self, *args, **kwargs):
+            answer = await super().conversation_body(*args, **kwargs)
+            if kind is not None:
+                answer["conversation_kind"] = kind
+            return answer
+
+    cfg = tmp_path / "cfg"
+    _store(cfg)
+    session = _session(tmp_path, CapturingStream([]), _runtime(cfg, Kinded()))
+    try:
+        fetched = await session._fetch_pending_body(CONVERSATION_ID, MESSAGE_ID)
+        assert fetched is not None
+        assert fetched.conversation_kind == expected
+    finally:
+        await session.dispose()

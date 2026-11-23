@@ -291,6 +291,60 @@ async def test_a_real_turn_streams_on_the_same_engine(scratch: SessionRoots) -> 
     assert Path(session.transcript_path).exists(), "a completed turn has written the transcript"
 
 
+@pytest.mark.asyncio
+async def test_a_declared_inventory_narrows_block_zero_not_just_block_one(
+    scratch: SessionRoots,
+) -> None:
+    """REGRESSION: the factory's block provider closed over the PRE-narrowing
+    tool list, so a session declared to three tools still shipped the browser
+    playbook (and library/todo/subagent/ask prose) in block 0 while block 1 said
+    the tool was not given. Block 0 must follow the session's live tool set —
+    before the first turn, so the frozen prefix carries the narrowed shape."""
+    declared = ("read", "web_search", "web_fetch")
+    async with sdk.open_session(
+        _mock_spec(approvals=ApprovalPolicy.declared(list(declared))), roots=scratch
+    ) as session:
+        session = cast(Any, session)
+        assert set(session.tool_inventory) == set(declared)
+        blocks = await session._prepare_system_blocks()
+        head = blocks[0]
+        for absent in (
+            "Browser work goes through the `browser` tool",
+            "Interactive terminal work (a TUI, REPL, installer, prompt)",
+            "## Library",
+            "Keep the todo list honest",
+            "Subagents: `task` delegates",
+            "Other `lop` sessions:",
+            "Session tags (`tags`)",
+            "`eval` persists Python state",
+            "call\n`no_reply` and write nothing",
+            "Reach for `ask` only when",
+            "Once that bar is met, `ask` is the only channel",
+        ):
+            assert absent not in head, f"block 0 still carries prose for an absent tool: {absent!r}"
+        assert "No `ask` tool in this session: decide yourself" in head
+        # The deciding-yourself guidance is judgement, not tool usage: it stays.
+        assert "Deciding is your job" in head
+        assert "An instruction already given is standing authorization." in head
+        # Block 0 and block 1 no longer contradict each other about the browser.
+        assert "`read` elided output at its `spill://` handle" in head
+
+
+@pytest.mark.asyncio
+async def test_an_undeclared_session_keeps_the_tool_gated_prose(scratch: SessionRoots) -> None:
+    """The control for the test above: the same SDK path without a declaration
+    holds library/todo/task/eval, so their prose is still rendered."""
+    async with sdk.open_session(_mock_spec(), roots=scratch) as session:
+        session = cast(Any, session)
+        held = set(session.tool_inventory)
+        assert {"library", "todo", "task", "eval"} <= held
+        head = (await session._prepare_system_blocks())[0]
+        assert "## Library" in head
+        assert "Keep the todo list honest" in head
+        assert "Subagents: `task` delegates" in head
+        assert "`eval` persists Python state" in head
+
+
 # --- approval policy -------------------------------------------------------------
 
 
@@ -623,6 +677,8 @@ async def test_spawn_resume_skips_the_warm_step(
         {"goal": "finish"},
         {"approvals": ApprovalPolicy.auto()},
         {"yolo": True, "approvals": ApprovalPolicy.auto()},
+        {"mcp_ready_timeout_s": None},
+        {"mcp_ready_timeout_s": 5.0},
     ],
 )
 async def test_spawn_refuses_state_the_spawn_contract_cannot_deliver(
@@ -1083,13 +1139,17 @@ def test_public_surface_is_pinned() -> None:
         "SessionSpecError",
         "SteerErrand",
         "ViewerSessionProtocol",
+        "VerifierEvidence",
+        "VerifierEvidenceItem",
         "WakeErrand",
         "WarmErrand",
         "decode_output",
         "deliver",
         "events",
+        "format_event_trace",
         "open_session",
         "spawn_session",
+        "trace_events",
         "SessionProtocol",
     ]
     for name in sdk.__all__:
@@ -1111,6 +1171,7 @@ def test_public_surface_is_pinned() -> None:
         ("roots", K),
         ("mode", K),
         ("allow_multi_root", K),
+        ("verbose", K),
     ]
     assert params(sdk.spawn_session) == [
         ("spec", P),
@@ -1127,6 +1188,8 @@ def test_public_surface_is_pinned() -> None:
         ("allow_multi_root", K),
     ]
     assert params(sdk.events) == [("session", P)]
+    assert params(sdk.format_event_trace) == [("event", P)]
+    assert params(sdk.trace_events) == [("session", P), ("logger", K), ("stream", K)]
 
 
 # --- output contract enforcement ---------------------------------------------------
@@ -1187,6 +1250,36 @@ async def test_spawn_refuses_output_enforcement_with_a_named_remedy(
             roots=scratch,
             errand=launch_mod.PromptErrand(text="go"),
         )
+
+
+@pytest.mark.parametrize("timeout", [None, 5.0])
+def test_attach_refuses_a_first_prompt_mcp_wait_it_could_never_apply(timeout: Any) -> None:
+    """The wait runs in the OWNER's turn loop; a viewer's value would be inert."""
+    with pytest.raises(SessionSpecError, match="mcp_ready_timeout_s"):
+        sdk._refuse_attach_extras(SessionSpec(resume="abc123def456", mcp_ready_timeout_s=timeout))
+    # The default is what a spec that never mentioned it carries: accepted.
+    sdk._refuse_attach_extras(SessionSpec(resume="abc123def456"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "policy", "bound"),
+    [
+        ({}, "all", 30.0),
+        ({"mcp_ready_timeout_s": 4}, "all", 4.0),
+        ({"mcp_ready_timeout_s": None}, "off", None),
+    ],
+)
+async def test_open_session_hands_the_first_prompt_mcp_wait_to_the_session(
+    scratch: SessionRoots, overrides: dict[str, Any], policy: str, bound: float | None
+) -> None:
+    """Shape only: the SDK sets the session's first-turn MCP policy; the wait
+    itself is the session's gate (``test_declared_mcp_ready.py`` pins it, and
+    ``tests/e2e/test_sdk_first_prompt_mcp_ready_e2e.py`` drives it for real)."""
+    async with sdk.open_session(_mock_spec(**overrides), roots=scratch) as session:
+        session = cast(Any, session)
+        assert session._first_turn_mcp_wait == policy
+        assert session._first_turn_mcp_timeout_s == bound
 
 
 def test_attach_refuses_output_enforcement() -> None:
@@ -1295,6 +1388,9 @@ def sdk4_boundary(tmp_path, monkeypatch):
 
         def set_approval_handler(self, gate):
             state.approval_handler = gate
+
+        def set_first_turn_mcp_wait(self, timeout_s):
+            state.mcp_ready_timeout_s = timeout_s
 
     state.session = Session()
     state.cause = session_factory.HostingNotConfiguredError(_SDK4_OPAQUE)
@@ -1766,7 +1862,8 @@ async def test_sdk4_pre_root_refusals_never_construct_or_read_locale(
     source_calls = []
 
     def source_only(code, params, *, locale=None):
-        # Spec input diagnostics are keyed but stay English before isolation;
+        # Spec input diagnostics are keyed and render in the ACTIVE locale
+        # (English here: the autouse fixture restores it); before isolation
         # they must not resolve configuration or construct a scoped manager.
         assert locale == "en"
         source_calls.append(code)

@@ -748,8 +748,18 @@ async def test_the_ladder_is_bounded_and_stops_when_nothing_can_deliver(
         session_id = handle._session_id_for_resume()
         token = _publish("complete", session_id)
         handle._schedule_completion_announce()
-        await _until(lambda: len(calls) >= 3)
-        await asyncio.sleep(0.2)  # any further retry would land inside this
+        # Wait for the LADDER to stop, not for the third banner call and not for
+        # a fixed dwell. `len(calls) >= 3` goes true as the third attempt ENTERS
+        # its sink, before `_announce_completion` runs `release_delivery`, so the
+        # claim read below raced that release (CI job 132338398281, run
+        # 43558123292: "a failed banner must not spend the claim"). A `sleep` only
+        # narrows that race under load. `_ladder_exhausted` awaits the attempt
+        # tasks, so the handback has landed when it returns; and because the
+        # successor is stored in `_completion_task` BEFORE a rung returns, a slot
+        # that still holds the finished task also proves no 4th attempt was
+        # scheduled, so no extra dwell is needed for the "ran past its bound"
+        # check. The count assertion below pins the rungs the wait cannot.
+        await _ladder_exhausted(handle)
         assert len(calls) == 3, f"the ladder ran past its bound: {len(calls)} attempts"
         assert len(serving_module._COMPLETION_RETRY_DELAYS_S) == 2
         assert _delivered(session_id, token) is False, "a failed banner must not spend the claim"
@@ -964,3 +974,58 @@ async def test_only_her_banner_asks_for_a_durable_click(
         assert seen[0]["durable_click_s"] > 3600, "must outlive a morning"
     else:
         assert "durable_click_s" not in seen[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("phone_emits", "expected"), [(True, False), (False, True)])
+async def test_a_mobile_origin_completion_is_the_phones_while_it_would_emit(
+    tmp_path: Path, monkeypatch, banners, phone_emits, expected
+) -> None:
+    """ADR 0009 §2 footnote 1: the desktop stays silent for a mobile-origin
+    completion only while the phone would be told (``phone_would_emit``, the
+    predicate the push worker asks); with no phone to tell, rung 4 still speaks,
+    so the item is never silent on every surface. SETTLED without a claim: the
+    unseen mark stays for the sidebar."""
+    import uuid
+
+    from local_operator.notifications import routing as push_routing
+
+    monkeypatch.setattr(push_routing, "phone_would_emit", lambda state, root, **_: phone_emits)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    calls, _state = banners
+    try:
+        session_id = handle._session_id_for_resume()
+        token = str(uuid.uuid4())
+        AttentionStore(config_dir() / "attention.db").publish(
+            f"session/{session_id}", token, "a1", "complete", origin="mobile"
+        )
+        await asyncio.to_thread(handle._announce_completion)
+        assert bool(calls) is expected, calls
+        assert _delivered(session_id, token) is expected
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_origin_completion_never_consults_the_phone(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """The negative control: a non-mobile row banners on the desktop as before,
+    even when a phone would have been told."""
+    import uuid
+
+    from local_operator.notifications import routing as push_routing
+
+    monkeypatch.setattr(push_routing, "phone_would_emit", lambda state, root, **_: True)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    calls, _state = banners
+    try:
+        session_id = handle._session_id_for_resume()
+        token = str(uuid.uuid4())
+        AttentionStore(config_dir() / "attention.db").publish(
+            f"session/{session_id}", token, "a1", "complete", origin="desktop"
+        )
+        await asyncio.to_thread(handle._announce_completion)
+        assert calls, "the desktop banners its own work"
+    finally:
+        await session.dispose()

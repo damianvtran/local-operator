@@ -1,0 +1,35 @@
+{
+  "record_reference": "i18n/audits/evidence/es/wire.settings/gh4052r2/record.json",
+  "execution": [
+    {
+      "command": [
+        "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/91d1e05d2d82/scratchpad/4052-r2-es-wire.settings-receipt.json",
+        "--expected-history-sha",
+        "dce546a6037cffe717ab017692b981933af3ca69e7d7f13fba914e3c42474722",
+        "--dry-run"
+      ],
+      "exit_code": 0,
+      "stdout": "i18n/audit-history/es/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/91d1e05d2d82/scratchpad/4052-r2-es-wire.settings-receipt.json",
+        "--expected-history-sha",
+        "dce546a6037cffe717ab017692b981933af3ca69e7d7f13fba914e3c42474722",
+        "--apply"
+      ],
+      "exit_code": 0,
+      "stdout": "i18n/audit-history/es/wire.settings.json\n",
+      "stderr": ""
+    }
+  ]
+}

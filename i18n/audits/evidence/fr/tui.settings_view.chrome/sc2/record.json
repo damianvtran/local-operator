@@ -1,0 +1,30 @@
+{
+  "audit": "chrome-r2-fr",
+  "catalogue": "tui.settings_view.chrome",
+  "locale": "fr",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-leftovers",
+  "head": "183ed01e92cc",
+  "sha256": {
+    "en": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+    "fr": "7f7b016a1d385ae843b5a43d16af611d71ac908293e16e400cb22fa2716b305e",
+    "en_context": "4d981004bb67852a6b4f8420ecb6eabba2f6c2c3d2328780830bcb4313dc8b40"
+  },
+  "keys_read": 49,
+  "check_py_catalogues_only": "0 problem(s), no fr lines",
+  "verdict": "clean-with-findings",
+  "findings": [
+    {
+      "id": "F1",
+      "key": "error.unexpected_structure",
+      "severity": "minor"
+    },
+    {
+      "id": "F2",
+      "key": "hotkey.desktop_detail",
+      "severity": "nit"
+    }
+  ],
+  "auditor": "translation-auditor",
+  "model": "anthropic/claude-opus-5-5 (fallback from openai/gpt-6.1-sol after quota 429)",
+  "at": "2026-11-21T09:59:04.204873"
+}

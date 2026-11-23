@@ -348,6 +348,62 @@ def _origin(value: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else value
 
 
+def node_approval_steps(origin: str, url: str) -> str:
+    """Model-facing ``origin_not_allowed`` on a HEADLESS NODE: the signed-card flow.
+
+    The extension host's ordinary copy sends the operator to the extension
+    popup, which nobody can reach in a node-managed headless Chrome (PR #3935
+    round 1, U1). With operator-signed approvals (#3938) the same
+    ``request_access`` call raises a card the operator answers on their OWN
+    device instead (``tools/builtin._node_site_access``), so the steps are the
+    usual ones minus the popup. English by design: tool results are
+    model-facing, like every sibling here.
+    """
+    return (
+        f"site {origin or '(unknown origin)'} is not allowed yet. Nobody can approve "
+        f"anything inside this headless node's browser: call browser "
+        f"action='request_access' url={url}, which raises a card the operator answers "
+        "on their own device, signed with their operator key (do not write your own "
+        f"ask for it), then action='await_access' url={url} until it returns allowed "
+        "or denied. Never work around it with another browser (guide://browser "
+        "'On a headless node')."
+    )
+
+
+def node_approval_unavailable(origin: str) -> str:
+    """Model-facing: this node's EXTENSION cannot take a signed approval.
+
+    ``request_access`` reached an extension that answered without an
+    ``approval`` field — a build older than operator-signed approvals — so its
+    prompt would sit in a popup nobody can reach (PR #3935 round 1, U1). The
+    entry is withdrawn by the caller; the remedy is a current extension build.
+    """
+    return (
+        f"site {origin or '(unknown origin)'} is not allowed, and this headless node's "
+        "browser extension is too old to take the operator's signed approval, so "
+        "nothing on this node can present the request. Do not work around it with "
+        "another browser. Tell the operator which site you needed and why, that the "
+        "node's browser needs `lop browser setup --node --repair --authorised-by "
+        "'<who, when>'` with a current build, and stop the browser part of the task "
+        "(guide://browser 'Headless nodes')."
+    )
+
+
+def _on_headless_node() -> bool:
+    """Read once per process (``node_host.headless_node_once``); never raises.
+
+    The first call runs ``loginctl`` synchronously (Linux only, 5 s cap) inside
+    the async tool path; being cached, a host that joins a mesh after this
+    process started keeps the user-machine copy until restart (round 2, R2-5).
+    """
+    try:
+        from local_operator.browser_bridge import node_host
+
+        return bool(node_host.headless_node_once())
+    except Exception:  # noqa: BLE001 - copy selection must never break an error path
+        return False
+
+
 #: Where an approval decision lands, per host, for the sites that name it.
 _APPROVAL_SURFACE = {
     HOST_EXTENSION: "the Local Operator extension popup",
@@ -638,13 +694,40 @@ def format_error(
         # bearing, not politeness.
         origin = str(error.data.get("origin") or _origin(str(error.data.get("url", ""))))
         url = str(error.data.get("url") or origin)
-        return (
+        # A node's managed Chrome is served by the EXTENSION host; the desktop
+        # app's host never runs on a node.
+        if host == HOST_EXTENSION and _on_headless_node():
+            return node_approval_steps(origin, url)
+        steps = (
             f"site {origin or '(unknown origin)'} is not allowed yet. Call browser "
             f"action='request_access' url={url} to raise the approval prompt, then NOTIFY "
             f"THE USER (via the ask tool or a message) to approve it in {approval} — the "
             "popup badge alone is not reliably seen — and only then "
             f"action='await_access' url={url} to wait for the decision."
         )
+        # A desktop app that opens the approved page in its own browser on
+        # Allow advertises it with ``opens_on_approval``. Without this sentence
+        # agents asked "approve, then sign in" and the operator, after Allow,
+        # had no tab to sign in to — a second round trip per site (operator
+        # report, 2026-11-17). Gated on the flag, never on the host alone: an
+        # older app sends no flag and opens nothing, so the text stays exactly
+        # what that app actually does. ``opened_tab`` means that page is ALREADY
+        # open from an earlier Allow whose allow-once grant lapsed before the
+        # agent's `open`: asking for a fresh sign-in there would send the
+        # operator to redo work they finished (UX round 1, U1).
+        if host == HOST_UI and error.data.get("opened_tab") is True:
+            steps += (
+                " The page from an earlier approval is still open in the app's Browser: "
+                "ask the user to approve again; the page they already used comes back, "
+                "so there is no need to sign in again."
+            )
+        elif host == HOST_UI and error.data.get("opens_on_approval") is True:
+            steps += (
+                " Approving opens this page in the app's Browser. If the site needs a "
+                "sign-in, ask once: approve, sign in on the page that opens in the "
+                "app's Browser, then reply here."
+            )
+        return steps
     if error.code == ErrorCode.INTERNAL and error.data.get("tab_crashed"):
         return (
             f"the browser tab crashed while {action or 'the action'} was running. "
@@ -1363,7 +1446,11 @@ class HostClient:
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         current = self._read()
         if current is None:
-            raise BridgeUnreachable(self.copy_for().no_state)
+            # Typed pre-delivery (60334 R4 MINOR-1): with no state file nothing
+            # was sent, so a site decision that hits this is provably
+            # undelivered and its card reopens rather than going ``unknown``.
+            # A subclass of BridgeUnreachable, so every existing handler holds.
+            raise HostPreDeliveryFailure(self.copy_for().no_state)
         return await self.call_once(current, method, params)
 
     async def call_once(

@@ -305,6 +305,68 @@ async def test_a_normalized_quiet_tick_is_silent(tmp_path: Path, config_dir: Pat
 
 
 @pytest.mark.asyncio
+async def test_quiet_tick_refreshes_only_attached_monitor_state(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    watch = tmp_path / "stable.txt"
+    watch.write_text("same\n", encoding="utf-8")
+    session = _session(tmp_path, make_read_tool(watch))
+    monkeypatch.setattr(session, "_ensure_wake_supervisor", lambda: None)
+    clock = [1_756_000_000_000]
+    monkeypatch.setattr(session._monitors, "_now", lambda: clock[0])
+    spec = MonitorSpec(
+        id="m1",
+        name="stable",
+        tool="read",
+        arguments={"path": str(watch)},
+        every_ms=30_000,
+        created_at=1,
+    )
+    internal_frames: list[Any] = []
+    viewer_frames: list[Any] = []
+    internal = None
+    viewer = None
+    index = config_dir / "monitors" / "sess.json"
+    counters_path = config_dir / "monitors" / "state" / "sess" / "m1.json"
+
+    async def tick() -> None:
+        clock[0] += 60_000
+        await session._monitors.pump(now_ms=clock[0])
+        await drain_checks(session._monitors, session)
+
+    try:
+        await session.set_monitor_schedules([spec])
+        original = index.read_bytes()
+        internal = session._frontend_state_store.subscribe_internal_threadsafe(
+            internal_frames.append
+        )
+        await tick()  # baseline; the internal observer is not a viewer
+        assert not internal_frames
+        assert session.frontend_state.monitors[0].checks == 0
+
+        viewer = session.subscribe_frontend(viewer_frames.append)
+        assert viewer.sync.snapshot.monitors[0].checks == 1  # attach takes a fresh cut
+        await tick()  # unchanged content, now with an attached frontend
+        (update,) = viewer_frames
+        assert update.sequence == viewer.sync.sequence + 1
+        assert set(update.changes) == {"monitors"}
+        (row,) = update.changes["monitors"]
+        counters = json.loads(counters_path.read_bytes())
+        assert row["checks"] == counters["checks"] == 2
+        assert row["last_check_at"] == counters["last_check_at"] == clock[0]
+        assert row["next_due_at"] == counters["next_due_at"] > clock[0]
+        assert counters["deliveries"] == 0
+        assert session.frontend_state.monitors[0].checks == 2
+        assert index.read_bytes() == original
+    finally:
+        if viewer is not None:
+            viewer.unsubscribe()
+        if internal is not None:
+            internal.unsubscribe()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_session_gate_suppresses_a_non_material_change(
     tmp_path: Path, config_dir: Path
 ) -> None:

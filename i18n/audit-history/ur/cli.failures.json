@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "cli.failures",
+  "history_sha256": "872d387d5dc176399791d30640562baae13c091020c2abf36cf4c2a58133ff2d",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "cli.failures",
+      "source_sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea",
+      "translator": {
+        "agent": "i18n-translator (timeout-ur)",
+        "model": "openai/gpt-6.1-sol (fallback anthropic/claude-opus-5-5 during the run, as reported by parent)",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (audit2-ur subagent)",
+        "model": "anthropic/claude-opus-5-5 (harness quota fallback from primary openai/gpt-6.1-sol, HTTP 429, switched before any catalogue string was read; the fallback performed the audit)",
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "ur cli.failures 5 keys incl new github_borrow_timeout: passed, 0 BLOCKER/0 MAJOR, 1 MINOR U1 (Latin-first {owner} makes line LTR; put {seconds} first). Auditor claude-opus-5-5 (fallback from gpt-6.1-sol). Record: i18n/audits/evidence/ur/cli.failures/gbt2/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ur/cli.failures/gbt2/record.json",
+          "sha256": "89c05f2fcbc8b5d5f0eacadbb06b54f750f6740bc9772eedc11d0ba2c25fb709"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/cli.failures/gbt2/report.md",
+          "sha256": "d8ed3d79d3d577150d78fec52f5089f88a83c71dda0fdb8bce255b72d7246a97"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/cli.failures/gbt2/audit.log",
+          "sha256": "ca5ed98e78f08552ff269246ce43145fb7e1e19cfe17e80bc2617974e54c0696"
+        }
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.failures",
+      "source_sha256": "10452313f2d9c33a17496fabefb90870ef27631c1ac446972d7457b8000ce54c",
+      "translator": {
+        "agent": "coder (PR #4364 implementer)",
+        "model": null,
+        "date": "2026-11-21",
+        "model_source": "not reported in the PR, commit or brief; left null rather than invented"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev 4364-i18n-audit)",
+        "model": "anthropic/claude-opus-5-5",
+        "session": "f3778867a369",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "ur cli.failures goo1: independent audit of new key github_owner_offline (PR #4364); FAIL→corrected (محفوظ رسائی → محفوظ شدہ رسائی); prior 5 keys byte-identical to base. Auditor claude-opus-5-5, no fallback. Report: i18n/audits/evidence/ur/cli.failures/goo1/report.md",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ur/cli.failures/goo1/report.md",
+          "sha256": "5f1e67dc02d197c6a550c6e3eceeeee4cdc357f1c6e5dc26c93731f2f838ebce"
+        }
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.failures",
+      "source_sha256": "da8725bbc324ad5124716489a31616dc4e7d999ae1ae07f9060d206f0137bc95",
+      "translator": {
+        "agent": "manager (lopdev lane 79, PR #4364 commit 6d1afe8c3)",
+        "model": null,
+        "date": "2026-11-21",
+        "model_source": "not reported in the PR, commit or brief; left null rather than invented"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev 4364-i18n-audit-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "session": "683ecf30b5dc",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "ur cli.failures goo2: independent re-audit of github_owner_offline after en reworded to \"isn't answering right now\" (PR #4364, 6d1afe8c3); PASS; round-1 corrections persist; other 5 keys byte-identical. Auditor claude-opus-5-5, no fallback. Report: i18n/audits/evidence/ur/cli.failures/goo2/report.md",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ur/cli.failures/goo2/report.md",
+          "sha256": "48177816ecb49ed43a97e61bf01233bf44d36dc2917cac3a66f2c27589324bf9"
+        }
+      ]
+    }
+  ]
+}
