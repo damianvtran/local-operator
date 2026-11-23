@@ -380,10 +380,14 @@ def test_peer_query_skips_nested_nontext_without_walking_it(
     bad["payload"]["content"] = [{"text": "NESTED_VALUE"}]
     lines[0] = json.dumps(bad)
     depth_bound_hit = False
+    # Bound unconditionally so the assertion below is checkable by pyright even
+    # though only the cycle shape populates it; the assertion itself stays
+    # inside the cycle branch, so a non-cycle run never reads an empty list as
+    # evidence that nothing was walked.
+    traversals: list[str] = []
     if shape == "cycle":
         # JSON cannot express a cycle. Inject it only at the counted reader's
         # decoder boundary, leaving the owner, window and ACK paths real.
-        traversals: list[str] = []
 
         class Cycle(list[Any]):
             def __iter__(self) -> Any:
