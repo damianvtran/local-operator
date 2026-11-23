@@ -25,6 +25,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
     BaseModel,
@@ -4704,6 +4705,136 @@ async def attachment_waveform(session_id: str, digest: AttachmentDigest, request
         payload,
         headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
     )
+
+
+#: The closed query of the session notification-avatar route: exactly these two
+#: names, each once, each from its own closed set. A frozen desktop<->core
+#: contract (agent notification avatars, 2026-11-23); a widened query is a new
+#: capability version, never a silently accepted parameter.
+_SESSION_NOTIFICATION_AVATAR_QUERY = frozenset({"size", "theme"})
+#: Developer-facing 422 diagnostics (the desktop main process is the only
+#: caller and never shows them; the app's validation handler answers its own
+#: catalogued sentence).
+_SESSION_NOTIFICATION_AVATAR_DIAGNOSTICS = {
+    "names": "Exactly size and theme are accepted",  # i18n: ignore protocol diagnostic
+    "repeated": "Each parameter must appear once",  # i18n: ignore protocol diagnostic
+    "size": "Input should be 64 or 256",  # i18n: ignore protocol diagnostic
+    "theme": "Input should be 'light' or 'dark'",  # i18n: ignore protocol diagnostic
+}
+
+
+def _session_notification_avatar_query(request: Request) -> tuple[int, Literal["light", "dark"]]:
+    """``(size, theme)`` from the closed query, or a 422 naming the offender."""
+    query = request.query_params
+    names = set(query)
+    problem: tuple[str, str] | None = None
+    if names != _SESSION_NOTIFICATION_AVATAR_QUERY:
+        extra = sorted(names - _SESSION_NOTIFICATION_AVATAR_QUERY)
+        missing = sorted(_SESSION_NOTIFICATION_AVATAR_QUERY - names)
+        problem = (extra or missing)[0], "names"
+    else:
+        repeated = [name for name in sorted(names) if len(query.getlist(name)) != 1]
+        if repeated:
+            problem = repeated[0], "repeated"
+        elif query["size"] not in ("64", "256"):
+            problem = "size", "size"
+        elif query["theme"] not in ("light", "dark"):
+            problem = "theme", "theme"
+    if problem is not None:
+        name, kind = problem
+        message = _SESSION_NOTIFICATION_AVATAR_DIAGNOSTICS[kind]
+        raise RequestValidationError(
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("query", name),
+                    "msg": message,
+                    "input": query.getlist(name) if name in names else None,
+                }
+            ]
+        )
+    return int(query["size"]), cast(Literal["light", "dark"], query["theme"])
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/notification-avatar",
+    responses={
+        200: {"content": {"image/png": {}}},
+        304: {"description": "Not modified"},
+        404: {"description": "Unknown session, no bound agent, or no usable agent picture"},
+        422: {"description": "Query outside the closed set"},
+        503: {"description": "Renderer busy (transient)"},
+    },
+)
+async def session_notification_avatar(session_id: str, request: Request) -> Response:
+    """The OS-banner image for a session bound to an agent with its own picture.
+
+    Capability ``desktop_session_notification_avatar``. WHY: a banner about a
+    session whose agent has a stored profile picture should read as "your
+    agent is messaging you" rather than as a generic session notice, so the
+    desktop main process (never the renderer, never a URL handed to the OS)
+    fetches this ONE PNG -- the agent's picture circle-cropped with the Local
+    Operator mark in the bottom-right badge, the Team Bridge banner's visual
+    language minus its agent marker -- and passes it as the notification icon.
+
+    Contract (frozen with the desktop half):
+
+    * Closed query ``size=64|256`` and ``theme=light|dark``, each exactly once;
+      anything else is a 422 before any disk read.
+    * 404 with the ``agent_avatar`` refusal envelope (``not_found``) for an
+      unknown session, a session with no bound agent, or an agent with no
+      valid stored picture. There is deliberately no glyph fallback: the
+      desktop's answer to a 404 is today's banner, unchanged.
+    * ``ETag`` is derived from the agent picture's VERIFIED sha256 plus size
+      and theme, so a picture change, or a theme flip, can never revalidate a
+      stale composite; ``If-None-Match`` answers 304 without rendering.
+    * The desktop waits at most its 250 ms budget for this (the Team Bridge
+      pattern), so the render runs off the event loop under the shared,
+      bounded renderer; overload is a transient 503 ``renderer_busy`` that the
+      desktop treats like any other miss.
+
+    Cache headers: the route sets ``no-cache`` (local data, revalidatable),
+    but ``managed_desktop_boundary`` rewrites EVERY ``/v1/desktop/`` response to
+    ``no-store``; that is the stricter of the two and is left to win -- the
+    desktop's own in-memory cache keyed on the ETag is the only retention.
+    """
+    from local_operator import agent_avatar
+    from local_operator.i18n.http import etag_matches
+    from local_operator.team_bridge import notification_avatar as na
+
+    size, theme = _session_notification_avatar_query(request)
+    try:
+        picture, sha = await host(request).agent_notification_picture(session_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=agent_avatar.refusal_envelope(agent_avatar.NOT_FOUND)
+        )
+    # The composite's validator: same picture at another size or theme is a
+    # different body, so both ride in the tag.
+    tag = f"{sha}-notification-{size}-{theme}"
+    headers = {
+        "ETag": agent_avatar.etag(tag),
+        "Cache-Control": "no-cache",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if etag_matches(request.headers.get("if-none-match", ""), tag):
+        return Response(status_code=304, headers=headers)
+    try:
+        data = await na.render_agent_picture(picture, theme=theme, size=size)
+    except na.RendererBusy:
+        raise HTTPException(
+            status_code=503,
+            # The machine code IS the payload: only desktop main reads it
+            # (it never shows this text), so no new user-facing copy.
+            detail=_wd.desktop_refusal(error="renderer_busy").envelope(code="renderer_busy"),
+        )
+    except na.AvatarImageRejected:
+        # Digest-verified but outside the decode ceilings (or not a PNG/JPEG):
+        # for the banner that is the same as "no usable picture".
+        raise HTTPException(
+            status_code=404, detail=agent_avatar.refusal_envelope(agent_avatar.NOT_FOUND)
+        )
+    return Response(content=data, media_type="image/png", headers=headers)
 
 
 @router.get("/v1/desktop/sessions/{session_id}/supplements/{digest}/document")
