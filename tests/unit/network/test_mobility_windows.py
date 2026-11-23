@@ -53,12 +53,9 @@ def test_handoff_paths_refuse_reparse_points(tmp_path: Path, entry: str) -> None
             is None
         )
         missing = control.with_name("missing")
-        assert (
-            mobility._contained_handoff_path(  # noqa: SLF001
-                root, missing, parent_parts=("plain",), leaf=missing.name
-            )
-            == expected.with_name(missing.name)
-        )
+        assert mobility._contained_handoff_path(  # noqa: SLF001
+            root, missing, parent_parts=("plain",), leaf=missing.name
+        ) == expected.with_name(missing.name)
         rename.assert_not_called()
         replace.assert_not_called()
         unlink.assert_not_called()
