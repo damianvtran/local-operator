@@ -547,6 +547,78 @@ def test_3_merged_plain_cleanup_requires_preserved_payload(
     assert _rank(home, f"rm -rf {wt}")[0] is Risk.HIGH
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["exact", "brace", "ancestor", "glob", "remote", "pending", "dirty", "busy", "compound", "compound-unapproved", "owned", "owned-no-ask"])
+async def test_ignored_cleanup_approval_at_real_checkpoint(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Real Git inventory and ask-store rows; the destructive command is never run."""
+    import json
+    import time
+
+    from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
+    from local_operator.guardrails.preview import preview_tool_call
+
+    wt = repo / ".worktrees" / "consent"
+    if mode.startswith("owned"):
+        _run_recorded(home, f"git -C {repo} worktree add -qb consent {wt}")
+    else:
+        _git("worktree", "add", "-qb", "consent", ".worktrees/consent", cwd=repo)
+    (wt / "dist-ssr").mkdir()
+    (wt / "dist-ssr" / "payload").write_text("preserve")
+    if mode == "dirty":
+        (wt / "untracked").write_text("work")
+    if mode.startswith("compound"):
+        _git("worktree", "add", "-qb", "other", ".worktrees/other", cwd=repo)
+        (wt.parent / "other" / "dist-ssr").mkdir()
+        (wt.parent / "other" / "dist-ssr" / "payload").write_text("preserve")
+    if mode == "busy":
+        monkeypatch.setattr(prov, "_live_cwd_inside", lambda *a, **kw: True)
+    named = str(wt)
+    if mode in ("brace", "compound"):
+        named = str(wt.parent / "{consent,other}")
+    elif mode == "ancestor":
+        named = str(wt.parent)
+    elif mode == "glob":
+        named = str(wt.parent / "consent*")
+    now = int(time.time() * 1000)
+    rows = [{"v": 1, "kind": "queued", "ask_id": "a-cafe", "at": now - 2000,
+             "expires_at": now + 60000, "timeout_s": 60,
+             "questions": [{"id": "q", "question": f"Delete {named}?",
+                            "options": [{"label": "Approve"}, {"label": "Keep"}],
+                            "multi": False, "question_id": ""}]}]
+    if mode != "pending":
+        rows.append({"v": 1, "kind": "answered", "ask_id": "a-cafe", "at": now - 1000,
+                     "by": {"surface": "remote" if mode == "remote" else "desktop"},
+                     "answers": {"q": ["Approve"]}})
+    path = home / ".local-operator" / "sessions" / S / "asks.jsonl"
+    path.write_text("" if mode == "owned-no-ask" else "".join(json.dumps(row) + "\n" for row in rows))
+    command = f"git -C {repo} worktree remove -- {wt}"
+    if mode.startswith("compound"):
+        command += f" && git -C {repo} worktree remove -- {wt.parent / 'other'}"
+    ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=S)
+    settings = GuardSettings()
+    calls = []
+
+    async def judge(system: str, prompt: str) -> str:
+        calls.append(prompt)
+        return "BLOCK: live holder"
+
+    preview = preview_tool_call("bash", {"command": command}, ctx, settings=settings)
+    result = await check_tool_call("bash", {"command": command}, ctx, settings=settings, judge=judge)
+    if mode in ("exact", "brace", "compound", "owned"):
+        assert preview.builtin_effect == "pass", preview.render()
+        assert result is not None and not result.blocked, result and result.text
+        assert not calls
+    elif mode == "busy":
+        assert preview.builtin_effect == "judge", preview.render()
+        assert result is not None and result.blocked and calls
+    else:
+        assert preview.builtin_effect == "hold-cleanup", preview.render()
+        assert result is not None and result.blocked and not calls
+    assert (wt / "dist-ssr" / "payload").read_text() == "preserve"
+
+
 def test_3_nested_repo_inside_dist_ssr_is_not_regenerable(home: Path, repo: Path) -> None:
     _run_recorded(home, "cd ~/local-operator && git worktree add -b x .worktrees/x", sid=S2)
     wt = repo / ".worktrees" / "x"

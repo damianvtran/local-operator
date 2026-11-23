@@ -5180,6 +5180,11 @@ class UnansweredAsk:
     #: Answered, non-declining, but on an untrusted surface (``remote``,
     #: ``chat``, ``unverified``): not consent, not a refusal (:func:`_untrusted_yes`).
     untrusted_yes: bool = False
+    #: Effective answer time is the revision time, not the first answer time.
+    answered_at: int = 0
+    #: An expired folded record can still contain a late answer or a decline.
+    has_answer: bool = False
+    expires_at: int = 0
 
 
 #: Statuses that mean "the operator never answered".
@@ -5327,6 +5332,9 @@ def unanswered_asks(
                     created_at=int(record.get("created_at") or 0),
                     never_answered=status in _UNANSWERED_LABEL,
                     untrusted_yes=words is None and _untrusted_yes(record, status, questions),
+                    answered_at=int(record.get("revised_at") or record.get("answered_at") or 0),
+                    has_answer=bool(record.get("answered_at") or record.get("answers")),
+                    expires_at=int(record.get("expires_at") or 0),
                 )
             )
     return out

@@ -51,8 +51,10 @@ from local_operator.guardrails.check import (
     _critical_text,
     _safe_text,
     _targets_text,
+    apply_cleanup_consent,
     build_delete_case,
     builtin_branch,
+    cleanup_consent_safe,
     cleanup_hold_text,
     credential_path_masks,
     credential_refusal_text,
@@ -369,6 +371,7 @@ def preview_tool_call(
                 )
                 # Same ranking the checkpoint applies (unanswered asks lift LOW).
                 verdict = escalate_asked_targets(verdict, context)
+                verdict = apply_cleanup_consent(verdict, context)
                 effect = builtin_branch(verdict, critical_override=live.critical_override)
                 if effect == BUILTIN_REFUSE_CRITICAL:
                     builtin_text = _critical_text(verdict)
@@ -381,7 +384,7 @@ def preview_tool_call(
                     builtin_facts = (*case.facts, *case.evidence.describe())
                     if case.excluded:
                         builtin_facts += (f"excluded as untrusted: {case.excluded}",)
-                    proven = case.evidence_basis()
+                    proven = case.evidence_basis() if cleanup_consent_safe(verdict, context) else ""
                     if proven:
                         # The checkpoint allows this without the judge
                         # (``DeleteCase.evidence_basis``); report that branch.

@@ -957,6 +957,8 @@ class DeleteCase:
     #: operator row names it. ``_dangerous_delete`` refuses these before any
     #: judge runs (incident 2026-11-14, ask a-20fc).
     lapsed_only: Mapping[str, str] = field(default_factory=dict)
+    #: An outstanding contrary ask must not be bypassed by creation evidence.
+    ask_blocked: frozenset[str] = frozenset()
 
     def _named_by(self, path: str, words: Any) -> bool:
         from local_operator.guardrails.provenance import names_path
@@ -1007,7 +1009,7 @@ class DeleteCase:
         made, no foreign ``.git`` below it); any unverifiable target (opaque, unresolved, an empty
         glob) or operator-only target (an overridden CRITICAL) keeps the judge.
         """
-        if self.unverifiable or self.operator_only or not self.paths:
+        if self.unverifiable or self.operator_only or self.ask_blocked or not self.paths:
             return ""
         listed = list(getattr(self.evidence, "listed", {}) or {})
         # ``alone``: resolver-pinned coverage only, and no git repository
@@ -1209,6 +1211,75 @@ _MAX_FACTS = 64
 _ASKED_OPS = frozenset({"delete", "move", "clean", "unprotect"})
 
 
+def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
+    """A trusted pick names this literal leaf, not a glob, ancestor or typed set.
+
+    Brace lists are expanded by the existing prose parser into concrete leaves;
+    no filesystem globbing or symlink resolution can create consent.
+    """
+    from local_operator.guardrails import provenance as prov
+
+    if ask.answer is None or not ask.approved:
+        return False
+    for word, _ in prov._path_readings(ask.approved):
+        if prov._GLOBISH.search(word) or "{" in word or "}" in word:
+            continue
+        if any(part in (".", "..") for part in word.split("/")):
+            continue
+        if prov._expand_word(word, home, cwd) == path:
+            return True
+    return False
+
+
+def cleanup_consent_safe(verdict: Verdict, ctx: CallContext) -> bool:
+    """Require a fresh owner/holder check even when creation evidence exists."""
+    return all(
+        not r.cleanup_consent or _ask_settles_git_root(r.target.path, ctx.session_id) is not None
+        for r in verdict.targets
+    )
+
+
+def apply_cleanup_consent(verdict: Verdict, ctx: CallContext) -> Verdict:
+    """Lift only ignored-only holds, per pinned target and trusted literal pick.
+
+    This changes neither rank nor critical/credential precedence. In particular,
+    an answer cannot waive unreadable status, protected trees or real changes.
+    """
+    import dataclasses
+
+    from local_operator.guardrails import provenance as prov
+    from local_operator.guardrails.classify import _protected
+
+    if not ctx.session_id or not any(r.cleanup_hold for r in verdict.targets):
+        return verdict
+    home = ctx.env.get("HOME") or os.path.expanduser("~")
+    prot = _protected(ctx.env, ctx.scratchpad, ctx.session_id)
+    stop = tuple(sorted({*prot.homes, *prot.state_roots, *prot.install_roots, "/"}))
+    asks = prov.unanswered_asks(ctx.session_id)
+    lineage = set(prov.session_lineage(ctx.session_id)[0])
+    targets = []
+    for ranked in verdict.targets:
+        t = ranked.target
+        path = t.path
+        eligible = (
+            ranked.cleanup_hold and ranked.hold_conditions == (HOLD_IGNORED_UNVERIFIED,)
+            and t.op == "delete" and t.worktree_remove and path and not t.pattern and not t.opaque
+            and not t.unknown_cwd and not t.climbs and not t.dotdot and not t.empty
+            and not t.credential_derived and not t.unpinned and not t.landings
+            and os.path.abspath(t.raw_path or path) == os.path.realpath(t.raw_path or path)
+        )
+        if eligible and any(
+            a.session_id in lineage and _exact_firm_ask(a, path, home=home, cwd=ctx.cwd)
+            for a in asks
+        ) and _ask_block(
+            asks, path, home=home, cwd=ctx.cwd, stop=stop, escalating=False,
+            session_id=ctx.session_id, env=ctx.env,
+        ) is None:
+            ranked = dataclasses.replace(ranked, cleanup_hold=False, cleanup_consent=True)
+        targets.append(ranked)
+    return dataclasses.replace(verdict, targets=targets)
+
+
 def _ask_block(
     lapsed: Sequence[Any],
     path: str,
@@ -1253,8 +1324,26 @@ def _ask_block(
         return hit is not None and hit[0] in ("exact", "under")
 
     now = int(time.time() * 1000)
+    # Family asks are refusal evidence, but only this session's lineage can
+    # authorize a supersession: a sibling's decision belongs to its own task.
+    lineage = set(prov.session_lineage(session_id)[0]) if session_id else set()
+    superseding = [
+        a for a in lapsed
+        if a.session_id in lineage and a.answered_at
+        and _exact_firm_ask(a, path, home=home, cwd=cwd)
+    ]
     judge_only = None
     for a in lapsed:
+        # Expired can also contain a late answer: only genuine silence is
+        # displaced, and only by an independently verified later answer.
+        if (
+            a.status in ("timed_out", "expired") and not a.has_answer
+            and a.expires_at and any(
+                b.created_at > a.expires_at and b.answered_at >= b.created_at
+                for b in superseding
+            )
+        ):
+            continue
         if escalating and a.created_at and now - a.created_at > prov.ASK_ESCALATION_MAX_AGE_MS:
             continue
         reach = prov.ask_reach(a.text, path, home=home, cwd=cwd, protected=stop)
@@ -1624,6 +1713,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     # yeses last (stable sort, store order otherwise kept) so it is named.
     lapsed = sorted(lapsed, key=lambda a: bool(getattr(a, "untrusted_yes", False)))
     lapsed_only: dict[str, str] = {}
+    ask_blocked: set[str] = set()
     facts: list[str] = []
     for path in [*paths, *operator_only][:_MAX_FACTS]:
         ids = [] if path in operator_only else (evidence.covers.get(path) or [])
@@ -1655,6 +1745,8 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             env=ctx.env,
         )
         not_consent = _not_consent_fact(fact_hit[0]) if fact_hit is not None else ""
+        if fact_hit is not None and path in destroying:
+            ask_blocked.add(path)
         refusing = (
             _ask_block(
                 lapsed,
@@ -1677,7 +1769,9 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             if refusing is None or record is None
             else ledger_record(path, ctx.session_id, stop, tuple(prot.state_roots), family=False)
         )
-        if refusing is not None and refusing[1] and not ids and own_record is None and not named:
+        # An older affirmative cannot erase a later pending ask or veto. Only
+        # _ask_block may remove a genuinely superseded timeout from this set.
+        if refusing is not None and refusing[1] and not ids and own_record is None:
             lapsed_only[path] = _not_consent_fact(refusing[0])
         tree = ""
         if not os.path.islink(path) and os.path.exists(os.path.join(path, ".git")):
@@ -1755,6 +1849,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         home=home,
         cwd=ctx.cwd,
         lapsed_only=lapsed_only,
+        ask_blocked=frozenset(ask_blocked),
     )
 
 
@@ -1898,6 +1993,7 @@ async def _dangerous_delete(
         command, cwd=ctx.cwd, env=ctx.env, scratchpad=ctx.scratchpad, session_id=ctx.session_id
     )
     verdict = escalate_asked_targets(verdict, ctx)
+    verdict = apply_cleanup_consent(verdict, ctx)
     branch = builtin_branch(verdict, critical_override=settings.critical_override)
     if branch == BUILTIN_PASS:
         # Ordinary delete: runs with zero model calls. Still marked destructive
@@ -1958,7 +2054,9 @@ async def _dangerous_delete(
     risk_name = "critical-overridden" if risk is Risk.CRITICAL else "high"
     # Provable creation settles the call without a model (see
     # ``DeleteCase.evidence_basis``): the judge could only agree or refuse falsely.
-    proven = case.evidence_basis()
+    # An ignored-payload waiver is not permission to skip a live owner or
+    # process holder just because creation evidence also covers the path.
+    proven = case.evidence_basis() if cleanup_consent_safe(verdict, ctx) else ""
     if proven:
         _journal(DANGEROUS_DELETE_RULE, risk_name, "allow", 0.0, targets, proven)
         outcome = GuardOutcome(
