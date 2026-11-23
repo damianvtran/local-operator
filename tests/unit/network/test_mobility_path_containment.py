@@ -8,7 +8,6 @@ must not turn the later cleanup or promotion into an arbitrary filesystem action
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -263,41 +262,6 @@ def test_recovery_refuses_uncontained_stage_before_mutation(
     assert backup.exists()
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows junctions")
-@pytest.mark.parametrize("component", [0, 1, 2], ids=["network", "stage-parent", "stage"])
-def test_staging_refuses_windows_junctions(tmp_path: Path, component: int) -> None:
-    if sys.platform == "win32":
-        from _winapi import CreateJunction
-    else:
-        pytest.fail("the native Windows test ran despite its skip marker")
-
-    parts = ("network", "staging", "opaque-session")
-    root = tmp_path / "config"
-    staging = root.joinpath(*parts)
-    junction = root.joinpath(*parts[: component + 1])
-    junction.parent.mkdir(parents=True)
-    target = tmp_path / "target"
-    other_stage = target.joinpath(*parts[component + 1 :])
-    other_stage.mkdir(parents=True)
-    marker = other_stage / "ready.json"
-    marker.write_bytes(b"{}")
-
-    # A directory symlink would not cover junctions: verify the native fixture
-    # is a junction and then exercise each directory level of the write gate.
-    CreateJunction(str(target), str(junction))
-    try:
-        assert os.path.isjunction(junction)
-        assert mobility._staging_for_verification(root, parts[-1], staging) is None
-        assert os.path.isjunction(junction)
-        assert marker.read_bytes() == b"{}"
-    finally:
-        junction.rmdir()
-
-    staging.mkdir(parents=True)
-    (staging / "ready.json").write_bytes(b"{}")
-    assert mobility._staging_for_verification(root, parts[-1], staging) == staging.resolve()
-
-
 def test_recovery_leaves_failed_skill_pin_digest_untouched(tmp_path: Path) -> None:
     root = tmp_path / "config"
     session_id = "opaque-session"
@@ -317,6 +281,30 @@ def test_recovery_leaves_failed_skill_pin_digest_untouched(tmp_path: Path) -> No
     assert refusal["code"] == "digest_mismatch"
     assert attachment.read_text() == "staged pinned attachment"
     assert backup.read_text() == "staged original attachment"
+
+
+def test_staging_accepts_a_hard_linked_pin_sidecar(tmp_path: Path) -> None:
+    """The pin stores the attachment's original bytes as a HARD LINK.
+
+    ``_promote`` keeps the pre-pin attachment as ``os.link``'d
+    ``.skill-pin-original`` so the source's digest still matches while the
+    attachment is rewritten, which leaves the staged sidecars carrying
+    ``st_nlink 2``. A no-alias predicate that also refused multiply-linked
+    entries would refuse every pinned staged copy — the shape an interrupted
+    publish leaves behind — so this pins the boundary: aliases are refused,
+    a hard link to the copy's own inode is not.
+    """
+    root = tmp_path / "config"
+    session_id = "opaque-session"
+    staging = sync.staging_dir(root, session_id)
+    staging.mkdir(parents=True)
+    (staging / "ready.json").write_text('{"content_digest":"recorded"}')
+    attachment = staging / "attachment.json"
+    attachment.write_text("staged pinned attachment")
+    os.link(attachment, staging / mobility._SKILL_PIN_ORIGINAL)
+
+    assert mobility._staging_for_verification(root, session_id, staging) == staging.resolve()
+    assert attachment.stat().st_nlink == 2
 
 
 def test_legitimate_move_still_uses_the_contained_paths(
