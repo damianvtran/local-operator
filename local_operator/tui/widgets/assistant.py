@@ -1374,7 +1374,7 @@ class AssistantBlock(TranscriptBlock):
         if not isinstance(visual, Content):
             return None
         if not self._full_text.strip():
-            return super().get_selection(selection)
+            return self._frame_selection(selection)
         rows = visual.plain.split("\n")
         # ONE COORDINATE CONVENTION, and everything below depends on it: the
         # alignment, the furniture measurement and every BLANKNESS test work in
@@ -1583,7 +1583,7 @@ class AssistantBlock(TranscriptBlock):
                         copied = self._markdown_for_rows(mapping, selected[0][0], selected[-1][0])
                         if copied:
                             return copied, "\n"
-                        return super().get_selection(selection)
+                        return self._frame_selection(selection)
                     separators = _copy_markdown.separators_without_source(fold_rows)
 
             joined = trimmed[0]
@@ -1604,8 +1604,24 @@ class AssistantBlock(TranscriptBlock):
         # the markdown path spans exactly the rows it has always spanned.
         copied = self._markdown_for_rows(mapping, selected[0][0], selected[-1][0])
         if not copied:
-            return super().get_selection(selection)
+            return self._frame_selection(selection)
         return copied, "\n"
+
+    def _frame_selection(self, selection: Selection) -> tuple[str, str] | None:
+        """The base FRAME copy, with the paint-only ask marks stripped.
+
+        The fallback for a selection this block cannot align back to its
+        source. A cited ask id is painted with a no-break space and a one-cell
+        state mark (`tui/ask_ink`), which are decoration: the clipboard still
+        gets the model's words, on this path as on the markdown one.
+        """
+        frame = super().get_selection(selection)
+        if frame is None:
+            return None
+        from local_operator.tui.ask_ink import strip_marks
+
+        body, separator = frame
+        return strip_marks(body), separator
 
     def _markdown_for_rows(self, mapping: list[int | None], first_row: int, last_row: int) -> str:
         """Markdown for ``first_row..last_row``, widened over UNPLACED edge rows.
