@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -134,8 +134,16 @@ def test_omitting_the_flag_leaves_the_spec_default_untouched(
 
 
 @pytest.fixture
-def isolated_session_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def isolated_session_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    from local_operator.model import configure
     from local_operator.session.spec import SessionRoots
+
+    # resolve_model_info memoizes per provider/model and TTL bucket, not per
+    # config root, so a ladder one case serves from its fixture listing would
+    # otherwise be what the next case in the same process reads (QA r1 Q1: the
+    # [False] case's ("high",) ladder refused [True]'s valid 'max'). Clearing on
+    # both sides keeps every case independent of order and of xdist placement.
+    configure.invalidate_model_info_cache()
 
     home = tmp_path / "home"
     config_dir = home / ".local-operator"
@@ -147,7 +155,8 @@ def isolated_session_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(home / "local-operator-home"))
     monkeypatch.setenv("LOP_RUN_SCRATCH_ROOT", str(tmp_path))
     monkeypatch.setattr(SessionRoots, "assert_durable", lambda self: None)
-    return config_dir
+    yield config_dir
+    configure.invalidate_model_info_cache()
 
 
 def _session_preflight_args(tmp_path: Path, session_route: str, *, managed: bool = False) -> Any:
@@ -401,7 +410,10 @@ async def test_frontend_checks_terminal_receipt_when_owner_disappears(
         ("anthropic", None, False, "medium"),
         ("deepseek", "max", True, "max"),
         ("deepseek", "none", True, "none"),
-        ("deepseek", None, True, "low"),
+        # The unchanged auto classifier rates "show status" tier 'lo', which maps
+        # to the lowest rung: 'low' on Anthropic's ladder but 'none' on DeepSeek's
+        # (none, low, high, max), serialized as thinking disabled (QA r1 Q2).
+        ("deepseek", None, True, "none"),
         ("deepseek", None, False, "max"),
     ],
 )
