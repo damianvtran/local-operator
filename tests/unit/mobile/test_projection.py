@@ -1677,8 +1677,8 @@ def test_the_text_tier_never_walks_the_answer_down_to_the_floor(
 
     monkeypatch.setattr(projection_module, "_compact_multiline", spy)
 
-    # 693,000 sits between what the floor reaches (692,708) and what the 250
-    # step reaches (693,958): the walk must go to the floor to fit.
+    # 693,000 sits between what the floor reaches (692,780) and what the 250
+    # step reaches (694,030): the walk must go to the floor to fit.
     data, degraded = cap_projection_frame(projection, cap_bytes=693_000)
 
     assert degraded is True
@@ -1742,8 +1742,8 @@ def test_the_answers_walk_too_when_sparing_them_would_drop_the_frame(
     old walk kept and this tier lost would be a worse outcome than a clipped
     answer. The ~64 KB the first bound costs is ASCII: JSON-escaped, an emoji is
     12 bytes, so thirty answers of 6,000 emoji beside an unbounded ``asks``
-    question stayed at 1,055,475 bytes with the answers held at 4,000 characters,
-    where the old walk fit them at 515,475. The answers are therefore spared
+    question stayed at 1,055,583 bytes with the answers held at 4,000 characters,
+    where the old walk fit them at 515,476. The answers are therefore spared
     FIRST and walked only when everything else is already at its floor and the
     frame is still over the cap.
     """
