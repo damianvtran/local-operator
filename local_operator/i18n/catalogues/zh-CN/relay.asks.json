@@ -28,10 +28,10 @@
   "relay.asks.card.send_answer": "发送回答",
   "relay.asks.card.decline": "拒绝",
   "relay.asks.card.timed_out_badge": "已超时",
-  "relay.asks.sheet.title_waiting": "提问 · {count, plural, other {# 个问题}}",
-  "relay.asks.sheet.title_lapsed": "提问 · {count, number}个已超时",
-  "relay.asks.sheet.title_plain": "提问",
-  "relay.asks.sheet.loading": "正在读取提问……",
+  "relay.asks.sheet.title_waiting": "{count, plural, other {# 个问题等待回答}}",
+  "relay.asks.sheet.title_lapsed": "{count, plural, other {# 个问题已超时}}",
+  "relay.asks.sheet.title_plain": "问题",
+  "relay.asks.sheet.loading": "正在读取问题……",
   "relay.asks.sheet.empty": "暂无待答问题——智能体提出的问题会显示在这里。",
   "relay.asks.sheet.retry": "重试",
   "relay.asks.sheet.ended_wait": "此对话已结束——回答后会重新打开（最多可能需要约30秒）",
@@ -80,5 +80,9 @@
   "relay.asks.card.command.label": "建议的命令",
   "relay.asks.card.command.copy": "复制",
   "relay.asks.card.command.copied": "已复制",
-  "relay.asks.card.command.copy_failed": "无法复制——命令已选中，请从那里复制"
+  "relay.asks.card.command.copy_failed": "无法复制——命令已选中，请从那里复制",
+  "relay.asks.sheet.earlier": "更早",
+  "relay.asks.card.progress_tally": "已回答 {answered}/{total}",
+  "relay.asks.card.progress_pick_or_type": "选择一个选项或输入你自己的回答，即可回答。",
+  "relay.asks.card.progress_type": "输入你的回答或跳过，即可发送。"
 }

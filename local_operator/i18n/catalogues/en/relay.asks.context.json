@@ -76,7 +76,7 @@
   },
   "relay.asks.card.placeholder_answer": {
     "role": "free-text answer input placeholder",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (first letter capital), no final full stop. Also the inline hint on the Other row (\"Other   Your answer\").",
     "note": "Owned relay SPA asks copy. Used for ordinary questions with no options."
   },
   "relay.asks.card.other": {
@@ -101,7 +101,7 @@
   },
   "relay.asks.card.dismiss": {
     "role": "dismissal action label",
-    "tone": "Preserve casing, lowercase, em dash.",
+    "tone": "Sentence case (first letter capital), no final full stop. Keep the em dash.",
     "note": "Owned relay SPA asks copy. The label is also the control's width; keep it short. Dismissal sends no reply."
   },
   "relay.asks.card.skip": {
@@ -126,17 +126,17 @@
   },
   "relay.asks.card.send_answers": {
     "role": "submit action label for a multi-question ask",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (first letter capital), no final full stop. Half-width button in the pinned bottom bar; keep it short.",
     "note": "Owned relay SPA asks copy. One submit answers every question in the form."
   },
   "relay.asks.card.send_answer": {
     "role": "submit action label for a single-question ask",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (first letter capital), no final full stop. Half-width button in the pinned bottom bar; keep it short.",
     "note": "Owned relay SPA asks copy. Singular sibling of send_answers."
   },
   "relay.asks.card.decline": {
     "role": "decline action label",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (first letter capital), no final full stop. Half-width button in the pinned bottom bar; keep it short.",
     "note": "Owned relay SPA asks copy. Declining answers the agent that the user refused."
   },
   "relay.asks.card.timed_out_badge": {
@@ -146,22 +146,22 @@
   },
   "relay.asks.sheet.title_waiting": {
     "role": "asks sheet title with a live count",
-    "tone": "Preserve the leading section noun and its ' · ' separator, and lowercase. The section noun names the SHEET (asks, approvals and secrets all live here), so a locale must not reuse the question word as the section noun. The count is an ICU plural over questions.",
-    "note": "Owned relay SPA asks copy. Counts questions, not asks, matching the dock and the session header."
+    "tone": "Sentence case (first letter capital), no final full stop. Same wording as relay.asks.dock.waiting. The count is an ICU plural over questions.",
+    "note": "Owned relay SPA asks copy. Counts questions, not asks, matching the dock and the session header; reads \"1 question waiting\" in English."
   },
   "relay.asks.sheet.title_lapsed": {
     "role": "asks sheet title when only lapsed questions remain",
-    "tone": "Preserve the leading section noun and its ' · ' separator, and lowercase. The section noun is the sheet's name, not the question count word.",
+    "tone": "Sentence case (first letter capital), no final full stop. Same wording as relay.asks.dock.timed_out. The count is an ICU plural over questions.",
     "note": "Owned relay SPA asks copy. Lapsed questions are read-only; the title says what the sheet holds."
   },
   "relay.asks.sheet.title_plain": {
     "role": "asks sheet title with nothing waiting or lapsed",
-    "tone": "Preserve casing, lowercase. This is the section noun alone.",
-    "note": "Owned relay SPA asks copy. The bare sheet name."
+    "tone": "Sentence case (first letter capital), no final full stop. A plain noun for the sheet, not a count.",
+    "note": "Owned relay SPA asks copy. The bare sheet title, shown when only answered questions are listed."
   },
   "relay.asks.sheet.loading": {
     "role": "asks sheet loading line",
-    "tone": "Preserve casing, lowercase. The ellipsis is U+2026.",
+    "tone": "Sentence case (first letter capital), no final full stop. The ellipsis is U+2026.",
     "note": "Owned relay SPA asks copy. Prevents the empty state from appearing while the first read is in flight."
   },
   "relay.asks.sheet.empty": {
@@ -171,7 +171,7 @@
   },
   "relay.asks.sheet.retry": {
     "role": "retry action after a failed read",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (first letter capital), no final full stop.",
     "note": "Owned relay SPA asks copy. A failed read must not leave closing as the only move."
   },
   "relay.asks.sheet.ended_wait": {
@@ -408,5 +408,29 @@
     "role": "small note under the command when the clipboard write failed",
     "tone": "Plain, calm, lowercase after the em dash.",
     "note": "Owned relay SPA asks copy. The card has selected the command text so the platform's own copy gesture works; the note says so. Preserve the em dash."
+  },
+  "relay.asks.sheet.earlier": {
+    "role": "heading above the answered questions in the asks sheet",
+    "tone": "Sentence case (first letter capital), no final full stop.",
+    "maxCells": 16,
+    "note": "Owned relay SPA asks copy. Sits above the one-line rows of questions that are already settled, below everything still waiting. Same word as the native app's mobile.asks.earlier."
+  },
+  "relay.asks.card.progress_tally": {
+    "role": "quiet line in the pinned bar while Send is disabled, multi-question ask",
+    "tone": "Sentence case (first letter capital), no final full stop.",
+    "maxCells": 34,
+    "note": "Owned relay SPA asks copy. {answered} and {total} are integers (answered < total) counting the ask's own questions. Explains why Send is grey. Same wording as the native app's mobile.asks.progress.tally."
+  },
+  "relay.asks.card.progress_pick_or_type": {
+    "role": "quiet line in the pinned bar while Send is disabled, single question with options",
+    "tone": "Sentence case (first letter capital), no final full stop.",
+    "maxCells": 60,
+    "note": "Owned relay SPA asks copy. Says what it takes to enable Send: pick one of the options or type an own answer in the Other row. Same wording as the native app's mobile.asks.progress.pick_or_type."
+  },
+  "relay.asks.card.progress_type": {
+    "role": "quiet line in the pinned bar while Send is disabled, single free-text question",
+    "tone": "Sentence case (first letter capital), no final full stop.",
+    "maxCells": 60,
+    "note": "Owned relay SPA asks copy. Says what it takes to enable Send on a question with no options: type an answer, or skip the question. Same wording as the native app's mobile.asks.progress.type."
   }
 }

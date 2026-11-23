@@ -37,12 +37,13 @@
  */
 import { contentDir } from "../lib/content-direction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ReactNode } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
-import { ASK_QUESTION_FRACTION, ASK_QUESTION_LIST_FRACTION, columnCap } from "../lib/column";
-import { Disclosure } from "./ui/disclosure";
+import { ASK_QUESTION_FRACTION, columnCap } from "../lib/column";
 import {
+	type AskTone,
 	answeredPairs,
 	askStateLine,
 	dismissedReasonKey,
@@ -74,6 +75,37 @@ const DISMISS_COPY = {
 } as const;
 
 const DISMISS_REASONS = ["moot", "answered_in_chat"] as const;
+
+/** The one line a queued ask's own state is stated in, for the open card and
+    for the sheet's collapsed row of the same ask.
+
+    A DISMISSED ROW STATES ITS REASON (SA-D8, design §17). The reason is a
+    catalogue sentence rather than a literal here, so the card says it in the
+    operator's language: `askStateLine`'s `dismissed` arm is the fallback for a
+    row that recorded none (and for an older daemon that never sent the key). */
+export function askStateOf(row: PendingAsk, nowMs: number): { text: string; tone: AskTone } {
+	const state = askStateLine(row, nowMs, messageRuntime.t);
+	const reason = dismissedReasonKey(row);
+	return reason ? { ...state, text: messageRuntime.t(reason) } : state;
+}
+
+/** The ink a state line is painted in, one place for the open card and the
+    sheet's collapsed rows. INK FOLLOWS THE PROMISE, not the mood (design round
+    1, D2): an open ask's line was `text-accent` and a settled one
+    `text-success`, two greens that are ΔE 17 apart here and IDENTICAL in three of
+    the 28 shipped themes — so the one distinction this card exists to draw
+    (still waiting vs already settled) could vanish. `accent` is no longer spent
+    on the state line at all: "the agent is continuing" is information, not an
+    achievement, and success green is reserved for the states that are receipts. */
+export function askToneClass(tone: AskTone): string {
+	return tone === "attention"
+		? "text-warning"
+		: tone === "settled"
+			? "text-success"
+			: tone === "gone"
+				? "text-ink-dim"
+				: "text-ink-muted";
+}
 
 /** The daemon's sentence, or the plainest honest thing when it gave none.
  *
@@ -346,32 +378,49 @@ function CommandBlock({ command }: { command: string }) {
 }
 
 /**
- * The question stack of a multi-question card, capped as a whole
- * (`ASK_QUESTION_LIST_FRACTION`) and scrolling inside itself (PR #3777 code
- * review M2). Each question's text is already capped at
- * `ASK_QUESTION_FRACTION`, but three long questions at 0.3 each, plus their
- * options, still exceed the column and push the card's shared send/decline
- * (or dismiss) row off screen. A single question is left unwrapped so its
- * options stay directly under its excerpt, as before; the card's answer row
- * always renders outside this region.
+ * The look of one option row (and the `Other` row), the web twin of the native
+ * app's `choiceRowClasses` so the two panels draw the same rows.
+ *
+ * - REST: a tinted fill (the accent wash) and a 2 px accent start edge.
+ * - SELECTED: the same tint, a 4 px edge and a trailing tick (`Tick`) — colour
+ *   alone never says "chosen". The edge takes the 2 px it gains out of the start
+ *   padding, so the label does not shift when a row is picked. (The native app
+ *   also deepens the fill on selection; the relay's palette has no stronger tint
+ *   than the wash, and a runtime blend would sit outside what
+ *   `scripts/contrast-contract.mjs` can verify, so shape carries the state here.)
+ * - PRESSED: a brief dim under the finger.
+ * - DISABLED (and not selected): sunken ground, hairline edge, disabled ink. A
+ *   selected row keeps its look while an answer is in flight, so the thing being
+ *   sent stays readable.
+ *
+ * Every ink sits on the accent wash or the sunken ground, pairs the contrast
+ * contract pins in every theme: ink, inkMuted, inkDim and accent on accentWash at
+ * 4.5:1 (ink on sunken at 7:1). The disabled ink is exempt, as an inactive
+ * control's is.
  */
-function QuestionList({ count, children }: { count: number; children: ReactNode }) {
-	if (count <= 1) return <>{children}</>;
-	return (
-		<div
-			data-testid="ask-question-list"
-			// A focusable scroller needs a name or a screen reader announces a
-			// bare stop (PR #3777 R2-5); the dock's existing "N questions
-			// waiting" string names it without a new catalogue entry.
-			role="region"
-			aria-label={messageRuntime.t("relay.asks.dock.waiting", { count })}
-			tabIndex={0}
-			style={columnCap(ASK_QUESTION_LIST_FRACTION)}
-			className="lo-scroll flex min-w-0 flex-col gap-3 overflow-y-auto overflow-x-hidden"
-		>
-			{children}
-		</div>
-	);
+function optionRowLook({ selected, disabled }: { selected: boolean; disabled: boolean }) {
+	const dimmed = disabled && !selected;
+	return {
+		row: cn(
+			"flex min-h-11 items-center gap-2 rounded-sm py-2 pe-3 text-start",
+			selected ? "border-s-4 ps-3" : "border-s-2 ps-3.5",
+			dimmed ? "border-s-hairline bg-sunken" : "border-s-accent",
+			!dimmed && "bg-accent-wash active:brightness-95",
+		),
+		inkMain: dimmed ? "text-ink-disabled" : "text-ink",
+		note: dimmed ? "text-ink-disabled" : "text-ink-dim",
+		desc: dimmed ? "text-ink-disabled" : "text-ink-muted",
+	};
+}
+
+/** The trailing tick of a chosen row. Decorative: `aria-checked` carries the
+    state for assistive tech, the glyph carries it for everyone who sees. */
+function Tick({ on }: { on: boolean }) {
+	return on ? (
+		<span aria-hidden className="shrink-0 text-body-sm font-medium text-accent">
+			✓
+		</span>
+	) : null;
 }
 
 function QuestionField({
@@ -415,6 +464,7 @@ function QuestionField({
 		onChange(cellWith(ticks, multi, next));
 	};
 	const chosen = new Set(ticks);
+	const otherLook = optionRowLook({ selected: other.open, disabled });
 	if (options.length === 0) {
 		/* A free-text or secret question: the answer IS the typed string. */
 		return (
@@ -447,7 +497,11 @@ function QuestionField({
 	}
 
 	return (
-		<div className="flex flex-col gap-2">
+		<div
+			role={multi ? "group" : "radiogroup"}
+			aria-label={question.question}
+			className="flex flex-col gap-2"
+		>
 			{/* Describes the option list, so it sits with it, above the rows. */}
 			{multi ? (
 				<span className="text-meta text-ink-dim">
@@ -464,10 +518,18 @@ function QuestionField({
 				   runtime stops hoisting (agent review round 2, N1). A multi-select
 				   may recommend several rows, so every one in the set is badged. */
 				const recommended = recommendedRows(question).includes(index);
+				const rowLook = optionRowLook({ selected: on, disabled });
 				return (
 					<button
 						key={option.label}
 						type="button"
+						/* A RADIO OR A CHECKBOX, NOT A TOGGLE BUTTON (ask-panel parity R3): the
+						   rows are one choice among several, which is what a screen reader
+						   should hear ("radio, 1 of 3, checked"), and `aria-pressed` only ever
+						   said "toggle". They stay real <button>s, so Enter and Space work
+						   without a key handler of ours. */
+						role={multi ? "checkbox" : "radio"}
+						aria-checked={on}
 						disabled={disabled}
 						onClick={() => {
 							if (!multi) {
@@ -488,35 +550,24 @@ function QuestionField({
 							else next.add(option.label);
 							onChange(cellWith(Array.from(next), true, other));
 						}}
-						aria-pressed={on}
-						className={cn(
-							/* A TONE STEP, NOT AN OUTLINE (design review round 2, NIT): the
-							   option's ground was the sheet's own ground, so a 1 px
-							   `border-control` box was the only thing drawing it — the one
-							   place this PR's "separate by the ladder, not by a box" rule had
-							   not reached. `bg-surface` on the sheet's `bg-elevated` draws it
-							   with the ground ladder instead; the 2 px accent start edge stays,
-							   because that is the option's authority mark, not its boundary. */
-							"flex min-h-11 flex-col justify-center rounded-sm border-s-2 border-s-accent px-3 py-2 text-start",
-							on
-								? "bg-accent-wash"
-								: "bg-surface active:bg-accent-wash",
-							"disabled:opacity-50",
-						)}
+						className={rowLook.row}
 					>
-						<span className="text-body-sm font-medium text-ink">
-							{option.label}
-							{recommended ? (
-								/* The model's recommendation, as a word. §5's contract keeps
-								   position as the only channel for older clients, but this
-								   client is told outright, and a badge that says so is
-								   cheaper to read than "the first one means it". */
-								<span className="text-ink-dim"> {messageRuntime.t("relay.asks.card.recommended")}</span>
+						<span className="flex min-w-0 flex-1 flex-col justify-center">
+							<span className={cn("text-body-sm font-medium", rowLook.inkMain)}>
+								{option.label}
+								{recommended ? (
+									/* The model's recommendation, as a word. §5's contract keeps
+									   position as the only channel for older clients, but this
+									   client is told outright, and a badge that says so is
+									   cheaper to read than "the first one means it". */
+									<span className={rowLook.note}> {messageRuntime.t("relay.asks.card.recommended")}</span>
+								) : null}
+							</span>
+							{option.description ? (
+								<span className={cn("text-body-sm", rowLook.desc)}>{option.description}</span>
 							) : null}
 						</span>
-						{option.description ? (
-							<span className="text-body-sm text-ink-muted">{option.description}</span>
-						) : null}
+						<Tick on={on} />
 					</button>
 				);
 			})}
@@ -528,12 +579,13 @@ function QuestionField({
 					    than something the user has to know. The hint is the same
 					    "your answer" the field's placeholder says; it goes while the
 					    field is open, where it would print the same words twice.
-					    A real button with `aria-pressed`, like the option rows. */}
+					    A real button with the option rows' radio/checkbox semantics. */}
 					<button
 						type="button"
 						data-ask-option-other=""
 						disabled={disabled}
-						aria-pressed={other.open}
+						role={multi ? "checkbox" : "radio"}
+						aria-checked={other.open}
 						onClick={() => {
 							/* A single-select `Other` is the selected one of a radio-like
 							   group, which does not deselect: pressing it again re-focuses
@@ -550,20 +602,18 @@ function QuestionField({
 								writeOther({ ...other, open: true });
 							}
 						}}
-						className={cn(
-							"flex min-h-11 items-center gap-2 rounded-sm border-s-2 border-s-accent px-3 py-2 text-start",
-							other.open ? "bg-accent-wash" : "bg-surface active:bg-accent-wash",
-							"disabled:opacity-50",
-						)}
+						className={otherLook.row}
 					>
-						<span className="text-body-sm font-medium text-ink">
+						<span className={cn("text-body-sm font-medium", otherLook.inkMain)}>
 							{messageRuntime.t("relay.asks.card.other")}
 						</span>
 						{other.open ? null : (
-							<span className="text-body-sm text-ink-dim">
+							<span className={cn("text-body-sm", otherLook.note)}>
 								{messageRuntime.t("relay.asks.card.placeholder_answer")}
 							</span>
 						)}
+						<span className="flex-1" />
+						<Tick on={other.open} />
 					</button>
 					{other.open ? (
 						<input
@@ -605,6 +655,11 @@ export function AskCard({
 	nowMs,
 	onSettled,
 	onDismissed,
+	footerSlot,
+	lead,
+	hideState = false,
+	focusQuestion = false,
+	onFocused,
 }: {
 	row: PendingAsk;
 	sessionId: string;
@@ -622,6 +677,28 @@ export function AskCard({
 	    words, and the id so a later dismissal replaces this one instead of being
 	    confused with it (M1). */
 	onDismissed?: (askId: string, reason: "moot" | "answered_in_chat" | undefined) => void;
+	/** WHERE THE ANSWERING CONTROLS GO. The controls that answer the card (send,
+	    decline, dismiss, the progress and refusal lines) are drawn in the sheet's
+	    PINNED bottom bar, not at the end of the scrolling card: content may
+	    scroll, the control that answers it may not (ask-panel parity, R2).
+
+	    `undefined` draws them at the card's own foot (a card used on its own);
+	    an element portals them into it; `null` is a bar that has not mounted yet,
+	    which draws nothing for that one commit rather than a duplicate. They stay
+	    this component's own children either way, so the draft, the in-flight
+	    state and the refusal never have to be lifted into the sheet. */
+	footerSlot?: HTMLElement | null;
+	/** Drawn right under the state line: the conversation's name when the sheet
+	    holds several conversations' asks, and the not-running wait. Data and
+	    sheet-level copy the card has no reason to know how to compute. */
+	lead?: ReactNode;
+	/** The state line is stated once by the collapsed row an expanded receipt
+	    sits under, so the card does not say it a second time. */
+	hideState?: boolean;
+	/** Move focus to the first question's text once, on mount (after a send, the
+	    reader's place moves to the next ask), then say so through `onFocused`. */
+	focusQuestion?: boolean;
+	onFocused?: () => void;
 }) {
 	/* The draft map: question id → the labels (or the typed string) the user has
 	   chosen but not yet sent. IT LIVES IN THE STORE, not in this component
@@ -675,13 +752,8 @@ export function AskCard({
 	   aggregate's own fields (`PendingAsk.runtime_live` / `.durable`), and a
 	   second copy of them on the component was exactly the drift D7 was made of. */
 	const cold = row.runtime_live === false;
-	const state = askStateLine(row, nowMs, messageRuntime.t);
-	/* A DISMISSED ROW STATES ITS REASON (SA-D8, design §17). The reason is a
-	   catalogue sentence rather than a literal here, so the card says it in the
-	   operator's language: `askStateLine`'s `dismissed` arm is the fallback for a
-	   row that recorded none (and for an older daemon that never sent the key). */
-	const dismissReason = dismissedReasonKey(row);
-	const stateLine = dismissReason ? messageRuntime.t(dismissReason) : state.text;
+	const state = askStateOf(row, nowMs);
+	const stateLine = state.text;
 	const status = String(row.status || "open");
 	const answerable = isAnswerable(status);
 	/* A LAPSED ASK IS SHOWN, NOT OFFERED (Ben's report, 2026-10-15). Its deadline
@@ -865,14 +937,7 @@ export function AskCard({
 	   could vanish. `accent` is no longer spent on the state line at all: "the
 	   agent is continuing" is information, not an achievement, and success green
 	   is reserved for the states that are receipts. */
-	const toneClass =
-		state.tone === "attention"
-			? "text-warning"
-			: state.tone === "settled"
-				? "text-success"
-				: state.tone === "gone"
-					? "text-ink-dim"
-					: "text-ink-muted";
+	const toneClass = askToneClass(state.tone);
 
 	const body = (
 		<>
@@ -881,19 +946,15 @@ export function AskCard({
 			    longer exists" is the same contradiction §5's preamble forbids — the
 			    timer and the agent both belong to a conversation that is not there.
 			    The refusal sentence is the whole state. */}
-			{terminal ? null : (
+			{terminal || hideState ? null : (
 				<span className={cn("flex flex-wrap items-center gap-x-2 text-meta", toneClass)}>
-					{/* Under the `Timed out` badge the line starts at what that means:
-					    the badge says the word one line above (#2481 UX round 2, U13). A
-					    lapsed, non-terminal card is always inside that Disclosure. */}
-					<span role="status">
-						{lapsed ? messageRuntime.t("relay.asks.status.lapsed_body") : stateLine}
-					</span>
+					<span role="status">{stateLine}</span>
 					{row.urgent && offered ? (
 						<span className="text-ink-dim">{messageRuntime.t("relay.asks.card.urgent")}</span>
 					) : null}
 				</span>
 			)}
+			{terminal ? null : lead}
 
 			{terminal ? (
 				/* TERMINAL, AND IT IS THE SENTENCE THAT SAYS SO (design round 1, D3 for
@@ -912,13 +973,13 @@ export function AskCard({
 			) : lapsed ? (
 				<>
 					{/* READ-ONLY: the question the agent asked, so the reader knows what
-					    lapsed, and nothing to answer it with. Dismiss is the only op. A
+					    lapsed, and nothing to answer it with. Dismiss is the only op, in the
+					    pinned bar. A
 					    lapsed row is always `timed_out` (`isLapsed`; the index readers
 					    re-derive a stale `open` past its deadline), so the Dismiss gate and
 					    the queue's own rule are the same statement. It stays apart from any
 					    Decline: declining ANSWERS the agent, dismissing answers nobody and
 					    buys no turn (the agent is told on its next run — §14). */}
-					<QuestionList count={questions.length}>
 					{questions.map((question, index) => (
 						<span
 							key={String(question.id ?? index)}
@@ -932,48 +993,9 @@ export function AskCard({
 							<QuestionText text={question.question} />
 						</span>
 					))}
-					</QuestionList>
-					{dismissible ? (
-						<>
-							<button
-								type="button"
-								disabled={busy !== ""}
-								aria-busy={busy === "dismiss" || undefined}
-								/* No reason: a lapsed ask's door is the one-key dismissal, and
-								   the queue records its own default (the agent already walked past
-								   that deadline, so nothing turns on the operator naming one). */
-								onClick={() => dismiss()}
-								className="flex min-h-11 self-start items-center rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
-							>
-								{/* D1 (design round 1): the label IS the width, so it stays put while
-								    the dismissal is in flight. The in-flight mark used to be the bare
-								    glyph "…", which collapsed the control from 208 px to a 44 px square
-								    under the thumb — a glitch rather than feedback, and now the whole
-								    in-flight life of a dismissal is one append and a flash. The only
-								    change is that it dims (`disabled`) and says it is busy. Kept off the
-								    answer/decline pair, where D1 called the same glyph optional. */}
-								{messageRuntime.t("relay.asks.card.dismiss")}
-							</button>
-							{/* NO COLD LINE, AND NO COLD CLOCK (fork A, 2026-10-16). A dismissal
-							    on a conversation with no runtime used to ENGAGE it to record the
-							    dismissal, so the card owed the reader that fact before the tap (UX
-							    round 1, U3) and stated its ~30 s while it ran (design round 1, D1 =
-							    UX U1). A dismissal now takes the no-boot door on both surfaces — one
-							    append against the log, no boot, no turn — so "dismiss — send no
-							    reply" above is the WHOLE truth, warm or cold, and there is nothing
-							    left to promise or to wait out. Left as a comment rather than an
-							    absence, because the next reader came here looking for the engage
-							    copy the other ops still genuinely carry: the cold ANSWER's clock at
-							    the bottom of this card, and the sheet's strip above it. */}
-							{error && errorOp === "dismiss" ? (
-								<p className="text-body-sm text-danger">{error}</p>
-							) : null}
-						</>
-					) : null}
 				</>
 			) : offered ? (
 				<>
-					<QuestionList count={open_questions.length}>
 					{open_questions.map((question, index) => {
 						const id = String(question.id);
 						return (
@@ -1030,7 +1052,6 @@ export function AskCard({
 							</div>
 						);
 					})}
-					</QuestionList>
 
 					{/* R6 (agent review round 1): an answerable ask whose questions are all
 					    already taken elsewhere used to render no fields and a permanently
@@ -1061,157 +1082,6 @@ export function AskCard({
 						) : null;
 					})()}
 
-					{/* THE COLD ANSWER'S CLOCK, STATED (design round 1, D1 = UX U1). A cold
-					    answer is an engage plus a dial plus an ack in ONE call — ~30 s
-					    measured, against the 1–3 s a warm answer pays — and until this line
-					    existed the whole in-flight affordance was a bare `…` with the state
-					    line still reading "Queued — the agent is continuing". Saying nothing
-					    is also a claim, and it was the wrong one. */}
-					{busy !== "" && busy !== "dismiss" && cold ? (
-						/* NOT FOR A DISMISSAL (agent review round 1, M1): the engine takes
-						   the no-boot door on every surface (`dismiss_cold`, §14/fork A),
-						   so the dismissal this card offers is one append whether the
-						   conversation is live or cold — the ~30 s bring-up belongs to the
-						   ANSWER and DECLINE below, which really do engage. The gate is
-						   the op, not the row: `cold` says what an answer would cost. */
-						<p className="text-body-sm text-ink-muted">
-							{messageRuntime.t("relay.asks.card.cold_wait")}
-						</p>
-					) : null}
-
-					{/* THE REFUSAL SITS WITH THE CONTROL IT ANSWERS (design round 1, D5 for
-					    the dismiss arm; round 1's D4 fixed the send/decline pair). A dismiss
-					    refusal rendered here would land 60 px above the button that produced
-					    it, with the send/decline pair between them, so it renders beside
-					    dismiss instead — see the dismiss control below. */}
-					{error && errorOp !== "dismiss" ? (
-						<p className="text-body-sm text-danger">{error}</p>
-					) : null}
-
-					<div className="flex flex-wrap gap-2">
-						<button
-							type="button"
-							disabled={busy !== "" || !complete}
-							onClick={respond}
-							className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-accent px-4 text-body-sm font-medium text-on-accent active:bg-accent-active disabled:opacity-50"
-						>
-							{busy === "respond"
-								? "…"
-								: open_questions.length > 1
-									? messageRuntime.t("relay.asks.card.send_answers")
-									: messageRuntime.t("relay.asks.card.send_answer")}
-						</button>
-						<button
-							type="button"
-							disabled={busy !== ""}
-							onClick={decline}
-							className="flex min-h-11 items-center justify-center rounded-sm bg-danger-wash px-3 text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
-						>
-							{busy === "decline" ? "…" : messageRuntime.t("relay.asks.card.decline")}
-						</button>
-					</div>
-
-					{/* THE OPEN ASK'S OWN DOOR (R5, §15's amended D6): `close…` puts the
-					    QUESTION away without answering anybody, which is the act a stale
-					    ask needs and the one the card never offered on an open row. It
-					    asks WHY first — the two reasons are what the agent acts on — and
-					    a tap on `close…` sends nothing: the reason row is a choice, not a
-					    dismissal.
-
-					    IT IS NOT A SECOND `decline`. Declining ANSWERS the agent ("no"),
-					    buys nothing and is irreversible; closing says the question stopped
-					    mattering and asks the agent for nothing at all, and on a live
-					    conversation it need not even start a turn (a dismissal is held
-					    durably until the agent's next turn). */}
-					{reason_needed ? (
-						<div className="flex flex-col gap-2">
-							{closing ? (
-								/* THE REASONS ARE FULL-WIDTH ROWS WITH THEIR OWN NOTES (design
-								   round 1, D1 = UX U6). They used to be three controls on one
-								   flex-wrap line — no heading, no explanation, `cancel` orphaned
-								   onto a second line in Urdu — and "Answered in chat" sat 8.5 px
-								   under a live `decline`, so a reader with a drafted answer could
-								   read it as "send my answer". The heading names the act (the
-								   same words the terminal uses), and each row states what the
-								   agent will be told, in the same shape the answer options above
-								   already use. */
-								<div className="flex flex-col gap-2">
-									{/* THE QUIET CONTROLS SIT ON THE CARD'S TEXT AXIS (design round
-									    2, D10): `cancel` and the `dismiss…` reveal are borderless, and
-									    their `px-2` box put their words 7.5 px inside the heading and
-									    the question, which the eye reads as a misalignment. `px-0`
-									    aligns the words to the box's own edge; `min-h-11` keeps the
-									    44 px target and the label's width keeps it above the 24 px
-									    floor. */}
-									<span className="text-meta text-ink-dim">
-										{messageRuntime.t("relay.ask.dismiss.title")}
-									</span>
-									{DISMISS_REASONS.map((reason) => (
-										<button
-											key={reason}
-											type="button"
-											disabled={busy !== "" || dismissRefused}
-											aria-busy={
-												(busy === "dismiss" && sentReason === reason) || undefined
-											}
-											onClick={() => dismiss(reason)}
-											className={cn(
-												"flex w-full flex-col items-start gap-0.5 rounded-sm px-3 py-2 text-start active:bg-elevated disabled:opacity-50",
-												sentReason === reason && busy === "dismiss"
-													? "text-ink"
-													: "text-ink-muted",
-											)}
-										>
-											{/* THE PRESSED LABEL STAYS PUT (UX round 1, U3). Both buttons
-											    used to collapse to `…`, erasing the only statement of
-											    which reason had been sent; the pressed row keeps its
-											    words and gains the in-flight mark, the sibling dims. */}
-											<span className="text-body-sm">
-												{messageRuntime.t(DISMISS_COPY[reason].key)}
-												{busy === "dismiss" && sentReason === reason ? " …" : ""}
-											</span>
-											<span className="text-meta text-ink-dim">
-												{messageRuntime.t(DISMISS_COPY[reason].note)}
-											</span>
-										</button>
-									))}
-									<button
-										type="button"
-										disabled={busy !== ""}
-										onClick={() => {
-											/* THE REFUSAL GOES WITH THE BLOCK IT EXPLAINED (UX round 2,
-											   U10 = agent review round 2, m1): the sentence renders
-											   outside the `closing` ternary, so leaving it behind put
-											   an old refusal under a fresh-looking `dismiss…`. */
-											setClosing(false);
-											setDismissRefused(false);
-											setError("");
-											setErrorOp("");
-										}}
-										className="flex min-h-11 self-start items-center rounded-sm px-0 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
-									>
-										{messageRuntime.t("relay.ask.dismiss.cancel")}
-									</button>
-								</div>
-							) : (
-								<button
-									type="button"
-									disabled={busy !== "" || dismissRefused}
-									onClick={() => setClosing(true)}
-										className="flex min-h-11 self-start items-center rounded-sm px-0 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
-								>
-									{messageRuntime.t("relay.ask.dismiss.open")}
-								</button>
-							)}
-							{/* THE REFUSAL SITS WITH THE CONTROL THAT PRODUCED IT (design
-							    round 1, D5): a relay or bridge ask refuses the dismissal in
-							    the queue's own words, and that sentence belongs beside the
-							    reason the operator pressed, not 60 px above it. */}
-							{error && errorOp === "dismiss" ? (
-								<p className="text-body-sm text-danger">{error}</p>
-							) : null}
-						</div>
-					) : null}
 				</>
 			) : (
 				<>
@@ -1273,46 +1143,218 @@ export function AskCard({
 		</>
 	);
 
-	return (
-		<div
-			data-testid="ask-card"
-			data-ask-id={row.ask_id}
-			data-ask-status={String(row.status || "open")}
-			className="flex flex-col gap-2 rounded-md bg-surface p-2.5"
-		>
-			{lapsed && !terminal ? (
-				/* A LAPSED ASK IS COLLAPSED BEHIND ITS BADGE (decision D11, Ben's
-				   2026-10-15 request): it reads the way the desktop's declined row does,
-				   one line with a status word, and seeing it is an explicit tap. The
-				   app-wide `Disclosure` idiom, never a second collapse pattern, closed by
-				   default and taking no focus on mount (D12: a lapsed ask never claims
-				   the user). The body is the read-only card above — the lapsed line, the
-				   question, and Dismiss, which stays inside so nothing on the collapsed
-				   header can be tapped by accident. A TERMINAL row is not wrapped: its
-				   refusal sentence is the whole state and must stay readable. */
-				<Disclosure
-					headerClassName="gap-2"
-					header={(open: boolean) => (
-						<>
-							<span className="shrink-0 rounded-sm px-1.5 text-meta text-ink-muted">
-								{messageRuntime.t("relay.asks.card.timed_out_badge")}
-							</span>
-							{/* The header names the question only while CLOSED (#2481 UX U7):
-							    open, the body states it in full, and a truncated copy one line
-							    above it said the same thing twice. */}
-							{open ? null : (
-								<span dir={contentDir(questions[0]?.question ?? "")} className="min-w-0 truncate text-body-sm text-ink-muted">
-									{questions[0]?.question ?? ""}
-								</span>
-							)}
-						</>
-					)}
-				>
-					<div className="flex flex-col gap-2 pt-1">{body}</div>
-				</Disclosure>
-			) : (
-				body
-			)}
+	/* THE ANSWERING CONTROLS (ask-panel parity, R2). Everything the reader does
+	   to ANSWER this card, and everything that explains why they cannot yet, lives
+	   in one block so it can be pinned: the refusal, the cold-start wait, why send
+	   is grey, the send/decline pair, and the quiet way out. Nothing in it is part
+	   of the question, so a long question can scroll without taking the buttons
+	   with it. Absent on a terminal card (its sentence is the whole state), a
+	   settled receipt (nothing to do) and an `expired` one. */
+	const hasBar = !terminal && (offered || (lapsed && dismissible));
+	const unfilled = open_questions.filter((question) => !filled(String(question.id)));
+	/* WHY SEND IS GREY, said in words (the native panel's rule): a disabled button
+	   alone gives the reader no reason. Only while the form is incomplete and
+	   nothing is in flight (a busy button is dimmed for a different reason). A
+	   multi-question ask names how far along it is, counting questions taken
+	   elsewhere as answered, as the gate does; a single question says what it takes. */
+	const progressLine =
+		offered && busy === "" && unfilled.length > 0
+			? questions.length > 1
+				? messageRuntime.t("relay.asks.card.progress_tally", {
+						answered: String(Math.max(0, questions.length - unfilled.length)),
+						total: String(questions.length),
+					})
+				: Array.isArray(open_questions[0]?.options) && open_questions[0].options.length > 0
+					? messageRuntime.t("relay.asks.card.progress_pick_or_type")
+					: messageRuntime.t("relay.asks.card.progress_type")
+			: null;
+	const bar = !hasBar ? null : lapsed ? (
+		/* A LAPSED ASK'S ONLY OP, with no reason asked: the agent already walked past
+		   its deadline, so nothing turns on the operator naming one. It stays apart
+		   from any Decline: declining ANSWERS the agent, dismissing answers nobody and
+		   buys no turn (the agent is told on its next run — §14). */
+		<div className="flex flex-col gap-2" data-testid="ask-bar">
+			<button
+				type="button"
+				disabled={busy !== ""}
+				aria-busy={busy === "dismiss" || undefined}
+				onClick={() => dismiss()}
+				className="flex min-h-11 w-full items-center justify-center rounded-sm px-3 text-body-sm text-ink-muted active:bg-surface disabled:opacity-50"
+			>
+				{/* The label IS the width, so it stays put while the dismissal is in
+				    flight: it dims (`disabled`) and says it is busy, and never collapses
+				    to a bare glyph under the thumb (design round 1, D1).
+
+				    NO COLD LINE, AND NO COLD CLOCK (fork A, 2026-10-16): a dismissal takes
+				    the no-boot door on every surface, one append against the log, so
+				    "dismiss — send no reply" is the WHOLE truth, warm or cold. */}
+				{messageRuntime.t("relay.asks.card.dismiss")}
+			</button>
+			{error && errorOp === "dismiss" ? <p className="text-body-sm text-danger">{error}</p> : null}
 		</div>
+	) : (
+		<div className="flex flex-col gap-2" data-testid="ask-bar">
+			{closing ? (
+				/* THE REASONS REPLACE THE ANSWERING PAIR while they are up (ask-panel
+				   parity, as on the native panel). They used to sit 8.5 px under a live
+				   `decline`, so a reader with a drafted answer could read "Answered in
+				   chat" as "send my answer" (design round 1, D1 = UX U6). The heading
+				   names the act (the same words the terminal uses) and each row states
+				   what the agent will be told.
+
+				   A TAP ON `Dismiss…` SENDS NOTHING: the reason row is a choice, not a
+				   dismissal. IT IS NOT A SECOND `decline`: declining ANSWERS the agent
+				   ("no"), buys nothing and is irreversible; closing says the question
+				   stopped mattering and asks the agent for nothing at all, and on a live
+				   conversation it need not even start a turn (a dismissal is held durably
+				   until the agent's next turn). */
+				<div className="flex flex-col gap-1">
+					<span className="text-meta text-ink-dim">
+						{messageRuntime.t("relay.ask.dismiss.title")}
+					</span>
+					{DISMISS_REASONS.map((reason) => (
+						<button
+							key={reason}
+							type="button"
+							disabled={busy !== "" || dismissRefused}
+							aria-busy={(busy === "dismiss" && sentReason === reason) || undefined}
+							onClick={() => dismiss(reason)}
+							className={cn(
+								"flex min-h-11 w-full flex-col items-start justify-center gap-0.5 rounded-sm px-2 py-1.5 text-start active:bg-surface disabled:opacity-50",
+								sentReason === reason && busy === "dismiss" ? "text-ink" : "text-ink-muted",
+							)}
+						>
+							{/* THE PRESSED LABEL STAYS PUT (UX round 1, U3): the pressed row
+							    keeps its words and gains the in-flight mark, the sibling dims. */}
+							<span className="text-body-sm">
+								{messageRuntime.t(DISMISS_COPY[reason].key)}
+								{busy === "dismiss" && sentReason === reason ? " …" : ""}
+							</span>
+							<span className="text-meta text-ink-dim">
+								{messageRuntime.t(DISMISS_COPY[reason].note)}
+							</span>
+						</button>
+					))}
+					<button
+						type="button"
+						disabled={busy !== ""}
+						onClick={() => {
+							/* THE REFUSAL GOES WITH THE BLOCK IT EXPLAINED (UX round 2, U10 =
+							   agent review round 2, m1): leaving it behind put an old refusal
+							   under a fresh-looking `Dismiss…`. */
+							setClosing(false);
+							setDismissRefused(false);
+							setError("");
+							setErrorOp("");
+						}}
+						className="flex min-h-11 items-center self-start rounded-sm px-2 text-body-sm text-ink-dim active:bg-surface disabled:opacity-50"
+					>
+						{messageRuntime.t("relay.ask.dismiss.cancel")}
+					</button>
+				</div>
+			) : (
+				<>
+					{/* THE COLD ANSWER'S CLOCK, STATED (design round 1, D1 = UX U1). A cold
+					    answer is an engage plus a dial plus an ack in ONE call — ~30 s
+					    measured, against the 1–3 s a warm answer pays — and until this line
+					    existed the whole in-flight affordance was a bare `…`. NOT FOR A
+					    DISMISSAL (agent review round 1, M1): the engine takes the no-boot
+					    door on every surface, so the ~30 s bring-up belongs to the ANSWER and
+					    DECLINE below, which really do engage. The gate is the op, not the row:
+					    `cold` says what an answer would cost. */}
+					{busy !== "" && busy !== "dismiss" && cold ? (
+						<p className="text-body-sm text-ink-muted">
+							{messageRuntime.t("relay.asks.card.cold_wait")}
+						</p>
+					) : null}
+					{/* THE REFUSAL SITS WITH THE CONTROLS IT ANSWERS (design round 1, D4/D5): a
+					    dismiss refusal renders beside the reasons instead, above. */}
+					{error && errorOp !== "dismiss" ? (
+						<p className="text-body-sm text-danger">
+							{error}
+						</p>
+					) : null}
+					{progressLine ? <p className="text-meta text-ink-dim">{progressLine}</p> : null}
+					{/* HALF WIDTH EACH, the label staying put while in flight: the button
+					    dims and says it is busy, and never collapses to a bare `…` (D1). */}
+					<div className="flex gap-2">
+						<button
+							type="button"
+							disabled={busy !== "" || !complete}
+							aria-busy={busy === "respond" || undefined}
+							onClick={respond}
+							className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-accent px-4 text-body-sm font-medium text-on-accent active:bg-accent-active disabled:opacity-50"
+						>
+							{open_questions.length > 1
+								? messageRuntime.t("relay.asks.card.send_answers")
+								: messageRuntime.t("relay.asks.card.send_answer")}
+						</button>
+						<button
+							type="button"
+							disabled={busy !== ""}
+							aria-busy={busy === "decline" || undefined}
+							onClick={decline}
+							className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-danger-wash px-3 text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
+						>
+							{messageRuntime.t("relay.asks.card.decline")}
+						</button>
+					</div>
+					{/* THE OPEN ASK'S OWN DOOR (R5, §15's amended D6): puts the QUESTION away
+					    without answering anybody, which is the act a stale ask needs. Quiet,
+					    and deliberately not beside Decline. */}
+					{reason_needed ? (
+						<button
+							type="button"
+							disabled={busy !== "" || dismissRefused}
+							onClick={() => setClosing(true)}
+							className="flex min-h-11 items-center self-center rounded-sm px-3 text-body-sm text-ink-dim active:bg-surface disabled:opacity-50"
+						>
+							{messageRuntime.t("relay.ask.dismiss.open")}
+						</button>
+					) : null}
+				</>
+			)}
+			{/* THE REFUSAL SITS WITH THE CONTROL THAT PRODUCED IT (design round 1, D5): a
+			    relay or bridge ask refuses the dismissal in the queue's own words, and
+			    that sentence belongs beside the reason the operator pressed. */}
+			{error && errorOp === "dismiss" ? (
+				<p className="text-body-sm text-danger">
+					{error}
+				</p>
+			) : null}
+		</div>
+	);
+
+	const card = useRef<HTMLDivElement>(null);
+	/* AFTER A SEND, THE READER'S PLACE MOVES TO THE NEXT QUESTION (ask-panel parity):
+	   the control that was focused (send) is gone with the card it belonged to, so
+	   without this focus falls to the page and a keyboard or screen-reader user
+	   starts over. The question text is the first thing the card says after its
+	   state line, and it is focusable already (the capped scroller's own tab stop).
+	   Spent once, on mount: a card that is merely re-rendered must not take focus. */
+	useEffect(() => {
+		if (!focusQuestion) return;
+		card.current
+			?.querySelector<HTMLElement>('[data-testid="ask-question-text"]')
+			?.focus({ preventScroll: true });
+		onFocused?.();
+		// Mount-only on purpose: `focusQuestion` is the trigger, not a value to track.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [focusQuestion]);
+
+	return (
+		<>
+			<div
+				ref={card}
+				data-testid="ask-card"
+				data-ask-id={row.ask_id}
+				data-ask-status={String(row.status || "open")}
+				className="flex flex-col gap-2 rounded-md bg-surface p-2.5"
+			>
+				{body}
+				{footerSlot === undefined ? bar : null}
+			</div>
+			{footerSlot ? createPortal(bar, footerSlot) : null}
+		</>
 	);
 }

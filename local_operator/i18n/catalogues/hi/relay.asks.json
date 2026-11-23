@@ -28,10 +28,10 @@
   "relay.asks.card.send_answer": "उत्तर भेजें",
   "relay.asks.card.decline": "अस्वीकार करें",
   "relay.asks.card.timed_out_badge": "समय समाप्त",
-  "relay.asks.sheet.title_waiting": "पूछताछ · {count, plural, one {# सवाल} other {# सवाल}}",
-  "relay.asks.sheet.title_lapsed": "पूछताछ · {count, number} समय-समाप्त",
-  "relay.asks.sheet.title_plain": "पूछताछ",
-  "relay.asks.sheet.loading": "पूछताछ पढ़ी जा रही है…",
+  "relay.asks.sheet.title_waiting": "{count, plural, one {# सवाल प्रतीक्षा में} other {# सवाल प्रतीक्षा में}}",
+  "relay.asks.sheet.title_lapsed": "{count, plural, one {# सवाल समय-समाप्त} other {# सवाल समय-समाप्त}}",
+  "relay.asks.sheet.title_plain": "सवाल",
+  "relay.asks.sheet.loading": "सवाल पढ़े जा रहे हैं…",
   "relay.asks.sheet.empty": "कुछ भी प्रतीक्षा में नहीं — एजेंट के पूछे सवाल यहाँ दिखाई देंगे।",
   "relay.asks.sheet.retry": "फिर से कोशिश करें",
   "relay.asks.sheet.ended_wait": "यह बातचीत समाप्त हो गई है — उत्तर देने पर यह फिर खुलेगी (इसमें ~30 सेकंड तक लग सकते हैं)",
@@ -80,5 +80,9 @@
   "relay.asks.card.command.label": "सुझाया गया कमांड",
   "relay.asks.card.command.copy": "कॉपी करें",
   "relay.asks.card.command.copied": "कॉपी हो गया",
-  "relay.asks.card.command.copy_failed": "कॉपी नहीं हो सका — कमांड चुन लिया गया है, वहीं से कॉपी करें"
+  "relay.asks.card.command.copy_failed": "कॉपी नहीं हो सका — कमांड चुन लिया गया है, वहीं से कॉपी करें",
+  "relay.asks.sheet.earlier": "पहले",
+  "relay.asks.card.progress_tally": "{answered} उत्तर दिए गए ({total} में से)",
+  "relay.asks.card.progress_pick_or_type": "जवाब देने के लिए एक विकल्प चुनें या अपना लिखें।",
+  "relay.asks.card.progress_type": "भेजने के लिए अपना उत्तर लिखें, या इसे छोड़ दें।"
 }

@@ -14,7 +14,7 @@ import { useScrollCues } from "../../lib/use-scroll-cues";
  * a scrim or ✕ receives it — dismissing the sheet the user never touched. The
  * guard below swallows exactly that one click; every other path is unchanged.
  */
-import { useId, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useCallback, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { cn } from "../../lib/cn";
 import { useModalLayer } from "./use-modal-layer";
 import { columnBox, columnCap } from "../../lib/column";
@@ -29,6 +29,8 @@ export function Sheet({
 	initialFocusRef,
 	headerAction,
 	headerDetail,
+	footer,
+	scrollerRef,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -47,6 +49,18 @@ export function Sheet({
 	    sticky line inside the scroller would sit under `lo-fade-y`'s top mask.
 	    Absent on every other sheet. */
 	headerDetail?: ReactNode;
+	/** A PINNED BOTTOM BAR, outside the scroller: the control that answers the
+	    sheet's content may not scroll away with it (the asks sheet's send and
+	    decline). It sits after the scroller inside the panel, so it clears the
+	    home indicator by the panel's own safe-area padding, and the sheet adds
+	    no chrome of its own around it (no border, no padding): the caller owns the
+	    bar's look, including collapsing it (`empty:hidden`) while it holds nothing,
+	    so an idle bar leaves no stripe. Absent on every other sheet, which render
+	    as before. */
+	footer?: ReactNode;
+	/** The scrolling region, for a caller that has to move it (the asks sheet
+	    puts the open card back at the top when it moves to the next ask). */
+	scrollerRef?: RefObject<HTMLDivElement | null>;
 	children: ReactNode;
 	returnFocusRef?: RefObject<HTMLElement | null>;
 	/** Where focus lands when the sheet opens. Defaults to the ✕; the slash
@@ -56,6 +70,19 @@ export function Sheet({
 }) {
 	const titleId = useId();
 	const scrollCue = useScrollCues();
+	/* ONE REF CALLBACK FOR TWO JOBS. `scrollCue` returns a cleanup that React 19
+	   runs instead of calling the ref with null, so the merge must forward it. */
+	const scrollRef = useCallback(
+		(node: HTMLDivElement | null) => {
+			const cleanup = scrollCue(node) as unknown;
+			if (scrollerRef) scrollerRef.current = node;
+			return () => {
+				if (typeof cleanup === "function") cleanup();
+				if (scrollerRef) scrollerRef.current = null;
+			};
+		},
+		[scrollCue, scrollerRef],
+	);
 	const [dragY, setDragY] = useState(0);
 	const panelRef = useRef<HTMLDivElement>(null);
 	const drag = useRef<{ y: number; at: number; pointer: number } | null>(null);
@@ -191,9 +218,10 @@ export function Sheet({
 					</div>
 				) : null}
 				{headerDetail ? <div className="shrink-0">{headerDetail}</div> : null}
-				<div ref={scrollCue} className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto">
+				<div ref={scrollRef} className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto">
 					{children}
 				</div>
+				{footer ? <div className="shrink-0">{footer}</div> : null}
 			</div>
 			<span data-focus-guard tabIndex={0} aria-hidden onFocus={() => setTimeout(() => focusEdge(false), 0)} />
 		</div>

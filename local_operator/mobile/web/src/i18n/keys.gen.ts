@@ -63,6 +63,9 @@ export type MessageParams = {
   "relay.asks.card.other": undefined;
   "relay.asks.card.placeholder_answer": undefined;
   "relay.asks.card.placeholder_secret": undefined;
+  "relay.asks.card.progress_pick_or_type": undefined;
+  "relay.asks.card.progress_tally": { "answered": string; "total": string };
+  "relay.asks.card.progress_type": undefined;
   "relay.asks.card.recommended": undefined;
   "relay.asks.card.secret_notice": undefined;
   "relay.asks.card.secret_notice_persisted": undefined;
@@ -113,6 +116,7 @@ export type MessageParams = {
   "relay.asks.pending.remember": undefined;
   "relay.asks.pending.send": undefined;
   "relay.asks.row.told": undefined;
+  "relay.asks.sheet.earlier": undefined;
   "relay.asks.sheet.empty": undefined;
   "relay.asks.sheet.ended_wait": undefined;
   "relay.asks.sheet.loading": undefined;

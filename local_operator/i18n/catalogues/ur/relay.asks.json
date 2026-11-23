@@ -28,10 +28,10 @@
   "relay.asks.card.send_answer": "جواب بھیجیں",
   "relay.asks.card.decline": "انکار کریں",
   "relay.asks.card.timed_out_badge": "وقت ختم",
-  "relay.asks.sheet.title_waiting": "درخواستیں · {count, plural, one {# سوال} other {# سوالات}}",
-  "relay.asks.sheet.title_lapsed": "درخواستیں · {count, number} کا وقت ختم",
-  "relay.asks.sheet.title_plain": "درخواستیں",
-  "relay.asks.sheet.loading": "درخواستیں پڑھی جا رہی ہیں…",
+  "relay.asks.sheet.title_waiting": "{count, plural, one {# سوال انتظار میں} other {# سوالات انتظار میں}}",
+  "relay.asks.sheet.title_lapsed": "{count, plural, one {# سوال کا وقت ختم} other {# سوالات کا وقت ختم}}",
+  "relay.asks.sheet.title_plain": "سوالات",
+  "relay.asks.sheet.loading": "سوالات پڑھے جا رہے ہیں…",
   "relay.asks.sheet.empty": "کچھ انتظار میں نہیں — ایجنٹ کے پوچھے گئے سوالات یہاں دکھائی دیں گے۔",
   "relay.asks.sheet.retry": "دوبارہ کوشش کریں",
   "relay.asks.sheet.ended_wait": "یہ گفتگو ختم ہو چکی ہے — جواب دینے سے یہ دوبارہ کھل جائے گی (اس میں ~30 سیکنڈ تک لگ سکتے ہیں)",
@@ -80,5 +80,9 @@
   "relay.asks.card.command.label": "تجویز کردہ کمانڈ",
   "relay.asks.card.command.copy": "کاپی کریں",
   "relay.asks.card.command.copied": "کاپی ہو گئی",
-  "relay.asks.card.command.copy_failed": "کاپی نہیں ہو سکی — کمانڈ منتخب کر دی گئی ہے، وہیں سے کاپی کریں"
+  "relay.asks.card.command.copy_failed": "کاپی نہیں ہو سکی — کمانڈ منتخب کر دی گئی ہے، وہیں سے کاپی کریں",
+  "relay.asks.sheet.earlier": "پہلے",
+  "relay.asks.card.progress_tally": "{answered} جواب دیے گئے ({total} میں سے)",
+  "relay.asks.card.progress_pick_or_type": "جواب دینے کے لیے کوئی آپشن چنیں یا اپنا لکھیں۔",
+  "relay.asks.card.progress_type": "بھیجنے کے لیے اپنا جواب لکھیں، یا اسے چھوڑ دیں۔"
 }
