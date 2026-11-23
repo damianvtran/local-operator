@@ -1629,7 +1629,11 @@ def test_the_text_tier_never_walks_the_answer_down_to_the_floor(
         FRAME_CAP_TRANSCRIPT_FLOOR,
         cap_projection_frame,
     )
-    from local_operator.mobile.types import PendingAskWire, SessionProjection, TranscriptEntry
+    from local_operator.mobile.types import (
+        PendingAskWire,
+        SessionProjection,
+        TranscriptEntry,
+    )
 
     projection = SessionProjection(session_id="s1", pid=1, kind="tui")
     projection.transcript = [

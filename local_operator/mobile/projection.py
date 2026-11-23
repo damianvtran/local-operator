@@ -1499,9 +1499,7 @@ def cap_projection_frame(
                 if not isinstance(value, str):
                     continue
                 limit = (
-                    FRAME_CAP_ENTRY_TEXT_CHARS
-                    if answer_text and field == "text"
-                    else text_limit
+                    FRAME_CAP_ENTRY_TEXT_CHARS if answer_text and field == "text" else text_limit
                 )
                 if len(value) <= limit:
                     continue
