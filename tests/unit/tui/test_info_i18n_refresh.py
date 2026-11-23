@@ -46,7 +46,7 @@ def test_external_language_writer_imports_only_installed_modules() -> None:
     assert imports == {"pathlib", "sys", "local_operator", "local_operator.config"}
 
 
-async def _await_scrollable(pilot: Pilot, screen: InfoScreen, *, minimum: float) -> None:
+async def _await_scrollable(pilot: Pilot[None], screen: InfoScreen, *, minimum: float) -> None:
     """Wait until the seeded readout is laid out tall enough to scroll.
 
     A scroll request issued before the readout has been measured is clamped (or
@@ -58,6 +58,10 @@ async def _await_scrollable(pilot: Pilot, screen: InfoScreen, *, minimum: float)
         if scroll.max_scroll_y >= minimum:
             return
         await pilot.pause()
+    # The last permitted pause can itself satisfy the condition; re-read once so a
+    # slow-but-correct screen is not reported as a broken fixture.
+    if scroll.max_scroll_y >= minimum:
+        return
     raise AssertionError(
         "the seeded readout is too short to scroll, so the scroll premise has no "
         "meaning; this is a fixture fault, not a repaint bug",
@@ -66,22 +70,20 @@ async def _await_scrollable(pilot: Pilot, screen: InfoScreen, *, minimum: float)
 
 
 async def _scroll_request_landed(
-    pilot: Pilot, screen: InfoScreen, *, target: float | None
+    pilot: Pilot[None], screen: InfoScreen, *, target: float | None
 ) -> None:
     """Wait until a scroll request has actually moved ``scroll_y``.
 
-    ``scroll_to``/``scroll_end`` set a TARGET; ``scroll_y`` only follows on a
-    later event-loop turn, and on a loaded worker that can take more than the
-    single turn one bare ``pause()`` allowed. Reading the baseline before then
-    compares a settled post-repaint scroll against a pre-state that was never the
-    intended one. That is the exact 2026-11-23 main failure: ``old_scroll`` was
-    0.0 although the test had asked for y=5, and the value after the repaint was
-    5, so the assertion read as "the repaint moved the reader" when all that had
-    happened was this test's own pending scroll landing late.
+    ``scroll_to``/``scroll_end`` record a target, and the requested position is
+    applied by a later refresh pass; on a loaded worker that pass can land after
+    the single ``pause()`` this test used to allow. Capturing the baseline before
+    it lands compares a settled post-repaint position against a pre-state that
+    was never the intended one — the shape of the 2026-11-23 main failure, where
+    the captured baseline was 0.0 although the test had asked for y=5 and the
+    value read after the repaint was 5.
 
-    The real property is untouched: the caller still asserts ``scroll_y`` is
-    unchanged across the repaint, so a repaint that actually moves the reader
-    still fails.
+    The property is untouched: the caller still asserts ``scroll_y`` is unchanged
+    across the repaint, so a repaint that really moves the reader still fails.
     """
     scroll = screen._scroll
     # Bounded, not timed: 200 turns is far beyond what a laid-out screen needs,
@@ -93,6 +95,15 @@ async def _scroll_request_landed(
         elif scroll.scroll_y >= target:
             return
         await pilot.pause()
+    # The last permitted pause can itself satisfy the condition; re-read once so a
+    # slow-but-correct screen is not reported as a request that never landed.
+    landed = (
+        scroll.scroll_y >= scroll.max_scroll_y
+        if target is None
+        else scroll.scroll_y >= target
+    )
+    if landed:
+        return
     raise AssertionError(
         "the scroll request never landed before the baseline was read",
         (scroll.scroll_y, scroll.max_scroll_y, target),
