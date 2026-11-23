@@ -201,6 +201,7 @@ def _consumer_defaults() -> dict[str, object]:
         QUERY_BUDGET_SECONDS_DEFAULT,
         QUERY_BUDGET_STOP_DEFAULT,
     )
+    from local_operator.tui import settings as tui_settings
     from local_operator.tui import status_command
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
@@ -232,6 +233,11 @@ def _consumer_defaults() -> dict[str, object]:
         # user explicitly on `dark` as having changed the setting (round 1, M1).
         "tui.theme": DEFAULT_THEME,
         "display.time_format": DEFAULT_TIME_FORMAT,
+        # The transcript layout mode's own vocabulary, from the module the TUI
+        # reader lives in (``tui/settings.py:transcript_display_mode``). The
+        # registry restates "by-turn" because it must not import the TUI
+        # module's cache; THIS entry is what turns a drift into a red test.
+        "display.transcript_display": tui_settings.DEFAULT_TRANSCRIPT_DISPLAY,
         # The language resolver's own default, from the module that READS the
         # key (`i18n.resolve.resolve_language`). The registry restates "auto"
         # rather than importing it (settings_io stays off the resolver's import

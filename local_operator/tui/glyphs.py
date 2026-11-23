@@ -255,6 +255,17 @@ _SAFE_NERD_ICONS: dict[str, str] = {
 _SAFE_NERD_MCP = _single_cell(NERD_ICON_MCP, PLAIN_ICON_MCP)
 _SAFE_NERD_DEFAULT = _single_cell(NERD_ICON_DEFAULT, PLAIN_ICON_DEFAULT)
 
+#: The fold bars' disclosure marks (``▾`` open, ``▸`` closed). ONE cell each —
+#: the ledger reserves exactly one cell in front of a bar's name column, the
+#: same field a tool row spends on its icon — and passed through the gate for
+#: that reason. The closed mark is also :data:`PLAIN_ICON_DEFAULT`: a bar and an
+#: unknown-tool row are both "there is more behind this mark", so the degraded
+#: frame reads the same way it always has. ``▾`` is U+25BE, WGL4, one cell in
+#: every repertoire this table targets; ``▼`` (U+25BC) is the emoji-presentation
+#: sibling and can measure two, which is exactly what the gate refuses.
+FOLD_OPEN_GLYPH = _single_cell("\u25be", PLAIN_ICON_DEFAULT)
+FOLD_CLOSED_GLYPH = _single_cell("\u25b8", PLAIN_ICON_DEFAULT)
+
 
 def _nerd_capable_terminal(env: EnvMap | None = None) -> bool:
     """Whether ``env``'s terminal is CONFIRMED to render Nerd Font PUA glyphs.

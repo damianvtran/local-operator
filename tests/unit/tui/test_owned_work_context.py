@@ -396,6 +396,7 @@ def test_typed_failed_result_and_unknown_generic_notice_split_context_not_payloa
 def test_page_adoption_uses_current_closed_owner_and_refuses_stale_epoch_or_user() -> None:
     from local_operator.tui.widgets.tool_card import ToolCard
     from local_operator.tui.widgets.transcript import (
+        PeerMessageBlock,
         TranscriptView,
         UserBlock,
         quiet_group_plan,
@@ -408,15 +409,21 @@ def test_page_adoption_uses_current_closed_owner_and_refuses_stale_epoch_or_user
     tools = [ToolCard(f"t{at}", "bash", {"command": "printf safe"}) for at in range(3)]
     for tool in tools:
         tool.mark_done("safe")
-    for block in [user, *tools]:
+    # A tool-only run has no fold any more (TOOL_ONLY_WORK_BAR), and a bar over
+    # no rows cannot certify an owner: the receipt is what makes this the
+    # receipt group whose adoption path this test drives.
+    peer = PeerMessageBlock("Sanitised incoming note", {"conversation_name": "peer-a"})
+    peer.navigation_anchor_id = "peer"
+    members = [*tools, peer]
+    for block in [user, *members]:
         block.work_view_identity = view.work_identity
-    project_work_blocks([user, *tools], view.work_identity)
-    group = quiet_group_plan([user, *tools])[0][1]
+    project_work_blocks([user, *members], view.work_identity)
+    group = quiet_group_plan([user, *members])[0][1]
     retired = QuietGroupBlock(group)
-    retired.adopt_members(tools, expanded=True)
+    retired.adopt_members(members, expanded=True)
     replacement = QuietGroupBlock(group)
-    replacement.adopt_members(tools, expanded=False)
-    view._blocks = [user, replacement, *tools]
+    replacement.adopt_members(members, expanded=False)
+    view._blocks = [user, replacement, *members]
     tracker = view._quiet_groups
     tracker._open = retired
     tracker._pending_owned_page = (view.work_identity, False)
@@ -433,7 +440,7 @@ def test_page_adoption_uses_current_closed_owner_and_refuses_stale_epoch_or_user
     other = UserBlock("A different loaded user")
     other.navigation_anchor_id = "other-user"
     other.work_view_identity = view.work_identity
-    view._blocks = [other, replacement, *tools]
+    view._blocks = [other, replacement, *members]
     tracker._pending_owned_page = (view.work_identity, False)
     tracker.adopt_reconciled_page()
     assert tracker._open is None, "a different USER cannot adopt the old certificate"
@@ -566,18 +573,14 @@ def test_source_generation_changes_only_for_real_clear_or_session_change(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_a_failed_member_keeps_the_fold_and_releases_only_its_row() -> None:
-    """The reported flicker, pinned on the real mount path.
+async def test_a_live_tool_only_run_no_longer_forms_a_work_bar() -> None:
+    """The tool-only ``work`` bar is RETIRED (``TOOL_ONLY_WORK_BAR``).
 
-    Operator report (2026-10-16, v0.73.3): "the traces flicker between showing
-    the full tool details and the collapsed/condensed tool traces … sometimes
-    when starting a new conversation". A member's row re-reads as a boundary
-    whenever it becomes attention-bearing — most often a tool that FAILED. The
-    fold used to answer that by showing every member and removing the bar, so a
-    batch that had just been condensed came back a frame later and was folded
-    again by the next append; that unfold/refold pair is the flicker. The fold
-    must now keep standing over the rows it condensed and release only the row
-    a reader has to see.
+    Three owned tool rows in one batch used to fold under a synthetic ``work``
+    bar. That bar is what could draw "9 browser actions" over rows the reader
+    could still see, and the transcript's own tool fold now owns consecutive
+    tool runs instead. So the rows stay ordinary cards. The RECEIPT fold is
+    untouched, and the next test pins it over these same rows plus a receipt.
     """
     from local_operator.harness.types import (
         ToolCallComposeEvent,
@@ -586,7 +589,11 @@ async def test_a_failed_member_keeps_the_fold_and_releases_only_its_row() -> Non
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.events import ToolComposing, ToolStarted, UserMessageStart
     from local_operator.tui.widgets.tool_card import ToolCard
-    from local_operator.tui.widgets.transcript import QuietGroupBlock, TranscriptView
+    from local_operator.tui.widgets.transcript import (
+        FoldBarBlock,
+        QuietGroupBlock,
+        TranscriptView,
+    )
     from tests.unit.tui.conftest import await_session_boot
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -599,7 +606,6 @@ async def test_a_failed_member_keeps_the_fold_and_releases_only_its_row() -> Non
         app.post_message(UserMessageStart("do the work", 0, message_id="m-user"))
         for _ in range(10):
             await pilot.pause()
-        # Three owned tool rows in ONE batch: the fold forms on the third.
         for index, name in enumerate(("read", "grep", "bash")):
             call_id = f"call-{index}"
             app.post_message(
@@ -622,9 +628,101 @@ async def test_a_failed_member_keeps_the_fold_and_releases_only_its_row() -> Non
             for _ in range(6):
                 await pilot.pause()
         view = app.query_one(TranscriptView)
+        cards = [block for block in view.blocks() if isinstance(block, ToolCard)]
+        assert [card.tool_call_id for card in cards] == ["call-0", "call-1", "call-2"]
+        assert not any(
+            isinstance(block, QuietGroupBlock) for block in view.blocks()
+        ), "a tool-only run no longer forms a receipt bar"
+        # ...it forms a TOOL FOLD bar instead (slice 4). The rows are the same
+        # three cards, condensed by the layer that now owns consecutive tool
+        # runs; the receipt fold above is untouched.
+        bars = [child for child in view.children if isinstance(child, FoldBarBlock)]
+        assert [bar.kind for bar in bars] == ["run"], "the tool fold owns the run"
+        assert not bars[0].expanded, "a run with no live tail starts folded"
+        assert not any(card.display for card in cards), "the run bar condenses them"
+        assert all(
+            card.internal_work_membership is not None for card in cards
+        ), "the rows are still owned work, just not folded work"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_member_keeps_the_receipt_fold_and_is_counted_inside_it() -> None:
+    """The reported flicker, pinned on the real mount path.
+
+    Operator report (2026-10-16, v0.73.3): "the traces flicker between showing
+    the full tool details and the collapsed/condensed tool traces … sometimes
+    when starting a new conversation". A member's row becomes attention-bearing
+    when it FAILS, and the fold must keep standing over the rows it condensed
+    instead of handing every one of them back and letting the next append fold
+    them again.
+
+    Since the tool-only bar's retirement these rows fold under a RECEIPT group:
+    the same three tool rows plus one incoming receipt, whose tools still sit
+    inside. Receipt groups are unchanged, so the failure stays inside the fold
+    and is COUNTED on its line (the fixture's own rule — a failed call is
+    excluded from the action count and stated as failed) rather than released;
+    the release rule still applies when a span stops qualifying at all, and
+    `test_peer_message.test_a_member_re_read_as_a_splitter_dissolves_the_bar`
+    covers it. What matters here is the flicker: one fold, the same rows, and
+    nothing handed back.
+    """
+    from local_operator.harness.types import (
+        ToolCallComposeEvent,
+        ToolExecutionStartEvent,
+    )
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.events import ToolComposing, ToolStarted, UserMessageStart
+    from local_operator.tui.widgets.tool_card import ToolCard
+    from local_operator.tui.widgets.transcript import (
+        PeerMessageBlock,
+        QuietGroupBlock,
+        TranscriptView,
+    )
+    from tests.unit.tui.conftest import await_session_boot
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    session = FakeSession()
+    session._history = []
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        app.post_message(UserMessageStart("do the work", 0, message_id="m-user"))
+        for _ in range(10):
+            await pilot.pause()
+        for index, name in enumerate(("read", "grep", "bash")):
+            call_id = f"call-{index}"
+            app.post_message(
+                ToolComposing(
+                    ToolCallComposeEvent(
+                        tool_call_id=call_id, tool_name=name, intent=f"step {index}"
+                    )
+                )
+            )
+            app.post_message(
+                ToolStarted(
+                    ToolExecutionStartEvent(
+                        tool_call_id=call_id,
+                        tool_name=name,
+                        args={"cmd": "ls"},
+                        started_at_epoch=1000.0 + index,
+                    )
+                )
+            )
+            for _ in range(6):
+                await pilot.pause()
+        view = app.query_one(TranscriptView)
+        assert not any(isinstance(block, QuietGroupBlock) for block in view.blocks())
+        # The receipt is what admits the fold; the tool rows ride inside it.
+        peer = PeerMessageBlock("Sanitised incoming note", {"conversation_name": "peer-a"})
+        peer.navigation_anchor_id = "peer"
+        app._append_block(peer)
+        for _ in range(6):
+            await pilot.pause()
         (bar,) = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
         held = list(bar._members)
-        assert len(held) == 3, "the batch is folded"
+        assert len(held) == 4, "the three tools and the receipt are folded"
+        assert peer in held
         assert not any(member.display for member in held), "and hidden behind the bar"
         failed = held[2]
         # `_members` is typed as the base block while the batch's rows are
@@ -639,13 +737,13 @@ async def test_a_failed_member_keeps_the_fold_and_releases_only_its_row() -> Non
             await pilot.pause()
         bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
         assert len(bars) == 1, "the fold neither dissolves nor duplicates"
-        assert bars[0] is bar
-        assert failed.display, "the failed row is released and visible"
-        kept = list(bar._members)
-        assert kept and all(member is not failed for member in kept)
+        assert list(bars[0]._members) == held, "the same rows, in the same order"
+        assert failed in bars[0]._members
         assert not any(
-            member.display for member in kept
-        ), "the rows already condensed stay condensed — handing them back is the the flicker"
+            member.display for member in bars[0]._members
+        ), "handing them back is the flicker; the failed row is counted, not released"
+        assert bars[0].group.failed == 1, "the failure is stated on the bar's line"
+        assert bars[0].group.actions == 3, "the tool rows it hides are still counted"
 
 
 @pytest.mark.asyncio

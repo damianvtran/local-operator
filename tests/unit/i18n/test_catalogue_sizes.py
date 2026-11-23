@@ -102,6 +102,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.settings.hub_defaults",
         "wire.settings.hub_org",
         "wire.settings.keymap",
+        "wire.settings.transcript_display",
         "wire.language_receipts",
         "wire.voice_availability",
         "wire.harness_import_detail",
