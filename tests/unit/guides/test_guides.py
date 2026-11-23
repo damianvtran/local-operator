@@ -62,6 +62,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "highlights",
         "i18n",
         "image-generation",
+        "inline-ui",
         "mcp",
         "memory",
         "mobile",
