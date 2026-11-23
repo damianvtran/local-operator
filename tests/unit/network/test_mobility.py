@@ -2479,8 +2479,10 @@ async def test_no_attempt_inherits_a_previous_attempts_success(
     delivered["token"] = progress.attempt(SESSION)
     fresh = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     assert fresh["ok"] is False, fresh
-    assert fresh["code"] == "deadline_exceeded", fresh
+    assert fresh["code"] == "move_attempt_unconfirmed", fresh
+    assert fresh["changed"] is False, fresh
     assert not (server_b.root / "sessions" / SESSION).exists()
+    print("attributed wait:", fresh["ok"], fresh["code"], "changed:", fresh["changed"])
 
 
 @pytest.mark.asyncio

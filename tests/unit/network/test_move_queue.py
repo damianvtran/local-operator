@@ -509,6 +509,29 @@ class TestAttemptAttribution:
         third = progress.begin_attempt(SID)
         assert progress.refusal(SID, from_device="dev-b", attempt=third) is None
 
+    @pytest.mark.parametrize("use_prior_attempt", [False, True])
+    def test_a_wait_without_its_echo_ends_in_a_named_refusal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_prior_attempt: bool
+    ) -> None:
+        from types import SimpleNamespace
+
+        from local_operator.network import mobility
+
+        progress = mobility._Progress()
+        prior = progress.begin_attempt(SID)
+        attempt = progress.begin_attempt(SID)
+        echo = prior if use_prior_attempt else None
+        progress.signal_done(SID, echo)
+        progress.note_refusal(
+            SID, code="busy", message="other outcome", from_device="dev-b", attempt=echo
+        )
+        monkeypatch.setattr(mobility, "progress_for", lambda _server: progress)
+        # An expired wait over an empty store, without a transport or a handoff.
+        # The refusal is local: no uncorrelated record supplies a code or message.
+        assert mobility._await_own_progress(
+            SimpleNamespace(root=tmp_path), SID, budget=0.0, invited="dev-b", attempt=attempt
+        ) == ("move_attempt_unconfirmed", None)
+
     def test_a_completion_answers_only_the_attempt_it_reports(self) -> None:
         from local_operator.network import mobility
 

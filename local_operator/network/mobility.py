@@ -8580,10 +8580,13 @@ def _offload(
             changed=bool(reached and reached != "prepared"),
             working_set=refused_workset,
         )
+    deadline_code = (
+        "move_attempt_unconfirmed" if outcome == "move_attempt_unconfirmed" else "deadline_exceeded"
+    )
     if keep:
         return _move_refusal(
             session_id,
-            "deadline_exceeded",
+            deadline_code,
             f"{target_name or target_device} is still copying {session_id}"
             + (f" as {new_id}" if new_id else "")
             + ". Nothing on this device changed, and asking again would make another copy.",
@@ -8592,7 +8595,7 @@ def _offload(
         )
     return _move_refusal(
         session_id,
-        "deadline_exceeded",
+        deadline_code,
         f"{target_name or target_device} did not finish taking {session_id} in time. "
         + (
             "This device has already committed the handoff, so ask again rather than "
@@ -8653,7 +8656,8 @@ def _await_own_progress(
     ``invited`` names the device this move was invited to, so a refusal can only end
     the wait it belongs to. A refusal is consulted ONLY while nothing has committed
     here, because a handoff that committed has an answer a late refusal must not
-    overwrite.
+    overwrite. Before commit, an expired tokenized wait reports its own named
+    refusal, not a purported answer from the invited device.
     """
     deadline = time.monotonic() + max(0.0, budget)
     progress = progress_for(server)
@@ -8682,7 +8686,10 @@ def _await_own_progress(
                 if refusal is not None:
                     return "none", refusal
                 if now >= deadline:
-                    return "none", None
+                    # The deadline is local evidence, not a refusal from the peer:
+                    # neither an unattributed nor a different attempt's outcome
+                    # can confirm this wait or decide its refusal code.
+                    return ("move_attempt_unconfirmed" if attempt is not None else "none"), None
                 continue
         # Committed, now or earlier: hold the confirmation window, then answer.
         if now >= min(deadline, committed_at + OFFLOAD_CONFIRM_WAIT_S):
