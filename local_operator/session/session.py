@@ -53,6 +53,7 @@ import uuid
 import weakref
 from collections import deque
 from collections.abc import (
+    AsyncGenerator,
     AsyncIterator,
     Awaitable,
     Callable,
@@ -67,7 +68,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, AbstractSet, Any, Literal, TypedDict, cast
 
 from local_operator.asks.surfaces import PROFILE_CONSENT_SURFACES
 from local_operator.compaction.carry import (
@@ -397,6 +398,7 @@ if TYPE_CHECKING:
     # fails if resolving ``--resume`` drags the engine in, and that guard runs
     # in the other direction too.
     from local_operator.resume import SessionAttachment
+    from local_operator.session.warm_tool_prefix import _WarmToolPrefix
 
     # Type-only: ``session_factory`` builds sessions, so a runtime import
     # here would be the wrong direction. Held so the ``tool`` kind's roster
@@ -4811,6 +4813,9 @@ class Session:
         #: callable, and the prompt's inventory block reports it through the
         #: usual ``[session-state]`` delta.
         self._published_tools: list[AgentTool] | None = None
+        # Only SDK experimental owners install a native request witness. It
+        # never participates in this session's discovery or publication latch.
+        self._sdk_warm_prefix: _WarmToolPrefix | None = None
         #: DEFERRED SCHEMAS (``tools/deferral.py``). ``_deferral_pins`` are names
         #: a role's ``tools:`` list, a team manager's or a host declaration asked
         #: for, which stay published. ``_activated_tools`` is STICKY for the
@@ -16271,7 +16276,7 @@ class Session:
 
     # -- deferred tool schemas -------------------------------------------------
 
-    def _deferred_now(self) -> frozenset[str]:
+    def _deferred_now(self, *, activated: AbstractSet[str] | None = None) -> frozenset[str]:
         """Names whose schema is withheld from the array RIGHT NOW.
 
         The deferral set minus role pins and minus what the session has
@@ -16285,9 +16290,13 @@ class Session:
         """
         if not self._tool_deferral:
             return frozenset()
-        return deferred_tool_names(self._deferral_pins) - self._activated_tools
+        return deferred_tool_names(self._deferral_pins) - (
+            self._activated_tools if activated is None else activated
+        )
 
-    def _publishable(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
+    def _publishable(
+        self, tools: Sequence[AgentTool], *, activated: AbstractSet[str] | None = None
+    ) -> list[AgentTool]:
         """``tools`` minus the deferred schemas — the array a provider is sent.
 
         THE one filter, applied by every reader of "what is advertised": the
@@ -16299,7 +16308,9 @@ class Session:
         an activated tool lands where it always sat rather than at the end
         (appending saves nothing under tools-first caching).
         """
-        deferred = self._deferred_now()
+        # A warm SDK owner can preview a proposed activation through this
+        # same selector without first mutating the live activation set.
+        deferred = self._deferred_now(activated=activated)
         if not deferred:
             return list(tools)
         return [tool for tool in tools if tool.name not in deferred]
@@ -23739,7 +23750,7 @@ class Session:
                     else set()
                 )
 
-                async def witness() -> AsyncIterator[StreamEvent]:
+                async def witness() -> AsyncGenerator[StreamEvent, None]:
                     # Lazy provider generators may start only after another
                     # await. Carry the same guard to that first I/O boundary.
                     if frame is not None and not frame.binding_intact():
@@ -23783,7 +23794,13 @@ class Session:
                     async for event in inner:
                         yield event
 
-                return witness()
+                stream = witness()
+                hint = self._sdk_warm_prefix
+                return (
+                    hint.stream(stream)
+                    if hint is not None and request.purpose == "turn"
+                    else stream
+                )
 
             if opened_body is None:
                 if not self._turn_is_user_directed():

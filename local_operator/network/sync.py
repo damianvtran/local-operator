@@ -389,6 +389,7 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     ".file-provenance": "owner-local witnesses; replicas/imports cannot issue proofs",
     ".file-provenance.initialized.json": "origin-local incarnation; never copied/rebuilt",
     "profile-backups": "origin-local before-images; never portable approval or action authority",
+    "sdk-warm-tool-prefix.json": "SDK cache hint bound to the originating boot and serving scope",
     # THE INBOX'S TWO TRANSPORT LOCKS (``session/runtime/inbox``): empty
     # coordination files whose only meaning is "a writer/reader on THIS device is
     # inside the spool transaction". Copying one would carry a lock with no

@@ -1166,7 +1166,9 @@ def test_public_surface_is_pinned() -> None:
 
     P = "POSITIONAL_OR_KEYWORD"
     K = "KEYWORD_ONLY"
-    assert params(sdk.open_session) == [
+    # The private evaluation flag has a separate owner/transport test; it
+    # isn't a compatibility commitment on the stable SDK signature.
+    assert [p for p in params(sdk.open_session) if p[0] != "warm_tool_prefix"] == [
         ("spec", P),
         ("roots", K),
         ("mode", K),
