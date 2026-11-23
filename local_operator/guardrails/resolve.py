@@ -2093,6 +2093,21 @@ _GIT_CLONE_VALUE_FLAGS = frozenset(
 _GIT_WORKTREE_ADD_VALUE_FLAGS = frozenset({"-b", "-B", "--reason", "--orphan"})
 #: find: the predicates that make a match destructive.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+#: ``find`` tests allowed before ``-print0`` in a ``find | xargs rm`` pipe
+#: (``_add_found_stdin``): each takes one value and only narrows the walk.
+_FIND_PIPE_VALUED = frozenset(
+    {"-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth"}
+)
+#: Value-less words allowed there: pruning and boolean structure only.
+_FIND_PIPE_BARE = frozenset(
+    {"-prune", "-o", "-or", "-a", "-and", "!", "-not", "(", ")", "\\(", "\\)", "-empty"}
+)
+#: ``xargs`` options allowed in that pipe: NUL input and skip-if-empty only.
+_XARGS_PIPE_FLAGS = frozenset({"-0", "--null", "-r", "--no-run-if-empty"})
+#: ``rm`` flags allowed there: they change confirmation/recursion, never targets.
+_RM_PIPE_FLAGS = frozenset(
+    {"-r", "-R", "-f", "-rf", "-fr", "-Rf", "-fR", "--recursive", "--force", "-d", "-v"}
+)
 #: find predicates that select a SUBSET of the walk (R6).
 _FIND_SELECTING = frozenset(
     {
@@ -5105,7 +5120,9 @@ class _Walker:
         if name in DELETE_PROGRAMS:
             flags_with_value = _SHRED_VALUE_FLAGS if name == "shred" else _RM_VALUE_FLAGS
             operands, _flags = _operands(args, flags_with_value)
-            if stdin_fed and not self._add_found_stdin(name, feed):
+            if stdin_fed and not self._add_found_stdin(
+                name, feed, unpeeled, operands, _flags, redirects
+            ):
                 self._add_stdin(name)
             for w in operands:
                 self._add(w, "delete", name)
@@ -7177,33 +7194,58 @@ class _Walker:
                 self._add(Expanded(text=landed), "append", program)
                 self._carry_link(landed, state)
 
-    def _add_found_stdin(self, program: str, feed: _Feed | None) -> bool:
-        """``find <roots> <selecting test> -print0 | xargs -0 rm -rf``: rank as find.
+    def _add_found_stdin(
+        self,
+        program: str,
+        feed: _Feed | None,
+        unpeeled: list[Expanded],
+        operands: list[Expanded],
+        flags: list[str],
+        redirects: list[tuple[str, _RawWord]],
+    ) -> bool:
+        """``find <roots> <tests> -print0 | xargs -0 rm -rf``: rank as find.
 
         WHY (PR #4493, disk-reclamation field report 2026-11-23, session
         ed88c11e4952): ``find . -name __pycache__ -type d -prune -print0 |
         xargs -0 rm -rf`` inside a worktree was refused as an opaque delete of
-        the whole tree, while the same removal spelled ``find . -name
-        __pycache__ -exec rm -rf {} +`` already ranks LOW (S2-3, the
-        selecting-find cleanup shape). The two delete exactly the same set:
-        what ``find`` prints is what ``xargs`` hands ``rm``. So when the
-        IMMEDIATELY upstream stage is a plain ``find`` whose output reaches
-        ``rm`` unfiltered, add the targets ``find -delete`` would have, with
-        the same ``selected`` bit; ``classify`` then applies the one existing
-        rule (selecting predicate, never under a state root) to both spellings.
+        the whole tree, while ``find . -name __pycache__ -exec rm -rf {} +``
+        already ranks LOW (S2-3). The two delete the same set ONLY when what
+        ``rm`` receives is exactly ``find``'s own NUL-separated path list.
 
-        Fails closed (``False``: the caller keeps the opaque stdin target) on
-        anything that breaks that equivalence: no upstream stage, a heredoc
-        or herestring feeding the pipe, a stage that is not ``find`` (a
-        ``grep``/``sed`` between them can rewrite paths), a redirect on the
-        find stage, a ``find`` that itself runs ``-exec``/``-delete``, or an
-        opaque word anywhere in the find stage.
+        So this is an ALLOWLIST on both stages (review SEC-R2-B1); anything
+        else returns ``False`` and the caller keeps the opaque stdin target:
+
+        * the delete stage is literally ``xargs [-0|--null] [-r] rm|unlink
+          [rm flags]`` with no operands of its own, no ``-I``/``-i``/``-a``
+          or any other xargs option, and no redirection (``< file``);
+        * the upstream stage is the IMMEDIATE previous one, a plain ``find``
+          with at least one literal root, then only the tests in
+          :data:`_FIND_PIPE_TESTS` (each value-taking test with its value)
+          and exactly one ``-print0`` as the last word. No ``-H/-L/-P``,
+          ``-printf``/``-fprint*``/``-ls``/``-exec``/``-delete``/
+          ``-files0-from``: each can make the printed text differ from the
+          walked paths;
+        * no heredoc/herestring feeds the pipe and no word is opaque.
         """
         if feed is None or not feed.stages or feed.bodies:
             return False
+        if any(op.startswith("<") for op, _ in redirects):
+            return False
+        xargs_words = [w.text for w in unpeeled]
+        if not xargs_words or os.path.basename(xargs_words[0]) != "xargs":
+            return False
+        k = 1
+        while k < len(xargs_words) and xargs_words[k] in _XARGS_PIPE_FLAGS:
+            k += 1
+        if k >= len(xargs_words) or os.path.basename(xargs_words[k]) != program:
+            return False
+        if "-0" not in xargs_words[1:k] and "--null" not in xargs_words[1:k]:
+            return False
+        if operands or any(f not in _RM_PIPE_FLAGS for f in flags):
+            return False
         stage = _strip_grouping(feed.stages[-1])
-        raw_words, redirects = scan(stage)
-        if redirects:
+        raw_words, stage_redirects = scan(stage)
+        if stage_redirects:
             return False
         st = self.state
         words: list[Expanded] = []
@@ -7222,10 +7264,22 @@ class _Walker:
             roots.append(args[i])
             i += 1
         texts = [w.text for w in args[i:]]
-        if "-delete" in texts or any(t in _FIND_EXEC for t in texts):
+        if not roots or not texts or texts[-1] != "-print0" or texts.count("-print0") != 1:
             return False
-        selected = any(t in _FIND_SELECTING for t in texts)
-        for w in roots or [Expanded(text=".")]:
+        j = 0
+        selected = False
+        while j < len(texts) - 1:
+            t = texts[j]
+            if t in _FIND_PIPE_VALUED:
+                if j + 1 >= len(texts) - 1:
+                    return False
+                selected = selected or t in _FIND_SELECTING
+                j += 2
+                continue
+            if t not in _FIND_PIPE_BARE:
+                return False
+            j += 1
+        for w in roots:
             self._add(w, "delete", f"find | xargs {program}", selected=selected)
         return True
 

@@ -1064,6 +1064,37 @@ async def test_later_exact_approval_supersedes_only_the_earlier_timeout(deep: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("options", "pick"),
+    [
+        ([{"label": "Remove all"}, {"label": "Remove none"}], "Remove none"),
+        ([{"label": "Delete everything"}, {"label": "Delete nothing"}], "Delete nothing"),
+        # The pick names another path; build is only in the option not picked.
+        (
+            [{"label": "Delete ~/hyperplane-cpp/build"}, {"label": "Delete ~/other/x"}],
+            "Delete ~/other/x",
+        ),
+        ([{"label": "Delete next week"}, {"label": "Keep"}], "Delete next week"),
+    ],
+    ids=["remove-none", "delete-nothing", "other-path-pick", "next-week"],
+)
+async def test_pick_that_approves_no_named_path_cannot_supersede_timeout(
+    deep: Path, options: list[dict[str, str]], pick: str
+) -> None:
+    """Review SEC-R2-B2/m1 (PR #4493): the question's paths are reached only
+    through a pick that names none and approves deletion unconditionally."""
+    _deep_ask(deep, expired=True, age_ms=120_000)
+    _answered_ask(
+        deep, "a-feed", "Delete ~/hyperplane-cpp/build or ~/other/x?", options, answer=pick
+    )
+    judge = _Judge("ALLOW ask=a-feed")
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    assert result is not None and result.blocked
+    assert not judge.prompts
+    assert (deep / "hyperplane-cpp/build").is_dir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "question",
     [
         "Keep ~/hyperplane-cpp/build instead of deleting it?",

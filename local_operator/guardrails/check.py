@@ -716,7 +716,7 @@ def _ask_settles_git_root(
                 and (
                     activity.pr_state != "none"
                     or activity.git_merged
-                    or prov._running_owners(real, session_id, strict=True)
+                    or prov._running_owners(real, session_id, strict=True, allow_unattributed=True)
                 )
             )
         ):
@@ -1246,12 +1246,17 @@ _APPROVAL_VETO = re.compile(
     r"|restor\w*|recover\w*|cop(?:y|ies|ied|ying)|archiv\w*|spar(?:e|es|ed|ing)"
     r"|avoid\w*|pending|provided)\b"
 )
-#: Timing words, vetoed on the PICK only. The pick is the operator's authority,
-#: so "Delete after it is safe" is a deferred, conditional yes; in the question
+#: Quantity-zero and timing words, vetoed on the PICK only (SEC-R2-B2/m1).
+#: "Remove none" / "Delete nothing" approve no path; "Delete after it is
+#: safe" / "next week" is a deferred, conditional yes. In the question
 #: the same words are often the agent's own description of a check it already
 #: ran ("re-verified for 0 live holders before removal"), which the waiver's
 #: live holder/PR re-read covers whatever the prose says.
-_PICK_TIMING_VETO = re.compile(r"(?i)\b(?:after|before|later|first|then|tomorrow)\b")
+_PICK_TIMING_VETO = re.compile(
+    r"(?i)\b(?:none|nothing|neither|nor|no|zero"
+    r"|after|before|later|first|then|tomorrow|next|tonight|eventually|soon"
+    r"|week|month|day|hour)s?\b"
+)
 #: A pick that itself says delete/remove ("Approve removing all 33 ...").
 _DELETE_PICK = re.compile(
     r"(?i)^(?:(?:yes|approve[ds]?|confirm)\s*[,:]?\s*)?"
@@ -1334,17 +1339,53 @@ def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
             words = prov._ask_words(one, ask.session_id)
             if words is None:
                 continue
-            # The question is where an ask lists its exact paths (a brace list
-            # included); it passed the veto above, so its paths are the ones
-            # the deletion pick refers to.
-            naming = words.firm + "\n" + question
-            for word, _ in prov._path_readings(naming):
-                if prov._GLOBISH.search(word) or "{" in word or "}" in word:
-                    continue
-                if any(part in (".", "..") for part in word.split("/")):
-                    continue
-                if prov._expand_word(word, home, cwd) == path:
-                    return True
+
+            def names(text: str) -> bool:
+                for word, _ in prov._path_readings(text):
+                    if prov._GLOBISH.search(word) or "{" in word or "}" in word:
+                        continue
+                    if any(part in (".", "..") for part in word.split("/")):
+                        continue
+                    if prov._expand_word(word, home, cwd) == path:
+                        return True
+                return False
+
+            # SEC-R2-B2: an option the operator did NOT pick that names this
+            # path means the choice was between paths; the pick did not choose
+            # this one, whatever the question listed.
+            unpicked = [
+                f"{o.get('label') or ''}\n{o.get('description') or ''}"
+                for o in (q.get("options") or [])
+                if isinstance(o, Mapping) and str(o.get("label") or "").strip() != label
+            ]
+            if any(names(text) for text in unpicked):
+                continue
+            # A pick that names paths authorises exactly those. Only a pick
+            # that names none ("Approve removing all 33 ...", "Remove them",
+            # a bare yes) refers back to the paths its question lists.
+            if names(words.firm):
+                return True
+            # A pick names some OTHER path when it carries a path-shaped word
+            # that stands on its own (not the tail of "merged/closed", which
+            # the path reader would read as "/closed") and is either listed by
+            # the question or exists on disk: then it chose that, not this.
+            # A size such as "~17.3 GiB" is neither listed nor on disk.
+            listed = {
+                prov._expand_word(word, home, cwd)
+                for word, _ in prov._path_readings(prov._expand_prose_braces(question))
+            }
+            pick_text = prov._expand_prose_braces(label)
+            pick_words = [
+                m.group(1).rstrip("/.:?!,")
+                for m in prov._PATHISH.finditer(pick_text)
+                if m.start(1) == 0 or not pick_text[m.start(1) - 1].isalnum()
+            ]
+            pick_targets = [prov._expand_word(word, home, cwd) for word in pick_words if word]
+            # ``_expand_word`` is ``None`` for an unexpandable word ("~17.3").
+            if any(t is not None and (t in listed or os.path.lexists(t)) for t in pick_targets):
+                continue
+            if names(question):
+                return True
     except Exception:  # noqa: BLE001 — unreadable or malformed ask is never consent
         logger.debug("guardrail: deletion approval unreadable", exc_info=True)
     return False

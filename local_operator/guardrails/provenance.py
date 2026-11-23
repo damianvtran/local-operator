@@ -3479,6 +3479,13 @@ def _glab_mrs(repo: str, branch: str) -> list[ForgeChange] | None:
         return None
 
 
+class UnattributedWorktree(OSError):
+    """The ledger was READ and holds no current-generation ``git worktree add``
+    row for this path: nobody is on record as its owner. Distinct from an
+    unreadable ledger (plain ``OSError``/``sqlite3.Error``), which says
+    nothing (QA Q-R2-1, PR #4493)."""
+
+
 def worktree_creators(real: str, *, strict: bool = True) -> frozenset[str]:
     """Current generation attribution for strict cleanup (missing is unknown)."""
     creators: set[str] = set()
@@ -3504,11 +3511,13 @@ def worktree_creators(real: str, *, strict: bool = True) -> frozenset[str]:
         logger.debug("guardrail ledger unreadable", exc_info=True)
     # No attributed creator is unknown ownership, not proof of an idle tree.
     if strict and not creators:
-        raise OSError("worktree owner attribution unavailable")
+        raise UnattributedWorktree("worktree owner attribution unavailable")
     return frozenset(creators)
 
 
-def _running_owners(real: str, session_id: str, *, strict: bool = False) -> tuple[str, ...]:
+def _running_owners(
+    real: str, session_id: str, *, strict: bool = False, allow_unattributed: bool = False
+) -> tuple[str, ...]:
     """Running sessions (not the caller) that own the worktree at ``real``.
 
     Owner = the session the creation ledger attributes the ``git worktree
@@ -3518,8 +3527,20 @@ def _running_owners(real: str, session_id: str, *, strict: bool = False) -> tupl
     Read fresh on every call (no cache). Default: unreadable sources name no
     owner. ``strict`` requires current-generation attribution and a complete
     registry, raising on missing/unreadable facts rather than claiming idle.
+
+    ``allow_unattributed`` (strict only; the operator's exact-path approval
+    waiver, PR #4493 Q-R2-1): a tree made in a terminal, before the ledger,
+    or whose Linux ctime stamp drifted has NO recorded creator, so the only
+    owner left to find is a live session whose cwd is inside it, and the
+    strict registry scan below still finds that (and still raises when the
+    registry is incomplete). An unreadable ledger still raises.
     """
-    creators = worktree_creators(real, strict=strict)
+    try:
+        creators = worktree_creators(real, strict=strict)
+    except UnattributedWorktree:
+        if not (strict and allow_unattributed):
+            raise
+        creators = frozenset()
     # A RUNNING ANCESTOR that created the tree is the delegator, not a
     # conflicting owner (field case 2026-11-14): a parent is live for as long
     # as its cleanup subagent runs, so counting it as "owning session

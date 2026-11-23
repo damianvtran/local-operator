@@ -1057,8 +1057,40 @@ FIELD_XARGS = "find . -maxdepth 4 -name '__pycache__' -type d -prune -print0 | x
         ("find . -name __pycache__ | sed s/x/y/ | xargs rm -rf", Risk.HIGH),
         # The find stage itself runs a program: its output is not find's list.
         ("find . -name a -exec echo {} + | xargs rm -rf", Risk.HIGH),
+        # Review SEC-R2-B1 (PR #4493): every way rm's list can differ from the walk.
+        ("find . -name __pycache__ -print0 | xargs -0 -a list rm -rf", Risk.HIGH),
+        ("find . -name __pycache__ -print0 | xargs -0 --arg-file=list rm -rf", Risk.HIGH),
+        ("find . -name __pycache__ -print0 | xargs -0 rm -rf < list", Risk.HIGH),
+        ("find . -name x -printf '/etc\\0' | xargs -0 rm -rf", Risk.HIGH),
+        ("find . -name x -fprint /dev/stdout | xargs rm -rf", Risk.HIGH),
+        ("find . -name x -ls | xargs rm -rf", Risk.HIGH),
+        ("find . -name x -print0 | xargs -0 -I@ rm -rf ../precious/@", Risk.HIGH),
+        ("find . -name x -print0 | xargs -0 -i rm -rf {}", Risk.HIGH),
+        ("find -H . -name x -print0 | xargs -0 rm -rf", Risk.HIGH),
+        ("find -files0-from list -name x -print0 | xargs -0 rm -rf", Risk.HIGH),
+        ("find . -name x -print0 | xargs -0 rm -rf ../precious", Risk.HIGH),
+        # Newline-separated output (SEC-R2-m2): only -print0 | xargs -0 is find's list.
+        ("find . -name __pycache__ -print | xargs rm -rf", Risk.HIGH),
     ],
-    ids=["field-xargs", "find-exec", "no-predicate", "filtered", "find-runs-exec"],
+    ids=[
+        "field-xargs",
+        "find-exec",
+        "no-predicate",
+        "filtered",
+        "find-runs-exec",
+        "xargs-a",
+        "xargs-arg-file",
+        "stdin-redirect",
+        "printf",
+        "fprint",
+        "ls",
+        "xargs-I",
+        "xargs-i",
+        "find-H",
+        "files0-from",
+        "extra-operand",
+        "newline-print",
+    ],
 )
 def test_find_fed_xargs_delete_ranks_like_find(
     home: Path, repo: Path, command: str, risk: Risk
@@ -1081,3 +1113,31 @@ def test_find_fed_xargs_never_lowers_the_state_root(home: Path) -> None:
     command = f"find {state} -name '*.json' -print0 | xargs -0 rm -f"
     verdict = classify_bash(command, cwd=str(home), env=_env(home), scratchpad=None, session_id=S)
     assert verdict.risk is Risk.CRITICAL, verdict.reasons
+
+
+# -- PR #4493 QA Q-R2-1: an exact approval may settle an unattributed tree ----------
+
+
+def test_unattributed_tree_has_no_recorded_owner_under_exact_approval(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tree made in a terminal has no ledger row. The approval waiver reads
+    that as "nobody on record" (the live-cwd registry scan still runs); every
+    other strict caller still raises, and an UNREADABLE ledger still raises."""
+    monkeypatch.undo()  # the real _running_owners, not the module fixture's stub
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(home / ".local-operator"))
+    (home / ".local-operator" / "run" / "mobile").mkdir(parents=True, exist_ok=True)
+    _git("worktree", "add", "-q", "-b", "feat/terminal", ".worktrees/terminal", cwd=repo)
+    real = os.path.realpath(repo / ".worktrees" / "terminal")
+    # A ledger exists (another tree's row) but holds nothing for this one.
+    _run_recorded(home, "mkdir -p ~/rig-elsewhere")
+    with pytest.raises(prov.UnattributedWorktree):
+        prov._running_owners(real, S, strict=True)
+    assert prov._running_owners(real, S, strict=True, allow_unattributed=True) == ()
+    # Unreadable ledger: not "unattributed", so the waiver still fails closed.
+    ledger = prov.ledger_path()
+    ledger.write_bytes(b"not a sqlite database")
+    with pytest.raises((OSError, sqlite3.Error)) as raised:
+        prov._running_owners(real, S, strict=True, allow_unattributed=True)
+    assert not isinstance(raised.value, prov.UnattributedWorktree)
