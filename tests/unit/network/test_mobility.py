@@ -2240,6 +2240,26 @@ def test_matching_top_team_refuses_wider_nested_member(tmp_path: Path) -> None:
         check_arrival(target, target, offer)
 
 
+def _assert_queued_destination_owns(root: Path, device: str, *, wait_s: float = 5.0) -> None:
+    import time
+
+    # The queue can see the source tombstone before the destination promotes.
+    # A fold alone is not proof of ownership: require the promoted local stamp.
+    deadline = time.monotonic() + wait_s
+    stamp = read_stamp(root, SESSION)
+    while stamp is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+        stamp = read_stamp(root, SESSION)
+    assert stamp is not None, "the queue folded resumed but the destination never owned it"
+    assert stamp.home_device == device
+    assert (root / "sessions" / SESSION).is_dir()
+
+
+def test_queued_destination_ownership_check_rejects_an_empty_store(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="destination never owned it"):
+        _assert_queued_destination_owns(tmp_path, "device-b", wait_s=0.0)
+
+
 @pytest.mark.asyncio
 async def test_a_queued_transfer_succeeds_end_to_end_after_the_definitions_sync(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
@@ -2251,14 +2271,13 @@ async def test_a_queued_transfer_succeeds_end_to_end_after_the_definitions_sync(
     invites, the destination pulls and promotes, the source commits its tombstone,
     and the record reads ``resumed`` with the conversation living on the destination.
     """
-    import time
-
     from local_operator.network import definitions
     from local_operator.network import move_queue as mq
-    from local_operator.session.placement import read_stamp
     from local_operator.teams import TeamRegistry
 
-    # Hold the cadence: the sync below is the test's own act.
+    # These rows call the real driver directly. Startup reconciliation must not
+    # run a second driver on the same record while this test owns it.
+    monkeypatch.setattr(mq, "start_driver", lambda *_a, **_k: False)
     monkeypatch.setattr(definitions.DefinitionsSyncer, "tick", lambda *_a, **_k: [])
     server_a, server_b, _host, _port = pair
     _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
@@ -2284,22 +2303,8 @@ async def test_a_queued_transfer_succeeds_end_to_end_after_the_definitions_sync(
     # THE SOURCE'S OWN FACTS, which is all the queue decides on: the record folded on
     # the tombstone and this device retired its copy.
     assert not session_dir.exists()
-    # The destination's promote is observed, not gated on: the source folds on its
-    # own tombstone, which can precede the destination's promote by a moment. A
-    # promote that never lands is a different (pre-existing, reported) race in the
-    # copy path, not a queue decision — see the round-4 remediation note.
-    deadline = time.monotonic() + 5.0
-    arrived = read_stamp(server_b.root, SESSION)
-    while arrived is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-        arrived = read_stamp(server_b.root, SESSION)
-    print(
-        "queued transfer:", record["phase"], "source retired: True",
-        "destination promoted:", arrived is not None,
-    )
-    if arrived is not None:
-        assert arrived.home_device == server_b.identity.device_id
-        assert (server_b.root / "sessions" / SESSION).is_dir()
+    _assert_queued_destination_owns(server_b.root, server_b.identity.device_id)
+    print("queued transfer:", record["phase"], "source retired: True, destination promoted: True")
 
 
 @pytest.mark.asyncio
@@ -2314,14 +2319,13 @@ async def test_a_queued_retry_is_decided_by_its_own_attempt(
     record, or a refusal that actually crossed for it. At ``cf453abae`` the second
     drive folded ``team_definitions_pending`` again with NO second refusal arriving.
     """
-    import time
-
     from local_operator.network import definitions
     from local_operator.network import move_queue as mq
     from local_operator.network import mobility
-    from local_operator.session.placement import read_stamp
     from local_operator.teams import TeamRegistry
 
+    # The explicit drive() calls below own this record, not the startup scheduler.
+    monkeypatch.setattr(mq, "start_driver", lambda *_a, **_k: False)
     monkeypatch.setattr(definitions.DefinitionsSyncer, "tick", lambda *_a, **_k: [])
     server_a, server_b, _host, _port = pair
     _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
@@ -2340,6 +2344,24 @@ async def test_a_queued_retry_is_decided_by_its_own_attempt(
 
     monkeypatch.setattr(mobility, "_source_refused", refused)
 
+    # THE OTHER WAY THIS ATTEMPT ANSWERS: the invite can be refused in the ASK
+    # itself, which the destination never repeats as a ``refused`` frame. Both are
+    # this attempt's own evidence; neither exists for a remembered sentence.
+    answers: list[tuple[int, str]] = []
+    real_ask = mobility.LinkTransport.ask
+
+    def ask(self: Any, frame: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        try:
+            return real_ask(self, frame, **kwargs)
+        except mobility.Moved as refusal:
+            # LinkTransport correlates the direct reply with the request itself.
+            # A transport failure is not a refusal from this invited peer.
+            if frame.get("phase") == "invite" and refusal.code != "unreachable":
+                answers.append((int(frame.get("attempt") or 0), refusal.code))
+            raise
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
+
     def queue_it(request_id: str) -> None:
         mq.enqueue(
             server_a.root,
@@ -2351,47 +2373,37 @@ async def test_a_queued_retry_is_decided_by_its_own_attempt(
         )
         mq.transition(server_a.root, SESSION, mq.QUEUE_PHASE_COPYING, writer="relay")
 
+    progress = mobility.progress_for(server_a)
     queue_it("q1")
     assert mq.drive(server_a, SESSION) == mq.QUEUE_PHASE_FAILED
+    first_token = progress.attempt(SESSION)
     first = mq.read_record(server_a.root, SESSION) or {}
     first_code = str(first["code"])
-    print("queued attempt 1:", first["phase"], first_code, "| refusals:", len(arrived))
-    assert arrived, "the first attempt was refused by the destination, not locally"
+    assert first_token > 0
+    first_evidence = {code for token, code in arrived + answers if token == first_token}
+    assert first_code in first_evidence, (first_code, first_evidence)
+    print("queued attempt 1:", first["phase"], first_code, "matched own refusal: True")
     assert session_dir.is_dir()
 
     synced = definitions.push_to_peer(server_a, server_b.identity.device_id)
     assert synced["ok"], synced
     assert TeamRegistry(server_b.root).get_team_by_name("lopdev") is not None
-    seen_after_first = len(arrived)
 
     queue_it("q2")
     second_outcome = mq.drive(server_a, SESSION)
+    second_token = progress.attempt(SESSION)
     second = mq.read_record(server_a.root, SESSION) or {}
-    print(
-        "queued attempt 2:", second_outcome, second.get("code"),
-        "| new refusals:", len(arrived) - seen_after_first,
-    )
-    # THE INVARIANT, in three shapes: the attempt completed, or it was refused BY
-    # THIS ATTEMPT (a new sentence crossed for it), or it decided something this
-    # attempt computed. The one thing it may NOT do is fold attempt 1's sentence.
-    assert (
-        second_outcome == mq.QUEUE_PHASE_RESUMED
-        or len(arrived) > seen_after_first
-        or str(second.get("code")) != first_code
-    ), second
+    assert second_token > 0 and second_token != first_token
     if second_outcome == mq.QUEUE_PHASE_RESUMED:
-        # Same split as the transfer above: retire is the source's fact and is
-        # asserted; the destination's promote is observed (bounded) and printed.
+        assert second["phase"] == mq.QUEUE_PHASE_RESUMED
         assert not session_dir.exists()
-        deadline = time.monotonic() + 5.0
-        arrived_stamp = read_stamp(server_b.root, SESSION)
-        while arrived_stamp is None and time.monotonic() < deadline:
-            time.sleep(0.05)
-            arrived_stamp = read_stamp(server_b.root, SESSION)
-        print(
-            "queued attempt 2 transferred:", second["phase"], "source retired: True",
-            "destination promoted:", arrived_stamp is not None,
-        )
+        _assert_queued_destination_owns(server_b.root, server_b.identity.device_id)
+        print("queued attempt 2: resumed, source retired: True, destination promoted: True")
+    else:
+        assert second_outcome == second["phase"] == mq.QUEUE_PHASE_FAILED
+        own_refusals = {code for token, code in arrived + answers if token == second_token}
+        assert str(second.get("code")) in own_refusals, (second.get("code"), own_refusals)
+        print("queued attempt 2:", second_outcome, second.get("code"), "matched own refusal: True")
 
 
 @pytest.mark.asyncio
