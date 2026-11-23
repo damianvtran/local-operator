@@ -16,7 +16,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import pytest
 
@@ -24,6 +24,7 @@ from local_operator.network import files
 from local_operator.remote_files import cache as remote_cache
 from local_operator.remote_files import fetch as remote_fetch
 from local_operator.remote_files import precache
+from local_operator.session import peer_rows
 from local_operator.session.attachments import AttachmentStore
 from tests.unit.network.test_mesh_file_pull import mesh  # noqa: F401 — fixture
 from tests.unit.network.test_mobility import SESSION, devices, pair  # noqa: F401
@@ -31,6 +32,24 @@ from tests.unit.network.test_remote_files_fetch import viewer  # noqa: F401 — 
 from tests.unit.session_files._fixtures import append_journal, assistant, call, tool
 
 NOW = 1_800_000_000.0
+
+
+@pytest.fixture(autouse=True)
+def _fresh_peer_listing() -> Iterator[None]:
+    """``peer_rows`` caches the catalogue by ROOT PATH at module level: no test may inherit a read.
+
+    WHY THIS IS NOT HYPOTHETICAL HERE. Both ``test_the_capacity_oracle_rejects_broken_gates``
+    cases share the same 30-character ``tmp_path`` stem, and the repo's
+    ``tmp_path_retention_policy = "failed"`` deletes a PASSING test's directory, so the
+    second case is handed the very same path (``..._rejec0``) back. With fresh relay
+    identities but the constant ``SESSION`` id, the cached row still names the first
+    case's owner device: ``ask`` dials a peer this network has never heard of
+    (``unknown_peer``), ``candidates`` answers ``[]``, and the oracle never runs (CI run
+    44973792408). Same convention as ``tests/unit/server/test_desktop_remote_open.py``.
+    """
+    peer_rows.clear_cache()
+    yield
+    peer_rows.clear_cache()
 
 
 def _row(sid: str, *, age_s: float, **overrides: Any) -> dict[str, Any]:
