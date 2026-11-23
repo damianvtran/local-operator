@@ -201,6 +201,7 @@ def _consumer_defaults() -> dict[str, object]:
         QUERY_BUDGET_SECONDS_DEFAULT,
         QUERY_BUDGET_STOP_DEFAULT,
     )
+    from local_operator.tui import settings as tui_settings
     from local_operator.tui import status_command
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
@@ -232,6 +233,11 @@ def _consumer_defaults() -> dict[str, object]:
         # user explicitly on `dark` as having changed the setting (round 1, M1).
         "tui.theme": DEFAULT_THEME,
         "display.time_format": DEFAULT_TIME_FORMAT,
+        # The transcript layout mode's own vocabulary, from the module the TUI
+        # reader lives in (``tui/settings.py:transcript_display_mode``). The
+        # registry restates "by-turn" because it must not import the TUI
+        # module's cache; THIS entry is what turns a drift into a red test.
+        "display.transcript_display": tui_settings.DEFAULT_TRANSCRIPT_DISPLAY,
         # The language resolver's own default, from the module that READS the
         # key (`i18n.resolve.resolve_language`). The registry restates "auto"
         # rather than importing it (settings_io stays off the resolver's import
@@ -2385,19 +2391,41 @@ def test_the_write_boundary_refuses_a_key_another_hotkey_already_holds(tmp_path)
     succeeded and one action became unreachable.
     """
     manager = ConfigManager(tmp_path)
-    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], "ctrl+g")
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], "ctrl+y")
 
-    with pytest.raises(ValueError, match="already uses ctrl\\+g"):
-        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "ctrl+g")
+    with pytest.raises(ValueError, match="already uses ctrl\\+y"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "ctrl+y")
 
     # And through the ALTERNATES form, which is the shape `lop config edit`
     # reaches for a second key (design §H.1) and which bypassed the guard
     # entirely while it compared whole strings (review round 2, M4).
-    with pytest.raises(ValueError, match="already uses ctrl\\+g"):
-        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5,ctrl+g")
+    with pytest.raises(ValueError, match="already uses ctrl\\+y"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5,ctrl+y")
 
     # A free key still stores, and re-writing a row's own key is not a clash.
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
+
+
+def test_the_write_boundary_covers_every_newly_exposed_app_row(tmp_path) -> None:
+    """The rows this slice exposes are ordinary rows at the write boundary.
+
+    A newly exposed id that skipped the group check would let `lop config
+    edit keymap.aside ctrl+t` take the todo panel's shipped key with no
+    refusal anywhere — the exact silent disable §C.4 exists to prevent, now
+    with twelve more rows that can be the victim.
+    """
+    manager = ConfigManager(tmp_path)
+    with pytest.raises(ValueError, match="already uses ctrl\\+t"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.aside"], "ctrl+t")
+    with pytest.raises(ValueError, match="already uses ctrl\\+p"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.fork_aside"], "ctrl+p")
+    # The default of a NEW row is itself refused for an older row, because the
+    # defaults are live whether or not any value was written.
+    with pytest.raises(ValueError, match="already uses f9"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f9")
+    # A non-clearable app row cannot be cleared: `none` is not a terminal key.
+    with pytest.raises(ValueError):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.command_palette"], "none")
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
     assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "f5"
 
@@ -2405,17 +2433,17 @@ def test_the_write_boundary_refuses_a_key_another_hotkey_already_holds(tmp_path)
 @pytest.mark.parametrize(
     ("existing", "candidate"),
     [
-        ("f5,ctrl+g", "ctrl+g"),
-        ("ctrl+g", "f5,ctrl+g"),
-        ("ctrl+g", "ctrl+g,ctrl+g"),
-        ("f5,ctrl+g", "ctrl+t,ctrl+g"),
+        ("f5,ctrl+y", "ctrl+y"),
+        ("ctrl+y", "f5,ctrl+y"),
+        ("ctrl+y", "ctrl+y,ctrl+y"),
+        ("f5,ctrl+y", "ctrl+t,ctrl+y"),
     ],
 )
 def test_write_boundary_refuses_every_alternate_overlap(tmp_path, existing, candidate):
     """All documented alternate forms must reach the same refusal boundary."""
     manager = ConfigManager(tmp_path)
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], existing)
-    with pytest.raises(ValueError, match=r"already uses ctrl\+g"):
+    with pytest.raises(ValueError, match=r"already uses ctrl\+y"):
         settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], candidate)
     assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "ctrl+s"
 
@@ -2988,7 +3016,11 @@ class TestConfigEditQualifiesALoosening:
         code = config_edit_command(argparse.Namespace(key="tool_approval_mode", value="ask"))
         out = capsys.readouterr().out
         assert code == 0, out
-        assert "Successfully updated tool_approval_mode to ask" in out, out
+        # PR #4435 intentionally revised the reviewed English display label
+        # (also pinned in wire_settings_en_golden.json), not the machine token.
+        # Keep the golden's full slot guard; only those reviewed copy values move.
+        assert "Successfully updated tool_approval_mode to Ask" in out, out
+        assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "ask"
         assert "Running sessions are unchanged" not in out, out
 
 

@@ -145,6 +145,13 @@ class PendingBody:
     #: fields, but it arrives on the fetched body rather than on the row, so it
     #: travels here and overwrites the source's placeholder before rendering.
     sender_kind: str = "unknown"
+    #: Multi-frame turn shaping (``pending_turn.PendingTurnBatch``), passed
+    #: straight to :func:`build_body_frame`. The defaults are the one-body
+    #: frame byte-for-byte, so a single-body turn renders exactly as before.
+    with_rules: bool = True
+    participation: bool | None = None
+    delivery: str | None = None
+    omitted_ambient: int = 0
 
 
 @dataclass(frozen=True)
@@ -241,16 +248,49 @@ class CustomFrameInjection:
 
     @classmethod
     def append(cls, messages: Sequence[Any], text: str, *, message_id: str) -> list[Any]:
+        return cls.insert(messages, text, message_id=message_id, index=len(messages))
+
+    @classmethod
+    def insert(
+        cls,
+        messages: Sequence[Any],
+        text: str,
+        *,
+        message_id: str,
+        index: int | None = None,
+    ) -> list[Any]:
+        """Return a NEW list with one transient frame inserted at ``index``.
+
+        WHY insert-at-index rather than always append: a multi-step turn makes
+        several provider calls (tool use -> tool result -> follow-up). Always
+        appending moves up to 16 KiB of body text past every assistant/tool
+        message emitted mid-turn, so each step's prefix diverges at the frame.
+        On Anthropic that re-writes the frame plus the new step every step
+        (the prior tool_result breakpoint still reads the rest), and a full
+        rewrite only in image-bearing sessions, where the settled breakpoint
+        displaced that one. OpenAI-compat paid more: tool results are role
+        ``tool`` there, so its previous-user breakpoint was the wake card and
+        every step re-wrote the turn's tool steps so far. Anchoring the frame after
+        the same message every call (``PendingTurn._insert_index``) keeps the
+        prefix byte-identical through the frame for the entire turn while
+        leaving ``messages`` unmutated and never persisting the frame.
+        """
         from local_operator.harness.types import CustomMessage
 
-        return list(messages) + [
-            CustomMessage(
-                custom_type=cls.CUSTOM_TYPE,
-                attribution="user",
-                details={"text": text},
-                id=message_id,
-            )
-        ]
+        frame = CustomMessage(
+            custom_type=cls.CUSTOM_TYPE,
+            attribution="user",
+            details={"text": text},
+            id=message_id,
+        )
+        # Non-serialized private flag: tells provider cache-breakpoint logic
+        # not to anchor the tail cache_control marker on an ephemeral frame
+        # that vanishes as soon as the turn settles.
+        frame._ephemeral = True
+        out = list(messages)
+        pos = len(out) if index is None else max(0, min(index, len(out)))
+        out.insert(pos, frame)
+        return out
 
 
 def assemble_injection(
@@ -296,12 +336,17 @@ def assemble_injection(
             sender_kind=pending.sender_kind,
             mention=source.mention,
             conversation_seq=source.conversation_seq,
+            conversation_kind=source.conversation_kind,
         ).validated()
     frame = build_body_frame(
         source,
         conversation_label=pending.conversation_label,
         sender_label=pending.sender_label,
         body=pending.body,
+        with_rules=pending.with_rules,
+        participation=pending.participation,
+        delivery=pending.delivery,
+        omitted_ambient=pending.omitted_ambient,
     )
     size = request_size(frame)
     if not frame_within_capacity(frame, request_bytes=budget.available_bytes):

@@ -1,0 +1,29 @@
+{
+  "locale": "ru",
+  "namespace": "tui.provider_state",
+  "source_sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912",
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "openai/gpt-6.1-sol",
+    "session": "29d4fc18d1a7",
+    "date": "2026-11-22"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "eb9e65295113",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "29d4fc18d1a7",
+    "actual_model_source": "Host [model switch] notice in this session: openai/gpt-6.1-sol, previously anthropic/claude-opus-5-5, provider failure: quota. No provider telemetry independently available.",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "qualification": "Native-fluent LLM lexical judgment, not human native-speaker review. Same reported fallback model as translator; independent session, not model-family independence.",
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "i18n/audits/evidence/ru/tui.provider_state/ru22B/record.json; independent B 5/5 lexical; no styled/native/eligibility approval"
+}

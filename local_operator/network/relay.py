@@ -95,14 +95,21 @@ from local_operator.network.credentials.sync import sync_checks
 from local_operator.network.handshake import (
     HANDSHAKE_TIMEOUT_S,
     MAX_DECLARED_ENDPOINTS,
+    REASON_LISTENER_UNPROVEN,
+    REASON_MAC,
+    REASON_PEER_IDENTITY,
     REASON_SELF,
+    REASON_SIGNATURE,
     Credential,
+    DialerExpectation,
     Handshake,
     ListenerPolicy,
+    MembershipEnded,
     pair_abort_frame,
     pair_offer_frame,
     pair_result_frame,
     pair_timeout_seconds,
+    prime_dummy_public_key,
     sas_matches,
     set_pair_keepalive,
 )
@@ -1498,6 +1505,26 @@ def handshake_not_attempted_reason(winner: str, *, budget: str = "listing") -> s
 #: writes it; ``resume.peer_reason_words`` reads it).
 HANDSHAKE_REFUSED = "handshake_refused"
 
+#: How long after ``member rm`` a removed device that dials in and PROVES its stored
+#: key is told "membership ended" instead of silence (G9-B). Seven days is the
+#: security owner's floor for the persisted tombstone; the row itself lives for
+#: ``store.TOMBSTONE_PRUNE_AGE_S`` (90 days), so the window, not the row, is the
+#: bound. After it the device gets the plain silent refusal again.
+#:
+#: The window holds however many rotations happened inside it (security P3 /
+#: review R1-1, closed in the G9-B follow-up): the handshake's step-4 epoch check
+#: (``Handshake.verify_auth``) runs the same tombstone probe before it refuses, so a
+#: device removed and then left behind by a second removal, a ``leave`` or a
+#: ``panic`` still proves its key and is told. Before that it got silence until its
+#: hold ended.
+REMOVAL_NOTICE_WINDOW_S = 7 * 24 * 60 * 60.0
+#: At most one notice per tombstoned key per this many seconds, per relay process;
+#: every other attempt in the window is the plain silent close. The value is the
+#: security owner's "about one per key per few minutes": a stolen key re-dialling
+#: in a loop must not turn the notice into a liveness probe of this device. A
+#: restart forgets the window, which costs at most one extra notice.
+REMOVAL_NOTICE_INTERVAL_S = 300.0
+
 
 def handshake_refused_reason(exc: BaseException) -> str:
     """Why a dial that CONNECTED produced no link, in the wire's own words.
@@ -1808,6 +1835,7 @@ def adopt_members(
     *,
     sender_device_id: str = "",
     allow_new: bool = True,
+    supplier_verified: bool,
 ) -> tuple[bool, list[str]]:
     """Take a peer's member rows into this device's record. Returns (changed, added).
 
@@ -1817,7 +1845,14 @@ def adopt_members(
     A joined member may assert its own bounded standing; only an active admin
     may introduce another device. Unknown rows arrive only in receiver-initiated
     pulls (``allow_new``), never in unsolicited change notifications. No new
-    wire field is needed: the link already authenticates the answering peer.
+    wire field is needed: the link authenticates the answering peer, in BOTH
+    directions since the dialer verifies the listener's welcome proof.
+
+    ``supplier_verified`` is that fact, passed in (``PeerLink.peer_verified``) and
+    REQUIRED with no default: an unverified supplier is refused outright, so a
+    future caller holding a link ``_admit_link`` never vetted cannot merge rows on
+    a claimed admin's authority (mesh trust audit G2). ``_admit_link`` already
+    refuses such links; this is the backup at the one function that writes rows.
 
     THE RULES, and each one is a refusal to guess:
 
@@ -1853,6 +1888,8 @@ def adopt_members(
       the normal case, and shrinking the table on the weaker evidence is how a mesh
       loses members that are still members.
     """
+    if not supplier_verified:
+        return False, []
     changed = False
     added: list[str] = []
     sender = record.member(sender_device_id)
@@ -5114,10 +5151,16 @@ class PeerLink:
         self.device_id = result.peer_device_id
         self.instance_id = result.peer_instance_id
         self.network_id = result.network_id
-        #: Whether this link's PEER identity was proved by the handshake (see the
-        #: constructor). Read by ``_peer_block`` into the block the owner's relay
-        #: MACs for its runtime (G6), where it caps the stamp's ``verified``.
-        self.peer_verified = bool(peer_verified)
+        #: ``PeerLink.peer_verified: bool`` — True iff this link's peer was
+        #: authenticated against its stored key (``HandshakeResult.peer_verified``:
+        #: the listener verified the dialer's auth, or the dialer verified the
+        #: listener's welcome proof and that it is the device it meant to reach),
+        #: as each build site states it (see the constructor). ``_admit_link``
+        #: refuses False; ``adopt_members``, ``_note_peer_endpoints`` and
+        #: ``_broadcast_epoch`` read it as a backup; ``_peer_block`` puts it in the
+        #: block the owner's relay MACs for its runtime (G6), where it caps the
+        #: stamp's ``verified``. The name is a cross-lane interface — do not rename it.
+        self.peer_verified: bool = bool(peer_verified)
         self.epoch = result.epoch
         self.phase: LinkPhase = result.phase
         self.capabilities = frozenset(result.peer_capabilities)
@@ -5706,6 +5749,59 @@ class ServerPolicy(ListenerPolicy):
             return None
         return member.public_key or None
 
+    def removed_member_public_key(self, network_id: str, device_id: str) -> str | None:
+        """A tombstone's stored key while it may still be told it was removed (G9-B).
+
+        The tombstone IS the member row ``remove_member`` kept: ``removed_at``,
+        ``lifecycle="expired"`` and the public key, no secret. It is notice-eligible
+        for :data:`REMOVAL_NOTICE_WINDOW_S` after the removal; past that the device
+        falls back to the plain silent refusal. A device that LEFT (``removed_by`` is
+        itself) already knows, so it is never eligible. Only ever used to check a
+        signature; it authorises nothing.
+        """
+        if not self._record or network_id != self._record.network_id:
+            return None
+        # A listener that knows it was itself removed has no standing to tell
+        # anyone else they were (review R1-4): the dialer verifies the signer only
+        # against ITS OWN record, which may not yet show this device removed, so the
+        # check has to live here. Falling through to ``None`` keeps the probe on the
+        # same one-verify path (the discarded key stands in), so this is silence.
+        # Do not use ``member``/``self_member`` here: their first-match lookup
+        # skips later rows. Every claim scans every row/alias and revocation id,
+        # then evaluates the same eligibility checks, including on a dummy miss.
+        # This is a work-shape invariant, not a constant-time Python guarantee.
+        member = MemberRecord(device_id="", removed_at=0.0)
+        me = MemberRecord(device_id="", removed_at=0.0)
+        found = self_found = False
+        for row in self._record.members:
+            matches = row.device_id == device_id
+            self_matches = row.device_id == self._record.self_device_id
+            for previous_id in row.previous_ids:
+                matches |= previous_id == device_id
+                self_matches |= previous_id == self._record.self_device_id
+            if matches & (not found):
+                member = row
+            if self_matches & (not self_found):
+                me = row
+            found |= matches
+            self_found |= self_matches
+        revoked = False
+        for removed_id in self._record.removed_ids:
+            revoked |= removed_id == device_id
+        public_key = member.public_key
+        eligible = (
+            found
+            & self_found
+            & (me.removed_at is None)
+            & (me.lifecycle != "expired")
+            & (member.removed_at is not None)
+            & (member.removed_by != device_id)
+            & revoked
+            & bool(public_key)
+            & (time.time() - float(member.removed_at or 0.0) <= REMOVAL_NOTICE_WINDOW_S)
+        )
+        return public_key if eligible else None
+
     def invite_credential(self, network_id: str, invite_id: str) -> Credential | None:
         """The invite's MAC key, or ``None`` when the token may not be redeemed.
 
@@ -6132,6 +6228,34 @@ class RelayServer:
         #: Collapses identical handshake refusals and redial failures per window
         #: (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these repeats.
         self._refusal_rows = redial.RefusalCoalescer()
+        #: (network_id, device_id) -> monotonic time of the last "membership ended"
+        #: notice sent to that tombstoned key (``_send_removal_notice``). Process
+        #: memory, ids only, pruned past :data:`REMOVAL_NOTICE_INTERVAL_S`.
+        self._removal_notices: dict[tuple[str, str], float] = {}
+        self._removal_notices_lock = threading.Lock()
+        # Claim failure telemetry once even when different peer readers deliver
+        # notices concurrently. Never hold this lock across audit/disk I/O.
+        self._unrecorded_removals: set[str] = set()
+        self._unrecorded_removals_lock = threading.Lock()
+        #: device_id -> {"build", "endpoint", "at"} for every member whose LISTENER
+        #: answered this device's dial without a welcome proof (``listener_unproven``).
+        #: STICKY ON PURPOSE, separate from ``redial``: the tracker's ``last_cause`` is
+        #: overwritten by every later ``connect_failed``, so the one actionable fact
+        #: ("that device runs a build too old to prove itself; update it") would flap
+        #: away under the reconnect loop. Cleared when an OUTBOUND link to that device
+        #: is admitted, or an INBOUND one whose MAC-covered caps carry
+        #: ``listener-proof-v1`` (``_admit_link``; review m1 / UX U1). In memory only:
+        #: re-learnt on the first dial after a restart. Read by ``peers()`` as
+        #: ``listener_proof``.
+        self._unproven_listeners: dict[str, dict[str, Any]] = {}
+        #: device_id -> {endpoint, ...} answered by a party that could NOT prove it is
+        #: that member, on UNAUTHENTICATED evidence (a challenge naming another device,
+        #: or a signature that does not verify). IN MEMORY, NEVER THE ROW (review M1,
+        #: security S-2): one bare frame from anyone at that address costs 64 random
+        #: bytes, so it may reorder this device's dials but never durably delete a
+        #: member's address. ``_ensure_link_with_reason`` dials these only after the
+        #: member's other addresses fail; a verified link at the address clears it.
+        self._suspect_endpoints: dict[str, set[str]] = {}
         self.links: dict[str, PeerLink] = {}
         self._links_lock = threading.RLock()
         #: How many inviter ceremonies are PARKED on this relay right now (from the
@@ -6399,6 +6523,10 @@ class RelayServer:
         # BEFORE the accept loop starts: a peer that handshakes in the first
         # millisecond must find this device's endpoints already on the self row.
         self.sync_self_endpoints()
+        # And the tombstone probe's stand-in key, for the same reason: minted here,
+        # once, so no inbound probe ever pays for a keygen (the timing equalisation
+        # in ``Handshake._probe_tombstone``) and no CLI import pays for it either.
+        prime_dummy_public_key()
         for target, name in (
             (self._accept_loop, "mesh-accept"),
             (self._control_loop, "mesh-control"),
@@ -6933,8 +7061,17 @@ class RelayServer:
                 # writing it back would resurrect it (``save`` creates the file).
                 continue
 
-    def _note_peer_endpoints(self, network_id: str, device_id: str, endpoints: list[str]) -> None:
+    def _note_peer_endpoints(
+        self, network_id: str, device_id: str, endpoints: list[str], *, verified: bool
+    ) -> None:
         """Record where a peer says it can be reached, on its member row.
+
+        ``verified`` is whether the handshake that carried ``endpoints`` authenticated
+        the peer against its stored key. False writes NOTHING: a durable endpoint is
+        a redirect of every future dial, and before the dialer verified the
+        listener's welcome proof an impostor's endpoints landed here on the victim's
+        row (mesh trust audit G4). Both callers now run after verification, so this
+        is the assertion-style guard that keeps a new caller from undoing that.
 
         THE ROW IS THE ONLY PLACE ``_ensure_link`` DIALS, so a declaration that
         never lands here is a peer that is permanently unreachable. A peer that
@@ -6950,7 +7087,7 @@ class RelayServer:
         flight. The read happens inside the lock instead, and a record that cannot be
         reloaded is still not this connection's problem.
         """
-        if not endpoints or not device_id:
+        if not verified or not endpoints or not device_id:
             return
         try:
             with store.mutate(network_id, self.root) as record:
@@ -7209,7 +7346,11 @@ class RelayServer:
         # stamps hiding it.
         with store.mutate(link.network_id, self.root) as record:
             changed, added = adopt_members(
-                record, rows, sender_device_id=link.device_id, allow_new=allow_new
+                record,
+                rows,
+                sender_device_id=link.device_id,
+                allow_new=allow_new,
+                supplier_verified=bool(getattr(link, "peer_verified", False)),
             )
             link.member_pull_added = list(added)
             if not changed:
@@ -7435,7 +7576,7 @@ class RelayServer:
         which ``_note_peer_endpoints`` records — healing the row on both sides.
         """
         for record in store.list_networks(self.root):
-            if record.trust != "active":
+            if record.trust != "active" or _self_removed(record):
                 continue
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
@@ -7457,6 +7598,15 @@ class RelayServer:
             for device_id in self.redial.due():
                 if self._stop.is_set():
                     return
+                if self._named_only_where_self_removed(device_id):
+                    # THIS DEVICE WAS REMOVED from every network naming the peer
+                    # (#4394 review R2-4): a verified notice tombstoned our own row,
+                    # and nothing a dial can bring back changes that — re-admission is
+                    # a fresh invite. Stop scheduling it rather than re-dial a
+                    # member that will only refuse (or re-send the notice) every
+                    # backoff for the whole notice window.
+                    self.redial.forget(device_id)
+                    continue
                 if self._link_for(device_id) is not None:
                     # Admission already owns the connected transition under
                     # _links_lock. This lookup is only a scheduling hint: the link
@@ -7549,11 +7699,29 @@ class RelayServer:
                 unroutable.discard(device_id)
                 self.redial.kick(device_id)
 
-    def _members_named(self, device_id: str) -> list[MemberRecord]:
-        """Every active member row for ``device_id``, across this device's networks."""
-        rows: list[MemberRecord] = []
+    def _named_only_where_self_removed(self, device_id: str) -> bool:
+        """Whether every trusted network listing ``device_id`` active has removed US."""
+        named = False
         for record in store.list_networks(self.root):
             if record.trust != "active":
+                continue
+            member = record.member(device_id)
+            if member is None or not member.active:
+                continue
+            if not _self_removed(record):
+                return False
+            named = True
+        return named
+
+    def _members_named(self, device_id: str) -> list[MemberRecord]:
+        """Every active member row for ``device_id``, across this device's networks.
+
+        A network whose own self row is tombstoned names nobody this device may
+        dial (#4394 review R2-4; see ``_named_only_where_self_removed``).
+        """
+        rows: list[MemberRecord] = []
+        for record in store.list_networks(self.root):
+            if record.trust != "active" or _self_removed(record):
                 continue
             member = record.member(device_id)
             if member is not None and member.active:
@@ -7945,6 +8113,14 @@ class RelayServer:
                     handshake.credential = invite_credential_for(
                         joined, joined_secrets.secret, invite_id
                     )
+            if handshake.mode == "member":
+                # A ROTATED LISTENER CARRIES ITS HOP (G1D-1): a dialer still holding
+                # our pre-rotation row verifies this statement against that row's key
+                # before its auth, then our proof under the new key. Public data (it
+                # rides on every copy of the table), so it is safe to show pre-auth.
+                handshake.self_rotation = _own_rotation_statement(
+                    self.store_view.network(network_id), self.identity.device_id
+                )
             handshake.send_challenge(sock, policy)
             stage = "auth"
             handshake.verify_auth(reader, deadline, policy)
@@ -7970,19 +8146,41 @@ class RelayServer:
             stage = "establish"
             result = handshake.establish()
         except MeshRefusal as refusal:
-            self._audit_handshake_refusal(
-                refusal,
-                network_id,
-                peer_addr,
-                mode,
-                # ``handshake`` is created INSIDE this ``try`` (it is the first
-                # thing that can refuse), so a refusal raised by its own
-                # construction has nothing to read: the row then says so rather
-                # than this handler failing the accept loop.
-                declared_device=handshake.peer_device_id if handshake is not None else "",
-                verified=handshake.auth_verified if handshake is not None else False,
-            )
-            _close_quietly(sock)
+            # THE SOCKET IS ANSWERED AND CLOSED BEFORE THE AUDIT ROW IS WRITTEN (G9-B
+            # follow-up, the unknown-vs-known id timing oracle, #4394 QA O1). The
+            # measured gap was not in the handshake: ``handshake_refused`` is a
+            # DURABLE event (written through and fsynced), and the refusal coalescer
+            # (``_refusal_rows``) writes one only for a (code, claimed id, host, ...)
+            # tuple it has not seen in its window. Writing it before the close put
+            # that fsync — ~1.6 ms on an EBS-backed Linux dev host, ~2.5 ms in #4394's QA rig —
+            # inside the time a dialer observes, so a never-seen id read slower than
+            # a repeated one. Closing first removes every audit cost from the
+            # same-connection observation window in this handler, with no sleep, no
+            # jitter and no floor; the row, its text and its durability are unchanged,
+            # only its timing relative to the FIN. The notice (a proven tombstone's
+            # only reply) still goes out before the close, decided as before.
+            try:
+                if handshake is not None and handshake.removal_proven:
+                    self._send_removal_notice(sock, handshake, network_id)
+            except Exception as exc:  # noqa: BLE001 — a notice is only best-effort
+                logger.warning(
+                    "relay: removal notice failed network=%s exception=%s",
+                    network_id[:80],
+                    type(exc).__name__[:64],
+                )
+            finally:
+                # Exceptions raised inside this handler bypass its sibling excepts.
+                # A failed courtesy notice must not skip socket cleanup or telemetry.
+                _close_quietly(sock)
+                self._audit_handshake_refusal(
+                    refusal,
+                    network_id,
+                    peer_addr,
+                    mode,
+                    # Construction itself may refuse before ``handshake`` exists.
+                    declared_device=handshake.peer_device_id if handshake is not None else "",
+                    verified=handshake.auth_verified if handshake is not None else False,
+                )
             return
         except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError) as exc:
             # A CONNECTION THAT DIED BETWEEN ITS HELLO AND ITS WELCOME LEAVES A ROW
@@ -8129,6 +8327,12 @@ class RelayServer:
             "bad_mac": "auth_failed",
             "protocol_mismatch": "protocol_mismatch",
             "invite_device_mismatch": "wrong_device",
+            # The dialer's refusals of a listener (``Handshake.verify_welcome``): no
+            # proof reads as an old build; answering as the wrong device is the
+            # wrong-device family the join path already had.
+            "listener_unproven": "protocol_mismatch",
+            "peer_identity_mismatch": "wrong_device",
+            "invite_wrong_inviter": "wrong_device",
             "invite_invalid": "policy",
             "self_link": "policy",
         }.get(refusal.code, "policy")
@@ -8244,6 +8448,16 @@ class RelayServer:
         answer every other refusal on this transport gives — an open port that
         explains itself is an oracle — and the record of why is this device's own.
         """
+        # NO UNVERIFIED LINK ENTERS THE TABLE (mesh trust audit G1-G4). Checked before
+        # the lock and the duplicate fence: a link whose peer never proved its
+        # identity must not displace a real one, reach ``redial.connected``, run the
+        # link-up hooks, or become visible to any consumer (the member pull, epoch
+        # broadcast, forwards, credential lending). One structural gate here instead
+        # of one per consumer. The handshake normally refuses first; this is the
+        # gate a new dial path cannot forget.
+        if not getattr(link, "peer_verified", False):
+            _close_quietly(link.sock)
+            return "unverified_link"
         displaced: PeerLink | None = None
         with self._links_lock:
             refusal = self._refusal_reason(link.network_id)
@@ -8300,6 +8514,23 @@ class RelayServer:
         if refusal:
             _close_quietly(link.sock)
         else:
+            if outbound or "listener-proof-v1" in getattr(link, "capabilities", ()):
+                # The peer has now proved itself AS A LISTENER (outbound: we verified
+                # its welcome proof), or is a build whose listener always signs its
+                # welcome (inbound, the cap inside the MAC-covered transcript this
+                # side just verified). Either way the sticky "cannot prove its
+                # identity" fact is no longer true; clearing it on the inbound case is
+                # what lets the warning go once the member updates and dials in first
+                # (review m1, UX U1, S-3, Q-1). An inbound link from an OLD member
+                # carries no cap and says nothing about its listener half (T22).
+                unproven = getattr(self, "_unproven_listeners", None)
+                if unproven is not None:
+                    unproven.pop(link.device_id, None)
+            if outbound:
+                # A verified link at this address: it reaches the member after all.
+                suspects = getattr(self, "_suspect_endpoints", {}).get(link.device_id)
+                if suspects is not None:
+                    suspects.discard(str(getattr(link, "peer_addr", "") or ""))
             if displaced is not None:
                 # Outside the lock: ``close`` waits on the writer's flush and then
                 # runs ``link_closed``, which finds the new link and so records no
@@ -8428,7 +8659,10 @@ class RelayServer:
         # and re-read inside the record's lock, which is what makes that tolerance
         # safe to hand them rather than this method's own copy of the record.
         self._note_peer_endpoints(
-            result.network_id, result.peer_device_id, handshake.peer_endpoints
+            result.network_id,
+            result.peer_device_id,
+            handshake.peer_endpoints,
+            verified=bool(getattr(result, "peer_verified", False)),
         )
         self._note_observed_endpoint(
             result.network_id, result.peer_device_id, peer_addr, handshake.peer_endpoints
@@ -8792,11 +9026,11 @@ class RelayServer:
         # pair before this was fixed, and caught by the e2e test rather than by
         # review).
         if result is None:
-            reply: dict[str, Any] = {"op": "ack", "req": req, "detail": ""}
+            reply = wire.peer_ack(req, "")
         elif result.get("op") in ("ack", "error"):
             reply = result
         else:
-            reply = {"op": "ack", "req": req, "detail": result}
+            reply = wire.peer_ack(req, result)
         # EVERY REPLY LEAVES THROUGH ONE WRAP (agent review round 1, R1-2), the empty
         # ack above included. A reply carrying SECRET material — the broker's `copy`
         # value, the epoch-rotation answers, the reconcile catch-up — is an ack with
@@ -10213,17 +10447,21 @@ class RelayServer:
         except Exception:  # noqa: BLE001 — a trust change must never fail on this
             logger.debug("mesh relay: dropping renewed logins failed", exc_info=True)
 
-    def _op_identity_rotate(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
-        record = self.store_view.network(link.network_id)
-        if record is None:
-            raise MeshRefusal("not_a_member", "this device is not in that network")
-        statement = frame.get("statement")
-        if not isinstance(statement, dict):
-            raise MeshRefusal("bad_rotation_statement", "no rotation statement was carried")
+    def _apply_rotation_statement(
+        self, network_id: str, statement: dict[str, Any]
+    ) -> DeviceRotationOutcome:
+        """Apply one verified-on-arrival rotation statement and audit it if it moved a row.
+
+        ONE implementation for the two routes a hop arrives by: the queued
+        ``net_identity_rotate`` frame (``_op_identity_rotate``) and a dial answered by
+        the rotated device itself (``dial``, mesh-listener-auth G1D-1). Both must
+        verify ``sig_old`` against the stored row and write the same row, or the
+        two routes would disagree about one member. Raises ``MeshRefusal``.
+        """
         # The member row is rewritten in place: read and write inside the lock, so
         # a membership pull that admitted somebody in the same second is not
         # reverted by this one-row edit.
-        with store.mutate(link.network_id, self.root) as record:
+        with store.mutate(network_id, self.root) as record:
             rotation = apply_device_rotation(record, statement, root=self.root)
         # THE AUDIT LINE IS CONDITIONAL ON WHAT WAS APPLIED, not on the frame having
         # arrived. A duplicate delivery (the table overtook the queue) rewrites nothing
@@ -10250,6 +10488,16 @@ class RelayServer:
                     },
                 )
             )
+        return rotation
+
+    def _op_identity_rotate(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        record = self.store_view.network(link.network_id)
+        if record is None:
+            raise MeshRefusal("not_a_member", "this device is not in that network")
+        statement = frame.get("statement")
+        if not isinstance(statement, dict):
+            raise MeshRefusal("bad_rotation_statement", "no rotation statement was carried")
+        rotation = self._apply_rotation_statement(link.network_id, statement)
         return {
             "op": "ack",
             "req": frame.get("req"),
@@ -12947,6 +13195,18 @@ class RelayServer:
             member = record.member(device_id)
             if member is None or not member.active:
                 continue
+            # THE ROW'S CURRENT ID, NOT THE CALLER'S (security S-6). ``member()``
+            # also matches ``previous_ids``, so a caller still holding the id a
+            # proven rotation retired (a stream's recorded ``peer``, a move or an
+            # attention record) lands on the rotated row. The listener can only
+            # prove the key that row now stores, so dialling — and keying suspect
+            # marks — by the retired id would refuse the real device and mark its
+            # real address suspect, where main kept reaching it through that id.
+            current_id = member.device_id
+            if current_id != device_id:
+                live = self._link_for(current_id, network_id=record.network_id)
+                if live is not None:
+                    return live, "", attempts
             # Our own listener answers a self-addressed candidate before any real
             # peer can (the self-race, ``_reaches_own_listener``), so those are
             # dropped before the race rather than lost to it.
@@ -12954,29 +13214,46 @@ class RelayServer:
             if not candidates:
                 reason = "no_endpoint"
                 continue
-            probe = probe_candidates(candidates, deadline=deadline, connect_cap=cap)
-            attempts.extend(probe.attempts)
-            if probe.sock is None:
-                reason = probe.reason
-                continue
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                # The address answered and the budget ran out before the
-                # handshake: "unreachable" would be a claim about the peer when
-                # the truth is a claim about our clock.
-                _close_quietly(probe.sock)
-                return None, handshake_not_attempted_reason(probe.winner), attempts
-            link, dial_reason = self.dial(
-                record.network_id,
-                host=probe.winner,
-                epoch=record.epoch,
-                timeout_s=remaining,
-                connected=probe.sock,
-                expected_device=device_id,
-            )
-            if link is not None:
-                return link, "", attempts
-            reason = dial_reason or probe.reason
+            # SUSPECT ADDRESSES GO LAST, NEVER AWAY (review M1, security S-2): an
+            # address where an unproven party answered is dialled only after the
+            # member's other addresses failed in this same attempt, so a stale or
+            # hijacked address cannot win the first-connect race forever, and a
+            # member whose only address is suspect is still dialled.
+            # ``getattr``: stand-in servers built without ``__init__`` (as the probe
+            # tests build them) have no suspects, which is the honest default.
+            suspects = getattr(self, "_suspect_endpoints", {}).get(current_id, set())
+            tiers = [
+                tier
+                for tier in (
+                    [c for c in candidates if c not in suspects],
+                    [c for c in candidates if c in suspects],
+                )
+                if tier
+            ]
+            for tier in tiers:
+                probe = probe_candidates(tier, deadline=deadline, connect_cap=cap)
+                attempts.extend(probe.attempts)
+                if probe.sock is None:
+                    reason = probe.reason
+                    continue
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    # The address answered and the budget ran out before the
+                    # handshake: "unreachable" would be a claim about the peer when
+                    # the truth is a claim about our clock.
+                    _close_quietly(probe.sock)
+                    return None, handshake_not_attempted_reason(probe.winner), attempts
+                link, dial_reason = self.dial(
+                    record.network_id,
+                    host=probe.winner,
+                    epoch=record.epoch,
+                    timeout_s=remaining,
+                    connected=probe.sock,
+                    expected_device=current_id,
+                )
+                if link is not None:
+                    return link, "", attempts
+                reason = dial_reason or probe.reason
         return None, reason, attempts
 
     def _open_viewer_stream(self, frame: dict[str, Any]) -> tuple[dict[str, Any], _Stream | None]:
@@ -14084,7 +14361,7 @@ class RelayServer:
 
     def _broadcast_epoch(
         self, record: NetworkRecord, state: SecretState, *, reason: str, removed: list[str]
-    ) -> None:
+    ) -> set[str]:
         """Send ``net_epoch`` to every live link, and QUEUE it for the offline ones.
 
         The frame is built PER RECIPIENT by :func:`epoch_frame`, which withholds the
@@ -14103,6 +14380,13 @@ class RelayServer:
         for link in list(self.links.values()):
             if link.network_id != record.network_id:
                 continue
+            # NEVER A SECRET TO AN UNVERIFIED LINK (G3): ``epoch_frame`` carries the
+            # rotated secret for any active id, so a link whose peer did not prove
+            # its identity gets nothing and the real member's copy is QUEUED below.
+            # ``_admit_link`` already keeps such links out of the table; this is the
+            # backup at the one place the secret is sent.
+            if not getattr(link, "peer_verified", False):
+                continue
             if link.send(
                 epoch_frame(record, state, reason=reason, target_device_id=link.device_id)
             ):
@@ -14111,6 +14395,10 @@ class RelayServer:
             if member.device_id in delivered or member.device_id == record.self_device_id:
                 continue
             self._queue_epoch_for(member.device_id, record, state, reason=reason)
+        # The devices a live, verified link ACCEPTED the frame for. ``member rm`` reads
+        # it (G9): a removed device in this set was told over its link, and its client
+        # drops every borrowed grant on that news; one outside it never learns.
+        return delivered
 
     def _queue_epoch_for(
         self, device_id: str, record: NetworkRecord, state: SecretState, *, reason: str
@@ -14225,6 +14513,8 @@ class RelayServer:
         budget = self.settings.handshake_timeout_s if timeout_s is None else float(timeout_s)
         record = store.load(network_id, self.root)
         state = store.require_secrets(network_id, self.root)
+        if mode != "join":
+            expected_device = _current_member_id(record, expected_device)
         if connected is not None:
             sock = connected
         else:
@@ -14280,8 +14570,23 @@ class RelayServer:
             handshake.send_hello(sock)
             reader = wire.FrameReader(sock)
             handshake.read_challenge(reader, deadline)
+            # WHO THIS DIAL MEANT TO REACH, from this device's own record. The
+            # listener's welcome proof is verified against the STORED key of that
+            # member's ACTIVE row (never a key from the frame), and the peer must be
+            # ``expected_device`` — an empty one refuses, because a dial that cannot
+            # say whom it meant cannot tell an impostor from the member (G1). Every
+            # production caller passes it. Join (unused here: the CLI owns joins)
+            # treats ``expected_device`` as the token's inviter id.
+            expect = DialerExpectation(
+                device_id=expected_device,
+                public_key_for=None if mode == "join" else _active_key_reader(record),
+            )
+            # A challenge naming another device is refused BEFORE our auth, so an
+            # honest listener at a stale address never completes and never evicts
+            # its real link from us (see ``Handshake.refuse_unexpected_peer``).
+            handshake.refuse_unexpected_peer(expect)
             handshake.send_auth(sock, credential)
-            handshake.read_welcome(reader, deadline)
+            handshake.read_welcome(reader, deadline, expect)
             # ``read_welcome`` takes the phase off that very frame — the ONE place
             # it is decided (``Handshake.read_welcome``) — so re-reading it here
             # would be a second rule for one fact.
@@ -14294,6 +14599,21 @@ class RelayServer:
                 # connection it was told nothing about.
                 _close_quietly(sock)
                 return None, "pair_phase_requires_the_ceremony"
+            if handshake.peer_rotation:
+                # THE TARGET ROTATED WHILE THIS DEVICE WAS AWAY (G1D-1), and has now
+                # proved it: ``sig_old`` verified against our stored row before our
+                # auth left, and the welcome proof under the new key. The hop is
+                # applied BEFORE admission, through the same code the queued
+                # ``net_identity_rotate`` frame uses, so the link is admitted under a
+                # member id this device's record already knows. A refusal here
+                # (``MeshRefusal``) closes the socket below and demotes nothing.
+                # WRITTEN EVEN IF ``_admit_link`` THEN REFUSES (review m2-2): by
+                # this point the rotation is fully proven (old-key statement plus the
+                # new key's welcome proof), and the row it writes is byte-for-byte
+                # what the queued ``net_identity_rotate`` would write. A network-level
+                # refusal of the LINK (relay stopping, network refused) says nothing
+                # against the rotation, so keeping it spares the next dial the hop.
+                self._apply_rotation_statement(record.network_id, handshake.peer_rotation)
             link = PeerLink(
                 server=self,
                 sock=sock,
@@ -14301,12 +14621,10 @@ class RelayServer:
                 codec=handshake.codec(),
                 settings=self.settings,
                 reader=reader,
-                # THE DIALER HAS NOT PROVED THE LISTENER (pre-G1): it reads the listener's id
-                # off the challenge unverified (``Handshake.read_challenge``), so this link may
-                # never vouch for its peer in a mesh origin stamp. G1 flips this once the dialer
-                # verifies the listener; until then False is the honest value, pinned here
-                # rather than read off the result so that change is one deliberate edit.
-                peer_verified=False,
+                # G1: the dialer verified the listener's welcome proof against its stored
+                # key and that it is the device it meant to reach (``verify_welcome``), so
+                # the handshake's own proved fact carries over (mesh-origin-stamp §2 r3).
+                peer_verified=result.peer_verified,
             )
             link.peer_addr = host
             refusal = self._admit_link(link, outbound=True)
@@ -14330,7 +14648,10 @@ class RelayServer:
             # ``record`` was read before this handshake and is only an id source now:
             # a round trip has happened since, so the write re-reads inside the lock.
             self._note_peer_endpoints(
-                record.network_id, result.peer_device_id, handshake.peer_endpoints
+                record.network_id,
+                result.peer_device_id,
+                handshake.peer_endpoints,
+                verified=link.peer_verified,
             )
             # CONTACT RE-EVALUATES MEMBERSHIP (§8.4). A link is the one moment both
             # ends are known to be up, and the member table is a distributed fact
@@ -14339,6 +14660,13 @@ class RelayServer:
             self._pull_members(link)
             self._clear_refusal_mark(record.network_id)
             return link, "ok"
+        except MembershipEnded as ended:
+            # A CURRENT member (by this device's own record) proved, on this very
+            # handshake, that this device was removed (G9-B). Reduce authority here
+            # and now instead of reading the refusal as an owner that is asleep.
+            _close_quietly(sock)
+            self._apply_verified_removal(network_id, ended)
+            return None, ended.code
         except MeshRefusal as refusal:
             _close_quietly(sock)
             self._audit_handshake_refusal(
@@ -14353,6 +14681,13 @@ class RelayServer:
                 # never mistaken for the peer's proof of anything.
                 expected_device=expected_device,
             )
+            self._note_listener_refusal(
+                refusal.code,
+                network_id,
+                host,
+                expected_device=expected_device,
+                build=dict(handshake.peer_build) if handshake is not None else {},
+            )
             return None, refusal.code
         except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
             _close_quietly(sock)
@@ -14360,6 +14695,103 @@ class RelayServer:
                 record.network_id, host, mode, expected_device=expected_device
             )
             return None, handshake_refused_reason(exc)
+
+    def _note_listener_refusal(
+        self,
+        code: str,
+        network_id: str,
+        host: str,
+        *,
+        expected_device: str,
+        build: dict[str, Any],
+    ) -> bool:
+        """What a refused LISTENER teaches this dialer. Returns whether E was removed.
+
+        ``listener_unproven`` (no proof: an old build or an impostor) is remembered
+        in ``_unproven_listeners`` so ``peers``/``doctor`` can name it; it is NOT a
+        reason to touch the member row, because it is the expected answer of a
+        legitimate not-yet-updated member and demoting its address would strand it
+        once it updates. It is NOT recorded while a verified link that proves the
+        member's listener is live (review m1 / security S-3): a doctor probe of a
+        stale address must not contradict the link the operator is using.
+
+        WHAT MAY DELETE AN ADDRESS (review M1, security S-2). Only ``bad_mac``: it is
+        reachable only after a signature that verified under M's STORED key, so the
+        answering party provably holds M's key and not this network's secret. A
+        challenge naming another device and a ``bad_signature`` are UNAUTHENTICATED
+        (a bare frame, or 64 random bytes), so they only mark E suspect in memory
+        (``_suspect_endpoints``): this device tries M's other addresses first and
+        still falls back to E. And even ``bad_mac`` never removes M's LAST address,
+        nor its ``observed_endpoint`` (written only by verified inbound links), so no
+        answer at one address can leave a member undialable from here.
+        """
+        if not expected_device:
+            return False
+        if code == REASON_LISTENER_UNPROVEN:
+            if not self._listener_proven_by_live_link(expected_device):
+                self._unproven_listeners[expected_device] = {
+                    "build": _build_version_only(build),
+                    "endpoint": host,
+                    "at": time.time(),
+                }
+            return False
+        if code in (REASON_PEER_IDENTITY, REASON_SIGNATURE):
+            self._mark_suspect(expected_device, host)
+            return False
+        if code != REASON_MAC:
+            return False
+        demoted = False
+        try:
+            with store.mutate(network_id, self.root) as record:
+                member = record.member(expected_device)
+                if (
+                    member is not None
+                    and host in member.endpoints
+                    and len(member.endpoints) > 1
+                    and host != (member.observed_endpoint or "")
+                ):
+                    member.endpoints = [e for e in member.endpoints if e != host]
+                    store.save(record, self.root)
+                    demoted = True
+        except FileNotFoundError:
+            return False
+        if not demoted:
+            # The last address (or the observed one) stays; it is still tried last.
+            self._mark_suspect(expected_device, host)
+            return False
+        self.audit.record(
+            AuditEvent(
+                event="endpoint_demoted",
+                actor="self",
+                subject=expected_device,
+                outcome="ok",
+                network_id=network_id,
+                cause="auth_failed",
+                detail={"endpoint": host, "code": code},
+            )
+        )
+        return True
+
+    def _mark_suspect(self, device_id: str, endpoint: str) -> None:
+        """Remember ``endpoint`` as unproven for ``device_id``: memory only, never the row."""
+        if not hasattr(self, "_suspect_endpoints"):
+            self._suspect_endpoints = {}
+        self._suspect_endpoints.setdefault(device_id, set()).add(endpoint)
+
+    def _listener_proven_by_live_link(self, device_id: str) -> bool:
+        """Whether a live link already proves ``device_id``'s listener can verify.
+
+        An OUTBOUND link means this device verified that listener's welcome proof;
+        an inbound one whose MAC-covered transcript advertises ``listener-proof-v1``
+        comes from a build whose listener signs its welcome. Either one outranks an
+        "unproven" answer from some address (review m1, UX U1, security S-3, Q-1).
+        """
+        link = self._link_for(device_id)
+        if link is None:
+            return False
+        return bool(getattr(link, "outbound", False)) or "listener-proof-v1" in getattr(
+            link, "capabilities", ()
+        )
 
     def _clear_refusal_mark(self, network_id: str) -> None:
         """A COMPLETED handshake clears a ``refused_by_peers`` mark.
@@ -14383,6 +14815,158 @@ class RelayServer:
                 store.save(record, self.root)
         except FileNotFoundError:
             return
+
+    def _send_removal_notice(
+        self, sock: socket.socket, handshake: Handshake, network_id: str
+    ) -> bool:
+        """Answer a PROVEN removed member with the fixed notice, at most once per window.
+
+        Reached only when ``handshake.removal_proven`` (the dialer signed this
+        transcript with its tombstoned row's exact key, inside the notice window).
+        Everything else, including a second attempt by the same key inside
+        :data:`REMOVAL_NOTICE_INTERVAL_S`, gets the plain silent close the caller
+        does next — nothing on the socket — so a stolen key cannot use the notice
+        to poll whether this device is up. This device never DIALS a tombstoned
+        member (``_ensure_link_with_reason`` skips inactive rows): the notice exists
+        only as an answer. Best-effort: a dead socket costs the notice, nothing else.
+        """
+        key = (network_id, handshake.peer_device_id)
+        moment = time.monotonic()
+        lock = getattr(self, "_removal_notices_lock", None)
+        if lock is None:  # a relay built without ``__init__`` (test doubles)
+            return False
+        with lock:
+            notices = self._removal_notices
+            for stale in [
+                k for k, at in notices.items() if moment - at >= REMOVAL_NOTICE_INTERVAL_S
+            ]:
+                del notices[stale]
+            if key in notices:
+                return False
+            notices[key] = moment
+        try:
+            epoch = ServerPolicy(self, network_id).current_epoch
+            return handshake.send_removal_notice(sock, epoch)
+        except (OSError, ValueError, MeshRefusal):
+            return False
+
+    def _apply_verified_removal(self, network_id: str, ended: MembershipEnded) -> None:
+        """Mark THIS device removed locally and drop every borrowed bearer at once.
+
+        Only ever reduces authority, and only on this device: the self row is
+        tombstoned the way ``remove_member`` tombstones a row (``removed_at``,
+        ``removed_by`` = the member that said so, ``lifecycle="expired"``) and the
+        network is marked ``stale: refused_by_peers`` exactly as a rotation frame
+        naming this device does (``apply_epoch``'s ``removing_us`` branch). The
+        epoch, secrets and member table are left alone: no rejoin, no rotation,
+        nothing deleted. Once the self-tombstone saves, session processes fail
+        closed on their next borrow or held serve
+        (``MeshCredentialClient._self_membership_active``), and
+        the credential client's own membership-loss path runs here too
+        (``invalidate_membership``: persistent network deny, borrowed cache drop,
+        GitHub revoke, held rows retired) so the offline hold ends now rather than at
+        its expiry.
+
+        ONE ``membership_ended`` ROW, ON THE TRANSITION ONLY (review R1-2): after
+        this runs, this device's record still lists the signer as active, so it
+        keeps re-dialling it, and the signer answers again every
+        ``REMOVAL_NOTICE_INTERVAL_S`` for the whole notice window. Every one of
+        those notices verifies; only the first one that flips our self row from
+        active to removed is audited. The drop itself re-runs each time, which is
+        harmless (it only ever reduces authority). A crash between the record save
+        and the audit write loses that one row; the removal itself is persisted.
+
+        FAIL SAFE ON A RECORD ERROR (review R1-3, security S3): a verified notice is
+        reason enough to drop borrowed bearers even when the self-tombstone cannot
+        be saved — without it the lazy ``_self_membership_active`` gate never fires
+        either — so any write failure is logged and the drop still runs. The
+        transition row waits for a save that succeeds (the next notice retries);
+        meanwhile the drop is audited as ``recorded: false`` (#4394 review R2-2), so
+        a record that NEVER saves — a corrupt file, a read-only disk — still leaves
+        audit evidence of the attempted credential drop, not only a WARNING line.
+        ONE audit ATTEMPT per network per relay process (a failing audit sink can
+        still lose that row): a record that keeps failing keeps this device
+        re-dialling (its self row still reads active), and a row per notice — one
+        every ``REMOVAL_NOTICE_INTERVAL_S`` for the whole window — is the R1-2 flood
+        again. The 300 s ``_refusal_rows`` window is no help there: it equals the
+        notice interval, so it would admit every one.
+        """
+        moment = time.time()
+        transitioned = False
+        recorded = False
+        epoch = 0
+        try:
+            with store.mutate(network_id, self.root) as record:
+                me = record.self_member()
+                was_active = me is not None and me.active
+                if me is not None and me.active:
+                    me.removed_at = moment
+                    me.removed_by = ended.signer
+                    me.lifecycle = "expired"
+                if record.self_device_id and record.self_device_id not in record.removed_ids:
+                    record.removed_ids.append(record.self_device_id)
+                record.stale = "refused_by_peers"
+                store.save(record, self.root)
+                epoch = record.epoch
+                transitioned = was_active
+                recorded = True
+        except Exception as exc:  # noqa: BLE001 — the credential drop below must still run
+            transitioned = False
+            logger.warning(
+                "relay: could not record a verified removal network=%s exception=%s",
+                network_id[:80],
+                type(exc).__name__[:64],
+            )
+        dropped = False
+        try:
+            from local_operator.network.credentials.client import MeshCredentialClient
+
+            client = MeshCredentialClient.for_this_device(self.root, network_id)
+            if client is not None:
+                client.invalidate_membership()
+                dropped = True
+        except Exception as exc:  # noqa: BLE001 — the record write above already fails closed
+            logger.warning(
+                "relay: credential drop after a verified removal failed network=%s exception=%s",
+                network_id[:80],
+                type(exc).__name__[:64],
+            )
+        if not recorded:
+            with self._unrecorded_removals_lock:
+                should_audit = network_id not in self._unrecorded_removals
+                self._unrecorded_removals.add(network_id)
+            if should_audit:
+                self.audit.record(
+                    AuditEvent(
+                        event="membership_ended",
+                        actor=ended.signer,
+                        subject=network_id,
+                        outcome="refused",
+                        network_id=network_id,
+                        epoch=epoch,
+                        cause="not_a_member",
+                        detail={
+                            "notice_epoch": ended.epoch,
+                            "credentials_dropped": dropped,
+                            "recorded": False,
+                        },
+                    )
+                )
+            return
+        if not transitioned:
+            return
+        self.audit.record(
+            AuditEvent(
+                event="membership_ended",
+                actor=ended.signer,
+                subject=network_id,
+                outcome="refused",
+                network_id=network_id,
+                epoch=epoch,
+                cause="not_a_member",
+                detail={"notice_epoch": ended.epoch, "credentials_dropped": dropped},
+            )
+        )
 
     def _note_refused_handshake(
         self, network_id: str, host: str, mode: str, *, expected_device: str = ""
@@ -14864,11 +15448,31 @@ class RelayServer:
                     },
                 )
             )
-        self._broadcast_epoch(record, state, reason="member_removed", removed=outcome.removed)
+        told = self._broadcast_epoch(
+            record, state, reason="member_removed", removed=outcome.removed
+        )
         self._rehandshake_network(record.network_id, reason="epoch_stale")
+        from local_operator.network.credentials import owner as owner_mod
+        from local_operator.network.credentials.lends import removal_lends
+
+        # Read BEFORE the off-thread revoke below starts, while the lender still
+        # holds the token: an App lend counts as "revocation requested" only if
+        # that DELETE will actually be attempted (review R1-1; ``lends.py``).
+        network_id = record.network_id
+        lends = removal_lends(
+            self.root,
+            network_id,
+            device_id,
+            told=device_id in told,
+            revoke_tracked=lambda key, holder: owner_mod.lent_token_tracked(
+                self, network_id, key, holder
+            ),
+            audit=self.audit,
+        )
         # The owner half of "membership loss ends a held GitHub token" (#3947 M2).
         self._revoke_lent_on_removal(record.network_id, [device_id])
         return {
+            **lends,
             "network_id": record.network_id,
             "removed": device_id,
             "epoch": outcome.epoch,
@@ -16755,9 +17359,48 @@ class RelayServer:
                         # unchanged.
                         "build": dict(link.peer_build) if link is not None else {},
                         "capabilities": sorted(link.capabilities) if link is not None else [],
+                        # WHETHER THIS PEER CAN PROVE ITSELF AS A LISTENER — present on
+                        # every row, like ``build``. Driven by the sticky
+                        # ``_unproven_listeners`` fact, never by ``redial.last_error``,
+                        # so the reconnect loop cannot flap it away.
+                        "listener_proof": self._listener_proof_row(member.device_id, link),
                     }
                 )
         return peers
+
+    def _listener_proof_row(self, device_id: str, link: PeerLink | None) -> dict[str, Any]:
+        """``{"state", "build", "build_source", "at"}`` for one ``peers()`` row.
+
+        ``unproven``: this device's dial was answered with no welcome proof and no
+        outbound link has been admitted since. The build is what the CHALLENGE
+        reported (``build_source: "challenge"``, a claim) unless a live INBOUND link
+        from that member exists, whose hello build the listener side verified
+        (``"hello"``). ``verified``: a live link to it carries ``listener-proof-v1``
+        (inside the MAC-covered transcript) or this device dialled it successfully.
+        ``unknown`` otherwise. Only ``version`` is rendered, never ``source_ref``.
+        """
+        # A LIVE PROOF WINS over the sticky record (review m1, UX U1, S-3, Q-1): the
+        # record says what one dial saw; this link is what the operator is using now.
+        if link is not None and (
+            getattr(link, "outbound", False)
+            or "listener-proof-v1" in getattr(link, "capabilities", ())
+        ):
+            return {"state": "verified", "build": {}, "build_source": "", "at": None}
+        unproven = getattr(self, "_unproven_listeners", {}).get(device_id)
+        if unproven is not None:
+            build = dict(unproven.get("build") or {})
+            source = "challenge"
+            if link is not None and not getattr(link, "outbound", False):
+                hello_build = _build_version_only(getattr(link, "peer_build", {}))
+                if hello_build:
+                    build, source = hello_build, "hello"
+            return {
+                "state": "unproven",
+                "build": build,
+                "build_source": source,
+                "at": unproven.get("at"),
+            }
+        return {"state": "unknown", "build": {}, "build_source": "", "at": None}
 
     def status(self, *, refresh: bool = False) -> dict[str, Any]:
         """Install state, health, links, log paths — what ``lop network status`` prints.
@@ -16903,6 +17546,9 @@ class RelayServer:
                 if peer and member.device_id != peer:
                     continue
                 findings.extend(self._probe_member(record, member, deadline=deadline))
+                proof = self._listener_proof_finding(member)
+                if proof is not None:
+                    findings.append(proof)
         return {
             "checks": findings,
             "identity_dir": str(identity),
@@ -17075,6 +17721,45 @@ class RelayServer:
             )
         return rows
 
+    def _listener_proof_finding(self, member: MemberRecord) -> dict[str, Any] | None:
+        """The named doctor warning for a member whose listener cannot prove itself.
+
+        Read from the sticky ``_unproven_listeners`` fact (this doctor run's own dial
+        refreshes it), so it says the same thing ``lop network peers`` does. Severity
+        ``warn``: named, non-gating — the handshake row already reports the dial.
+        The remedies name both routes: the mesh roll from here, and ``lop update`` on
+        the member itself for one that can never connect to this device (the roll
+        rides the member's own inbound link, which such a member never opens).
+        """
+        from local_operator.resume import (
+            UNNAMED_DEVICE,
+            listener_unproven_remedies,
+            listener_unproven_sentence,
+        )
+
+        if member.device_id not in self._unproven_listeners:
+            return None
+        proof = self._listener_proof_row(member.device_id, self._link_for(member.device_id))
+        if proof.get("state") != "unproven":
+            # A live verified link outranks the record (review m1): no warning.
+            return None
+        label = member.name or UNNAMED_DEVICE
+        return {
+            "check": "listener_proof",
+            "code": REASON_LISTENER_UNPROVEN,
+            "device_id": member.device_id,
+            "device_name": member.name,
+            "ok": False,
+            "severity": "warn",
+            "listener_proof": proof,
+            # ``detail`` IS A CODE on every doctor row (``doctor_detail_words`` maps
+            # it), so the sentence rides in ``message`` (UX U8), and stops before the
+            # remedy, which the bullets below carry once (UX U5).
+            "detail": REASON_LISTENER_UNPROVEN,
+            "message": listener_unproven_sentence(label, proof, with_remedy=False),
+            "remedies": list(listener_unproven_remedies(label, device_id=member.device_id)),
+        }
+
     def _handshake_row(
         self, member: MemberRecord, endpoint: str, *, ok: bool, detail: str, **extra: Any
     ) -> dict[str, Any]:
@@ -17111,8 +17796,24 @@ class RelayServer:
             return self._handshake_row(member, endpoint, ok=False, detail=refusal.code)
         latency_ms = round((time.monotonic() - started) * 1000, 1)
         if link is None:
+            # Whether this dial's refusal took the address off the row (only a
+            # ``bad_mac`` demotion can), read back rather than inferred from the code,
+            # so the doctor line says "removed" only when it is true (UX U6).
+            extra: dict[str, Any] = {}
+            if endpoint in member.endpoints:
+                try:
+                    after = store.load(record.network_id, self.root).member(member.device_id)
+                except FileNotFoundError:
+                    after = None
+                if after is not None and endpoint not in after.endpoints:
+                    extra = {"endpoint_removed": True, "device_name": member.name}
             return self._handshake_row(
-                member, endpoint, ok=False, detail=reason or "unreachable", latency_ms=latency_ms
+                member,
+                endpoint,
+                ok=False,
+                detail=reason or "unreachable",
+                latency_ms=latency_ms,
+                **extra,
             )
         skew = None
         if link.epoch != record.epoch:
@@ -17430,6 +18131,77 @@ def _audit_pair_grant(
             detail=detail,
         )
     )
+
+
+def _own_rotation_statement(record: NetworkRecord | None, device_id: str) -> dict[str, Any]:
+    """This device's last rotation statement for ``record``, or ``{}``.
+
+    Read from the self row's ``rotation_proof`` and offered only when it names THIS
+    identity as the successor: a statement for an older hop (the row rotated again,
+    or the identity on disk is not the row's) would only make a dialer refuse.
+    """
+    if record is None:
+        return {}
+    member = record.member(device_id)
+    proof = member.rotation_proof if member is not None else None
+    if not isinstance(proof, dict) or proof.get("new_device_id") != device_id:
+        return {}
+    return dict(proof)
+
+
+def _active_key_reader(record: NetworkRecord) -> Callable[[str], str | None]:
+    """The dialer's key lookup: the ACTIVE member row's stored key, or ``None``.
+
+    The same rule the listener's policy applies (``active_member_public_key``): a
+    tombstoned or absent device has no key to verify against, so it is refused
+    ``not_a_member`` before any signature is checked.
+    """
+
+    def public_key_for(device_id: str) -> str | None:
+        member = record.member(device_id)
+        if member is None or not member.active:
+            return None
+        return member.public_key or None
+
+    return public_key_for
+
+
+def _self_removed(record: NetworkRecord) -> bool:
+    """Whether ``record`` holds THIS device's own row and that row is tombstoned.
+
+    A missing self row is not "removed": records built before the self row was
+    written (and test fixtures) must keep their old redial behaviour.
+    """
+    me = record.self_member()
+    return me is not None and not me.active
+
+
+def _current_member_id(record: NetworkRecord, device_id: str) -> str:
+    """The id a dial must expect for ``device_id``: the row's current one (S-6).
+
+    A caller may hold an id that a PROVEN rotation has since retired into the
+    row's ``previous_ids`` (only a verified ``rotation_proof`` or a hop puts it
+    there). The listener can prove only the key the row now stores, so expecting
+    the retired id would refuse the real device ``peer_identity_mismatch``, mark
+    its address suspect and write a misleading ``wrong_device`` audit line (QA
+    Q2-1). Resolving here, against the record ``dial`` has just re-read, covers
+    every caller, including a doctor/readiness pass that iterated a snapshot
+    taken before a concurrent hop. An exact row match wins, so a stale table that
+    still carries the old row is never redirected; an unknown id is returned
+    unchanged and refused as before.
+    """
+    if not device_id or any(row.device_id == device_id for row in record.members):
+        return device_id
+    member = record.member(device_id)
+    return member.device_id if member is not None else device_id
+
+
+def _build_version_only(build: Any) -> dict[str, Any]:
+    """A peer's build stamp reduced to its ``version`` — never ``source_ref`` paths."""
+    if not isinstance(build, dict):
+        return {}
+    version = str(build.get("version") or "")
+    return {"version": version} if version else {}
 
 
 def _net_summary(record: NetworkRecord | None) -> dict[str, Any]:

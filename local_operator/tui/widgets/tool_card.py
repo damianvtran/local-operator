@@ -96,7 +96,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -117,13 +117,20 @@ from local_operator.harness.types import INTERRUPTED_FAULTS
 from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_tool_card as _tc
+from local_operator.i18n.keys import tui_tool_card_extra as _tx
+from local_operator.i18n.keys import tui_tool_card_status as _ts
 from local_operator.i18n.text import active_locale, tr, tr_record
 from local_operator.tools import diff_archive
 from local_operator.tools.diff_archive import DIFF_FULL_KEY
 from local_operator.tui import bindings
 from local_operator.tui import imagegen as imagegen_mod
 from local_operator.tui.glyphs import display_name, tool_icon
-from local_operator.tui.i18n_status import localized_display
+from local_operator.tui.i18n_status import (
+    display_tr,
+    localized_display,
+    message_display,
+    strip_display_controls,
+)
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
     TOOL_NAME_COL_MAX,
@@ -143,7 +150,7 @@ from local_operator.tui.widgets.transcript import (
 # third-party import, is already a hard dependency of this app.
 from local_operator.web_fetch.failure import (
     RETRY_AFTER_NOTE_LEAD,
-    attempt_summary,
+    attempt_profile_labels,
     block_lead,
 )
 
@@ -160,6 +167,117 @@ _t_tc = tr("tui.tool_card")
 def _more_marker(msg) -> str:
     """An elision marker: the `… ` lead glyph stays code, the words are keyed."""
     return f"… {_t_tc(msg)}"
+
+
+# The status words (status column, reason slot, send/switch outcome words) live
+# in a CHILD namespace, `tui.tool_card.status`, rather than as more keys in
+# `tui.tool_card`: that namespace's bytes are already audited, and adding keys
+# to it would stale every locale's ledger row for it (the precedent is
+# `wire.tool_rows.bridge.skipped` in `harness/bridge_copy.py`). Resolved at
+# RENDER time like the chrome above. The STATE TOKENS the card stores and
+# compares (`self._state == "running"`, `"interrupted"`, …) are not copy and
+# stay English; only the word painted for them is keyed.
+#
+# `display_tr`, not bare `tr`: it is the render adapter every other painted TUI
+# namespace goes through, and for Urdu it wraps the resolved word in ONE
+# balanced RLI…PDI isolate so the LTR technical text around it on the row
+# (targets, pids, durations) keeps its own direction (review round 1, R2). Every
+# other language gets the plain word back. Each status word is projected here
+# and nowhere else, so no composed string carries a second projection; a cut
+# through an isolate is closed again by :func:`truncate_cells`.
+_t_st = display_tr("tui.tool_card.status")
+
+# The card's remaining words (send mode markers, the model-switch marker, the
+# compose record, the web_fetch/web_search row fragments, the failed-send
+# reason pattern) live in a SECOND child namespace, `tui.tool_card.extra`, for
+# the reason `tui.tool_card.status` exists: both parents are audited, and adding
+# keys to either would stale every locale's ledger row for it. Same render
+# adapter as the status words, resolved at paint time. The technical params
+# (sizes, provider tokens, the backend's English failure cause, identity names)
+# become LTR islands for Urdu; `facts`/`word` are NOT listed because they carry
+# already-projected localized text, which an LTR island would mis-order.
+# `profiles` and `auth_mode` are NOT bare param islands: every locale wraps
+# them in parentheses, and an island must start after whitespace
+# (display.isolated_status_text), so the bare values raised "must include its
+# whole prefix" and crashed the Urdu fetch and search cards. The parenthesised
+# group is one island instead, and `{provider} ({auth_mode})` is ONE island
+# (two neighbouring LTR islands swap order in RTL, the reason `/login
+# {provider}` is whole). Templates whose params a message lacks are skipped and
+# the longest match wins, so the bare `{provider}` row still gets its island.
+# `cause` is not an island either: it is free English prose, measured EMPTY by
+# `_cap_failed_reason` and cut with a non-ASCII `…`, both of which the strict
+# token validator refuses -- in Urdu that was a crash on the failed-send row.
+_t_x = display_tr(
+    "tui.tool_card.extra",
+    technical_params=("size",),
+    technical_commands=("({profiles})", "{provider} ({auth_mode})", "{provider}"),
+)
+
+
+class _HeaderRow(NamedTuple):
+    """A structured search/fetch row and what KIND of row it is.
+
+    The body painters used to pick each row's ink by matching its English lead
+    (``Provider:``, ``Fetched:``, ``Rendered:``); once those leads are keyed a
+    translated row matched nothing and lost its dim/link treatment. The builder
+    knows what each row is, so it says so here, and the painter styles by this
+    record — never by the localized text.
+
+    ``signal`` is the sub-run of ``text`` painted in the signal ink (the attempt
+    count on a ``rendered`` row), located by value because THIS module composed
+    it into the row in the same call.
+    """
+
+    kind: str
+    text: str
+    signal: str = ""
+
+
+def _send_mode_word(args: Mapping[str, object]) -> str:
+    """The localized delivery-mode marker a send row leads with.
+
+    The TOKEN comes from the tool's own ``peer_send_mode_label`` so the card and
+    the approval prompt can never disagree about which mode a call names; only
+    the word painted for it is keyed. The token stays English everywhere it is
+    model-facing. An unknown future token paints as itself rather than vanishing.
+    """
+    from local_operator.tools.builtin import peer_send_mode_label
+
+    token = peer_send_mode_label(dict(args))
+    words = {
+        "now": _tx.send_mode_now,
+        "quiet": _tx.send_mode_quiet,
+        "wake": _tx.send_mode_wake,
+    }
+    message = words.get(token)
+    return _t_x(message()) if message else _scalar_text(token)
+
+
+def _model_marker() -> str:
+    """The marker a model-switch send row leads with until it settles."""
+    return _t_x(_tx.send_model())
+
+
+def _compose_record(compose_bytes: int) -> str:
+    """``<size> composed`` (or ``nothing composed``) for a never-sent row."""
+    if compose_bytes:
+        return _t_x(_tx.compose_composed(size=_format_bytes(compose_bytes)))
+    return _t_x(_tx.compose_nothing_composed())
+
+
+def _never_sent_text(compose_bytes: int, facts: str) -> str:
+    """``never sent · <facts>``, nesting an already-PAINTED record.
+
+    ``facts`` comes out of :func:`_compose_record` already projected: in Urdu it
+    is wrapped in isolates, and the outer paint refuses control characters, so
+    nesting it raw crashed every Urdu never-sent row. Its isolates are stripped
+    for the nest and the size is re-declared as the outer message's island.
+    """
+    size = _format_bytes(compose_bytes) if compose_bytes else ""
+    return message_display(
+        _tx.compose_never_sent(facts=strip_display_controls(facts)),
+        technical_literals=(size,) if size else (),
+    ).plain
 
 
 _profile_copy = tr_record("tui.profile_actions")
@@ -204,13 +322,18 @@ ICON_PARTIAL = "◐"
 #: leads with something else, therefore keeps the ordinary crop instead of
 #: promoting a line that is not the claim.
 _PARTIAL_LEADS = ("Partial results:", "Partial search:")
+
+
 #: The word the collapsed row falls back to when the payload says the result is
 #: partial but its text carries no disclosure to promote. It is the word both
 #: shipped leads open with, so the row reads the same either way, and it exists
 #: because a bare `◐` and nothing else is a state mark the operator cannot
 #: interpret: a foreign or older payload still has to say WHICH state it is in
 #: (design review round 2, D2-3).
-_PARTIAL_LABEL = "Partial"
+def _partial_label() -> str:
+    return _t_st(_ts.partial())
+
+
 #: The lead the reset notice is composed with by ``tools/eval.py``
 #: (``_build_render_result``). A flag alone is not enough, for the same reason
 #: :data:`_PARTIAL_LEADS` exists: ``details["kernel_reset"]`` says the CALL ran
@@ -219,12 +342,15 @@ _PARTIAL_LABEL = "Partial"
 #: anything else, keeps the ordinary crop instead of promoting a line that is
 #: not the claim (design review round 1, D1).
 _RESET_LEADS = ("Session state was reset",)
+
+
 #: The word the collapsed row falls back to when ``kernel_reset`` is set but
 #: the result text carries no notice to promote — the reset twin of
-#: :data:`_PARTIAL_LABEL`, and it exists for the same reason: the flag says the
+#: :func:`_partial_label`, and it exists for the same reason: the flag says the
 #: session was reset, so the row must state that even where there is no notice
 #: sentence to promote (design review round 1, D2).
-_RESET_LABEL = "session reset"
+def _reset_label() -> str:
+    return _t_st(_ts.session_reset())
 
 
 #: The word a stopped row states when the owner ACCEPTED the stop but had not
@@ -417,7 +543,7 @@ ROW_INDENT = 1
 ROW_INDENT_MIN_WIDTH = 30
 
 
-def row_indent(width: int) -> int:
+def row_indent(width: int, depth: int = 0) -> int:
     """Cells of left inset a ledger row draws at ``width`` — the ONE derivation.
 
     Called by every ledger row builder (`ToolCard`, and the wake and peer rows
@@ -442,11 +568,33 @@ def row_indent(width: int) -> int:
     Those are the same number on every applied row — `_refresh_row` sets
     `_built_width` from the width it hands `_build_row` — and the only detached
     path returns before either.
+
+    ``depth`` is the tool fold's DISPLAY level, owned by
+    :class:`~local_operator.tui.tool_fold.ToolFoldLayer` and set on the row
+    before it is rebuilt: ``0`` is the plain ledger spine (a row no fold
+    covers, or a receipt row — unchanged from before the fold existed), ``1``
+    is a fold bar or a tool row inside a turn the fold condenses (two cells
+    deeper than prose, Ben's "tool rows one indent deeper"), and ``2`` is a row
+    revealed UNDER an open bar or pinned below a collapsed one (the design's
+    failed-call column, two cells deeper again). ""Deeper" here is measured from
+    the transcript's prose column, which draws at its padding with no inset of
+    its own; one cell of that is the ledger spine every row has always spent,
+    which is why the first fold step adds one more rather than two.
+
+    The GUTTER must receive the same depth as the builder, or the two derive
+    the inset separately and a covered row copies with a character of its tool
+    name eaten — the failure this docstring's first paragraph is about, now
+    reachable on the fold path too. The layer therefore sets depth on the
+    widget, never at a call site.
     """
-    return ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
+    if width < ROW_INDENT_MIN_WIDTH:
+        return 0
+    if depth <= 0:
+        return ROW_INDENT
+    return ROW_INDENT + 2 * depth - 1
 
 
-def row_body_width(width: int) -> int:
+def row_body_width(width: int, depth: int = 0) -> int:
     """Cells a ledger row's CONTENT is built in, given the width it is given.
 
     The card's own 1-cell inner padding each side and the ledger inset come off
@@ -465,7 +613,7 @@ def row_body_width(width: int) -> int:
     ``max(..., 10)`` is the builder's own floor, kept here so the two callers
     cannot drift apart on the degenerate widths either.
     """
-    return max(width - 2 - row_indent(width), 10)
+    return max(width - 2 - row_indent(width, depth), 10)
 
 
 NAME_COL = TOOL_NAME_COL
@@ -483,6 +631,11 @@ NAME_GROWTH_MIN_ROW = 70
 #: of it lands in the same column whether the tool took 0.4s or 12.3s. Five
 #: cells covers every duration the format produces up to ``9999s``.
 DURATION_COL = 5
+#: Cells the settled spine occupies (`<glyph> ` + :data:`DURATION_COL`), the
+#: width the live status word is padded to; see :func:`running_label`.
+_RUNNING_SPINE = cell_len(f"{ICON_SUCCESS} ") + DURATION_COL
+
+
 #: What a live row with no clock puts in the status column (see
 #: ``_status_runs``). Its LENGTH is load-bearing, not just its wording: it is
 #: sized to the settled spine — ``<glyph> `` plus :data:`DURATION_COL` — so the
@@ -490,7 +643,16 @@ DURATION_COL = 5
 #: the summary beside it is budgeted identically at both ends. A label of any
 #: other width makes the row reflow on settling at narrow widths. Any
 #: replacement must keep that equality; assert it rather than eyeballing it.
-RUNNING_LABEL = "running"
+#:
+#: Translated, the equality can only be kept from one side: a SHORTER word is
+#: padded to the spine by :func:`running_label`, a longer one is a translator
+#: constraint (`maxCells` in the context sidecar), and the cap check measures
+#: terminal CELLS, not code points, so a CJK word is shed when it does not fit.
+def running_label() -> str:
+    word = _t_st(_ts.running())
+    return " " * max(0, _RUNNING_SPINE - cell_len(word)) + word
+
+
 #: What a call that has been announced but NOT started puts in the status
 #: column (see ``_status_runs``). A state word rather than a clock, because
 #: there is no execution to time and the dictation clock it replaces has ended.
@@ -504,11 +666,41 @@ RUNNING_LABEL = "running"
 #: the summary is the same text on both sides of the width change, which is why
 #: a shadow of it here would buy nothing and cost a trailing cell that would
 #: push the whole status run one cell off the right edge.
-QUEUED_LABEL = "queued"
+def queued_label() -> str:
+    return _t_st(_ts.queued())
+
+
+def _interrupt_word(token: str) -> str:
+    """The interrupted row's word for its stored token (`cut_off` / `interrupted`)."""
+    return _t_st(_ts.cut_off() if token == "cut_off" else _ts.interrupted())
+
+
 #: Minimum summary budget before we drop the expand hint (D8 floor).
 _SUMMARY_FLOOR = 16
-#: Indent of the expanded output block, aligned under the tool name column.
+#: Indent of the expanded output block, aligned under the tool name column at
+#: the plain ledger spine. The fold's steps add to it — see
+#: :func:`detail_indent`.
 OUTPUT_INDENT = 2
+
+
+def detail_indent(width: int, depth: int = 0) -> int:
+    """Cells of left inset a card's DETAIL rows draw at ``width``.
+
+    The drop from the summary row stays one cell at every fold level: the
+    details take :data:`OUTPUT_INDENT` at the plain spine and then follow
+    :func:`row_indent`'s own steps, so an expanded call's ``action:`` /
+    ``target:`` / error rows sit under the row they belong to wherever the
+    fold has put it. Leaving them on the fixed ``OUTPUT_INDENT`` painted a
+    revealed row at col 6 over its own details at col 4 — the row walking
+    right while its content stayed behind, which reads as a different row's.
+
+    Depth 0 is :data:`OUTPUT_INDENT` at EVERY width, including below
+    :data:`ROW_INDENT_MIN_WIDTH` where the spine is given up entirely: that
+    keeps every plain card's expansion byte-identical to before the fold.
+    """
+    return OUTPUT_INDENT + (row_indent(width, depth) - row_indent(width, 0))
+
+
 #: Expanded output is capped: a 20k-line bash dump would otherwise turn the
 #: transcript into a scroll trap. The head is kept (it carries the command's
 #: framing) and the remainder is announced on a dim marker row.
@@ -770,6 +962,44 @@ def format_duration(seconds: float) -> str:
     return f"{days}d{hours}h" if hours else f"{days}d"
 
 
+def format_clock(seconds: float) -> str:
+    """A tool call's elapsed time in the LEDGER's grammar: ``<0.1s``, ``4.2s``, ``13s``.
+
+    Sub-second precision where it distinguishes tools, whole seconds once the
+    number is big enough to be a wait rather than a measurement, and
+    :func:`format_duration`'s own grammar past a minute — a composing row says
+    ``1m57s``, and ``117s`` two seconds later on the same row is the app
+    disagreeing with itself about how it writes a duration.
+
+    THE ONE SPELLING OF A ROW-SIZED DURATION. A tool row's status column, a
+    fold bar's right-aligned clock and the By-response foot's ``· {time}`` all
+    end up in the same visual column, so a bar budgeted with
+    ``format_duration``'s floored whole seconds read ``0s`` beside its own
+    member rows' ``0.1s``, and a 12.95 s turn foot read ``12s`` where its bar
+    said ``13s``. Callers that align the value (``DURATION_COL``) round with
+    this, never with a second grammar beside it.
+    """
+    if seconds < 0.05:
+        # `<0.1s`, never `0.0s`. Rounding a genuinely fast tool to `0.0s`
+        # reprints the exact string the fabricated-duration bug produced, which
+        # is why the missing-duration report came back against a tool that had
+        # simply returned at once — the reader cannot tell a real sub-50 ms call
+        # from a row whose duration was lost. Reads as "too fast to measure",
+        # and is exactly DURATION_COL wide so the column still holds.
+        return "<0.1s"
+    # ROUND BEFORE CHOOSING THE BRANCH. The old order let 9.96 print `10.0s`
+    # (one cell wider than `10s`, beside rows that said `10s`) and 59.6 print
+    # `60s` where `format_duration(60)` is `1m` — the app disagreeing with
+    # itself at each boundary it just crossed.
+    tenths = round(seconds, 1)
+    if tenths < 10:
+        return f"{tenths:.1f}s"
+    whole = round(seconds)
+    if whole < 60:
+        return f"{whole}s"
+    return format_duration(whole)
+
+
 def monotonic_from_epoch(epoch: float, *, clock: Callable[[], float] = time.monotonic) -> float:
     """A monotonic instant whose age is ``now - epoch``, for a threaded clock.
 
@@ -831,7 +1061,12 @@ def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
     # visible on the error row, whose whole job is to read cleanly beside the
     # outcome glyph. Every caller benefits (band model label, picker
     # descriptions, tool arguments), and the result is never WIDER than before.
-    return "".join(out).rstrip() + ellipsis
+    # Close any bidi isolate the cut left open (an Urdu status word projected by
+    # `_t_st`) BEFORE the ellipsis, so the rest of the row is not laid out
+    # inside it. Text without isolates is untouched.
+    head = "".join(out).rstrip()
+    depth = sum(head.count(c) for c in "\u2066\u2067\u2068") - head.count("\u2069")
+    return head + "\u2069" * max(0, depth) + ellipsis
 
 
 def compact_path(text: str) -> str:
@@ -892,10 +1127,7 @@ def _send_summary(args: dict[str, object]) -> str:
     # names — two copies of that precedence would drift the first time a mode is
     # added. Imported in-function: this widget module must not pull the tool
     # module in at import time.
-    from local_operator.tools.builtin import (
-        peer_send_mode_label,
-        peer_send_target_label,
-    )
+    from local_operator.tools.builtin import peer_send_target_label
 
     # `who` may be a raw conversation substring, i.e. model-controlled text; it
     # goes through the same scalar flattening every other summary field does.
@@ -905,8 +1137,8 @@ def _send_summary(args: dict[str, object]) -> str:
         # A model switch carries no delivery mode — `wake` would claim a turn
         # was started — so the leading marker names the act instead. Once the
         # call settles the marker becomes the OUTCOME (`_switch_outcome_summary`).
-        return " · ".join(("model", who, f"→ {model}"))
-    mode = peer_send_mode_label(args)
+        return " · ".join((_model_marker(), who, f"→ {model}"))
+    mode = _send_mode_word(args)
     message = _scalar_text(args.get("message"))
     parts = [part for part in (mode, who, message) if part]
     return " · ".join(parts)
@@ -916,12 +1148,16 @@ def _send_summary(args: dict[str, object]) -> str:
 #: D6). Without it `switched`, `already on` and an `accepted` switch that can
 #: still fail all painted the same `✓` row, and only the expansion told them
 #: apart. Keyed by the tool result's ``details["outcome"]``.
-SWITCH_OUTCOME_WORDS: dict[str, str] = {
-    "switched": "switched",
-    "unchanged": "no change",
-    "pending": "pending",
-    "partial": "switched (error)",
-}
+#: A function rather than the old constant dict so the words follow a live
+#: language change; the dict KEYS are ``details["outcome"]`` tokens, not copy.
+def switch_outcome_words() -> dict[str, str]:
+    return {
+        "switched": _t_st(_ts.switch_switched()),
+        "unchanged": _t_st(_ts.switch_unchanged()),
+        "pending": _t_st(_ts.switch_pending()),
+        "partial": _t_st(_ts.switch_partial()),
+    }
+
 
 #: The collapsed-row word for a settled send whose delivery is honest but not
 #: whole (design note A.4's ``details.delivery.state``).
@@ -938,15 +1174,23 @@ SWITCH_OUTCOME_WORDS: dict[str, str] = {
 #: buries it. ``wake unconfirmed`` rather than a bare ``unconfirmed`` on the
 #: mailbox arm because that is the fact that failed: the message is in the
 #: mailbox and the WAKE is what did not answer.
-DELIVERY_OUTCOME_WORDS: dict[str, str] = {
-    "mailbox": "wake unconfirmed",
-    # ``delivery unconfirmed``, not a bare ``unconfirmed`` (design round 1, D2 =
-    # UX round 1, U3): the residual sits beside the mailbox row and differs from
-    # it by one glyph and one dropped word, so the word has to say WHAT is
-    # unconfirmed -- the delivery, not the wake. It is also the word the desktop
-    # row and the model-facing copy already use.
-    "unconfirmed": "delivery unconfirmed",
-}
+#:
+#: Keyed for the same live-language reason as :func:`switch_outcome_words`. The
+#: desktop row ships the same two words as ``ui.chat.trace.send.delivery.
+#: {mailbox,unconfirmed}.word`` (local-operator-ui); the context sidecar points
+#: translators at them so one state reads the same on both surfaces. The
+#: model-facing copies in ``tools/builtin.py`` stay English by design.
+def delivery_outcome_words() -> dict[str, str]:
+    return {
+        "mailbox": _t_st(_ts.send_wake_unconfirmed()),
+        # ``delivery unconfirmed``, not a bare ``unconfirmed`` (design round 1,
+        # D2 = UX round 1, U3): the residual sits beside the mailbox row and
+        # differs from it by one glyph and one dropped word, so the word has to
+        # say WHAT is unconfirmed -- the delivery, not the wake. It is also the
+        # word the desktop row and the model-facing copy already use.
+        "unconfirmed": _t_st(_ts.send_delivery_unconfirmed()),
+    }
+
 
 #: The constant word a FAILED send's status cap leads with (design round 1, D3).
 #: ``failed`` is deliberately NOT in the table above: there the word REPLACES the
@@ -954,7 +1198,10 @@ DELIVERY_OUTCOME_WORDS: dict[str, str] = {
 #: on restating the target. On a failed row the cap is where the outcome belongs
 #: (the ``interrupted`` precedent), and this word is the same one the desktop row
 #: paints, so one state reads the same on both surfaces.
-SEND_NOT_DELIVERED_WORD = "not delivered"
+#: Desktop twin: ``ui.chat.trace.send.delivery.failed.word``.
+def send_not_delivered_word() -> str:
+    return _t_st(_ts.send_not_delivered())
+
 
 #: The prefix a SEND's result line opens with, which is what makes it eligible to
 #: be the expanded body's claimed lead (UX round 1, U1). A flag alone is not
@@ -972,27 +1219,28 @@ def _delivery_outcome_summary(summary: str, args: dict[str, object], details: ob
     state keeps the argument summary unchanged, which is what a card rebuilt from
     an older payload gets.
     """
-    from local_operator.tools.builtin import peer_send_mode_label
-
     if not isinstance(details, Mapping):
         return summary
     if details.get("duplicate_suppressed") is True:
         # Requested mode is not current execution: reuse performed no new act.
         # Put the discriminator first so right-truncation cannot hide it.
-        marker = _scalar_text(peer_send_mode_label(args))
+        # The marker is the LOCALIZED word `_send_summary` built the prefix
+        # with, in this same call and language, so the strip below is exact.
+        marker = _send_mode_word(args)
         prefix = f"{marker} · "
         rest = summary[len(prefix) :] if summary.startswith(prefix) else summary
-        return f"receipt reused · no new wake · {rest}"
+        reused, no_wake = _t_st(_ts.send_receipt_reused()), _t_st(_ts.send_no_new_wake())
+        return f"{reused} · {no_wake} · {rest}"
     delivery = details.get("delivery")
     state = delivery.get("state") if isinstance(delivery, Mapping) else None
-    word = DELIVERY_OUTCOME_WORDS.get(state) if isinstance(state, str) else None
+    word = delivery_outcome_words().get(state) if isinstance(state, str) else None
     if not word:
         return summary
     #: The legacy top-level flag, which is the REQUEST (see the nested payload's
     #: own ``wake`` key for the status): it is what tells a quiet send from a
     #: wake send, and it is the only place that fact lives on this result.
     wake_requested = bool(details.get("wake"))
-    marker = _scalar_text(peer_send_mode_label(args))
+    marker = _send_mode_word(args)
     prefix = f"{marker} · "
     if not marker or not summary.startswith(prefix):
         return summary
@@ -1010,24 +1258,38 @@ def _delivery_outcome_summary(summary: str, args: dict[str, object], details: ob
     return f"{word} · {rest}"
 
 
-def _cap_failed_reason(reason: str, room: int) -> str:
+def _failed_reason_text(word: str, cause: str) -> str:
+    """``<word>: <cause>`` through the keyed pattern, so a locale owns its joiner.
+
+    zh-CN, for one, writes a full-width colon (``：``) with no space; a
+    hard-coded ``": "`` could not carry that. ``word`` arrives painted (Urdu
+    isolates included), so its controls are stripped before it nests; the
+    outer paint re-wraps the whole line.
+    """
+    return _t_x(_tx.send_failed_reason(word=strip_display_controls(word), cause=cause))
+
+
+def _cap_failed_reason(word: str, cause: str, room: int) -> str:
     """``<word>: <cause>`` inside ``room`` cells, the word never cut mid-string.
 
-    Split on the first ``": "`` -- the shape :meth:`ToolCard._send_failed_reason`
-    composes, so there is no second separator to confuse it -- and spend the room
-    on the word first. Too narrow even for the word means the ordinary truncation
-    (a cap of 8 cells cannot hold a 13-cell constant), which is the only case
-    where the discriminator still loses.
+    Composed from its PARTS rather than split back out of the painted string:
+    the joiner is localized (``tui.tool_card.extra.send.failed_reason``), so
+    partitioning on an English ``": "`` found no separator in a locale that
+    writes ``：`` and truncated the word itself. The room is spent on the word
+    first; the pattern's own overhead is measured with an empty cause, so it
+    holds whatever joiner the locale chose. Too narrow even for the word means
+    the ordinary truncation (a cap of 8 cells cannot hold a 13-cell constant),
+    which is the only case where the discriminator still loses.
     """
-    word, separator, cause = reason.partition(": ")
-    if not separator:
-        return truncate_cells(reason, room)
+    full = _failed_reason_text(word, cause)
+    if cell_len(full) <= room:
+        return full
     if cell_len(word) >= room:
         return truncate_cells(word, room)
-    budget = room - cell_len(word) - len(separator)
+    budget = room - cell_len(_failed_reason_text(word, ""))
     if budget < 2:
         return word
-    return f"{word}{separator}{truncate_cells(cause, budget)}"
+    return _failed_reason_text(word, truncate_cells(cause, budget))
 
 
 def _failed_delivery_reason(details: object) -> str:
@@ -1046,9 +1308,36 @@ def _failed_delivery_reason(details: object) -> str:
     return reason if isinstance(reason, str) else ""
 
 
-def _delivery_word_run(
-    summary: str, *, partial: bool, is_send: bool, marker: str
-) -> tuple[str, str, str]:
+def _send_outcome_codes(summary: str, args: dict[str, object], details: object) -> tuple[str, str]:
+    """The STABLE tokens of the outcome word a send row's summary leads with.
+
+    ``(delivery_state, switch_outcome)`` -- ``details`` tokens such as
+    ``"mailbox"`` or ``"partial"``, or ``""`` when that arm put no word on the
+    row. The paint-time readers (the no-double-word guard and the amber word run)
+    classify the row by THESE, never by matching the summary against the active
+    language's words: the summary may have been composed in another language, and
+    a localized word is copy, not a value to parse (review round 1, R1).
+
+    "Put a word on the row" is decided by running the very composers that build
+    the summary and seeing whether they changed it, so the eligibility rules
+    (the ``model · `` marker, the mode-marker prefix, duplicate suppression) live
+    in one place and cannot drift from this classifier. Both sides of each
+    comparison are built in the same call, in the same language.
+    """
+    if not isinstance(details, Mapping):
+        return "", ""
+    switched = _switch_outcome_summary(summary, details)
+    outcome = details.get("outcome")
+    switch_code = outcome if switched != summary and isinstance(outcome, str) else ""
+    if details.get("duplicate_suppressed") is True:
+        return "", switch_code
+    delivery = details.get("delivery")
+    state = delivery.get("state") if isinstance(delivery, Mapping) else None
+    applied = _delivery_outcome_summary(switched, args, details) != switched
+    return (state if applied and isinstance(state, str) else ""), switch_code
+
+
+def _delivery_word_run(summary: str, *, word: str, marker: str) -> tuple[str, str, str]:
     """Split a settled send summary into its delivery word and the rest.
 
     The word is the state's carrier on the collapsed row, and it was painted in
@@ -1060,22 +1349,24 @@ def _delivery_word_run(
     its own. An empty first element means "paint the whole summary as one run",
     which is every other tool and every send whose state carries no word.
     """
-    if not (partial and is_send):
+    # ``word`` is THIS row's word, chosen by the caller from the row's stored
+    # delivery-state token (``""`` = not a partial send, one run), in the same
+    # language the summary was composed in -- so locating it is splitting text
+    # this module built, never guessing which language's word it is (R1).
+    if not word:
         return "", "", summary
-    for word in DELIVERY_OUTCOME_WORDS.values():
-        prefix = f"{word} · "
-        if summary.startswith(prefix):
-            return "", prefix, summary[len(prefix) :]
-        # The PREFIXED form: the mode marker leads and the state word follows it
-        # (design round 1, N2), so the word is the middle run. The marker is
-        # THIS row's, asked of the same function that built the summary -- the
-        # first version enumerated ``quiet`` and therefore missed the ``now``
-        # marker a steer with ``wake=false`` carries, which painted the word in
-        # the summary's ink AND the ``Partial`` fallback beside it (agent review
-        # round 2, MINOR-1).
-        marker_prefix = f"{marker} · {prefix}" if marker else ""
-        if marker_prefix and summary.startswith(marker_prefix):
-            return f"{marker} · ", prefix, summary[len(marker_prefix) :]
+    prefix = f"{word} · "
+    if summary.startswith(prefix):
+        return "", prefix, summary[len(prefix) :]
+    # The PREFIXED form: the mode marker leads and the state word follows it
+    # (design round 1, N2), so the word is the middle run. The marker is THIS
+    # row's, asked of the same function that built the summary -- the first
+    # version enumerated ``quiet`` and therefore missed the ``now`` marker a
+    # steer with ``wake=false`` carries, which painted the word in the summary's
+    # ink AND the ``Partial`` fallback beside it (agent review round 2, MINOR-1).
+    marker_prefix = f"{marker} · {prefix}" if marker else ""
+    if marker_prefix and summary.startswith(marker_prefix):
+        return f"{marker} · ", prefix, summary[len(marker_prefix) :]
     return "", "", summary
 
 
@@ -1087,10 +1378,13 @@ def _switch_outcome_summary(summary: str, details: object) -> str:
     outcome keeps the argument summary unchanged.
     """
     outcome = details.get("outcome") if isinstance(details, Mapping) else None
-    word = SWITCH_OUTCOME_WORDS.get(outcome) if isinstance(outcome, str) else None
-    if not word or not summary.startswith("model · "):
+    word = switch_outcome_words().get(outcome) if isinstance(outcome, str) else None
+    # The marker is the localized word `_send_summary` led with, built in the
+    # same call and language as ``summary`` -- splitting text this module made.
+    marker = f"{_model_marker()} · "
+    if not word or not summary.startswith(marker):
         return summary
-    return f"{word} · {summary[len('model · '):]}"
+    return f"{word} · {summary[len(marker) :]}"
 
 
 def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
@@ -1231,6 +1525,16 @@ def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
 
 def _search_result_output(details: dict[str, Any] | None) -> list[str]:
     """Structured web-search rows: provider, page name, URL, and short snippet."""
+    return [row.text for row in _search_result_rows(details)]
+
+
+def _search_result_rows(details: dict[str, Any] | None) -> list[_HeaderRow]:
+    """:func:`_search_result_output`'s rows, each tagged with its kind.
+
+    ``provider``/``sources`` are the two metadata rows the body painter dims;
+    every other row is ``""`` and keeps the painter's value-shaped rules (a URL,
+    a numbered title, a snippet), none of which read localized words.
+    """
     if not isinstance(details, Mapping):
         return []
     sources = details.get("sources")
@@ -1239,12 +1543,21 @@ def _search_result_output(details: dict[str, Any] | None) -> list[str]:
 
     provider = _strip_control_sequences(str(details.get("provider") or "search"))
     auth_mode = _strip_control_sequences(str(details.get("auth_mode") or ""))
-    lines = [f"Provider: {provider}" + (f" ({auth_mode})" if auth_mode else ""), "Sources:"]
+    provider_row = _t_x(
+        _tx.search_provider_auth(provider=provider, auth_mode=auth_mode)
+        if auth_mode
+        else _tx.search_provider(provider=provider)
+    )
+    rows = [
+        _HeaderRow("provider", provider_row),
+        _HeaderRow("sources", _t_x(_tx.search_sources())),
+    ]
+    lines: list[str] = []
     for index, source in enumerate(sources, start=1):
         if not isinstance(source, Mapping):
             continue
         title = _strip_control_sequences(
-            " ".join(str(source.get("title") or "Untitled result").split())
+            " ".join(str(source.get("title") or _t_x(_tx.search_untitled())).split())
         )
         url = _strip_control_sequences(" ".join(str(source.get("url") or "").split()))
         snippet = _strip_control_sequences(" ".join(str(source.get("snippet") or "").split()))
@@ -1256,7 +1569,7 @@ def _search_result_output(details: dict[str, Any] | None) -> list[str]:
                 snippet = snippet[: SEARCH_EXPANDED_SNIPPET_CHARS - 1].rstrip() + "…"
             lines.append(f"   {snippet}")
     lines.append(_t(_x.tool_card_search_fetch_hint()))
-    return lines
+    return rows + [_HeaderRow("", line) for line in lines]
 
 
 def _is_fetch_details(tool_name: str, details: dict[str, Any] | None) -> bool:
@@ -1285,6 +1598,11 @@ def _is_fetch_details(tool_name: str, details: dict[str, Any] | None) -> bool:
 
 
 def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
+    """The fetch card's header rows as text; see :func:`_fetch_result_rows`."""
+    return [row.text for row in _fetch_result_rows(details)]
+
+
+def _fetch_result_rows(details: dict[str, Any] | None) -> list[_HeaderRow]:
     """Structured web-fetch rows: the request/final URL, status, and render meta.
 
     Rendered from ``details`` (which never reaches the provider) rather than the
@@ -1331,7 +1649,7 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         fetched += "  " + _t_tc(_tc.fetch_final(url=final))
     if meta:
         fetched += f"  ·  {meta}"
-    rows: list[str] = []
+    rows: list[_HeaderRow] = []
     # F1: a non-2xx leads with a prominent error row (painted in the danger
     # treatment by the body painter) so a block/error page is visually distinct
     # from successful content — the card equivalent of the tool result's
@@ -1351,11 +1669,16 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         if details.get("failure_kind") == "blocked" and vendor:
             clause = block_lead(str(vendor))
             rows.append(
-                _t(_x.tool_card_http_blocked(status=str(status), reason=reason, clause=clause))
+                _HeaderRow(
+                    "",
+                    _t(_x.tool_card_http_blocked(status=str(status), reason=reason, clause=clause)),
+                )
             )
         else:
-            rows.append(_t(_x.tool_card_http_error_page(status=str(status), reason=reason)))
-    rows.append(fetched)
+            rows.append(
+                _HeaderRow("", _t(_x.tool_card_http_error_page(status=str(status), reason=reason)))
+            )
+    rows.append(_HeaderRow("fetched", fetched))
 
     # D1/D7: ``Rendered: markdownify · 2 attempts (default, browser-profile) ·
     # 800 lines · 51.8 KB``. The escalation that WON is the case a reader most
@@ -1389,13 +1712,17 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
     # fields read as one decision, and ``summary`` can be gated on them.
     attempts_n = details.get("attempts")
     profiles_n = details.get("profiles")
-    summary = attempt_summary(
+    summary = _attempt_count_text(
         attempts_n if isinstance(attempts_n, int) else 1,
         profiles_n if isinstance(profiles_n, list) else (),
     )
     own_bits = (
         method,
-        f"{lines_n} lines" if isinstance(lines_n, int) else "",
+        (
+            _t_x(_tx.fetch_lines(count=lines_n, shown=str(lines_n)))
+            if isinstance(lines_n, int)
+            else ""
+        ),
         # D2: humanise (KB/MB) so the structured row agrees with the binary
         # notice body two lines below, which already prints e.g. "2.4 MB".
         # Suppressed for a replaced body: see the docstring (DN2).
@@ -1416,10 +1743,34 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         if part
     )
     if render_bits:
-        rows.append(_t(_x.tool_card_rendered_row(bits=render_bits)))
+        # The attempt count rides along as the row's signal run: the painter
+        # inks it by this value instead of re-finding an English ``N attempts``.
+        rendered = _t(_x.tool_card_rendered_row(bits=render_bits))
+        signal = summary if summary and any(own_bits) else ""
+        rows.append(_HeaderRow("rendered", rendered, signal))
     if details.get("low_quality"):
-        rows.append(_t(_x.tool_card_low_quality_hint()))
+        rows.append(_HeaderRow("", _t(_x.tool_card_low_quality_hint())))
     return rows
+
+
+def _attempt_count_text(attempts: int, profiles: Sequence[str]) -> str:
+    """The card's localized twin of :func:`~local_operator.web_fetch.failure.attempt_summary`.
+
+    Same rules -- nothing for a single attempt, the identity sequence only when
+    it changed (``attempt_profile_labels`` owns that collapse) -- but the count
+    is an ICU plural in the active language. The English sentence stays the
+    model-facing copy in ``failure.py``; this is only what the card paints.
+    """
+    if attempts <= 1:
+        return ""
+    labels = attempt_profile_labels(profiles)
+    if labels:
+        return _t_x(
+            _tx.fetch_attempts_profiles(
+                count=attempts, shown=str(attempts), profiles=", ".join(labels)
+            )
+        )
+    return _t_x(_tx.fetch_attempts(count=attempts, shown=str(attempts)))
 
 
 #: Short reason phrases for the statuses a fetch card most often shows, kept in
@@ -1457,28 +1808,25 @@ _FETCH_HEADER_META_RE = re.compile(r"^\S.* · .*cache ")
 _FETCH_HEADER_NOTE_RE = re.compile(r"^\(The body below is the error response")
 
 
-#: The attempt summary clause on a painted fetch row, exactly as
-#: :func:`local_operator.web_fetch.failure.attempt_summary` writes it —
-#: ``· 2 attempts (default, browser-profile)``, or ``· 2 attempts`` when the
-#: retries never changed identity. Matched by VALUE rather than position, so the
-#: painter can lift it to ``signal`` (D9) without caring where D7 placed it in
-#: the row, and a future reorder cannot silently drop the escalation back into
-#: the metadata ink.
-_ATTEMPT_CLAUSE_RE = re.compile(r" · \d+ attempts?(?: \([^)]*\))?")
+def _split_attempt_clause(line: str, clause: str) -> tuple[str, str, str]:
+    """Split a ``rendered`` row into ``(before, clause, after)`` around its
+    attempt count, so the painter can lift it to ``signal`` (D9).
 
-
-def _split_attempt_clause(line: str) -> tuple[str, str, str]:
-    """Split a painted fetch row into ``(before, clause, after)`` around its
-    attempt summary.
-
-    ``clause`` is empty for a card that made one attempt — no summary is painted,
-    which is the common case — and for a terminal failure, whose count rides its
-    promoted lead instead of a ``Rendered:`` row.
+    ``clause`` is the count :func:`_fetch_result_rows` composed into this very
+    row (``_HeaderRow.signal``), so it is found by the value this module wrote,
+    in whatever language it was written -- the old English ``N attempts`` regex
+    matched nothing once the count was localized. Its leading `` · ``
+    joins the run, as the pattern's did, so English paints byte-identically.
+    Empty for a card that made one attempt, which is the common case.
     """
-    match = _ATTEMPT_CLAUSE_RE.search(line)
-    if match is None:
+    if not clause:
         return line, "", ""
-    return line[: match.start()], match.group(0), line[match.end() :]
+    head, found, tail = line.partition(clause)
+    if not found:
+        return line, "", ""
+    if head.endswith(" · "):
+        head, found = head[: -len(" · ")], f" · {found}"
+    return head, found, tail
 
 
 def _humanize_bytes(count: int) -> str:
@@ -1747,6 +2095,18 @@ class ToolCard(ExpandableActionBlock):
             event.prevent_default()
             self._request_profile_revert()
             return
+        # THE FAILED-CALL CURSOR. `f`/`F` land the keyboard on the call; the
+        # next press arrives HERE, and the reader rightly expects the ladder to
+        # continue. The card claims the two keys only while the layer's cursor
+        # stands on it (``jump_from_card`` answers False otherwise), so typing
+        # a sentence that starts with f on any other card still reaches the
+        # composer through the base class's printable passthrough.
+        if event.is_printable and event.key in ("f", "F"):
+            layer = getattr(self, "fold_owner", None)
+            if layer is not None and layer.jump_from_card(self, 1 if event.key == "f" else -1):
+                event.stop()
+                event.prevent_default()
+                return
         super().on_key(event)
 
     #: Shared by every expandable action row; naming it here lets the base
@@ -1767,6 +2127,12 @@ class ToolCard(ExpandableActionBlock):
         started_at: float | None | _UnknownStart = None,
     ) -> None:
         super().__init__()
+        #: The tool fold's DISPLAY level (see `row_indent`): 0 while no fold
+        #: covers this row, 1 inside a condensed turn, 2 revealed under an open
+        #: bar or pinned below a collapsed one. The collect layer sets it; the
+        #: builder and the copy gutter both read it, which is what keeps a
+        #: copied row from losing a character of its tool name.
+        self.fold_depth = 0
         #: Injected so elapsed time is testable without sleeping, exactly as
         #: ``StatusLine`` takes one. Monotonic, not wall clock: a duration that
         #: jumps when the system clock is adjusted is worse than no duration,
@@ -1899,6 +2265,11 @@ class ToolCard(ExpandableActionBlock):
         self._frame_timer_ms: float = 0.0
         self._duration: float | None = None
         self._error: str = ""
+        #: Which keyed word stands in for an EMPTY error text (`error` for a
+        #: failed call, `not_run` for one that never started). A token, not the
+        #: word, so the fallback follows a live language change; read through
+        #: :meth:`_error_text`, never ``self._error`` directly.
+        self._error_fallback: str = "error"
         #: The word this card's ``interrupted`` state prints. Set by
         #: :meth:`mark_interrupted` from the turn's verdict — an involuntary
         #: cut-off earns ``cut off``, because ``interrupted`` is now reserved for
@@ -1907,6 +2278,9 @@ class ToolCard(ExpandableActionBlock):
         #: removed (design review round 1, D2). Defaulted to the historical word
         #: because every other route into this state (a replayed row with no
         #: result, a viewer teardown that knows no verdict) still means it.
+        #: Stored as a STATE TOKEN (`interrupted` / `cut_off`), resolved to the
+        #: keyed word only at paint time (:func:`_interrupt_word`), so a live
+        #: language change repaints a settled row too.
         self._interrupt_label: str = "interrupted"
         #: When THIS card's execution began, or ``None`` when the card cannot
         #: know. ``None`` is the replay case and it is not a missing value to
@@ -1980,6 +2354,9 @@ class ToolCard(ExpandableActionBlock):
         self._localized_output_inputs: tuple[str, dict[str, Any] | None] | None = None
         #: The locale ``_output`` was composed under.
         self._output_locale = ""
+        #: Structured search/fetch rows by their composed text -> what kind of
+        #: row each is (see :class:`_HeaderRow`); empty for plain output.
+        self._header_marks: dict[str, _HeaderRow] = {}
         #: The write/edit tool's rendered unified diff (``details["diff"]``),
         #: colourised at render time. ``None`` (not []) when the tool reported
         #: no diff — a read or bash card expands to its raw output instead.
@@ -2058,6 +2435,23 @@ class ToolCard(ExpandableActionBlock):
         #: it from the structured payload is what keeps the card from parsing the
         #: result prose.
         self._delivery_failed_reason = ""
+        #: The stable outcome tokens the send row's summary leads with (see
+        #: :func:`_send_outcome_codes`): ``details.delivery.state`` and
+        #: ``details.outcome``, ``""`` when that arm put no word on the row.
+        self._send_delivery_code = ""
+        self._send_switch_code = ""
+        #: What the settled send summary was composed FROM, the summary it
+        #: produced and the language it was produced in. The summary carries
+        #: keyed words, so a language change recomposes it from these inputs
+        #: (:meth:`_refresh_localized_summary`) -- the summary twin of
+        #: :meth:`_refresh_localized_output` (review round 1, R1).
+        self._send_summary_details: object = None
+        self._send_summary_built = ""
+        self._send_summary_locale = ""
+        #: The never-sent record's summary and language, the same pair for the
+        #: same reason (:meth:`_compose_never_sent_summary`).
+        self._never_sent_built = ""
+        self._never_sent_locale = ""
         #: True when the result came back from a call that ran on a FRESH kernel
         #: after a reset (``details["kernel_reset"]``, set by ``tools/eval.py``
         #: only for a call that really ran). Read by the COLLAPSED row the way
@@ -2188,7 +2582,8 @@ class ToolCard(ExpandableActionBlock):
             self._duration = parse_duration(measured_s)
         self._set_peer_cycle_communication(None)
         self._state = "error"
-        self._error = _strip_control_sequences(" ".join(error.split())) or "error"
+        self._error = _strip_control_sequences(" ".join(error.split()))
+        self._error_fallback = "error"
         self._absorb_result(result_text or error, details)
         self.remove_class("tool-running")
         self.add_class("tool-error")
@@ -2297,9 +2692,7 @@ class ToolCard(ExpandableActionBlock):
             self._compose_bytes = int(argument_bytes)
         self._set_peer_cycle_communication(None)
         self.never_sent = True
-        size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
-        self._compose_facts = f"{size} composed"
-        self._summary = f"never sent · {self._compose_facts}"
+        self._compose_never_sent_summary()
         self._duration = None
         if kind in INTERRUPTED_FAULTS:
             self._interrupt_label = "interrupted"
@@ -2313,7 +2706,8 @@ class ToolCard(ExpandableActionBlock):
             self.remove_class("tool-running", "tool-error")
             self.add_class("tool-interrupted")
         else:
-            self._error = _strip_control_sequences(" ".join((reason or "").split())) or "not run"
+            self._error = _strip_control_sequences(" ".join((reason or "").split()))
+            self._error_fallback = "not_run"
             self._state = "error"
             self.remove_class("tool-running")
             self.add_class("tool-error")
@@ -2390,14 +2784,12 @@ class ToolCard(ExpandableActionBlock):
             # written. It keeps the size as a record of how far the model got.
             # (`queued` is the same record one state later: the dictation is
             # over, the call still never started, and the turn died first.)
-            size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
             # Facts first, and `_compose_facts` set so the label-shed ladder can
             # reach this row too: gated on the composing STATE, the ladder built
             # for the live row could not touch the record it turns into, and
             # three materially different interrupted rows painted identically
             # from 40 columns down.
-            self._compose_facts = f"{size} composed"
-            self._summary = f"never sent · {self._compose_facts}"
+            self._compose_never_sent_summary()
             # The outcome column stays BLANK for this row. ``_elapsed`` here
             # measures from the moment the ROW was built — `ToolCard.__init__`
             # takes its own zero — so on this branch it is the dictation plus
@@ -2419,7 +2811,7 @@ class ToolCard(ExpandableActionBlock):
             self._absorb_result(reason, None)
         self._set_peer_cycle_communication(None)
         self._state = "interrupted"
-        self._interrupt_label = "cut off" if cut_off else "interrupted"
+        self._interrupt_label = "cut_off" if cut_off else "interrupted"
         self.remove_class("tool-running")
         self.add_class("tool-interrupted")
         self._refresh_row()
@@ -2503,6 +2895,38 @@ class ToolCard(ExpandableActionBlock):
         while rendering another.
         """
         return self._state
+
+    @property
+    def duration_s(self) -> float | None:
+        """The interval this call reports, or ``None`` when none is known.
+
+        A settled row reports the executor's MEASURED interval (``_duration``:
+        set by ``mark_done``/``mark_failed`` live, or restored from the
+        persisted result on replay). A row still running has no interval yet,
+        so it reports its elapsed age — the number a running fold bar shows in
+        place of a total. ``None`` stays ``None``: a card that cannot date
+        itself (restored ``running`` without a start epoch, a legacy row with
+        no persisted duration) must not have a number invented for it.
+        """
+        return self._duration if self._duration is not None else self._elapsed()
+
+    @property
+    def is_failed(self) -> bool:
+        """A call that FAILED. ``interrupted`` is a stop, not a failure."""
+        return self._state == "error"
+
+    @property
+    def summary(self) -> str:
+        """The row's own summary text, as composed for this call.
+
+        Public for the same reason :attr:`duration_s` is: the tool fold's live bar
+        names the call it is reporting (``◐ <tool> <summary> <elapsed>``) and the
+        ONE text that belongs there is the card's own — a second derivation from
+        the arguments would disagree with the row it stands beside, and the
+        localized variants (a composing row, a send row's outcome) are already
+        decided here. Read-only: every writer is a lifecycle method on this card.
+        """
+        return self._summary
 
     def restore(
         self,
@@ -2633,7 +3057,8 @@ class ToolCard(ExpandableActionBlock):
             return
         self.remove_class("tool-running")
         if state == "error":
-            self._error = _strip_control_sequences(" ".join(error.split())) or "error"
+            self._error = _strip_control_sequences(" ".join(error.split()))
+            self._error_fallback = "error"
             self._absorb_result(result_text or error, details)
             self.add_class("tool-error")
         elif state == "interrupted":
@@ -2725,7 +3150,7 @@ class ToolCard(ExpandableActionBlock):
         # call…` read as wrong.
         facts = f"{_format_bytes(self._compose_bytes)} · {clock}" if self._compose_bytes else clock
         self._compose_facts = facts
-        self._summary = f"composing… {facts}"
+        self._summary = _t_x(_tx.compose_composing(facts=facts))
         self._refresh_row()
 
     def set_navigation_visible(self, visible: bool) -> None:
@@ -3304,22 +3729,18 @@ class ToolCard(ExpandableActionBlock):
         # of (agent review round 2, MINOR-1).
         self._send_mode_marker = ""
         if self._is_send:
-            from local_operator.tools.builtin import peer_send_mode_label
-
-            self._send_mode_marker = _scalar_text(peer_send_mode_label(self._args))
+            # Re-read (in the same language) whenever the summary is recomposed
+            # -- see `_compose_send_summary` -- so a live language switch never
+            # pairs a translated summary with an old-language marker.
+            self._send_mode_marker = _send_mode_word(self._args)
         if self._is_send:
             # Re-derived from the arguments every time, so a card that settles
             # twice (a replay over a live row) never stacks outcome words. The
             # delivery word wins over the model-switch one: one result cannot be
             # both, and reading the nested delivery state first is what keeps a
             # future switch arm from claiming a send row.
-            self._summary = _delivery_outcome_summary(
-                _switch_outcome_summary(
-                    _strip_control_sequences(_summary_from_args("send", self._args)), details
-                ),
-                self._args,
-                details,
-            )
+            self._send_summary_details = details
+            self._compose_send_summary()
         # Reset per result, with the fetch flags below and for the same reason: a
         # card is written once, but a rebuilt card must never inherit the previous
         # body's partial state.
@@ -3401,7 +3822,9 @@ class ToolCard(ExpandableActionBlock):
         must happen once per result belong in :meth:`_absorb_result`.
         """
         name = self.tool_name.lower()
-        search_output = _search_result_output(details) if name == "web_search" else []
+        search_rows = _search_result_rows(details) if name == "web_search" else []
+        search_output = [row.text for row in search_rows]
+        fetch_rows: list[_HeaderRow] = []
         # A web_fetch (and a `read <url>`, which records tool_name "read" but
         # carries a fetch's details shape) leads with structured header rows and
         # then the rendered preview body, so the card shows what was fetched and
@@ -3416,7 +3839,8 @@ class ToolCard(ExpandableActionBlock):
             # narrowing has to survive the type checker to keep the guards
             # readable (one alias instead of an isinstance per key).
             fetch_details = details if isinstance(details, Mapping) else {}
-            fetch_header = _fetch_result_output(details)
+            fetch_rows = _fetch_result_rows(details)
+            fetch_header = [row.text for row in fetch_rows]
             if fetch_header:
                 # D1: the structured rows above OWN the metadata (status, final
                 # URL, method, ctype, cache), so strip the model-facing preview's
@@ -3467,12 +3891,65 @@ class ToolCard(ExpandableActionBlock):
         # the fetch presentation without re-inspecting details every repaint.
         self._is_fetch_card = bool(fetch_output)
         self._output = search_output or fetch_output or self._clean_output(result_text)
+        # What each structured row IS, keyed by the exact text composed for it
+        # just above (in this call, in this language). The body painters style
+        # by this, never by matching a row's localized lead.
+        marked = search_rows if search_output else fetch_rows if fetch_output else []
+        self._header_marks = {row.text: row for row in marked if row.kind}
         # Only cards whose rows carry catalogue text need recomposing; a plain
         # output is the tool's own bytes and is never re-derived.
         self._localized_output_inputs = (
             (result_text, details) if (search_output or fetch_output) else None
         )
         self._output_locale = active_locale()
+
+    def _compose_send_summary(self) -> None:
+        """Build the settled send row's summary, in the active language."""
+        details = self._send_summary_details
+        base = _strip_control_sequences(_summary_from_args("send", self._args))
+        self._summary = _delivery_outcome_summary(
+            _switch_outcome_summary(base, details), self._args, details
+        )
+        self._send_delivery_code, self._send_switch_code = _send_outcome_codes(
+            base, self._args, details
+        )
+        self._send_summary_built = self._summary
+        self._send_summary_locale = active_locale()
+        self._send_mode_marker = _send_mode_word(self._args)
+
+    def _compose_never_sent_summary(self) -> None:
+        """``never sent · <size> composed``, in the active language.
+
+        One composer for both endings that settle a never-sent row (retirement
+        and the terminal-frame path), recording what it built so
+        :meth:`_refresh_localized_summary` can repaint the record after a live
+        language change -- the row is terminal, so nothing else ever rewrites it.
+        ``_compose_facts`` keeps feeding the label-shed ladder.
+        """
+        self._compose_facts = _compose_record(self._compose_bytes)
+        self._summary = _never_sent_text(self._compose_bytes, self._compose_facts)
+        self._never_sent_built = self._summary
+        self._never_sent_locale = active_locale()
+
+    def _refresh_localized_summary(self) -> None:
+        """Recompose a settled send summary when the language changed since.
+
+        Only the summary THIS card composed: a later writer (a bridge or
+        compose path rewriting ``_summary``) owns its own text and is left as is.
+        """
+        if (
+            self._is_send
+            and self._send_summary_built
+            and self._summary == self._send_summary_built
+            and self._send_summary_locale != active_locale()
+        ):
+            self._compose_send_summary()
+        elif (
+            self._never_sent_built
+            and self._summary == self._never_sent_built
+            and self._never_sent_locale != active_locale()
+        ):
+            self._compose_never_sent_summary()
 
     def _refresh_localized_output(self) -> None:
         """Recompose structured result rows when the language changed since."""
@@ -3790,10 +4267,11 @@ class ToolCard(ExpandableActionBlock):
         Below the summary, every row is written by
         ``_append_input_body``/``_append_output_body``/``_append_search_body``/
         ``_append_diff_body``/``_append_live_body``, each of which opens with
-        ``"\\n" + " " * OUTPUT_INDENT``. That indent is the card's own layout,
-        and it is the thing standing between a copied stderr and a paste that
-        goes straight into a bug report — or, for a diff, between ``+ added``
-        and something ``git apply`` will not read.
+        ``"\\n" + " " * detail_indent(...)`` — :data:`OUTPUT_INDENT` at the plain
+        spine, plus the fold step the row itself took. That indent is the card's
+        own layout, and it is the thing standing between a copied stderr and a
+        paste that goes straight into a bug report — or, for a diff, between
+        ``+ added`` and something ``git apply`` will not read.
 
         The summary row's field also carries :data:`ROW_INDENT`, the cell that
         keeps the icon off the left wall of the card's own fill. It is layout
@@ -3805,7 +4283,7 @@ class ToolCard(ExpandableActionBlock):
         would eat the first character of the tool's name.
         """
         if index != 0:
-            return OUTPUT_INDENT
+            return detail_indent(self._built_width, self.fold_depth)
         return self._row_indent() + self.ICON_COLS
 
     def _row_indent(self) -> int:
@@ -3819,7 +4297,7 @@ class ToolCard(ExpandableActionBlock):
         over-count eats the first character of the tool's name, an under-count
         pastes a leading space into a bug report.
         """
-        return row_indent(self._built_width)
+        return row_indent(self._built_width, self.fold_depth)
 
     # -- rendering ----------------------------------------------------------
     def refresh_row(self, width: int | None = None) -> None:
@@ -3976,7 +4454,7 @@ class ToolCard(ExpandableActionBlock):
         # the one a parentless build cannot read, so it bakes the floor. Recorded
         # beside the width because `ExpandableActionBlock._layout_moved` reads the
         # pair to decide whether this row still fits the ledger it landed in.
-        self._built_name_col = self._name_col(row_body_width(width))
+        self._built_name_col = self._name_col(row_body_width(width, self.fold_depth))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -4033,11 +4511,11 @@ class ToolCard(ExpandableActionBlock):
                 # summary and exact revert call are part of the result, not
                 # duplicate input. Keep them visible above the diff, wrapping
                 # each authored line so the backup id cannot be clipped away.
-                line_width = max(1, width - 2 - OUTPUT_INDENT)
+                line_width, indent = self._detail_layout(width)
                 receipt_style = bindings.style("tool.row.chip_settled")
                 for source in self._output:
                     for line in wrap_cells(source, line_width):
-                        row.append("\n" + " " * OUTPUT_INDENT + line, style=receipt_style)
+                        row.append("\n" + indent + line, style=receipt_style)
             self._append_diff_body(row, width)
         elif self._bridge_view is not None and self._state in ("success", "error"):
             self._append_bridge_body(row, width)
@@ -4095,8 +4573,7 @@ class ToolCard(ExpandableActionBlock):
         label_ink = bindings.style("tool.args.label")
         value_ink = bindings.style("tool.args.value")
         secondary = bindings.style("tool.bridge.detail_value")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         headline = _strip_control_sequences(str(view.get("headline") or ""))
         for line in wrap_cells(headline, line_width) if headline else []:
             row.append("\n" + indent, style=dim)
@@ -4192,8 +4669,7 @@ class ToolCard(ExpandableActionBlock):
         dim = bindings.style("tool.live.dim")
         accent = bindings.style("tool.live.header")
         advisory_style = bindings.style("tool.live.advisory")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         # State, then time, then the caveat — read left to right that is "it is
         # running / for this long / and has printed nothing", which is the
         # order the questions are asked in. The caveat last also means it
@@ -4278,16 +4754,21 @@ class ToolCard(ExpandableActionBlock):
         accent = bindings.style("tool.live.header")
         advisory_style = bindings.style("tool.live.advisory")
         danger = bindings.style("tool.output.error")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         view = self._imagegen_live or imagegen_mod.ImagegenLive()
         word = imagegen_mod.imagegen_state_word(self._state, view.state)
-        # The queued row already says `queued` in its status cell (`QUEUED_LABEL`),
+        # The queued row already says `queued` in its status cell (`queued_label`),
         # and repainting it here is the double-print class this repo polices
         # (design round 1, D4). The line is skipped exactly when it would only
         # repeat that cell — a provider interim, a running elapsed or the
         # cancelling word all add something and keep it.
-        repeats_status = self._state == "queued" and word == QUEUED_LABEL
+        # Both spellings: the cell's word is keyed, while `imagegen`'s own state
+        # word is a separate (still English) slice, so equality with the cell
+        # alone would stop matching the moment a language is chosen.
+        repeats_status = self._state == "queued" and word in (
+            imagegen_mod.STATE_QUEUED,
+            queued_label(),
+        )
         if word is not None and not repeats_status:
             header = f"⋯ {word}"
             # Elapsed only for a RUNNING card: a queued call has not started,
@@ -4379,8 +4860,7 @@ class ToolCard(ExpandableActionBlock):
         # keeps its dim tier (the \u2298 receipt), so a carried sentence there
         # reads as the record it is, not as a fresh failure.
         ink = bindings.style("tool.output.error") if self._state == "error" else dim
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         note = imagegen_mod.provider_error_note(
             self._imagegen_error, self._imagegen_error_type, "\n".join(self._output)
         )
@@ -4406,8 +4886,8 @@ class ToolCard(ExpandableActionBlock):
         card is claiming failure anyway.)
         """
         dim = bindings.style("tool.output.dim")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        row.append("\n" + " " * OUTPUT_INDENT, style=dim)
+        line_width, indent = self._detail_layout(width)
+        row.append("\n" + indent, style=dim)
         row.append(truncate_cells(text, line_width), style=dim)
 
     def _append_input_body(self, row: Text, width: int) -> None:
@@ -4425,8 +4905,7 @@ class ToolCard(ExpandableActionBlock):
         dim = bindings.style("tool.args.dim")
         label = bindings.style("tool.args.label")
         body = bindings.style("tool.args.value")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         for key, value in self._args.items():
             text = _strip_control_sequences(_argument_text(value))
             if not text:
@@ -4505,7 +4984,7 @@ class ToolCard(ExpandableActionBlock):
             return ""
         head = self._output[0]
         collapsed = " ".join(head.split())
-        reason = self._error.strip()
+        reason = self._error_text().strip()
         if not collapsed or not reason:
             return ""
         if collapsed != reason and not reason.startswith(f"{collapsed} "):
@@ -4523,7 +5002,12 @@ class ToolCard(ExpandableActionBlock):
         """
         if self.tool_name.lower() != "send":
             return False
-        words = (*SWITCH_OUTCOME_WORDS.values(), *DELIVERY_OUTCOME_WORDS.values())
+        # Classified by the stored tokens, not by matching the summary against
+        # the active language's words (review round 1, R1).
+        if self._is_send and self._send_summary_built and self._summary == self._send_summary_built:
+            return bool(self._send_delivery_code or self._send_switch_code)
+        delivery_words = delivery_outcome_words().values()
+        words = (*switch_outcome_words().values(), *delivery_words)
         prefixes = [f"{word} · " for word in words]
         # A send that asked for no turn carries its mode marker IN FRONT of the
         # word (``_delivery_outcome_summary``, design round 1 N2), and that form
@@ -4534,10 +5018,14 @@ class ToolCard(ExpandableActionBlock):
         # ``wake=false`` reads ``now · delivery unconfirmed · …`` (agent review
         # round 2, MINOR-1).
         if self._send_mode_marker:
-            prefixes += [
-                f"{self._send_mode_marker} · {word} · " for word in DELIVERY_OUTCOME_WORDS.values()
-            ]
+            prefixes += [f"{self._send_mode_marker} · {word} · " for word in delivery_words]
         return self._summary.startswith(tuple(prefixes))
+
+    def _error_text(self) -> str:
+        """The error reason the row paints: the call's own text, else the keyed fallback word."""
+        if self._error:
+            return self._error
+        return _t_st(_ts.not_run() if self._error_fallback == "not_run" else _ts.error())
 
     def _stop_pending_reason(self) -> str:
         """The stop receipt's own line when the stop was not confirmed.
@@ -4631,7 +5119,7 @@ class ToolCard(ExpandableActionBlock):
         """
         if not self._delivery_failed_reason:
             return ""
-        return f"{SEND_NOT_DELIVERED_WORD}: {self._delivery_failed_reason}"
+        return _failed_reason_text(send_not_delivered_word(), self._delivery_failed_reason)
 
     def _promoted_lead(self) -> str:
         """The lead line the collapsed row claims, whichever state owns it."""
@@ -4844,8 +5332,7 @@ class ToolCard(ExpandableActionBlock):
         """
         dim = bindings.style("tool.output.dim")
         ink = bindings.style("tool.output.error") if self._state == "error" else dim
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         glyph, lead_ink = self._promoted_paint(ink)
         self._append_reason_body(row, line_width, indent, dim, lead_ink, glyph=glyph)
         self._append_captured_rows(row, line_width, indent, dim, ink)
@@ -4932,8 +5419,7 @@ class ToolCard(ExpandableActionBlock):
         signal = bindings.style("tool.search.url")
         muted = bindings.style("tool.search.snippet")
         dim = bindings.style("tool.search.dim")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         glyph, lead_ink = self._promoted_paint(muted)
         self._append_reason_body(row, line_width, indent, dim, lead_ink, glyph=glyph)
         captured = self._captured_output()
@@ -4944,7 +5430,10 @@ class ToolCard(ExpandableActionBlock):
                 ink = signal
             elif stripped[:1].isdigit() and ". " in stripped:
                 ink = fg
-            elif stripped.startswith(("Provider:", "Sources:")):
+            elif (mark := self._header_marks.get(line)) is not None and mark.kind in (
+                "provider",
+                "sources",
+            ):
                 ink = dim
             else:
                 # See `bindings.BY_ELEMENT["tool.search.snippet"].note`.
@@ -4992,8 +5481,7 @@ class ToolCard(ExpandableActionBlock):
         muted = bindings.style("tool.fetch.snippet")
         dim = bindings.style("tool.fetch.dim")
         danger = bindings.style("tool.fetch.error")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         shown = self._output[:EXPAND_MAX_LINES]
         # ``_absorb_result`` joins the structured rows to the body with one blank
         # separator, so everything before it is header and everything after is
@@ -5015,6 +5503,9 @@ class ToolCard(ExpandableActionBlock):
             # keeps every origin byte on the clip rule unless a branch here has
             # positively identified the line as ours.
             our_note = False
+            # The structured row's recorded kind (header region only: a body
+            # line that happens to equal a header's text is origin content).
+            mark = self._header_marks.get(line) if is_header else None
             if stripped.startswith("⚠ HTTP"):
                 # See `bindings.BY_ELEMENT["tool.fetch.error"].note` (F1). D8: this
                 # classified row IS the card's headline now, so it reflows like the
@@ -5029,12 +5520,14 @@ class ToolCard(ExpandableActionBlock):
             elif is_header and stripped.startswith("⚠ "):
                 ink = danger
                 wrap = True
-            elif stripped.startswith("Fetched:"):
+            elif mark is not None and mark.kind == "fetched":
                 # See `bindings.BY_ELEMENT["tool.fetch.signal"].note` (D3).
+                # Recognised by the row's recorded kind, not its `Fetched:` lead,
+                # so a translated row keeps the treatment.
                 self._append_fetched_row(row, line, line_width, indent, dim, signal)
                 continue
-            elif stripped.startswith("Rendered:"):
-                self._append_rendered_row(row, line, line_width, indent, dim, signal)
+            elif mark is not None and mark.kind == "rendered":
+                self._append_rendered_row(row, line, line_width, indent, dim, signal, mark.signal)
                 continue
             elif stripped.startswith("Next step:"):
                 ink = signal
@@ -5140,6 +5633,7 @@ class ToolCard(ExpandableActionBlock):
         indent: str,
         dim: Style,
         signal: Style,
+        clause: str = "",
     ) -> None:
         """Paint the ``Rendered:`` row with its attempt summary in ``signal`` (D9).
 
@@ -5149,11 +5643,12 @@ class ToolCard(ExpandableActionBlock):
         make that findable, so it wears ``signal`` (4.32:1 light / 6.52:1 dark)
         rather than the row's pre-existing ``dim`` (3.32:1 light, below the body
         floor). One rule with D4: the sentence a reader may act on is ``signal``,
-        the metadata recedes. Match is by value (``_split_attempt_clause``), so
-        the clause is found wherever D7 places it in the row.
+        the metadata recedes. Match is by the value the row builder recorded
+        (``_split_attempt_clause``), so the clause is found wherever D7 places it
+        in the row, in any language.
         """
         row.append("\n" + indent, style=dim)
-        head, clause, tail = _split_attempt_clause(line)
+        head, clause, tail = _split_attempt_clause(line, clause)
         remaining = line_width
         for chunk, ink in ((head, dim), (clause, signal), (tail, dim)):
             if not chunk or remaining <= 0:
@@ -5179,8 +5674,7 @@ class ToolCard(ExpandableActionBlock):
         danger = bindings.style("tool.diff.removed")
         muted = bindings.style("tool.diff.hunk")
         dim = bindings.style("tool.diff.context")
-        line_width = max(1, width - 2 - OUTPUT_INDENT)
-        indent = " " * OUTPUT_INDENT
+        line_width, indent = self._detail_layout(width)
         # The `---`/`+++` file headers are dropped: the tool diffs one file's
         # before/after in memory, so difflib emits them NAMELESS (`--- ` /
         # `+++ `) and the path already heads the summary row. Two blank-label
@@ -5347,6 +5841,9 @@ class ToolCard(ExpandableActionBlock):
 
     def _build_row(self, width: int) -> Text:
         """The single summary row — the ONE-LINE guarantee lives here."""
+        # Before any read of `_summary` this frame: a settled send row composed
+        # in another language repaints in the active one (review round 1, R1).
+        self._refresh_localized_summary()
         dim = bindings.style("tool.row.dim")
         # See `bindings.BY_ELEMENT["tool.row.name_running"].note` for the
         # two-step fade this implements. `queued` is live but not executing, and
@@ -5375,11 +5872,25 @@ class ToolCard(ExpandableActionBlock):
         # Same threshold and same derivation the copy gutter reads
         # (`_row_indent`), against the width being BUILT rather than the last
         # one built, because this runs before `_built_width` is updated.
-        indent = row_indent(width)
-        # The content box this row is built in — the SAME derivation
+        indent = row_indent(width, self.fold_depth)
+        # The content box the NAME COLUMN is gated on — the SAME derivation
         # `_refresh_row` records the name column against, so the guard's question
         # and the builder's answer cannot be asked of two different widths (R2).
-        width = row_body_width(width)
+        name_width = row_body_width(width, self.fold_depth)
+        # D12: the LEDGER's right edge, not this row's own. A fold row draws from
+        # `indent` and measures its content box off the depth-0 body width, so
+        # every row's right edge — and the status column right-aligned at it —
+        # lands on the same cell at every depth. Measuring the box against the
+        # row's own depth-reduced width walked a revealed row's clock two cells
+        # left per level, so one column of durations painted as three.
+        width = row_body_width(width, 0)
+        # The row is painted FROM `indent` (the fold step) and its right edge is
+        # the ledger's column, so the indent is not free space: every segment that
+        # budgets the summary has to take it off first. It used to be taken off
+        # only after the fact, and a row whose summary hit its cap ended one
+        # cell right of a short row at the same level and two cells right at the
+        # next — the status column walked in steps inside one open fold.
+        avail = max(1, width - indent)
 
         # Status segment (right-aligned), capped at width // 3 (D8) and then
         # hard-clamped so no state can ever push the row past its card.
@@ -5399,7 +5910,7 @@ class ToolCard(ExpandableActionBlock):
         # card and clips the status off-screen.
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
-        name_budget = width - (2 + status_cells + 2)
+        name_budget = avail - (2 + status_cells + 2)
         if name_budget < 2 and (
             self._state in ("error", "interrupted")
             or self._partial
@@ -5414,7 +5925,7 @@ class ToolCard(ExpandableActionBlock):
             # that makes the row worth reading: WHICH tool failed.
             status_runs = _clamp_runs(self._status_runs(status_cap, terse=True), max(0, width - 3))
             status_cells = sum(cell_len(text) for text, _style in status_runs)
-            name_budget = width - (2 + status_cells + 2)
+            name_budget = avail - (2 + status_cells + 2)
         if name_budget < 2:
             # Too narrow for even a shrunken name: degrade to icon + status
             # so the outcome column survives. This is the last rung.
@@ -5430,7 +5941,7 @@ class ToolCard(ExpandableActionBlock):
                     row.append(text, style=style)
             return row
 
-        name_col = min(self._name_col(width), name_budget)
+        name_col = min(self._name_col(name_width), name_budget)
         name = truncate_cells(label, name_col)
         name = name + " " * max(0, name_col - cell_len(name))
         prefix_cells = 2 + name_col + 1
@@ -5451,7 +5962,7 @@ class ToolCard(ExpandableActionBlock):
         # an inert row left a byte-identical frame.
         slot = ""
         slot_element = "tool.row.slot_offer"
-        remaining = max(0, width - prefix_cells - status_cells - 2)
+        remaining = max(0, avail - prefix_cells - status_cells - 2)
         # The imagegen variant's cancel affordance (see `IMAGE_INTERRUPT_HINT`).
         # It takes the slot ahead of the expand offer while the call can still
         # be stopped — "how do I stop this" is the load-bearing question on a
@@ -5591,11 +6102,13 @@ class ToolCard(ExpandableActionBlock):
             row.append(row_chip, style=bindings.style(chip_element))
         # The state word leads the summary and takes the amber ink on its own run
         # (design round 1, D4); every other summary is one run.
+        state_word = (
+            delivery_outcome_words().get(self._send_delivery_code, "")
+            if self._partial and self._is_send and self._send_delivery_code
+            else ""
+        )
         before, word_run, rest = _delivery_word_run(
-            summary,
-            partial=self._partial,
-            is_send=self._is_send,
-            marker=self._send_mode_marker,
+            summary, word=state_word, marker=self._send_mode_marker
         )
         if word_run:
             if before:
@@ -5681,7 +6194,10 @@ class ToolCard(ExpandableActionBlock):
             # A pending approval is not an interruption or an execution clock.
             # At very narrow widths omit the label, never replace it with an
             # outcome glyph that falsely says the tool completed.
-            text = "waiting" if not cap or cap >= len("waiting") else ""
+            # Measured in terminal CELLS: a translated word may be wide (CJK),
+            # and `len` would let it overrun the cap it was checked against.
+            word = _t_st(_ts.waiting())
+            text = word if not cap or cap >= cell_len(word) else ""
             return [(text, bindings.style("tool.status.running_duration"))]
         if self._state == "queued":
             # Announced, dictated, not started. The state word is the whole
@@ -5692,7 +6208,8 @@ class ToolCard(ExpandableActionBlock):
             # answer before (see `mark_queued`). Shed whole below its width,
             # never truncated into a meaningless fragment — and never replaced
             # by an outcome glyph, which would claim the call completed.
-            text = QUEUED_LABEL if not cap or cap >= len(QUEUED_LABEL) else ""
+            word = queued_label()
+            text = word if not cap or cap >= cell_len(word) else ""
             return [(text, bindings.style("tool.status.running_duration"))]
         if self._state == "composing":
             # Nothing has RUN, so there is no execution time to report. The
@@ -5747,9 +6264,10 @@ class ToolCard(ExpandableActionBlock):
             # would falsely claim the tool completed.
             elapsed = self._elapsed()
             if elapsed is None:
-                text = RUNNING_LABEL if not cap or cap >= len(RUNNING_LABEL) else ""
+                word = running_label()
+                text = word if not cap or cap >= cell_len(word) else ""
                 return [(text, dim)]
-            text = format_duration(max(0, int(elapsed)))
+            text = format_clock(elapsed)
             return [("  ", dim), (text.rjust(DURATION_COL), dim)]
         core = self._outcome_runs(cap, terse=terse)
         diff = self._diff_runs()
@@ -5804,28 +6322,10 @@ class ToolCard(ExpandableActionBlock):
             # keeps the column aligned and says nothing, which is the truth.
             duration = " " * DURATION_COL
         else:
-            elapsed = self._duration
-            # Sub-second precision where it distinguishes tools, and the SAME
-            # grammar as everything else past a minute: the composing row above
-            # this one says `1m57s`, and `117s` two seconds later on the same
-            # row is the app disagreeing with itself about how it writes a
-            # duration.
-            if elapsed < 0.05:
-                # `<0.1s`, never `0.0s`. Rounding a genuinely fast tool to
-                # `0.0s` reprints the exact string the fabricated-duration bug
-                # produced, which is why the missing-duration report came back
-                # against a tool that had simply returned at once — the reader
-                # cannot tell a real sub-50 ms call from a row whose duration
-                # was lost. Reads as "too fast to measure", and is exactly
-                # DURATION_COL wide so the column still holds.
-                duration = "<0.1s"
-            elif elapsed < 10:
-                duration = f"{elapsed:.1f}s"
-            elif elapsed < 60:
-                duration = f"{elapsed:.0f}s"
-            else:
-                duration = format_duration(elapsed)
-            duration = duration.rjust(DURATION_COL)
+            # The row's own clock is the ledger's one duration grammar — see
+            # :func:`format_clock`, which the fold bar and the By-response foot
+            # also draw, so the three cannot disagree in the same column.
+            duration = format_clock(self._duration).rjust(DURATION_COL)
         if (
             self._state == "success"
             and not self._partial
@@ -5898,7 +6398,7 @@ class ToolCard(ExpandableActionBlock):
                 # does not: the flag is what says the RESULT is partial, so the row
                 # must be able to state that even where there is no disclosure
                 # sentence to promote (design review round 2, D2-3).
-                reason = self._partial_reason() or _PARTIAL_LABEL
+                reason = self._partial_reason() or _partial_label()
                 if self._switch_row_names_its_outcome():
                     # A model switch that took but raised afterwards: the row
                     # already leads with `switched (error)`, and "Partial" would
@@ -5917,7 +6417,7 @@ class ToolCard(ExpandableActionBlock):
                 # cannot show the note still names the state. Nothing here claims
                 # the call failed: it is a fact about the session it ran on.
                 glyph = ICON_SUCCESS
-                reason = self._reset_reason() or _RESET_LABEL
+                reason = self._reset_reason() or _reset_label()
                 tint = bindings.style("tool.status.partial_glyph")
                 abbreviates = True
         elif self._state == "interrupted":
@@ -5927,13 +6427,14 @@ class ToolCard(ExpandableActionBlock):
             # `surface` — under the 4.5:1 text floor — and the word is the
             # state's carrier, so it takes `muted` (7.93:1) while the ⊘ keeps
             # `dim` (the 3:1 icon floor).
-            glyph, reason = ICON_INTERRUPTED, self._interrupt_label
+            glyph, reason = ICON_INTERRUPTED, _interrupt_word(self._interrupt_label)
             tint = bindings.style("tool.status.interrupted")
             word_tint = bindings.style("tool.status.interrupted_word")
             abbreviates = False
         else:
             danger = bindings.style("tool.status.error_glyph")
-            glyph, reason, tint = ICON_ERROR, self._send_failed_reason() or self._error, danger
+            reason = self._send_failed_reason() or self._error_text()
+            glyph, tint = ICON_ERROR, danger
             if self._bridge_word:
                 # `refused · not_permitted` beats the tool's own sentence in a
                 # cap a third of the row wide: the code is what an operator
@@ -5961,7 +6462,9 @@ class ToolCard(ExpandableActionBlock):
                     # cell the finding is about: the 13-cell constant is what the
                     # cap exists to carry, and it fits at every width the row is
                     # drawn at, so the cause is what stops short.
-                    reason = _cap_failed_reason(reason, room)
+                    reason = _cap_failed_reason(
+                        send_not_delivered_word(), self._delivery_failed_reason, room
+                    )
                 elif abbreviates:
                     reason = truncate_cells(reason, room)
                 elif cell_len(reason) > room:
@@ -5992,16 +6495,48 @@ class ToolCard(ExpandableActionBlock):
 #: ``from tool_card import EXPAND_HINT`` gets the active language rather than
 #: the English captured at import. A module-level import still freezes the value
 #: of the moment it ran — prefer the functions in new code.
-_LEGACY_COPY = {
+_LEGACY_COPY: dict[str, Callable[[], str | dict[str, str]]] = {
     "EXPAND_HINT": expand_hint,
     "COLLAPSE_HINT": collapse_hint,
     "IMAGE_INTERRUPT_HINT": image_interrupt_hint,
     "LIVE_HEADER_RUNNING": live_header_running,
     "LIVE_HEADER_PENDING": live_header_pending,
+    # `tui.tool_card.status` (status words). `DELIVERY_OUTCOME_WORDS` is read
+    # by the mobile parity test; the rest by tests only.
+    "RUNNING_LABEL": running_label,
+    "QUEUED_LABEL": queued_label,
+    "_PARTIAL_LABEL": _partial_label,
+    "_RESET_LABEL": _reset_label,
+    "SEND_NOT_DELIVERED_WORD": send_not_delivered_word,
+    "DELIVERY_OUTCOME_WORDS": delivery_outcome_words,
+    "SWITCH_OUTCOME_WORDS": switch_outcome_words,
 }
 
 
-def __getattr__(name: str) -> str:
+# Type checkers resolve a module's missing attribute through `__getattr__`'s
+# return type, so a single union (str for the labels, dict for the two outcome
+# maps) would make every `EXPAND_HINT` read `str | dict` and break callers that
+# measure it with `cell_len`. Declaring each legacy name with its exact type
+# here gives importers the precise type; the bare annotations bind nothing at
+# runtime (and sit under TYPE_CHECKING besides), so PEP 562 still resolves the
+# live, active-language value on every access. Keep this list in step with
+# `_LEGACY_COPY`.
+if TYPE_CHECKING:
+    EXPAND_HINT: str
+    COLLAPSE_HINT: str
+    IMAGE_INTERRUPT_HINT: str
+    LIVE_HEADER_RUNNING: str
+    LIVE_HEADER_PENDING: str
+    RUNNING_LABEL: str
+    QUEUED_LABEL: str
+    _PARTIAL_LABEL: str
+    _RESET_LABEL: str
+    SEND_NOT_DELIVERED_WORD: str
+    DELIVERY_OUTCOME_WORDS: dict[str, str]
+    SWITCH_OUTCOME_WORDS: dict[str, str]
+
+
+def __getattr__(name: str) -> str | dict[str, str]:
     try:
         return _LEGACY_COPY[name]()
     except KeyError:

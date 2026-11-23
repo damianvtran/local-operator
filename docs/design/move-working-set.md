@@ -682,6 +682,44 @@ Detected per restored worktree by lockfile; PR B puts them in `recipes` (not run
 Phase 2: `--setup-deps` runs the listed recipe on the destination after restore
 (package lifecycle scripts execute, which is why it is opt-in, not default).
 
+Phase 2 as built so far (#4378) is **status only, zero execution**: `lop sessions
+setup-deps <id> --status` (`network/workset_setup.py`) reads THIS device's restore
+record and reports, per restored worktree and dependency kind, `pending` (absent or
+empty target), `present_unverified` (something exists; never claimed complete or
+usable), `unknown` (unreadable), `refused` (outside the restore placement rules),
+`manual` (git LFS) or `not_needed`, plus worktrees not restored yet. `--status` is
+required; there is no `--yes` and no `move --setup-deps`, so the former flags fail
+at parse time, before any move. The active-arrival note lists the same rows as data
+(path, kind, state — never a recipe's shell text) and names only that `--status`
+command; when the status cannot be computed it still says "status unknown" and
+keeps its do-not-set-up guard. Security ruling (owner 60334): a peer frame, the
+moved agent's shell, stdin, a CLI flag or the file transfer is not the destination
+operator's authority to run lifecycle scripts.
+
+**Phase 2 exit criteria for the run mode** (the next lane: "Set up dependencies on
+arrival" in the existing move confirmation; design goes to 60334 first). None of
+these is an accepted residual; each is a condition of shipping any execution:
+
+1. Authority: an authenticated operator opt-in on the destination, bound to this
+   move/session, the verified worktree identities and the plan shown, enforced
+   before launch and consumed once (S1). Flags, stdin and agent shells select at
+   most; they never approve.
+2. Arrival binding: only a completed arrival with a locally restored working set,
+   identified by this move's journal; a queued or files-omitted recall never
+   authorizes a stale record (S2).
+3. Effective target: the tool's effective workspace, install target and executable
+   resolved under controlled configuration and a minimal environment; unsupported
+   layouts (for example a pnpm `modulesDir` elsewhere) refused before running (S3).
+4. Identity and serialization: setup serialized per destination, worktree and
+   target identities bound from check to launch/mutation, drift refused; a newly
+   occupied target is never replaced (S4).
+5. Cleanup evidence: a row succeeds only with cleanup-required completion of the
+   process tree, never on the command's exit code alone (S5).
+6. Attribution: a durable, attributable start/authorization record written before
+   any mutation or launch, failing closed if it cannot be written (S6).
+7. Truthful completion: pending restores keep the result incomplete; a target an
+   interrupted run left behind is never reported present or usable (S7).
+
 ## 10. Recall (`--to local`)
 
 Symmetric by construction: the remote device is the owner, computes the manifest

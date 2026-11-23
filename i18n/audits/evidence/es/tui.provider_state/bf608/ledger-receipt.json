@@ -1,0 +1,36 @@
+{
+  "locale": "es",
+  "namespace": "tui.provider_state",
+  "status": "passed",
+  "source_sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "d37edc1334b7",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session model-switch notice before authoring; no independent per-response served-model telemetry available",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (Spanish B)",
+    "session": "f6084ca8999b",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "d37edc1334b7",
+    "actual_model_source": "Explicit host model-switch notice: provider failure quota; no independent per-response served-model telemetry available",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "initial_context_model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-22",
+    "result": "passed",
+    "unresolved_blocker_major": 0
+  },
+  "note": "Independent Spanish B; all 5 keys passed; 0 blocker/major. Record: i18n/audits/evidence/es/tui.provider_state/bf608/record.json. Scoped APIs/Rich only; no native UI clearance."
+}

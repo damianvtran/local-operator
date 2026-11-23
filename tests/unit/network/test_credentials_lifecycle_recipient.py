@@ -505,6 +505,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # and the ask condition only adds ``if_digest`` to that same frame. A peer
         # lacking it keeps receiving full tables. No new dispatchable op.
         wire.MEMBER_LIST_DIGEST_V1,
+        # Diagnostic only: says this build's listener signs its welcome and its dialer
+        # requires that proof (mesh-listener-auth). No op, and never gates anything.
+        "listener-proof-v1",
     }
     assert set(wire.LINK_CAPABILITIES) == set(handlers) | pure_features
     server = relay.RelayServer(root=rig.root, identity=rig.own)

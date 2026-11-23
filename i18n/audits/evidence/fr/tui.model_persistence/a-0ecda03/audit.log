@@ -1,0 +1,57 @@
+[Capture metadata, not command stdout: record_reference=i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/record.json; auditor=i18n-auditor; session=0ecda03ab969; actual_model=openai/gpt-6.1-sol; fallback=provider quota]
+COMMAND: primary .venv Python, PYTHONPATH worktree, isolated HOME/XDG_CONFIG_HOME/LOP_CONFIG_DIR, all CMUX_* removed
+module: /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+BEFORE en 4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+BEFORE context b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+BEFORE fr 2d31f57fd8a19eb9c82b71b135fc0cd76c0056d80a0ab846a744da2467e7c002
+OFFICIAL check.check_catalogues scoped en/fr + one namespace: []
+JSON PASS duplicate-free en/context/fr
+KEY PASS tui.model_persistence.persist args () zero plural/select; commands byte-equal ['/model default'] cells 63
+KEY PASS tui.model_persistence.settings args () zero plural/select; commands byte-equal ['/settings'] cells 68
+KEY PASS tui.model_persistence.saved args () zero plural/select; commands byte-equal ['/model saved'] cells 77
+KEY PASS tui.model_persistence.with_model args (('label', 'simple'), ('routes', 'simple')) zero plural/select; commands byte-equal [] cells 27
+WRAP ordinary label 3 cols 80 synthetic_inset 0 rows 3 line_cells [80, 80, 68] split_commands [] lone_final_command False
+WRAP ordinary label 3 cols 80 synthetic_inset 4 rows 4 line_cells [70, 76, 74, 9] split_commands [] lone_final_command False
+WRAP ordinary label 3 cols 100 synthetic_inset 0 rows 3 line_cells [99, 100, 30] split_commands [] lone_final_command False
+WRAP ordinary label 3 cols 100 synthetic_inset 4 rows 3 line_cells [93, 94, 42] split_commands [] lone_final_command False
+WRAP ordinary label 3 cols 120 synthetic_inset 0 rows 2 line_cells [120, 108] split_commands [] lone_final_command False
+WRAP ordinary label 3 cols 120 synthetic_inset 4 rows 2 line_cells [116, 112] split_commands [] lone_final_command False
+WRAP missing-model label 3 cols 80 synthetic_inset 0 rows 2 line_cells [80, 68] split_commands [] lone_final_command False
+WRAP missing-model label 3 cols 80 synthetic_inset 4 rows 3 line_cells [70, 70, 9] split_commands [] lone_final_command False
+WRAP missing-model label 3 cols 100 synthetic_inset 0 rows 2 line_cells [98, 51] split_commands [] lone_final_command False
+WRAP missing-model label 3 cols 100 synthetic_inset 4 rows 2 line_cells [91, 58] split_commands [] lone_final_command False
+WRAP missing-model label 3 cols 120 synthetic_inset 0 rows 2 line_cells [119, 30] split_commands [] lone_final_command False
+WRAP missing-model label 3 cols 120 synthetic_inset 4 rows 2 line_cells [116, 33] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 3 cols 80 synthetic_inset 0 rows 2 line_cells [74, 9] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 3 cols 80 synthetic_inset 4 rows 2 line_cells [74, 9] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 3 cols 100 synthetic_inset 0 rows 1 line_cells [83] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 3 cols 100 synthetic_inset 4 rows 1 line_cells [83] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 3 cols 120 synthetic_inset 0 rows 1 line_cells [83] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 3 cols 120 synthetic_inset 4 rows 1 line_cells [83] split_commands [] lone_final_command False
+WRAP ordinary label 108 cols 80 synthetic_inset 0 rows 6 line_cells [9, 80, 76, 80, 79, 9] split_commands [] lone_final_command False
+WRAP ordinary label 108 cols 80 synthetic_inset 4 rows 6 line_cells [9, 76, 76, 75, 75, 23] split_commands [] lone_final_command False
+WRAP ordinary label 108 cols 100 synthetic_inset 0 rows 5 line_cells [9, 100, 95, 100, 30] split_commands [] lone_final_command False
+WRAP ordinary label 108 cols 100 synthetic_inset 4 rows 5 line_cells [9, 96, 93, 94, 42] split_commands [] lone_final_command False
+WRAP ordinary label 108 cols 120 synthetic_inset 0 rows 3 line_cells [120, 116, 98] split_commands [] lone_final_command False
+WRAP ordinary label 108 cols 120 synthetic_inset 4 rows 4 line_cells [9, 111, 116, 98] split_commands [] lone_final_command False
+WRAP missing-model label 108 cols 80 synthetic_inset 0 rows 5 line_cells [9, 80, 76, 80, 9] split_commands [] lone_final_command False
+WRAP missing-model label 108 cols 80 synthetic_inset 4 rows 5 line_cells [9, 76, 76, 74, 19] split_commands [] lone_final_command False
+WRAP missing-model label 108 cols 100 synthetic_inset 0 rows 4 line_cells [9, 100, 100, 45] split_commands [] lone_final_command False
+WRAP missing-model label 108 cols 100 synthetic_inset 4 rows 4 line_cells [9, 96, 91, 58] split_commands [] lone_final_command False
+WRAP missing-model label 108 cols 120 synthetic_inset 0 rows 3 line_cells [120, 115, 19] split_commands [] lone_final_command False
+WRAP missing-model label 108 cols 120 synthetic_inset 4 rows 4 line_cells [9, 111, 115, 19] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 108 cols 80 synthetic_inset 0 rows 4 line_cells [9, 80, 80, 19] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 108 cols 80 synthetic_inset 4 rows 4 line_cells [9, 76, 73, 30] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 108 cols 100 synthetic_inset 0 rows 3 line_cells [9, 100, 79] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 108 cols 100 synthetic_inset 4 rows 3 line_cells [9, 96, 83] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 108 cols 120 synthetic_inset 0 rows 2 line_cells [120, 68] split_commands [] lone_final_command False
+WRAP hosting-dead-end label 108 cols 120 synthetic_inset 4 rows 3 line_cells [9, 111, 68] split_commands [] lone_final_command False
+PSEUDO PASS tui.model_persistence.persist human letters expanded; arguments and commands preserved
+PSEUDO PASS tui.model_persistence.settings human letters expanded; arguments and commands preserved
+PSEUDO PASS tui.model_persistence.saved human letters expanded; arguments and commands preserved
+PSEUDO PASS tui.model_persistence.with_model human letters expanded; arguments and commands preserved
+PSEUDO and widths are plain render controls; no native font or NoticeBlock claim
+AFTER en 4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+AFTER context b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+AFTER fr 2d31f57fd8a19eb9c82b71b135fc0cd76c0056d80a0ab846a744da2467e7c002
+PASS all4 keys; validation did not mutate input catalogues

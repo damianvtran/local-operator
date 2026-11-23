@@ -793,7 +793,138 @@ _TOOL_ROW_BINDINGS: tuple[Binding, ...] = (
     ),
 )
 
-BINDINGS: tuple[Binding, ...] = _MARKDOWN_BINDINGS + _CODE_BINDINGS + _TOOL_ROW_BINDINGS
+# ---------------------------------------------------------------------------
+# The tool fold (`tui/tool_fold.py`, `FoldBarBlock`/`TurnFootBlock` in
+# `widgets/transcript.py`, and By-response narration). Surface: TRANSCRIPT —
+# every one of these sits on the island `bg`, not on a tool card's fill.
+# ---------------------------------------------------------------------------
+_FOLD_BINDINGS: tuple[Binding, ...] = (
+    Binding(
+        "fold.bar.glyph",
+        "dim",
+        "bg",
+        Role.NEUTRAL,
+        Surface.TRANSCRIPT,
+        note=(
+            "The disclosure mark and its trailing cell. `dim` because the bar "
+            "already states more than the mark does: the name and the tally "
+            "carry the sentence, and a brighter arrow would be the loudest "
+            "thing on a row that exists to be skipped."
+        ),
+    ),
+    Binding(
+        "fold.bar.name",
+        "muted",
+        "bg",
+        Role.NEUTRAL,
+        Surface.TRANSCRIPT,
+        note=(
+            "The bar's name column (`turn`, `work`, or a sub-group's tool), on "
+            "the same cells the tool rows' names use. `muted`, one rung above "
+            "the summary's `dim`: the name is what the row is, the summary is "
+            "what happened, and a folded bar is read at a glance for the first."
+        ),
+    ),
+    Binding("fold.bar.summary", "muted", "bg", Role.NEUTRAL, Surface.TRANSCRIPT),
+    Binding(
+        "fold.bar.failed_answered",
+        "muted",
+        "bg",
+        Role.NEUTRAL,
+        Surface.TRANSCRIPT,
+        note=(
+            "A failure count on a turn that ANSWERED: history, not alarm — the "
+            "reader already got the outcome, and a red tally would send them "
+            "hunting through work that did not matter. The desktop retired this "
+            "tally for the same reason (issue #6); the TUI keeps the count but "
+            "drops the alarm."
+        ),
+    ),
+    Binding(
+        "fold.bar.failed_dead",
+        "danger",
+        "bg",
+        Role.OUTCOME,
+        Surface.TRANSCRIPT,
+        bold=True,
+        note=(
+            "The only alarm on a bar: the turn DIED. Bold as well as red so the "
+            "count survives greyscale and CVD, which is the design's no-colour "
+            "contract — `✗ K failed` is already a shape cue, and weight is the "
+            "second non-colour channel."
+        ),
+    ),
+    Binding(
+        "fold.bar.time",
+        "dim",
+        "bg",
+        Role.NEUTRAL,
+        Surface.TRANSCRIPT,
+        note="The right-aligned summed clock: reference, not outcome.",
+    ),
+    Binding(
+        "fold.bar.live",
+        "accent",
+        "bg",
+        Role.LIVENESS,
+        Surface.TRANSCRIPT,
+        note=(
+            "`◐ <tool> <summary> <elapsed>` while a run is still going: the "
+            "accent's existing meaning (something is happening now), spent on "
+            "the one cell a reader checks to know the turn has not stalled."
+        ),
+    ),
+    Binding(
+        "fold.foot.success_glyph",
+        "success",
+        "bg",
+        Role.OUTCOME,
+        Surface.TRANSCRIPT,
+        note="The `✓` that opens a settled turn's foot line.",
+    ),
+    Binding(
+        "fold.foot.text",
+        "dim",
+        "bg",
+        Role.NEUTRAL,
+        Surface.TRANSCRIPT,
+        note=(
+            "The foot's `N actions · 12s`. `dim` rather than `muted`: it is a "
+            "receipt under the answer, and at `muted` it competed with the "
+            "narration remarks the step above deliberately paints quieter."
+        ),
+    ),
+    Binding(
+        "fold.foot.failure",
+        "danger",
+        "bg",
+        Role.OUTCOME,
+        Surface.TRANSCRIPT,
+        note=(
+            "`✗ turn failed · <reason>`, wrapping. One ink for glyph and text: "
+            "the reason is a diagnosis, and a sentence split across two inks "
+            "reads as two rows."
+        ),
+    ),
+    Binding(
+        "fold.narration",
+        "muted",
+        "bg",
+        Role.NEUTRAL,
+        Surface.TRANSCRIPT,
+        note=(
+            "Mid-turn narration in By response — the remark that led to the "
+            "work, drawn at the prose column. `muted` is the ramp's secondary "
+            "ink and clears the 4.5:1 floor on both grounds in every registered "
+            "theme (`test_palette_contrast`), which is what lets the answer stay "
+            "`fg` and the step still read as one block."
+        ),
+    ),
+)
+
+BINDINGS: tuple[Binding, ...] = (
+    _MARKDOWN_BINDINGS + _CODE_BINDINGS + _TOOL_ROW_BINDINGS + _FOLD_BINDINGS
+)
 
 #: Derived index. Built once at import time — `BINDINGS` is a module-level
 #: constant tuple, never mutated after definition.

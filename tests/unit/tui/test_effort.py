@@ -1471,6 +1471,8 @@ def _attached_viewer(answer: Any) -> tuple[Any, list[dict[str, Any]], list[Any]]
     viewer = object.__new__(Viewer)
     viewer._client = Client()
     viewer._handlers = [notices.append]
+    # These fixtures bypass AttachedSession.__init__ but use its live dispatch.
+    viewer._event_observers = []
     viewer._streaming = True
     return viewer, sent, notices
 
@@ -1562,6 +1564,8 @@ async def _real_viewer(runtime: Any) -> tuple[Any, Any, list[Any]]:
     viewer = object.__new__(Viewer)
     viewer._client = client
     viewer._handlers = [notices.append]
+    # These fixtures bypass AttachedSession.__init__ but use its live dispatch.
+    viewer._event_observers = []
     viewer._streaming = True
     return viewer, client, notices
 

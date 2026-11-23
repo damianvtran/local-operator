@@ -84,6 +84,10 @@ PREFIXES_TEXT_POLICY = {
     # is refused with the option list — nothing after `/language` is ever
     # forwarded to a model.
     "language": True,
+    # The transcript layout token (`by-turn` | `by-response`), `/language`'s row
+    # class exactly: both tokens are offered by the inline list and read by the
+    # handler, and anything else is refused — never forwarded to a model.
+    "transcript": True,
     # --- a command whose trailing text is its OWN instruction ----------------
     # `cancel | retry | adjust <text>`: the words are the supplement job's
     # control vocabulary, read by the handler and sent to the generator — never
@@ -406,6 +410,9 @@ ARGUMENT_SHAPE_POLICY = {
     "tag": ArgumentShape.ANY,
     # `on`/`off` are selectors; a sentence after them is prose.
     "tags": ArgumentShape.WORD,
+    # A layout token: a value the inline list offers and the handler consumes or
+    # refuses, never a prompt.
+    "transcript": ArgumentShape.ANY,
 }
 
 
@@ -464,6 +471,9 @@ def test_the_vocabulary_is_exactly_the_desktop_argument_set() -> None:
         # A language tag, `/theme`'s row class exactly: a value the inline
         # list offers and the handler consumes or refuses, never a prompt.
         "language",
+        # The transcript layout, the same class as `language`: two tokens the
+        # inline list offers and the handler consumes or refuses.
+        "transcript",
         # the command's own control vocabulary (not a prompt, not a list value)
         "highlights",
     }

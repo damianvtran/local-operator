@@ -66,6 +66,10 @@ DEFERRED_MAX_BYTES = 160 * 1024
 #: 77,924 B, 100 B over, and the namespace meets the deferral criterion (SDK
 #: refusals are finished strings rendered in the embedding process), so it was
 #: deferred instead, returning hi to 72,321 B.
+#:
+#: NOT raised for wire.team_integrations (PR #4297): its 22 consent-card keys
+#: put hi at 78,277 B, 453 B over; the card is rendered in-process into plain
+#: strings, so the namespace was deferred instead, returning hi to 74,472 B.
 EAGER_TOTAL_MAX_BYTES = 76 * 1024
 
 
@@ -98,6 +102,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.settings.hub_defaults",
         "wire.settings.hub_org",
         "wire.settings.keymap",
+        "wire.settings.transcript_display",
         "wire.language_receipts",
         "wire.voice_availability",
         "wire.harness_import_detail",
@@ -121,7 +126,9 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.github",
         "wire.errors.bedrock",
         "wire.login.bedrock",
+        "wire.providers.reauth",
         "wire.errors.sdk_spec",
+        "wire.team_integrations",
     }, (
         "The deferred set is a reviewed policy, not a place to park a large "
         "namespace. Adding one requires updating this assertion, recording its "

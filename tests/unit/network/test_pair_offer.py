@@ -42,6 +42,7 @@ from local_operator.network.credentials import offers
 from local_operator.network.handshake import (
     PAIR_OFFER_WAIT_S,
     Credential,
+    DialerExpectation,
     Handshake,
     pair_abort_frame,
     pair_ready_frame,
@@ -1427,7 +1428,12 @@ def test_a_new_owner_sends_nothing_to_an_old_joiner(
             ),
         )
         handshake.send_auth(sock, credential)
-        handshake.read_welcome(reader, wire.deadline_in(30))
+        # Pinned to the token's inviter, exactly as `_join_one` pins it.
+        handshake.read_welcome(
+            reader,
+            wire.deadline_in(30),
+            DialerExpectation(device_id=minted.envelope.inviter_device_id),
+        )
         result = handshake.establish()
         codec = handshake.codec()
         sock.sendall(codec.seal(pair_ready_frame(req=1, typed_sas=result.sas)))

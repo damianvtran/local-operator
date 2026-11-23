@@ -1,0 +1,48 @@
+{
+  "reviewer": "designer eb9408d1d41b",
+  "actual_model": "openai/gpt-6.1-sol",
+  "model_source": "explicit host model-switch after anthropic/claude-opus-5-5 quota failure",
+  "head": "db684f29e586eea63c9428ab11f56a9008cf2645",
+  "scope": "e9e6c3711149..db684f29e586",
+  "round": 2,
+  "verdict": "TERMINAL; D1 resolved; no new BLOCKER or MAJOR in scoped visual delta",
+  "evidence_root": "/Users/damian/.local-operator/sessions/eb9408d1d41b/scratchpad",
+  "sources": {
+    "old_reproduction": "/Users/damian/.local-operator/sessions/fc9fd773c06f/scratchpad/old-frames/first-frame.png",
+    "prior_fixed_frame": "/Users/damian/.local-operator/sessions/fc9fd773c06f/scratchpad/frames/first-command-frame.png",
+    "current_qa_frames": "/Users/damian/.local-operator/sessions/9d351e8047b7/scratchpad/frames",
+    "qa_capture_scripts_read": ["qa_realpath.py", "qa_neighbors.py", "qa_warnings.py"],
+    "own_current_capture": "current-frames/manifest.json",
+    "own_remedy_capture": "remedy-frames/manifest.json",
+    "pixel_comparison": "qa-frame-comparison.json",
+    "narrow_comparison": "narrow-scroll-comparison.json"
+  },
+  "derived_results": {
+    "default_command_external_pairs_pixel_identical": "6/6 (fr, zh-CN, ur; 100x30)",
+    "narrow_60_first_settled_body_title_hint_equal": "6/6; pixels differ in four because viewport/layout repins after language-dependent line-count changes; NOT a claim of no narrow reflow",
+    "own_initial_captures": 36,
+    "own_initial_overlong_rows": 0,
+    "own_initial_horizontal_scrollbars": 0,
+    "own_remedy_captures": 9,
+    "own_remedy_overlong_rows": 0,
+    "remedy_fixture": "wedged=1, stall_held=False, synthetic pid4243; no signal/process action",
+    "source_identity": "complete intended 12-character a1b2c3d4e5f6 at 120/80/60; not arbitrary full40-character source hash guarantee",
+    "terminal_card_cell_budgets": {"120":101,"80":65,"60":47},
+    "warnings": "viewed QA9 explicit behind=True frames, full0.91.0 and whole /update, fr/zh-CN/ur120/80/60; initial fixture without behind=True did not cover warning, corrected by QA",
+    "convergence_retention_sha256_check": "78/78 match supplied retention proof",
+    "stylesheet_sha256_r1_priorH_currentH": "a388e695061e014ecd8e2aa1334bf4f4020fd4edcbf9eeeecfdfd8e51f5d4783",
+    "font_sizes": "one declared13px",
+    "declared_warning_frame_fill_colours": 8,
+    "contrast_against_302a20": {"e9e5db":11.298,"b5afa2":6.509,"38c96a":6.585,"e0b04b":7.093,"837c6d":3.430}
+  },
+  "limits": [
+    "No native terminal Urdu shaping or global RTL approval; librsvg pixels only",
+    "No all-theme rerender or whole277-key language reaudit; R1 unchanged matrix retained by source compatibility, current delta rendered",
+    "Dim contrast3.430 is unchanged pre-existing and out of scope",
+    "No new full UI clearance; stable English protocol/export header remains explicit contract exception",
+    "Did not rerun linguistic audits or certify header-only translator model provenance",
+    "Existing narrow end-pinned reflow disclosed; first locale-owned body/title/footer are already selected-language, no new D1 recurrence",
+    "Initial36-frame capture completed before manager's no-duplicate note; stopped broad capture and used QA frames; later granted remedy-only supplement captured9 frames, no duplicate warning App dispatch"
+  ],
+  "hygiene": "Read-only manager worktree at H; isolated synthetic HOME/config, env-i, real OperatorApp CSS; no install/native/browser/OSclipboard/signals/refmoves; no servers started"
+}

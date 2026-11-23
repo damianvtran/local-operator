@@ -1,0 +1,118 @@
+{
+  "kind": "mechanical_translation_checks_not_audit",
+  "status": "translated",
+  "key_count": 9,
+  "same_key_order": true,
+  "exact_placeholders": true,
+  "technical_tokens": true,
+  "NFC": true,
+  "bidi_controls": 0,
+  "catalogue_validator_exit_code": 0,
+  "rows": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "arguments": [
+        [
+          "role",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{role}"
+      ],
+      "plural_selectors": [],
+      "NFC": true
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "arguments": [],
+      "placeholder_sequence": [],
+      "plural_selectors": [],
+      "NFC": true
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "arguments": [],
+      "placeholder_sequence": [],
+      "plural_selectors": [],
+      "NFC": true
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{tier}"
+      ],
+      "plural_selectors": [],
+      "NFC": true
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{tier}"
+      ],
+      "plural_selectors": [],
+      "NFC": true
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{tier}"
+      ],
+      "plural_selectors": [],
+      "NFC": true
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{tier}"
+      ],
+      "plural_selectors": [],
+      "NFC": true
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "arguments": [
+        [
+          "selector",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{selector}"
+      ],
+      "plural_selectors": [],
+      "NFC": true
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "arguments": [],
+      "placeholder_sequence": [],
+      "plural_selectors": [],
+      "NFC": true
+    }
+  ]
+}

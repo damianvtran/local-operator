@@ -1,0 +1,6 @@
+{
+  "wire.providers.reauth.sign_in_expired": "Phiên đăng nhập {label} đã hết hạn và không thể tự động gia hạn. Hãy đăng nhập lại: /login {provider} trong ứng dụng hoặc lop login {provider} trong terminal.",
+  "wire.providers.reauth.session_policy": "Tổ chức Google Workspace của bạn yêu cầu đăng nhập lại vào {label} (Google Cloud session control), nên phiên đăng nhập không thể tự động gia hạn. Hãy đăng nhập lại: /login {provider} trong ứng dụng hoặc lop login {provider} trong terminal.",
+  "wire.providers.reauth.status_sign_in_required": "cần đăng nhập lại",
+  "wire.providers.reauth.status_session_policy": "cần đăng nhập lại (chính sách Workspace)"
+}

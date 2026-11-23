@@ -111,6 +111,11 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
             # #2803 report. Read with ``getattr`` for the same reason the flags
             # above are: tests build args objects that predate the field.
             resumed=bool(getattr(args, "resume", None)),
+            # A FRESH `sessions spawn` workstream (`--workstream`, no `--resume`)
+            # gets the same queued ask: it is listed, operator-visible work whose
+            # questions must reach the inbox without a resume first. Plain
+            # `lop exec` and ephemeral spawns carry no flag and stay ask-free.
+            workstream=bool(getattr(args, "workstream", False)),
             # The supervisor's descriptor, if one was inherited (stage E). Read with
             # ``getattr`` for the same reason the ``control`` flag above is: this
             # runner is also driven by tests and by the detached worker, which build

@@ -8,11 +8,11 @@ or HARD-CODED to a number the host controls:
 
 | Bucket | Count | Meaning |
 | --- | --- | --- |
-| A | 139 | derived or load-independent — safe by construction |
-| B | 85 | hard-coded wall-clock ceiling under 3 s — a future red shard |
-| C | 942 | fixed `pilot.pause()`/`sleep` before an assertion — order-dependent |
-| D | 88 | bounded wait of 3 s or more — fires only on a real hang |
-| **total** | **312 time/CPU asserts + 942 settle nodes** | |
+| A | 161 | derived or load-independent — safe by construction |
+| B | 93 | hard-coded wall-clock ceiling under 3 s — a future red shard |
+| C | 994 | fixed `pilot.pause()`/`sleep` before an assertion — order-dependent |
+| D | 100 | bounded wait of 3 s or more — fires only on a real hang |
+| **total** | **354 time/CPU asserts + 994 settle nodes** | |
 
 The 3 s line between B and D is stated rather than tuned: CI has measured a
 loaded runner adding hundreds of milliseconds to a call the product did not
@@ -27,9 +27,9 @@ Bucket C is an aggregate rather than a list because each node is one
 The counts describe the tree this document is committed with; every
 count in this file is computed by the sweep, none is typed in.
 
-## Converted in this PR
+## Converted
 
-6 bucket-B ceilings were replaced by the property behind them.
+16 bucket-B ceilings were replaced by the property behind them.
 None had its number raised: a wider constant moves the failure rather than
 removing it. Nodes are cited by pytest node id, which does not drift the way
 a line number does.
@@ -42,21 +42,43 @@ a line number does.
 | `tests/unit/tools/test_builtin_tools.py::test_a_stderr_with_no_signature_phrase_is_never_scanned` | `elapsed < 0.05` | the signature regex is never ENTERED for phrase-free stderr, and entered exactly once for input that carries the phrase (the control) |
 | `tests/unit/team_bridge/test_inline_data.py::test_a_one_megabyte_marker_dense_body_stays_fast` | `elapsed < 0.05` | one marker search for a body carrying 50,000 markers, which no per-URI parser can satisfy |
 | `tests/unit/tui/test_subagent_stats.py::test_pricing_a_child_never_blocks_the_paint` | `elapsed < 0.2` | the repaint resolved no model on its own thread (a 10 s listing there would be a blocked paint) |
+| `tests/unit/server/test_desktop_open_frame.py::test_the_first_frame_spends_only_what_is_left_of_its_budget` | `elapsed < 1.0; elapsed_deadline < 0.5` | the frame answered `building` while its GATED scan was still unfinished, and the spent-budget read finished on its first coroutine step (no await reached) |
+| `tests/unit/server/test_desktop_open_frame.py::test_a_warm_reopen_does_not_wait_on_its_own_paused_scan` | `elapsed < 0.5` | the read finished on its first coroutine step against a scan pinned in flight and paused (gated scan, hold kept young) — the old fixture raced the real scan |
+| `tests/unit/mcp/test_manager.py::test_prompt_child_costs_no_polling_tick` | `elapsed < 0.09` | no positive `anyio.sleep`/`asyncio.sleep` during stdio teardown — the polling tick is a sleep, the event-driven stop takes none |
+| `tests/unit/mcp/test_oauth_401_detached_persist.py::test_persist_wait_is_per_server_and_cut_at_the_deadline` | `time.monotonic() - start < 0.1; 0.2 <= time.monotonic() - start < 0.6` | an unrelated server's call finishes on its first step; only this server's exchange is awaited, and the wait's loop-clock cut sits at deadline − lock bound (30 s from a cut at the deadline) |
+| `tests/unit/saver/test_round1_remediation.py::test_r1_a_hung_availability_read_adds_nothing_to_the_turn` | `elapsed < 0.1` | `_apply_saver` finished on its first coroutine step: the turn reached no await |
+| `tests/unit/notifications/test_inbox_performance.py::test_a_read_after_the_interval_serves_the_snapshot_and_refreshes_off_thread` | `elapsed < 0.3` | the read answered while the GATED reload had not finished (plus the existing off-thread identity check) |
+| `tests/unit/notifications/test_inbox_performance.py::test_server_startup_warms_the_registry_without_blocking` | `time.monotonic() - t0 < 0.2` | the warm returned before its GATED build finished |
+| `tests/unit/test_session_factory_classification.py::test_the_provider_probe_is_inside_the_wait_budget` | `elapsed < 0.2` | the selection returned while the GATED probe had not answered, its task still pending |
+| `tests/unit/mobile/test_tui_bridge.py::test_tui_stop_receipt_does_not_wait_for_the_app_loop` | `elapsed < 0.3` | the receipt arrived before the GATED app ran the stop hop |
+| `tests/unit/mobile/test_tui_bridge.py::test_tui_hop_is_bounded_by_one_budget` | `elapsed < 0.9` | the budget's `TimeoutError` arrived before the GATED app ran the callback |
 
 Each conversion carries a negative control in its PR: reverting the product
 behaviour fails the new assertion deterministically, fast host or loaded, with
 no timing involved. None of these nodes still holds a bucket-B row.
 
+## Reviewed and kept
+
+5 bucket-B rows were read, measured and left as they are, filed under A:
+
+| node | assertion | why it stays |
+| --- | --- | --- |
+| `tests/unit/classification/test_live_openrouter.py::test_the_local_overhead_is_a_small_fraction_of_a_real_call` | `local_ms < 10.0` | never reached by CI: the module skips without `OPENROUTER_API_KEY(_DEV)`, and `ci.yml` passes that secret only to the cli/server sanity steps, not to a test shard; it is a manual live benchmark |
+| `tests/unit/secrets/test_credential_shapes.py::test_a_numeric_row_inside_an_open_block_is_not_charged_per_line` | `cpu < 0.5` | THREAD CPU since batch 1 (was `process_time`, which also bills every other thread in the worker); the bound is ~3 orders over the linear path and an order under the regressed walk (6.7-12.5 s), and single-thread CPU is not inflated by host load |
+| `tests/unit/secrets/test_credential_shapes.py::test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap` | `cpu < 0.05` | THREAD CPU since batch 1: 0.4-0.5 ms measured for the 8-column row with and without four busy threads (100x margin); the released spelling costs 222 ms |
+| `tests/unit/secrets/test_credential_shapes.py::test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap` | `cpu < 0.5` | THREAD CPU since batch 1: 18.4 ms measured for the 140-row payload with and without four busy threads (27x margin), where `process_time` read 112 ms beside them |
+| `tests/unit/secrets/test_credential_shapes.py::test_the_short_arms_lookahead_is_load_bearing_on_its_own_population` | `cpu < 0.05` | THREAD CPU since batch 1: 0.2-0.6 ms measured (80x margin); the released lookahead costs 18.6 s on this payload |
+
 ## Still to convert
 
-Bucket B has 85 entries, tightest first in the table below. The
+Bucket B has 93 entries, tightest first in the table below. The
 five tightest:
 
-- `tests/unit/test_tui_responsiveness.py:2391` (0.002 s) — `test_s2_gc_attribution_costs_nothing_measurable_when_nothing_collects`
-- `tests/unit/classification/test_live_openrouter.py:294` (0.01 s) — `test_the_local_overhead_is_a_small_fraction_of_a_real_call`
-- `tests/unit/test_tui_responsiveness.py:916` (0.02 s) — `test_second_title_backfill_pass_is_stat_only`
-- `tests/unit/secrets/test_credential_shapes.py:2558` (0.05 s) — `test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap`
-- `tests/unit/secrets/test_credential_shapes.py:2612` (0.05 s) — `test_the_short_arms_lookahead_is_load_bearing_on_its_own_population`
+- `tests/unit/test_tui_responsiveness.py:2679` (0.002 s) — `test_s2_gc_attribution_costs_nothing_measurable_when_nothing_collects`
+- `tests/unit/server/test_desktop_sessions.py:8392` (0.3 s) — `test_the_snapshot_does_not_wait_on_a_contended_attention_store`
+- `tests/unit/evaluation/test_session_arm.py:6892` (0.4 s) — `test_parallel_commands_at_the_maximum_are_refused_unsent_not_cut`
+- `tests/unit/harness/test_comms.py:649` (0.4 s) — `test_ask_gives_up_when_the_child_never_starts`
+- `tests/unit/server/test_desktop_quota_notice.py:777` (0.4 s) — `test_forced_refresh_failure_keeps_the_cached_row`
 
 ## Bucket B — hard-coded ceilings (the future red shards)
 
@@ -65,18 +87,10 @@ the host has to stall for the assertion to fail.
 
 | file:line | assertion | bound | why it can cross |
 | --- | --- | --- | --- |
-| `tests/unit/test_tui_responsiveness.py:2391` | `per_leg_ms < 2.0` | 0.002 s | hard-coded 0.002 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/classification/test_live_openrouter.py:294` | `local_ms < 10.0` | 0.01 s | hard-coded 0.01 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/test_tui_responsiveness.py:916` | `elapsed_ms < 20.0` | 0.02 s | hard-coded 0.02 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/secrets/test_credential_shapes.py:2558` | `cpu < 0.05` | 0.05 s | hard-coded 0.05 s CPU-time ceiling — a loaded runner crosses it |
-| `tests/unit/secrets/test_credential_shapes.py:2612` | `cpu < 0.05` | 0.05 s | hard-coded 0.05 s CPU-time ceiling — a loaded runner crosses it |
-| `tests/unit/mcp/test_manager.py:1860` | `elapsed < 0.09` | 0.09 s | hard-coded 0.09 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/mcp/test_oauth_401_detached_persist.py:330` | `time.monotonic() - start < 0.1` | 0.1 s | hard-coded 0.1 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/saver/test_round1_remediation.py:803` | `elapsed < 0.1` | 0.1 s | hard-coded 0.1 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/test_session_factory_classification.py:1605` | `elapsed < 0.2` | 0.2 s | hard-coded 0.2 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/mobile/test_tui_bridge.py:1126` | `elapsed < 0.3` | 0.3 s | hard-coded 0.3 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/server/test_desktop_sessions.py:8352` | `elapsed < 0.3` | 0.3 s | hard-coded 0.3 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/harness/test_comms.py:645` | `elapsed < 0.4` | 0.4 s | hard-coded 0.4 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/test_tui_responsiveness.py:2679` | `per_leg_ms < 2.0` | 0.002 s | hard-coded 0.002 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/server/test_desktop_sessions.py:8392` | `elapsed < 0.3` | 0.3 s | hard-coded 0.3 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/evaluation/test_session_arm.py:6892` | `time.monotonic() - started < 0.4` | 0.4 s | hard-coded 0.4 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/harness/test_comms.py:649` | `elapsed < 0.4` | 0.4 s | hard-coded 0.4 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/server/test_desktop_quota_notice.py:777` | `elapsed < 0.4` | 0.4 s | hard-coded 0.4 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/test_session_factory_classification.py:342` | `elapsed < 0.4` | 0.4 s | hard-coded 0.4 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/analytics/test_recorder.py:743` | `time.monotonic() - started < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
@@ -84,45 +98,45 @@ the host has to stall for the assertion to fail.
 | `tests/unit/code_requests/test_scope_head_shapes.py:230` | `elapsed < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/code_requests/test_scope_head_shapes.py:238` | `elapsed < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/compaction/test_tokens.py:751` | `elapsed < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/guardrails/test_classify.py:1016` | `time.perf_counter() - start < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/mcp/test_oauth_refresh_durability.py:545` | `elapsed < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/network/test_pair_offer.py:463` | `capped.deadlines[0] - before <= 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/secrets/test_credential_shapes.py:2382` | `cpu < 0.5` | 0.5 s | hard-coded 0.5 s CPU-time ceiling — a loaded runner crosses it |
-| `tests/unit/secrets/test_credential_shapes.py:2568` | `cpu < 0.5` | 0.5 s | hard-coded 0.5 s CPU-time ceiling — a loaded runner crosses it |
-| `tests/unit/server/test_desktop_open_frame.py:440` | `elapsed_deadline < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/server/test_desktop_open_frame.py:476` | `elapsed < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/session/test_compression_writer_race.py:115` | `time.monotonic() - started < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/session/test_hub_note_wake_coalesce.py:186` | `time.perf_counter() - started < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/session/test_hub_note_wake_coalesce.py:260` | `time.perf_counter() - started < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/session/test_transcript_index.py:2789` | `time.monotonic() - started < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/test_session_factory_classification.py:388` | `elapsed < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/test_session_factory_classification.py:1546` | `elapsed < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/test_tui_responsiveness.py:1313` | `elapsed_ms < 500.0` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/test_tui_responsiveness.py:1389` | `time.perf_counter() - started < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/test_tui_responsiveness.py:1438` | `elapsed_ms < 500.0` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/test_session_factory_classification.py:1564` | `elapsed < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/test_tui_responsiveness.py:1373` | `elapsed_ms < 500.0` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/test_tui_responsiveness.py:1449` | `time.perf_counter() - started < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/test_tui_responsiveness.py:1498` | `elapsed_ms < 500.0` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/test_xdist_worker_budget.py:1350` | `elapsed < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/wakes/test_lock.py:142` | `time.monotonic() - started < 0.5` | 0.5 s | hard-coded 0.5 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/mcp/test_oauth_401_detached_persist.py:335` | `0.2 <= time.monotonic() - start < 0.6` | 0.6 s | hard-coded 0.6 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/session/test_conversation_name_persistence.py:331` | `elapsed < 0.4 * 1.8` | 0.72 s | hard-coded 0.72 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/session/test_conversation_name_persistence.py:356` | `elapsed < 0.4 * 1.8` | 0.72 s | hard-coded 0.72 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/evaluation/adapters/osworld/test_guest_supervisor.py:2171` | `elapsed < 0.75` | 0.75 s | hard-coded 0.75 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/mcp/test_oauth_inflight_refresh_remediation.py:159` | `elapsed < 0.8` | 0.8 s | hard-coded 0.8 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/session/test_transcript_index.py:2867` | `time.monotonic() - started < 0.8` | 0.8 s | hard-coded 0.8 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/session/test_transcript_index.py:2884` | `time.monotonic() - started < 0.8` | 0.8 s | hard-coded 0.8 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/mobile/test_peer_client.py:170` | `elapsed < 0.9` | 0.9 s | hard-coded 0.9 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/mobile/test_tui_bridge.py:1073` | `elapsed < 0.9` | 0.9 s | hard-coded 0.9 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/network/test_session_plane.py:5478` | `elapsed < 0.9` | 0.9 s | hard-coded 0.9 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_session_plane.py:5788` | `elapsed < 0.9` | 0.9 s | hard-coded 0.9 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/classification/test_vendor_borrow.py:103` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/code_requests/test_scope_head_shapes.py:243` | `time.perf_counter() - start < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/evaluation/test_session_arm.py:4092` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/harness/test_comms.py:624` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/evaluation/test_session_arm.py:4781` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/guardrails/test_dotdot_through_symlink.py:493` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/harness/test_comms.py:628` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/mcp/test_oauth_inflight_refresh_remediation.py:145` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/network/test_invite.py:309` | `abs(late - pair_timeout_seconds(invite_mod.remaining_seconds(nearly_done))) <= 1` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/network/test_mesh_update.py:1174` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_mesh_update.py:1188` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/network/test_mobility.py:1354` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/network/test_slow_ops.py:300` | `latency < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_remote_files_precache.py:194` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_slow_ops.py:302` | `latency < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/providers/test_usage_cache.py:428` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/server/test_desktop_open_frame.py:427` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/secrets/test_encoded_credential_structures.py:412` | `time.perf_counter() - started < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/server/test_desktop_open_frame.py:1779` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/session/runtime/test_roster.py:243` | `time.monotonic() - started < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/session/runtime/test_server.py:7223` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/session/runtime/test_server.py:7330` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/session/test_index_prewarm.py:746` | `time.perf_counter() - began < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/test_buildwatch.py:416` | `time.monotonic() - started < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/test_buildwatch.py:447` | `time.monotonic() - started < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/test_herdr_reporter.py:802` | `time.monotonic() - started < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/test_multiplexer.py:695` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/test_session_factory_classification.py:379` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
@@ -134,22 +148,38 @@ the host has to stall for the assertion to fail.
 | `tests/unit/tui/test_visual_capture.py:323` | `elapsed < 1.0` | 1 s | hard-coded 1 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/e2e/test_desktop_radient_statuses.py:483` | `elapsed < 1.2` | 1.2 s | hard-coded 1.2 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/e2e/test_desktop_radient_statuses.py:486` | `elapsed < 1.2` | 1.2 s | hard-coded 1.2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/guardrails/test_reached_worktrees.py:712` | `time.monotonic() - started < 1.5` | 1.5 s | hard-coded 1.5 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_owner_quiet_wait.py:320` | `time.monotonic() - fired < 1.5` | 1.5 s | hard-coded 1.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/saver/test_round1_remediation.py:637` | `time.perf_counter() - started < 1.5` | 1.5 s | hard-coded 1.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/server/test_desktop_quota_notice.py:846` | `elapsed < 1.5` | 1.5 s | hard-coded 1.5 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/tui/test_click_durability.py:1137` | `elapsed < 1.5` | 1.5 s | hard-coded 1.5 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/server/test_server_health.py:220` | `cold_elapsed < 1.5` | 1.5 s | hard-coded 1.5 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/server/test_server_health.py:220` | `warm_elapsed < 1.5` | 1.5 s | hard-coded 1.5 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/tui/test_click_durability.py:1140` | `elapsed < 1.5` | 1.5 s | hard-coded 1.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/e2e/test_desktop_radient_statuses.py:498` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/e2e/test_steer_wake_e2e.py:185` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/analytics/test_maintenance_ownership.py:662` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/analytics/test_maintenance_ownership.py:670` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/mobile/test_session_move.py:518` | `time.monotonic() - started < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_create_idempotency.py:426` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_owner_quiet_wait.py:602` | `time.monotonic() - started < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_owner_quiet_wait.py:627` | `time.monotonic() - started < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_owner_quiet_wait.py:649` | `time.monotonic() - started < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_owner_quiet_wait.py:689` | `time.monotonic() - started < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_owner_quiet_wait.py:718` | `time.monotonic() - started < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_owner_quiet_wait.py:736` | `time.monotonic() - started < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/network/test_skillsync.py:485` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/providers/test_usage_cache_routing_reader.py:191` | `time.monotonic() - start < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/saver/test_round1_remediation.py:273` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/secrets/test_encoded_credential_structures.py:1276` | `time.perf_counter() - started < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/session/test_hub_note_wake_coalesce.py:135` | `0.4 < elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/test_herdr_reporter.py:768` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/tools/test_builtin_tools.py:8238` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/test_update_operation.py:97` | `time.perf_counter() - started < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/test_update_operation.py:101` | `time.perf_counter() - started < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/tools/test_builtin_tools.py:8269` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/tools/test_wait_budget.py:106` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/tools/test_wait_settles_on_events.py:49` | `elapsed < 2.0` | 2 s | hard-coded 2 s wall-clock ceiling — a loaded runner crosses it |
+| `tests/unit/guardrails/test_guard_forge_auth.py:140` | `time.monotonic() - started < 2.5` | 2.5 s | hard-coded 2.5 s wall-clock ceiling — a loaded runner crosses it |
 | `tests/unit/tui/test_status_command.py:169` | `elapsed < 2.5` | 2.5 s | hard-coded 2.5 s wall-clock ceiling — a loaded runner crosses it |
-| `tests/unit/session/test_catalog_scan_cost.py:1577` | `time.time() - refreshed < 5` | 5 s | 5 s stamp-vs-now tolerance — a stall between write and read crosses it |
+| `tests/unit/session/test_catalog_scan_cost.py:1579` | `time.time() - refreshed < 5` | 5 s | 5 s stamp-vs-now tolerance — a stall between write and read crosses it |
 
 ## Bucket D — hang detectors
 
@@ -158,8 +188,8 @@ a slowdown, so the number only has to be safely larger than the work.
 
 | file:line | assertion | bound | why it is D and not B |
 | --- | --- | --- | --- |
-| `tests/e2e/test_signal_drain_e2e.py:447` | `latency < 10.0` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/e2e/test_signal_drain_e2e.py:506` | `elapsed < 30.0` | 30 s | 30 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/e2e/test_signal_drain_e2e.py:461` | `latency < 10.0` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/e2e/test_signal_drain_e2e.py:520` | `elapsed < 30.0` | 30 s | 30 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/e2e/test_steer_wake_e2e.py:390` | `elapsed < 30.0` | 30 s | 30 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/e2e/test_steer_wake_e2e.py:470` | `elapsed < 30.0` | 30 s | 30 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/analytics/test_recorder.py:558` | `time.monotonic() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
@@ -168,40 +198,46 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/evaluation/adapters/test_rpc.py:399` | `elapsed < 10.0` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/evaluation/runner/test_run_episode_resolution.py:77` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/evaluation/runner/test_secrets.py:271` | `0.05 <= elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/harness/test_loop.py:4784` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/hub_sync/test_check_failure_reason.py:127` | `elapsed < 3` | 3 s | 3 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/guardrails/test_function_bodies.py:382` | `time.monotonic() - started < 8.0` | 8 s | 8 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/harness/test_loop.py:4911` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/hub_sync/test_check_failure_reason.py:132` | `elapsed < 3` | 3 s | 3 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/hub_sync/test_skill_bundle.py:651` | `elapsed < 120` | 120 s | 120 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/library/test_store.py:1350` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/library/test_store.py:1357` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/mcp/test_auth.py:3361` | `elapsed < 10.0` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/mcp/test_auth.py:3382` | `_time.monotonic() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/mobile/test_bundle_build_bound.py:1438` | `elapsed < 10.0` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/model/test_configure.py:6242` | `elapsed < 3.0` | 3 s | 3 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/monitors/test_scheduler.py:1540` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/network/test_credentials_owner.py:1588` | `0 < remaining_ms <= 60000` | 60 s | 60 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/mobile/test_doctor.py:458` | `elapsed < 5` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/model/test_configure.py:6322` | `elapsed < 3.0` | 3 s | 3 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/monitors/test_scheduler.py:1558` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/network/test_credentials_owner.py:1715` | `0 < remaining_ms <= 60000` | 60 s | 60 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/network/test_credentials_share_push.py:204` | `elapsed < 10.0` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/network/test_credentials_share_push.py:521` | `time.monotonic() - started < 60.0` | 60 s | 60 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/network/test_membership_convergence.py:764` | `elapsed < 60.0` | 60 s | 60 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/network/test_mesh_first_contact.py:108` | `elapsed < 6.0` | 6 s | 6 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/network/test_session_plane.py:5142` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/network/test_slow_ops.py:117` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/network/test_slow_ops.py:358` | `time.monotonic() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/network/test_wipe_notice.py:325` | `elapsed < 4.5` | 4.5 s | 4.5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/network/test_credentials_share_push.py:576` | `time.monotonic() - started < 60.0` | 60 s | 60 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/network/test_membership_convergence.py:799` | `elapsed < 60.0` | 60 s | 60 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/network/test_mesh_first_contact.py:109` | `elapsed < 6.0` | 6 s | 6 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/network/test_owner_quiet_wait.py:545` | `time.monotonic() - started < 3.0` | 3 s | 3 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/network/test_session_plane.py:5452` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/network/test_slow_ops.py:119` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/network/test_slow_ops.py:360` | `time.monotonic() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/network/test_wipe_notice.py:338` | `elapsed < 4.5` | 4.5 s | 4.5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/notifications/test_sound.py:241` | `time.monotonic() - started < 10` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/providers/test_auth_store.py:3260` | `elapsed < 5` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/providers/test_login_cancel_cli.py:357` | `elapsed < 30.0` | 30 s | 30 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/providers/test_login_cancel_cli.py:393` | `elapsed < 30.0` | 30 s | 30 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/providers/test_login_cancellation.py:117` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/providers/test_tool_markup.py:360` | `time.perf_counter() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/scripts/test_owned_process_group_classification.py:513` | `elapsed < 15.0` | 15 s | 15 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/scripts/test_run_bounded.py:756` | `elapsed < 30` | 30 s | 30 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/scripts/test_run_bounded.py:889` | `elapsed < 30` | 30 s | 30 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/scripts/test_run_bounded.py:773` | `elapsed < 30` | 30 s | 30 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/scripts/test_run_bounded.py:906` | `elapsed < 30` | 30 s | 30 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/secrets/test_broker.py:508` | `elapsed < 8` | 8 s | 8 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/secrets/test_broker.py:604` | `time.monotonic() - started < 10` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/secrets/test_identifier_redaction.py:1013` | `elapsed < 20.0` | 20 s | 20 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/secrets/test_indirect_credential_names.py:371` | `time.perf_counter() - started < 5` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/server/test_desktop_link_preview.py:995` | `elapsed < 3.0` | 3 s | 3 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/session/runtime/test_daemon_serving_plane.py:746` | `time.monotonic() - started < 5` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/session/runtime/test_launch_arbitration.py:922` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/session/runtime/test_runtime_keep_alive.py:423` | `0.5 * WINDOW <= time.monotonic() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/session/runtime/test_runtime_keep_alive.py:472` | `0.5 * WINDOW <= time.monotonic() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/session/runtime/test_runtime_keep_alive.py:703` | `time.monotonic() - started < 25.0` | 25 s | 25 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/session/runtime/test_server.py:7414` | `time.monotonic() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/session/runtime/test_session_host.py:273` | `time.monotonic() - started < 6.0` | 6 s | 6 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/session/runtime/test_session_host.py:803` | `time.monotonic() - started < 5` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/session/test_bulk_resume.py:303` | `time.monotonic() - started < 10` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
@@ -213,7 +249,8 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/session/test_frontend_sync_liveness.py:1221` | `elapsed < 10.0` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/session/test_hub_note_wake_coalesce.py:96` | `1.8 < elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/session/test_session_peer.py:444` | `elapsed < 3.0` | 3 s | 3 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/team_bridge/test_delivery_state.py:675` | `_time.monotonic() - started < 5` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/session_files/test_perf.py:97` | `cpu < 30.0` | 30 s | 30 s CPU-time ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/team_bridge/test_delivery_state.py:680` | `_time.monotonic() - started < 5` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/test_clipboard.py:761` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/test_clipboard.py:786` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/test_clipboard.py:800` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
@@ -225,7 +262,9 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/test_hook_forwarding.py:472` | `time.monotonic() - started < 10` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/test_memory_guard.py:815` | `time.monotonic() - start < 4.0` | 4 s | 4 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/test_multiplexer.py:933` | `elapsed < 10.0` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/test_update.py:3870` | `update_mod._bounded_timeout(60.0, deadline) <= 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/test_permissions_cli.py:215` | `time.monotonic() - started < 10` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/test_update.py:4147` | `update_mod._bounded_timeout(60.0, deadline) <= 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/test_update_refresh_handoff.py:141` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/tools/test_bash_long_sleep_guard.py:307` | `time.perf_counter() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/tools/test_builtin_tools.py:164` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/tools/test_eval_tool.py:261` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
@@ -243,9 +282,12 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/tools/test_wait_wakes_on_peer_message.py:155` | `time.perf_counter() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/tools/test_wait_wakes_on_peer_message.py:199` | `time.perf_counter() - started < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/tui/test_notifications_page.py:1126` | `elapsed < 10.0` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
-| `tests/unit/tui/test_session_sidebar.py:2294` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/tui/test_profile_revert_action.py:412` | `elapsed < 10.0` | 10 s | 10 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/tui/test_session_sidebar.py:2303` | `elapsed < 5.0` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/tui/test_settle.py:142` | `elapsed < 5` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/tui/test_status_command.py:90` | `time.monotonic() - started < 5` | 5 s | 5 s wall-clock ceiling over a blocking path — only a real hang trips it |
 | `tests/unit/tui/test_status_command.py:199` | `time.monotonic() - started < 3` | 3 s | 3 s wall-clock ceiling over a blocking path — only a real hang trips it |
+| `tests/unit/web_fetch/test_passages.py:142` | `cpu < 60` | 60 s | 60 s CPU-time ceiling over a blocking path — only a real hang trips it |
 
 ## Bucket A — derived or load-independent
 
@@ -259,7 +301,9 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/browser_bridge/test_daemon.py:264` | `await_elapsed >= 2.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/browser_bridge/test_protocol.py:110` | `COMMAND_TIMEOUTS['await_access'] > 20.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/browser_bridge/test_remediation_round5.py:407` | `0.0 < float(pending['takeover_within_s']) <= LINK_SILENCE_TIMEOUT_S + PING_INTERVAL_S` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/browser_bridge/test_site_approval.py:471` | `120 <= timeout <= 600` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/classification/test_live_openrouter.py:158` | `response.latency_s > 0.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/classification/test_live_openrouter.py:294` | `local_ms < 10.0` | reviewed and kept — never reached by CI: the module skips without `OPENROUTER_API_KEY(_DEV)`, and `ci.yml` passes that secret only to the cli/server sanity steps, not to a test shard; it is a manual live benchmark |
 | `tests/unit/classification/test_live_openrouter.py:295` | `response.latency_s > 0.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/classification/test_service.py:144` | `recommendation.latency_s > 0.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/classification/test_service.py:313` | `recommendation.latency_s < 1.0` | no clock read — code constants / policy values; load cannot move it |
@@ -268,7 +312,8 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/compaction/test_pruning.py:538` | `ceiling <= 90` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/evaluation/adapters/osworld/test_guest_deadline.py:229` | `posted['timeout'] < 45.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/evaluation/adapters/osworld/test_guest_deadline.py:462` | `0.0 < inner < socket_timeout` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/evaluation/adapters/osworld/test_guest_disk.py:871` | `timeout > 0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/evaluation/adapters/osworld/test_guest_disk.py:886` | `timeout > 0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/evaluation/adapters/osworld/test_guest_disk.py:1705` | `steps[guest_disk.GROW_STEP_NAME]['duration_s'] > 0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/evaluation/adapters/osworld/test_guest_loss.py:952` | `event['delay_ms'] > 0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/evaluation/adapters/osworld/test_guest_supervisor.py:598` | `0.0 < evidence['waited_s'] <= aws_mod._PRE_ACTION_RECOVERY_BUDGET_S` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/evaluation/adapters/osworld/test_guest_supervisor.py:4489` | `elapsed >= 30.0` | no clock read — code constants / policy values; load cannot move it |
@@ -277,7 +322,9 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/evaluation/adapters/test_rpc.py:294` | `elapsed >= 0.6` | lower bound on elapsed — load only inflates it |
 | `tests/unit/evaluation/runner/test_episode_subprocess.py:967` | `elapsed >= 3.0` | lower bound on elapsed — load only inflates it |
 | `tests/unit/evaluation/test_deadlines.py:216` | `funded_timeout(120.0, params) < 3900.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/guardrails/test_worktree_remove_and_refusal_scope.py:280` | `prov._WORKTREE_STATUS_TIMEOUT_S > 34.3 > prov._GIT_TIMEOUT_S` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/harness/test_degeneration.py:809` | `cost_micro > 0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/mcp/test_oauth_401_detached_persist.py:368` | `time.monotonic() - start >= 0.2` | lower bound on elapsed — load only inflates it |
 | `tests/unit/mobile/test_bundle_build_bound.py:1343` | `verdict['elapsed'] < 10.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/mobile/test_bundle_build_bound.py:1405` | `verdict['elapsed'] >= 3.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/mobile/test_paid_usage.py:336` | `0 < second['retry_after_ms'] <= 15000` | no clock read — code constants / policy values; load cannot move it |
@@ -285,22 +332,28 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/model/test_catalogue.py:427` | `time.time() - raw['fetched_at'] < 60` | 60 s timestamp tolerance — load does not move wall-clock arithmetic |
 | `tests/unit/model/test_catalogue.py:2277` | `time.time() - raw['fetched_at'] < 60` | 60 s timestamp tolerance — load does not move wall-clock arithmetic |
 | `tests/unit/model/test_discovery.py:932` | `timeout > 0` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/network/test_credential_limit_skip.py:366` | `borrowed.owner.auth.blocked_remaining_ms(borrowed.row_a.id, STUB_PROVIDER, 'claude-opus-5-5') <= 60000` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/network/test_credentials_github.py:1548` | `BROKER_ERROR_TTL_MS[github_mod.CODE_APP_UNUSABLE] > 60000` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/network/test_credentials_github.py:1549` | `BROKER_ERROR_TTL_MS[github_mod.CODE_REPOSITORIES_UNSET] > 60000` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/network/test_credentials_owner.py:1584` | `detail['block_ms'] <= 60000` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/network/test_credentials_owner.py:1653` | `remaining_ms > 40 * 60000` | lower bound on elapsed — load only inflates it |
-| `tests/unit/network/test_credentials_owner.py:2197` | `0 < int(blocked['retry_after_ms']) <= 45000` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/network/test_credentials_owner.py:2293` | `18 * 60000 < int(refused['retry_after_ms']) <= 20 * 60000` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_borrowed_quota_failover.py:150` | `30 * 60000 < error.retry_after_ms <= 35 * 60000` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_credential_limit_skip.py:368` | `borrowed.owner.auth.blocked_remaining_ms(borrowed.row_a.id, STUB_PROVIDER, 'claude-opus-5-5') <= 60000` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_credentials_github.py:1630` | `BROKER_ERROR_TTL_MS[github_mod.CODE_APP_UNUSABLE] > 60000` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_credentials_github.py:1631` | `BROKER_ERROR_TTL_MS[github_mod.CODE_REPOSITORIES_UNSET] > 60000` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_credentials_hold_github_mcp.py:841` | `acked['lent_hold_until_ms'] == detail['hold_until_ms'] > 0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_credentials_offline_hold.py:435` | `refused.retry_after_ms > 0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_credentials_owner.py:1711` | `detail['block_ms'] <= 60000` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_credentials_owner.py:1780` | `remaining_ms > 40 * 60000` | lower bound on elapsed — load only inflates it |
+| `tests/unit/network/test_credentials_owner.py:2329` | `0 < int(blocked['retry_after_ms']) <= 45000` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_credentials_owner.py:2425` | `18 * 60000 < int(refused['retry_after_ms']) <= 20 * 60000` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/network/test_credentials_placement.py:2001` | `0 <= error.retry_after_ms <= MAX_PEER_RETRY_AFTER_MS` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/network/test_credentials_placement.py:2002` | `0 < error.cache_ttl_ms <= MAX_PEER_RETRY_AFTER_MS` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/network/test_credentials_placement.py:2018` | `grant.latency_ms >= 0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/network/test_credentials_placement.py:2447` | `43000 <= live.retry_after_ms <= 45000` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/network/test_credentials_placement.py:2455` | `34000 <= later.retry_after_ms <= 35000` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/network/test_mesh_update.py:1403` | `59.0 < budgets[-1] <= 60.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_github_borrow_timeout_note.py:191` | `elapsed < 8.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_mesh_update.py:1417` | `59.0 < budgets[-1] <= 60.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/network/test_owner_quiet_wait.py:264` | `elapsed >= 1.5` | lower bound on elapsed — load only inflates it |
 | `tests/unit/network/test_projection.py:206` | `seen['timeout'] > 5.0` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/network/test_relay_loop_lifecycle.py:127` | `elapsed >= 0.3` | lower bound on elapsed — load only inflates it |
-| `tests/unit/network/test_relay_resilience.py:468` | `time.time() - row['last_seen_at'] < 60` | 60 s timestamp tolerance — load does not move wall-clock arithmetic |
+| `tests/unit/network/test_relay_loop_lifecycle.py:130` | `elapsed >= 0.3` | lower bound on elapsed — load only inflates it |
+| `tests/unit/network/test_relay_resilience.py:470` | `time.time() - row['last_seen_at'] < 60` | 60 s timestamp tolerance — load does not move wall-clock arithmetic |
+| `tests/unit/network/test_remote_peek.py:229` | `outcomes.count('regex_timeout') >= 3` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/network/test_tool.py:1927` | `net_tool._STOP_TIMEOUT_S > 240.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/network/test_tool.py:1928` | `net_tool._CREATE_ENGAGE_TIMEOUT_S > 120.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/network/test_wait_budget.py:81` | `outcome.elapsed_s >= 0.0` | no clock read — code constants / policy values; load cannot move it |
@@ -316,21 +369,29 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/scripts/test_xplat_probe.py:257` | `budget.clamp(600.0) <= 30.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/scripts/test_xplat_probe.py:258` | `budget.window(60.0) <= 30.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/secrets/test_broker.py:675` | `max(durations) < 20` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/secrets/test_credential_shapes.py:2392` | `cpu < 0.5` | reviewed and kept — THREAD CPU since batch 1 (was `process_time`, which also bills every other thread in the worker); the bound is ~3 orders over the linear path and an order under the regressed walk (6.7-12.5 s), and single-thread CPU is not inflated by host load |
+| `tests/unit/secrets/test_credential_shapes.py:2572` | `cpu < 0.05` | reviewed and kept — THREAD CPU since batch 1: 0.4-0.5 ms measured for the 8-column row with and without four busy threads (100x margin); the released spelling costs 222 ms |
+| `tests/unit/secrets/test_credential_shapes.py:2582` | `cpu < 0.5` | reviewed and kept — THREAD CPU since batch 1: 18.4 ms measured for the 140-row payload with and without four busy threads (27x margin), where `process_time` read 112 ms beside them |
+| `tests/unit/secrets/test_credential_shapes.py:2630` | `cpu < 0.05` | reviewed and kept — THREAD CPU since batch 1: 0.2-0.6 ms measured (80x margin); the released lookahead costs 18.6 s on this payload |
+| `tests/unit/secrets/test_encoded_credential_structures.py:1415` | `_cpu_seconds(lambda: _k8s_secret_gomap_spans(crafted)) < 3.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/server/test_answer_refusal_disposition.py:167` | `0 < remaining <= DESKTOP_ANSWER_BUDGET_S` | derived — the bound is a code constant the implementation owns |
 | `tests/unit/server/test_answer_refusal_disposition.py:168` | `DESKTOP_ANSWER_BUDGET_S < 20.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/server/test_desktop_diagnostics.py:196` | `abs(time.time() - data['captured_at']) < 60` | 60 s timestamp tolerance — load does not move wall-clock arithmetic |
 | `tests/unit/server/test_desktop_quota_notice.py:244` | `first['age_ms'] >= 0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/server/test_desktop_quota_notice.py:245` | `first['checked_at_ms'] > 0` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/server/test_desktop_read_without_owner.py:241` | `elapsed < 1.0` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/server/test_desktop_sessions.py:10017` | `abs(time.time() - served_user_ts) > 1000000` | lower bound on elapsed — load only inflates it |
+| `tests/unit/server/test_desktop_sessions.py:10153` | `abs(time.time() - served_user_ts) > 1000000` | lower bound on elapsed — load only inflates it |
 | `tests/unit/server/test_server_stt.py:259` | `result['duration_s'] >= 0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/session/runtime/test_process_reaper.py:428` | `max(elapsed) - min(elapsed) < 0.04` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/session/runtime/test_process_refresh.py:352` | `elapsed >= 0.25` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/session/runtime/test_runtime_build_watch.py:577` | `elapsed < 5.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/session/runtime/test_runtime_build_watch.py:618` | `elapsed < 5.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/session/runtime/test_runtime_keep_alive.py:746` | `time.monotonic() - second >= 2.0` | lower bound on elapsed — load only inflates it |
-| `tests/unit/session/test_attach_frame_size.py:2649` | `elapsed < 5.0` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/session/test_attach_frame_size.py:5463` | `0 < budget < _MIN_VIABLE_IMAGE_BUDGET_BYTES` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/session/test_attach_frame_size.py:5837` | `0 < budget < 32 * 1024` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/session/test_attach_frame_size.py:2691` | `elapsed < 5.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/session/test_attach_frame_size.py:5505` | `0 < budget < _MIN_VIABLE_IMAGE_BUDGET_BYTES` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/session/test_attach_frame_size.py:5879` | `0 < budget < 32 * 1024` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/session/test_attention_lock_contention.py:694` | `elapsed >= 0.06` | lower bound on elapsed — load only inflates it |
+| `tests/unit/session/test_bind_leaving_owner.py:98` | `0 < owner.engages[1]['deadline_s'] <= _BACKGROUND_BIND_BUDGET_S` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/session/test_bind_leaving_owner.py:309` | `0 < owner.engages[1]['deadline_s'] <= _BACKGROUND_BIND_BUDGET_S` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/session/test_closing_checkpoint.py:286` | `300.0 <= state.active_duration_s < 301.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/session/test_frontend_sync.py:294` | `300.0 <= state.active_duration_s < 301.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/session/test_frontend_sync_liveness.py:702` | `0 < remote_module._BACKGROUND_YIELD_BUDGET_S < remote_module._FOREGROUND_BIND_BUDGET_S` | no clock read — code constants / policy values; load cannot move it |
@@ -341,12 +402,12 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/session/test_verified_at.py:229` | `0 < WARM_VERIFY_BUDGET_S <= 2.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/session/test_wire_budget.py:494` | `session._wire_budget_override < 24000000` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/session/test_wire_budget.py:1116` | `0 < byte_trigger < payload < session._wire_bytes_budget()` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/session_files/test_perf.py:97` | `cpu < 30.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/team_bridge/test_batch_screening.py:589` | `3500 < retry_at - time.time() <= 3600` | 3600 s timestamp tolerance — load does not move wall-clock arithmetic |
 | `tests/unit/team_bridge/test_batch_screening.py:842` | `store.hold_count_readonly(owner, 'budget_exhausted') >= 1` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/team_bridge/test_client.py:1202` | `timeout['read'] > 25` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/team_bridge/test_h5_issuance.py:664` | `0 < time.time() - scans[0]['min_ts'] - 86400 < 60` | 60 s timestamp tolerance — load does not move wall-clock arithmetic |
 | `tests/unit/team_bridge/test_reconcile_plan.py:400` | `0 < len(rotation.owners) <= budget` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/test_ci_hygiene.py:744` | `durations['tests/unit/test_all_skipped.py'] > 0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/test_ci_hygiene.py:754` | `durations['tests/unit/test_all_skipped.py'] > 0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/test_clipboard.py:624` | `len(budgets) > 1` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/test_loop_callback_spans.py:128` | `window.top_cpu[0].cpu_ms >= 20` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/test_loop_callback_spans.py:129` | `window.cpu_ms >= 20` | no clock read — code constants / policy values; load cannot move it |
@@ -354,21 +415,24 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/test_memory_inspect.py:347` | `entry['age_seconds'] >= 0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/test_shard_stall_watchdog.py:487` | `float(env[watchdog.ENV_SECONDS]) > 0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/test_spawn.py:584` | `0 < APPLESCRIPT_EXIT_TIMEOUT_S <= 5` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/test_tui_responsiveness.py:2167` | `quiet.gc.total_ms < 1.0` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/test_tui_responsiveness.py:2169` | `heavy.gc.cpu_ms.get(2, 0.0) > 0.5` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/test_tui_responsiveness.py:2239` | `baseline_ms < 2.0` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/test_tui_responsiveness.py:2241` | `small_ms > 0.2` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/test_tui_responsiveness.py:2398` | `sum((leg.total_ms for leg in recorder.gc_legs)) < 5.0` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/test_tui_responsiveness.py:2581` | `harvest_cpu_ms < 500.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/test_tui_responsiveness.py:2425` | `quiet.gc.total_ms < 1.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/test_tui_responsiveness.py:2427` | `heavy.gc.cpu_ms.get(2, 0.0) > 0.5` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/test_tui_responsiveness.py:2497` | `baseline_ms < 2.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/test_tui_responsiveness.py:2499` | `small_ms > 0.2` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/test_tui_responsiveness.py:2686` | `sum((leg.total_ms for leg in recorder.gc_legs)) < 5.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/test_tui_responsiveness.py:2869` | `harvest_cpu_ms < 500.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/tools/test_browser_ownership_inspection.py:287` | `5 < COMMAND_TIMEOUTS['owner_inspect'] < 10` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/tools/test_console_tool.py:615` | `console_backend.console_timeout('console_list') < 190.0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/tools/test_heavy_job_lease.py:740` | `elapsed > 1.0` | lower bound on elapsed — load only inflates it |
 | `tests/unit/tools/test_spill.py:624` | `out_budget > 0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/tools/test_task_wait_jobs.py:165` | `elapsed < 1.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/tools/test_task_wait_jobs.py:228` | `seconds >= 373.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/tools/test_wait_wakes_on_peer_message.py:131` | `elapsed >= 0.1` | lower bound on elapsed — load only inflates it |
-| `tests/unit/tui/test_ask_picker.py:4664` | `layout.body_line_budget >= 1` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/tui/test_ask_picker.py:5013` | `layout.body_line_budget <= 2` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/tui/test_ask_picker.py:7588` | `layout.body_line_budget >= 3` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/tui/test_ask_picker.py:4791` | `layout.body_line_budget >= 1` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/tui/test_ask_picker.py:5140` | `layout.body_line_budget <= 2` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/tui/test_ask_picker.py:7715` | `layout.body_line_budget >= 3` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/tui/test_ask_picker.py:8296` | `layout.body_line_budget >= 1` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/tui/test_ask_picker.py:8406` | `layout.body_line_budget >= 2` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/tui/test_copy_picker.py:141` | `screen._row_budget() >= 1` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/tui/test_copy_picker_mouse.py:362` | `0 < ceiling < 39` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/tui/test_liveness_reader.py:68` | `LIVE_FRESHNESS_BUDGET_S < 21.05` | no clock read — code constants / policy values; load cannot move it |
@@ -382,18 +446,18 @@ a slowdown, so the number only has to be safely larger than the work.
 | `tests/unit/tui/test_sidebar_live_tool_card.py:852` | `27.0 <= elapsed < 57.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/tui/test_status_line.py:221` | `cell_len(format_duration(-1)) <= 6` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/tui/test_status_line.py:222` | `cell_len(format_duration(59.9)) <= 6` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/tui/test_steering_approval.py:1462` | `card._duration < 0.4` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/tui/test_steering_approval.py:1498` | `card._duration < 0.4` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/ui_browser/test_backend.py:444` | `timeouts[2] > 0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/ui_browser/test_backend.py:444` | `timeouts[3] > 0` | no clock read — code constants / policy values; load cannot move it |
+| `tests/unit/ui_browser/test_backend.py:1512` | `probe.elapsed_s > 1.0` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/ui_console/test_backend.py:313` | `max(backend.CONSOLE_TIMEOUTS.values()) + 5 < 190` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/wakes/test_lock.py:82` | `time.monotonic() - started >= 0.4` | lower bound on elapsed — load only inflates it |
 | `tests/unit/wakes/test_supervisor.py:532` | `WAKE_DEADLINE_S >= 120` | no clock read — code constants / policy values; load cannot move it |
-| `tests/unit/web_fetch/test_passages.py:142` | `cpu < 60` | no clock read — code constants / policy values; load cannot move it |
 | `tests/unit/web_fetch/test_service.py:695` | `settings.timeout_seconds >= 1.0` | no clock read — code constants / policy values; load cannot move it |
 
 ## Bucket C — sleep-then-assert
 
-942 spots where a fixed wait is the very next statement before an
+994 spots where a fixed wait is the very next statement before an
 assertion. They cluster hard, which is what makes them one shared helper's
 job rather than a hundred edits:
 
@@ -403,23 +467,23 @@ job rather than a hundred edits:
 | `tests/unit/session/runtime/test_serving.py` | 38 |
 | `tests/unit/tui/test_notify_wiring.py` | 32 |
 | `tests/unit/tui/test_build_skew.py` | 31 |
+| `tests/unit/tui/test_ask_picker.py` | 24 |
 | `tests/unit/tui/test_turn_abandoned.py` | 24 |
-| `tests/unit/tui/test_ask_picker.py` | 23 |
 | `tests/unit/tui/test_search_spend.py` | 18 |
+| `tests/unit/tui/test_compact_command.py` | 15 |
 | `tests/unit/tui/test_effort.py` | 15 |
 | `tests/unit/session/runtime/test_serving_approvals_live.py` | 14 |
-| `tests/unit/tui/test_compact_command.py` | 14 |
 | `tests/unit/tui/test_hub_links_policy.py` | 14 |
 | `tests/unit/tui/test_session_picker.py` | 14 |
 | `tests/unit/tui/test_skill_invocation.py` | 14 |
 | `tests/unit/session/runtime/test_runtime_keep_alive.py` | 13 |
 | `tests/unit/tui/test_harness_injection_replay.py` | 13 |
 | `tests/unit/tui/test_usage_panel.py` | 13 |
+| `tests/unit/server/test_serve_retire.py` | 12 |
 | `tests/e2e/test_exec_startup_e2e.py` | 11 |
 | `tests/unit/mcp/test_manager.py` | 11 |
-| `tests/unit/server/test_serve_retire.py` | 11 |
-| `tests/unit/session/test_session.py` | 11 |
 | `tests/unit/tui/test_link_picker.py` | 11 |
+| `tests/unit/session/test_session.py` | 10 |
 | `tests/unit/tui/test_sidebar_switch_smoothness.py` | 10 |
 | `tests/unit/notifications/test_gate_raises_notification.py` | 9 |
 | `tests/unit/session/test_transcript_index.py` | 9 |
@@ -427,14 +491,11 @@ job rather than a hundred edits:
 
 | wait | count |
 | --- | --- |
-| `pilot.pause()` | 539 |
-| `sleep(...)` | 403 |
+| `pilot.pause()` | 551 |
+| `sleep(...)` | 443 |
 
-`tests/unit/tui/waiting.py::settle` is the shared helper: each turn it joins the
-queued messages, the named product worker groups, any tracked thread hops and
-the after-refresh queue, then checks the product's own condition, bounded by a
-wall deadline (30 s default). A turn count is not a load-invariant bound: a real
-`Pilot.pause()` costs at least ~20 ms and up to ~1 s under load (Textual 8.2.8
-`wait_for_idle`), so a fixed count is seconds on an idle host and minutes on a
-loaded one. Its "Convention" block says how to call it.
+`tests/unit/tui/_settle.py` is the shared helper: it pumps a bounded COUNT of
+event-loop turns until the product's own condition holds. A turn count survives
+contention where a wall-clock budget does not — a loaded host inflates how long
+each turn takes, not how many turns the app needs.
 

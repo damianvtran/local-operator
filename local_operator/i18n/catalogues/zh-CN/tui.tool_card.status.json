@@ -1,0 +1,20 @@
+{
+  "tui.tool_card.status.cut_off": "意外中止",
+  "tui.tool_card.status.error": "错误",
+  "tui.tool_card.status.interrupted": "已中断",
+  "tui.tool_card.status.not_run": "未运行",
+  "tui.tool_card.status.partial": "部分结果",
+  "tui.tool_card.status.queued": "已排队",
+  "tui.tool_card.status.running": "运行中",
+  "tui.tool_card.status.send.delivery_unconfirmed": "送达未确认",
+  "tui.tool_card.status.send.no_new_wake": "未再唤醒",
+  "tui.tool_card.status.send.not_delivered": "未送达",
+  "tui.tool_card.status.send.receipt_reused": "复用回执",
+  "tui.tool_card.status.send.wake_unconfirmed": "唤醒未确认",
+  "tui.tool_card.status.session_reset": "会话已重置",
+  "tui.tool_card.status.switch.partial": "已切换（出错）",
+  "tui.tool_card.status.switch.pending": "待生效",
+  "tui.tool_card.status.switch.switched": "已切换",
+  "tui.tool_card.status.switch.unchanged": "无变化",
+  "tui.tool_card.status.waiting": "待批准"
+}

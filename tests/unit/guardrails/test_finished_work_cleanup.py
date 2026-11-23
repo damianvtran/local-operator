@@ -199,6 +199,60 @@ async def test_plain_own_checkout_without_origin_keeps_legacy_checkpoint(
     assert (wt / "a.txt").read_text() == "uncommitted\n"
 
 
+PRESERVATION_TAIL = (
+    "These are preservation steps, not permission to re-issue or reroute this removal. "
+    "The standing two refusal exceptions still apply."
+)
+
+
+@pytest.mark.asyncio
+async def test_open_pr_refusal_stays_critical_and_distinct_from_ignored_hold(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #4359 field case before merge: same tree, open PR -> CRITICAL, old words."""
+    wt = _branch_tree(home, repo, "open-pr")
+    _git("remote", "remove", "origin", cwd=repo)
+    _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
+    (home / "excludes").write_text(".env\n")
+    (wt / ".env").write_text("synthetic local data\n")
+    _record(home, wt, creator=ME)
+    monkeypatch.setattr(
+        prov,
+        "worktree_activity",
+        lambda *_: prov.WorktreeActivity("fix/open-pr", "open", pr_number=4359),
+    )
+    command = f"git -C {repo} worktree remove -- {wt}"
+    ranked = _rank(home, command)
+    assert ranked.risk is Risk.CRITICAL and not ranked.targets[0].cleanup_hold, ranked.reasons
+    assert "branch fix/open-pr has open PR #4359; finish or close it first" in (
+        ranked.targets[0].reason
+    )
+    result = await _check(home, command, _Judge())
+    assert result.blocked and result.risk == "critical", result
+    assert "(critical): this command would delete, move or overwrite" in result.text
+    assert "ignored files" not in result.text and PRESERVATION_TAIL not in result.text
+
+
+def test_unconditioned_cleanup_hold_keeps_general_guidance() -> None:
+    """Holds with no recorded condition (dirty, protected, tracked deletions) keep their text."""
+    from local_operator.guardrails.check import cleanup_hold_text
+    from local_operator.guardrails.classify import RankedTarget, Verdict
+    from local_operator.guardrails.resolve import Target
+
+    target = RankedTarget(
+        Target(path="/synthetic/wt", op="delete", program="git"),
+        Risk.HIGH,
+        "linked worktree state: tracked deletions remain",
+        cleanup_hold=True,
+    )
+    text = cleanup_hold_text(Verdict(Risk.HIGH, [target]))
+    assert (
+        "Preserve unknown files outside the checkout; commit or stash edits, push commits "
+        "that need to survive, and verify the exact path and Git registration. " + PRESERVATION_TAIL
+    ) in text
+    assert "ignored files" not in text
+
+
 def test_plain_exact_own_checkout_accepts_shared_link_witness(home: Path, repo: Path) -> None:
     wt = _branch_tree(home, repo, "plain-shared-link")
     _git("remote", "remove", "origin", cwd=repo)
@@ -216,19 +270,26 @@ def test_plain_exact_own_checkout_accepts_shared_link_witness(home: Path, repo: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload", ["ignored", "ignored-and-edit", "unknown"])
-async def test_plain_exact_own_checkout_holds_unverified_payload(
-    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, payload: str
+@pytest.mark.parametrize("relative", [False, True], ids=["canonical", "relative"])
+@pytest.mark.parametrize("payload", ["ignored", "ignored-and-edit", "unknown", "tracked-deletion"])
+async def test_plain_own_checkout_holds_unverified_payload(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, payload: str, relative: bool
 ) -> None:
     wt = _branch_tree(home, repo, "plain-preserve")
     _git("remote", "remove", "origin", cwd=repo)
+    _record(home, wt, creator=ME)
+    canonical = f"git -C {repo} worktree remove -- {wt}"
+    assert _rank(home, canonical).risk is Risk.LOW
     _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
     (home / "excludes").write_text(".env\n")
     marker = wt / ".env"
-    if payload != "unknown":
+    if payload in {"ignored", "ignored-and-edit"}:
         marker.write_text("synthetic local data\n")
     if payload == "ignored-and-edit":
         (wt / "a.txt").write_text("uncommitted\n")
+    elif payload == "tracked-deletion":
+        # Leave an unstaged deletion while keeping the fixture bytes intact.
+        (wt / "a.txt").rename(home / "preserved-a.txt")
     _record(home, wt, creator=ME)
     if payload == "unknown":
         original = prov._git_quiet
@@ -237,7 +298,7 @@ async def test_plain_exact_own_checkout_holds_unverified_payload(
             "_git_quiet",
             lambda args, cwd: None if "--ignored=matching" in args else original(args, cwd),
         )
-    command = f"git -C {repo} worktree remove -- {wt}"
+    command = f"git -C {repo} worktree remove -- {wt.relative_to(repo)}" if relative else canonical
     ranked = _rank(home, command)
     context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
     report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
@@ -246,9 +307,32 @@ async def test_plain_exact_own_checkout_holds_unverified_payload(
     assert ranked.risk is Risk.HIGH and ranked.targets[0].cleanup_hold, ranked.reasons
     assert report.builtin_effect != BUILTIN_PASS, report.render()
     assert result.blocked and not judge.prompts, result
+    assert result.risk == "high", result
     assert wt.is_dir()
-    if payload != "unknown":
+    if payload in {"ignored", "ignored-and-edit"}:
         assert marker.read_text() == "synthetic local data\n"
+    # Operator follow-up 2026-11-21: the refusal names the condition that
+    # failed; an ignored-only hold must not read like unpushed work.
+    text = result.text
+    assert report.builtin_text == text, report.render()
+    assert PRESERVATION_TAIL in text
+    if payload == "ignored":
+        assert "1 ignored entry the guard cannot prove regenerable" in text
+        assert "ignored files (build output, caches, environments)" in text
+        assert "not an open PR or unpushed work" in text
+        assert "commit or stash" not in text and "push commits" not in text
+        assert ".env" not in text  # counted, never listed
+    elif payload == "ignored-and-edit":
+        assert "1 ignored entry" in text and "1 tracked or untracked change" in text
+        assert "ignored files (build output" in text and "commit or stash edits" in text
+        assert "not an open PR or unpushed work" not in text
+    elif payload == "tracked-deletion":
+        assert "tracked deletions remain" in text
+        assert (home / "preserved-a.txt").read_text() == "a\n"
+    else:
+        assert "could not verify ignored files" in text
+        assert "could not verify the worktree's ignored files" in text
+        assert "commit or stash" not in text and "push commits" not in text
 
 
 @pytest.mark.asyncio

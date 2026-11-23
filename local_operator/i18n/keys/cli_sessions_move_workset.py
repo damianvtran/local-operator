@@ -21,6 +21,13 @@ def advice_stays(*, source: str, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.advice_stays", {"source": source, "device": device})
 
 
+def agent_needs_operator(*, flag: str, command: str, dry_run_command: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.agent_needs_operator",
+        {"flag": flag, "command": command, "dry_run_command": dry_run_command},
+    )
+
+
 def brings_summary(
     *,
     worktrees: int | float,
@@ -64,6 +71,86 @@ def cause_timeout() -> Msg:
 
 def changed() -> Msg:
     return Msg("cli.sessions_move_workset.changed", {})
+
+
+def deps_description() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_description", {})
+
+
+def deps_header(*, session: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_header", {"session": session})
+
+
+def deps_help() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_help", {})
+
+
+def deps_missing_tool(*, tool: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_missing_tool", {"tool": tool})
+
+
+def deps_none(*, session: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_none", {"session": session})
+
+
+def deps_not_restored(*, path: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_not_restored", {"path": path})
+
+
+def deps_row(*, state: str, cwd: str, kind: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_row", {"state": state, "cwd": cwd, "kind": kind})
+
+
+def deps_row_plain(*, state: str, cwd: str) -> Msg:
+    return Msg("cli.sessions_move_workset.deps_row_plain", {"state": state, "cwd": cwd})
+
+
+def deps_session_help() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_session_help", {})
+
+
+def deps_state_manual() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_manual", {})
+
+
+def deps_state_not_needed() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_not_needed", {})
+
+
+def deps_state_pending() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_pending", {})
+
+
+def deps_state_present_unverified() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_present_unverified", {})
+
+
+def deps_state_refused() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_refused", {})
+
+
+def deps_state_unknown() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_state_unknown", {})
+
+
+def deps_status_help() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_status_help", {})
+
+
+def deps_summary_nothing_needed() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_summary_nothing_needed", {})
+
+
+def deps_summary_pending() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_summary_pending", {})
+
+
+def deps_summary_present_unverified() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_summary_present_unverified", {})
+
+
+def deps_summary_unknown() -> Msg:
+    return Msg("cli.sessions_move_workset.deps_summary_unknown", {})
 
 
 def desktop_refused(*, source: str, device: str) -> Msg:
@@ -115,6 +202,10 @@ def needs_confirmation(*, source: str, digest: str) -> Msg:
 
 def none() -> Msg:
     return Msg("cli.sessions_move_workset.none", {})
+
+
+def plan_not_honoured(*, device: str, source: str) -> Msg:
+    return Msg("cli.sessions_move_workset.plan_not_honoured", {"device": device, "source": source})
 
 
 def prereq_missing_tools(*, device: str, tools: str) -> Msg:
@@ -409,3 +500,11 @@ def worktree_line(
             "untracked": untracked,
         },
     )
+
+
+def yes_carry_unavailable(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.yes_carry_unavailable", {"device": device})
+
+
+def yes_preflight_failed(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.yes_preflight_failed", {"device": device})

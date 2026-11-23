@@ -1,0 +1,509 @@
+{
+  "schema": 1,
+  "round": 3,
+  "pr": 4361,
+  "locale": "es",
+  "namespace": "tui.settings_view",
+  "scope": "HEAD plus uncommitted target catalogue delta; restored scope.new_sessions rechecked",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-view",
+  "head": "464c2500c7ab94c2c2335cfb2c277eb801d7b858",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "2e12394761a56b8417ac731770a5ce07131fe86ffac53c749ad93c912be91f69",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "delegation brief"
+  },
+  "auditor": {
+    "agent": "translation-auditor (settings-r3-es)",
+    "model": "openai/gpt-6.1-sol",
+    "fallback_used": false
+  },
+  "verdict": "clean",
+  "namespace_verdicts": {
+    "tui.settings_view": "clean"
+  },
+  "keys_read": 21,
+  "delta_keys": [
+    "tui.settings_view.editor.contract_unset"
+  ],
+  "restored_keys": [
+    "tui.settings_view.scope.new_sessions"
+  ],
+  "findings": [],
+  "rows": [
+    {
+      "key": "tui.settings_view.editor.contract",
+      "arguments": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "rendered": {
+        "en": "enter saves · esc cancels",
+        "es": "enter guarda · esc cancela"
+      },
+      "cell_len": {
+        "en": 25,
+        "es": 26
+      },
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.editor.contract_unset",
+      "arguments": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "rendered": {
+        "en": "enter saves · esc cancels · clear to unset",
+        "es": "enter guarda · esc cancela · vacío quita"
+      },
+      "cell_len": {
+        "en": 42,
+        "es": 40
+      },
+      "maxCells": 23
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_long",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "rendered": {
+        "en": "↑↓ suggestions · tab completes · enter saves · esc",
+        "es": "↑↓ sugerencias · tab completa · enter guarda · esc"
+      },
+      "cell_len": {
+        "en": 50,
+        "es": 50
+      },
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_medium",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "rendered": {
+        "en": "↑↓ browse · tab complete · enter saves",
+        "es": "↑↓ navega · tab completa · enter guarda"
+      },
+      "cell_len": {
+        "en": 38,
+        "es": 39
+      },
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_short",
+      "arguments": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "rendered": {
+        "en": "↑↓ · tab · enter saves",
+        "es": "↑↓ · tab · enter guarda"
+      },
+      "cell_len": {
+        "en": 22,
+        "es": 23
+      },
+      "maxCells": 23
+    },
+    {
+      "key": "tui.settings_view.pane.agents_empty",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "no agents configured",
+        "es": "no hay agentes configurados"
+      },
+      "cell_len": {
+        "en": 20,
+        "es": 27
+      },
+      "maxCells": 38
+    },
+    {
+      "key": "tui.settings_view.pane.empty_hint",
+      "arguments": [
+        [
+          "command",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "rendered": {
+        "en": "/agent lists and attaches them",
+        "es": "/agent los lista y los asocia"
+      },
+      "cell_len": {
+        "en": 30,
+        "es": 29
+      },
+      "maxCells": 38
+    },
+    {
+      "key": "tui.settings_view.pane.more",
+      "arguments": [
+        [
+          "count",
+          "plural"
+        ],
+        [
+          "shown",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "rendered": {
+        "en": "… 3 more",
+        "es": "… 3 más"
+      },
+      "cell_len": {
+        "en": 8,
+        "es": 7
+      },
+      "maxCells": 16
+    },
+    {
+      "key": "tui.settings_view.pane.providers_empty",
+      "arguments": [
+        [
+          "command",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "rendered": {
+        "en": "none logged in — /agent",
+        "es": "ninguno conectado — /agent"
+      },
+      "cell_len": {
+        "en": 23,
+        "es": 26
+      },
+      "maxCells": 38
+    },
+    {
+      "key": "tui.settings_view.pane.providers_header",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "providers",
+        "es": "proveedores"
+      },
+      "cell_len": {
+        "en": 9,
+        "es": 11
+      },
+      "maxCells": 20
+    },
+    {
+      "key": "tui.settings_view.pane.tab_agents",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "agents",
+        "es": "agentes"
+      },
+      "cell_len": {
+        "en": 6,
+        "es": 7
+      },
+      "maxCells": 10
+    },
+    {
+      "key": "tui.settings_view.pane.tab_teams",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "teams",
+        "es": "equipos"
+      },
+      "cell_len": {
+        "en": 5,
+        "es": 7
+      },
+      "maxCells": 10
+    },
+    {
+      "key": "tui.settings_view.pane.teams_empty",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "no teams configured",
+        "es": "no hay equipos configurados"
+      },
+      "cell_len": {
+        "en": 19,
+        "es": 27
+      },
+      "maxCells": 38
+    },
+    {
+      "key": "tui.settings_view.row.add_chain",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "+ add a chain",
+        "es": "+ añadir una cadena"
+      },
+      "cell_len": {
+        "en": 13,
+        "es": 19
+      },
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.row.add_hop",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "+ add a hop",
+        "es": "+ añadir un salto"
+      },
+      "cell_len": {
+        "en": 11,
+        "es": 17
+      },
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.scope.live",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "live",
+        "es": "al instante"
+      },
+      "cell_len": {
+        "en": 4,
+        "es": 11
+      },
+      "maxCells": 14
+    },
+    {
+      "key": "tui.settings_view.scope.never",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "never",
+        "es": "nunca"
+      },
+      "cell_len": {
+        "en": 5,
+        "es": 5
+      },
+      "maxCells": 14
+    },
+    {
+      "key": "tui.settings_view.scope.new_launch",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "new launch",
+        "es": "al reiniciar"
+      },
+      "cell_len": {
+        "en": 10,
+        "es": 12
+      },
+      "maxCells": 14
+    },
+    {
+      "key": "tui.settings_view.scope.new_sessions",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "new sessions",
+        "es": "sesión nueva"
+      },
+      "cell_len": {
+        "en": 12,
+        "es": 12
+      },
+      "maxCells": 14
+    },
+    {
+      "key": "tui.settings_view.section.takes_effect",
+      "arguments": [
+        [
+          "scope",
+          "simple"
+        ]
+      ],
+      "argument_parity": true,
+      "rendered": {
+        "en": "takes effect: sesión nueva",
+        "es": "se aplica: sesión nueva"
+      },
+      "cell_len": {
+        "en": 26,
+        "es": 23
+      },
+      "maxCells": null
+    },
+    {
+      "key": "tui.settings_view.too_short",
+      "arguments": [],
+      "argument_parity": true,
+      "rendered": {
+        "en": "terminal too short for settings — make it taller",
+        "es": "terminal muy baja — aumenta la altura"
+      },
+      "cell_len": {
+        "en": 48,
+        "es": 37
+      },
+      "maxCells": null
+    }
+  ],
+  "consumer_ladder": [
+    {
+      "room": 23,
+      "empty_unsets_hint": "enter guarda · esc cancela",
+      "suggestion_hint": "enter guarda · esc cancela"
+    },
+    {
+      "room": 25,
+      "empty_unsets_hint": "enter guarda · esc cancela",
+      "suggestion_hint": "↑↓ · tab · enter guarda"
+    },
+    {
+      "room": 26,
+      "empty_unsets_hint": "enter guarda · esc cancela",
+      "suggestion_hint": "↑↓ · tab · enter guarda"
+    },
+    {
+      "room": 40,
+      "empty_unsets_hint": "enter guarda · esc cancela",
+      "suggestion_hint": "↑↓ · tab · enter guarda"
+    },
+    {
+      "room": 41,
+      "empty_unsets_hint": "enter guarda · esc cancela",
+      "suggestion_hint": "↑↓ navega · tab completa · enter guarda"
+    },
+    {
+      "room": 42,
+      "empty_unsets_hint": "enter guarda · esc cancela · vacío quita",
+      "suggestion_hint": "↑↓ navega · tab completa · enter guarda"
+    },
+    {
+      "room": 48,
+      "empty_unsets_hint": "enter guarda · esc cancela · vacío quita",
+      "suggestion_hint": "↑↓ navega · tab completa · enter guarda"
+    },
+    {
+      "room": 52,
+      "empty_unsets_hint": "enter guarda · esc cancela · vacío quita",
+      "suggestion_hint": "↑↓ sugerencias · tab completa · enter guarda · esc"
+    }
+  ],
+  "scope_check": {
+    "text": "sesión nueva",
+    "same_as_HEAD": true,
+    "cells": 12,
+    "maxCells": 14,
+    "full_tag": "se aplica: sesión nueva",
+    "full_tag_cells": 23,
+    "ladder": "room >=23: full tag; 12<=room<23: bare scope; room<12: absent"
+  },
+  "contract_unset_judgment": {
+    "text": "{save_key} guarda · {cancel_key} cancela · vacío quita",
+    "acceptable": true,
+    "reason": "Acceptable terse UI shorthand: vacío is the field state, quita the removal effect; save/cancel clauses state how it is committed. Less idiomatic than a full sentence, but intelligible in this deliberately compact inline key-hint register. Do not restore borra para quitar: that expands the content to 46 cells (48 with indent).",
+    "rendered_cells": 40,
+    "with_indent_cells": 42,
+    "source_rendered_cells": 42,
+    "source_with_indent_cells": 44,
+    "sidecar_maxCells": 23,
+    "sidecar_exception": "The declared 23-cell cap is exceeded by both English and Spanish; this is an existing adaptive long-hint contract, not a new overflow. Current Spanish shrinks versus HEAD and English. Consumer drops full hint when room <42, retaining base hint; 23-cell-cap compliance is not claimed."
+  },
+  "plurals": [
+    {
+      "count": 0,
+      "rendered": "… 0 más"
+    },
+    {
+      "count": 1,
+      "rendered": "… 1 más"
+    },
+    {
+      "count": 2,
+      "rendered": "… 2 más"
+    },
+    {
+      "count": 1000000,
+      "rendered": "… 1000000 más"
+    }
+  ],
+  "limitations": [
+    "No live TUI render or screenshot produced in this linguistic/runtime-width audit; visual sign-off belongs to the separate design stream.",
+    "Unchanged keys were read for parity/context; prior audited translations retained without expanding round-3 remediation scope."
+  ],
+  "checks": {
+    "meaning": "pass",
+    "placeholder_parity": "21/21",
+    "render_message": "21/21 plus plural probes",
+    "scope_restoration": "pass",
+    "target_expected_hash": "pass",
+    "rtl": "not applicable (Spanish LTR)",
+    "all_maxCells_pass": false
+  }
+}

@@ -3279,6 +3279,62 @@ async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
 
 
 @pytest.mark.asyncio
+async def test_a_childs_prefix_epoch_survives_its_parents_attach_and_detach(
+    tmp_config_dir: Path,
+) -> None:
+    """PR #4375 review R1-M1, through the real constructors.
+
+    A delegated child (no ``ask``) reads its parent's live probe and re-latches
+    it at every turn boundary. A block-0 line keyed on the ``<interactivity>``
+    body moved block 0 at each flip, and ``_prepare_system_blocks`` persisted a
+    new ``system_prefix`` (a cold cache over tools, system and history): 3
+    epochs over detached -> attached -> detached. Attachment belongs to the
+    tail, which reaches the model as a ``[session-state]`` delta; the prefix
+    stays one epoch.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    state = {"attached": False}
+    parent._goal_state.interactive_probe = lambda: state["attached"]
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job-flips",
+        )
+        try:
+            assert not any(tool.name == "ask" for tool in child._context.tools)
+            heads: list[str] = []
+            for attached in (False, True, False):
+                state["attached"] = attached
+                child._goal_state.latch_interactivity()
+                blocks = await child._prepare_system_blocks()
+                heads.append(blocks[0])
+            prefixes = [
+                entry
+                for entry in child._transcript.entries()
+                if str(entry.payload.get("custom_type", "")) == "system_prefix"
+            ]
+            assert len(prefixes) == 1, f"{len(prefixes)} system_prefix epochs persisted"
+            assert len(set(heads)) == 1, "block 0 moved with the parent's attachment"
+            assert "No `ask` tool in this session" in heads[0]
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_fork_keeps_the_parent_id_in_its_prefix_and_journals_its_own(
     tmp_config_dir: Path,
 ) -> None:
@@ -8396,3 +8452,105 @@ def test_is_config_run_dir_reads_either_witness(tmp_path: Path) -> None:
     plain.mkdir(parents=True)
     assert is_config_run_dir(plain) is False
     assert is_config_run_dir(tmp_path / "sessions" / "missing") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [None, "Resolved host agent"])
+async def test_bridge_factory_uses_resolved_agent_name_for_host_context(
+    tmp_config_dir, monkeypatch, name
+):
+    """Birth composition uses the resolved record, not a transcript/model label."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.team_bridge import host
+    from local_operator.tools import registry as tools_registry
+
+    manager = ConfigManager(tmp_config_dir)
+    registry = AgentRegistry(tmp_config_dir)
+    if name is not None:
+        registry.create_agent(_agent_fields(name))
+    captured = {}
+
+    def runtime_for_session(**kwargs):
+        captured["host"] = kwargs["session_agent_display"]
+        return None  # feature-disabled birth: never creates a live/network runtime
+
+    def create_tools(context):
+        captured["dispatch"] = context.bridge_session_agent_display
+        return []
+
+    monkeypatch.setattr(host, "bridge_runtime_for_session", runtime_for_session)
+    monkeypatch.setattr(tools_registry, "create_tools", create_tools)
+    plan = await session_factory._prepare(
+        _args(hosting="test", model="test", agent_name=name), manager, registry, has_ui=False
+    )
+    try:
+        assert captured == {"host": name, "dispatch": name}
+    finally:
+        if plan.auth_store is not None:
+            plan.auth_store.close()
+        if plan.session_lease is not None:
+            plan.session_lease.release()
+
+
+@pytest.mark.asyncio
+async def test_goal_wake_refuses_hold_landed_at_lease_admission(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator import session_lease
+    from local_operator.resume import TRANSCRIPT_NAME, write_goal_record
+    from local_operator.session.runtime.control import _mark_wakes_dormant
+    from local_operator.session.runtime.launch import RuntimeStartupError, _runtime_env
+    from local_operator.session.runtime.types import SessionRecord
+    from local_operator.wakes.goals import permits_wake, retry_at
+    from local_operator.wakes.store import is_held, read_entry
+
+    root = tmp_config_dir
+    monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
+    sid = "feed0000ba11"
+    directory = root / "sessions" / sid
+    directory.mkdir(parents=True)
+    (directory / TRANSCRIPT_NAME).touch()
+    write_goal_record(
+        directory,
+        {
+            "status": "active",
+            "goal": "Finish fixture",
+            "token": "goal-1",
+            "judge": {"state": "waiting"},
+        },
+    )
+    due = retry_at(directory)
+    assert due is not None and permits_wake(directory, due)
+    env = _runtime_env(sid, str(root), defer_materialise=False, goal_wake_due=due)
+    monkeypatch.setenv("LOP_RUNTIME_GOAL_WAKE_DUE", str(due))
+    assert "LOP_RUNTIME_GOAL_WAKE_DUE" not in _runtime_env(sid, str(root), defer_materialise=False)
+    original_acquire = session_lease.acquire_session_lease
+
+    def acquire(path: Path):
+        lease = original_acquire(path)
+        record = SessionRecord(
+            pid=123,
+            kind="tui",
+            session_id=sid,
+            cwd=str(root),
+            conversation_name="test",
+            model_label="m",
+            control_port=0,
+            control_key="",
+        )
+        assert _mark_wakes_dormant(record, root) == 0
+        assert is_held(read_entry(root, sid))
+        return lease
+
+    monkeypatch.setattr(session_lease, "acquire_session_lease", acquire)
+    config_manager = FakeConfigManager({"hosting": "anthropic", "model_name": "claude-opus-5"})
+    with pytest.raises(RuntimeStartupError, match="automatic goal wake is no longer eligible"):
+        await _prepare_effort_plan(
+            config_manager,
+            tmp_config_dir,
+            resume=sid,
+            goal_wake_due=int(env["LOP_RUNTIME_GOAL_WAKE_DUE"]),
+        )
+    assert session_lease.lease_holder(directory) == (None, "none")
+    assert is_held(read_entry(root, sid))

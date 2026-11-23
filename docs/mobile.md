@@ -519,12 +519,21 @@ core's display store and is read separately, keyed by that row:
             source?: "local" | "hub",
             hold?: {class: "awaiting_review" | "transient", held_for_s},
             reason?: "signed_out" | "other_account" | "not_member" | "deleted" | "hub_unsupported" | "offline"}],
-   more: int}                        // ≤20 items; a coalesced card's rest is counted here
+   more: int,                        // ≤20 items; a coalesced card's rest is counted here
+   card?: {received_at?: str,        // ISO-8601 UTC ("2026-11-21T14:56:48.454293Z") of the card's journal row
+           thread_reply: bool}}      // the card is a reply inside a thread
   ```
+
+  `card` is additive within `v: 1` and describes the card ROW, not a body: it
+  comes from the card's own journal row (no hub read), so it is present on every
+  answer for a found card — local-only, held, pending and every `unavailable`
+  reason alike — and absent only on the nothing-to-resolve answer below. The
+  relay transcript row carries no timestamp and no thread marker, so this is
+  where a client gets the time and thread-reply marker it shows beside the body.
 
 - **States are the server's word.** `held` with `hold.class: "transient"` means
   screening has not run yet (not a moderation decision); any other class is
-  "held by moderation". `refused` comes only from the hub's rejection and carries
+  "held for review" (a review hold can still be released or refused). `refused` comes only from the hub's rejection and carries
   no reason to show. `reason` qualifies `unavailable` (`deleted` = the message was
   deleted; `offline` = the computer could not reach Radient). A client maps an
   unknown state, an `admitted` item without a body, or a malformed frame to
@@ -538,10 +547,20 @@ core's display store and is read separately, keyed by that row:
   still missing. An empty `items` list with `more: 0` (a card from before
   receipts carried message ids) is "nothing to resolve": no panel, the receipt
   line alone, as in the TUI.
-- **No caching.** Read once per mount (re-asked only for a not-yet-written row,
-  above); a remount reads again; revocation (sign-out, leave, account switch,
-  hub delete) must show on the next read. Render the body as data under an
-  "External message · untrusted content" frame.
+- **Re-read while on screen, never cache past it.** `pending`, `held` (either
+  class) and `unavailable`/`offline` are NOT final: a pending body is handed off
+  at the receiving session's next turn, measured (n=4005) at p50 45 s, p90
+  21 min, p99 100 min, max 8 h. So a mounted card re-reads such an answer on a
+  5 s, 10 s, 20 s, 30 s, then every-60 s backoff with no overall give-up,
+  re-reads at once when the app becomes visible again, keeps the last answer on
+  screen during a re-read (no flash back to Loading), and stops on a final
+  answer, on a non-"not yet" 404, or on unmount (aborting the in-flight read).
+  A failed read (network, 5xx, malformed frame) is asked again on the same
+  backoff. Re-reading a pending/held item is a local read in core. A remount
+  reads again; revocation (sign-out, leave, account switch, hub delete) shows
+  on the next read. Policy module: `mobile/web/src/lib/bridge-card-reread.ts`
+  (the TUI's twin is `tui/bridge_card_body.py`). Render the body as data under
+  an "External message · untrusted content" frame.
 
 Desktop twin and resolution order: `docs/DESKTOP_API.md` (`.../bridge-cards/{entry_id}/body`).
 The web relay's card is `mobile/web/src/components/bridge-card-body.tsx` over
@@ -795,6 +814,43 @@ re-dated at every serialization) are excluded, which is why the session's
 `unchanged` event carries their current values. A digest that does not match
 for any reason (including a field that moves with time) costs only the full
 seed the legacy path always sent; it can never elide a changed frame.
+
+### Steer journal order — `?steer_journal_order=1`
+
+| Capability | Contract |
+|---|---|
+| `capabilities.steer_journal_order = {"available": true}` | delivered phone steers sit at their journal slot on the session stream |
+
+A phone steer is painted on the live projection at SEND time and upgraded in
+place when the drain delivers it at a later tool boundary. The journal — so
+`/history`, a fresh mount and a resume — records it at DELIVERY. Without this
+capability the live frame reads `steer, tool, tool` while every page reads
+`tool, tool, user`: the "messages load out of order" report.
+
+`GET /api/sessions/{id}/events?steer_journal_order=1` declares the fix for that
+connection (only the exact value `1`; the parameter is per stream, like
+`?have=`). On a declaring stream, once a steer is delivered its row moves to
+just after the row it follows in the journal and its `kind` becomes `user` —
+the page's kind, since the journal carries no steer marker. Its `id` does not
+change, so a client keyed by id repaints the row instead of adding one. An
+undelivered steer stays where it was painted (`kind: "steer"`), and a steer
+whose anchor row is outside the capped frame keeps its slot (only the kind
+changes). Several steers drained at one boundary keep their send order.
+
+A stream that does not declare it is byte-identical to a relay without the
+feature: send-time slot, `kind: "steer"`. That is deliberate:
+local-operator-mobile builds before #359 mis-place a held row that moves later,
+and installed phones never update in step with the relay. The ordering hint
+(`steer_journal_order` on the projection, written by the runtime's fold) is
+relay-internal and stripped from every SSE frame. An older relay ignores the
+parameter, so a client feature-detects the capability rather than assuming the
+order.
+
+| Client | Declares | Sees after delivery |
+|---|---|---|
+| Phone app before #359 | no | send-time slot, `steer` (unchanged) |
+| Phone app that declares it | yes | journal slot, `user` — matches `/history` |
+| Relay web SPA | yes | held tab: the row keeps its held slot and repaints (upsert by id); fresh mount: journal order |
 
 ### The transfer verb — a conversation's move (`POST /api/sessions/{id}/transfer`)
 

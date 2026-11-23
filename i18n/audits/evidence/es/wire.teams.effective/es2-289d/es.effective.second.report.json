@@ -1,0 +1,178 @@
+{
+  "locale": "es",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "audit_instance": "second-independent",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "289d6604993c",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "8fba0458db34",
+    "independent_from_first_auditor_session": "2fb9f8e55f96",
+    "actual_model_source": "Developer-provided runtime model declaration in this session",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed or invoked."
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "8fba0458db34",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Runtime session model declaration in developer context",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed in this session. No translation service/API/SDK used."
+  },
+  "frozen_core_commit": "e70bc818b8553dca1fad007705257817be49ee37",
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "es": {
+      "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.json",
+      "sha256": "aad6efce35fa6fccc25573506b0ec3d3ee042f6e23f6e52d5440d2289a519e25"
+    }
+  },
+  "policy_hashes": {
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "findings": [],
+  "per_key": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "source": "No team named {role} was found.",
+      "current_text": "No se encontró ningún equipo llamado {role}.",
+      "status": "passed",
+      "placeholder_types": "(('role', 'simple'),)",
+      "chars": 44,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans.",
+      "native_semantic_review": "Natural impersonal failure wording; equipo follows glossary. Opaque role kept unchanged; no unintended launch claim.",
+      "register_glossary_fit": "Neutral Spanish, informal tú in instructions, equipo/agente/modelo, sentence case, no exclamation or region-specific wording. Prose wraps; no fixed maxCells/maxChars hint."
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "source": "The agent registry could not be read. Check the agent definitions and try again.",
+      "current_text": "No se pudo leer el registro de agentes. Revisa las definiciones de los agentes e inténtalo de nuevo.",
+      "status": "passed",
+      "placeholder_types": "()",
+      "chars": 100,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans.",
+      "native_semantic_review": "Registro de agentes describes the registry without inventing a corrupt file or exposing exception details. Tú imperative Revisa and inténtalo are consistent and idiomatic.",
+      "register_glossary_fit": "Neutral Spanish, informal tú in instructions, equipo/agente/modelo, sentence case, no exclamation or region-specific wording. Prose wraps; no fixed maxCells/maxChars hint."
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "source": "The model configuration could not be read. Check your configuration and try again.",
+      "current_text": "No se pudo leer la configuración del modelo. Revisa tu configuración e inténtalo de nuevo.",
+      "status": "passed",
+      "placeholder_types": "()",
+      "chars": 90,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans.",
+      "native_semantic_review": "Preserves inability to read model configuration and request to inspect it; tu configuración is correct informal register.",
+      "register_glossary_fit": "Neutral Spanish, informal tú in instructions, equipo/agente/modelo, sentence case, no exclamation or region-specific wording. Prose wraps; no fixed maxCells/maxChars hint."
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "source": "The value at subagents.models.{tier} is invalid. Set it to a provider/model selector or a model mapping.",
+      "current_text": "El valor de subagents.models.{tier} no es válido. Usa un selector provider/model o un objeto de configuración de modelo.",
+      "status": "passed",
+      "placeholder_types": "(('tier', 'simple'),)",
+      "chars": 120,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans.",
+      "native_semantic_review": "Correctly contrasts a provider/model selector with a configuration object. Usa supplies an actionable replacement without treating mapping as a paid allowance or translating technical syntax.",
+      "register_glossary_fit": "Neutral Spanish, informal tú in instructions, equipo/agente/modelo, sentence case, no exclamation or region-specific wording. Prose wraps; no fixed maxCells/maxChars hint."
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "source": "The mapping at subagents.models.{tier} is invalid. Set model to a provider/model selector and, optionally, effort to a supported reasoning effort.",
+      "current_text": "El objeto de configuración de subagents.models.{tier} no es válido. Asigna a model un selector provider/model y, opcionalmente, a effort un esfuerzo de razonamiento admitido.",
+      "status": "passed",
+      "placeholder_types": "(('tier', 'simple'),)",
+      "chars": 174,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans.",
+      "native_semantic_review": "Asigna a model … y, opcionalmente, a effort … is idiomatic Spanish configuration guidance. The optional adverb qualifies only effort; model remains required. Objeto de configuración preserves mapping meaning without English prose.",
+      "register_glossary_fit": "Neutral Spanish, informal tú in instructions, equipo/agente/modelo, sentence case, no exclamation or region-specific wording. Prose wraps; no fixed maxCells/maxChars hint."
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "source": "No model is configured at subagents.models.{tier}.",
+      "current_text": "No hay ningún modelo configurado en subagents.models.{tier}.",
+      "status": "passed",
+      "placeholder_types": "(('tier', 'simple'),)",
+      "chars": 60,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans.",
+      "native_semantic_review": "No hay ningún modelo configurado accurately states absence of configured model rather than failed resolution; configuration path literal.",
+      "register_glossary_fit": "Neutral Spanish, informal tú in instructions, equipo/agente/modelo, sentence case, no exclamation or region-specific wording. Prose wraps; no fixed maxCells/maxChars hint."
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "source": "The model selector at subagents.models.{tier} is invalid. Use the provider/model format.",
+      "current_text": "El selector de modelo de subagents.models.{tier} no es válido. Usa el formato provider/model.",
+      "status": "passed",
+      "placeholder_types": "(('tier', 'simple'),)",
+      "chars": 93,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans.",
+      "native_semantic_review": "Identifies invalid selector and gives the exact provider/model remedy, without exposing the raw invalid value.",
+      "register_glossary_fit": "Neutral Spanish, informal tú in instructions, equipo/agente/modelo, sentence case, no exclamation or region-specific wording. Prose wraps; no fixed maxCells/maxChars hint."
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "source": "The model {selector} could not be resolved. Check the model selector and provider configuration.",
+      "current_text": "No se pudo resolver el modelo {selector}. Revisa el selector de modelo y la configuración del proveedor.",
+      "status": "passed",
+      "placeholder_types": "(('selector', 'simple'),)",
+      "chars": 104,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans.",
+      "native_semantic_review": "Resolver el modelo is appropriate technical Spanish for resolution; preserves both selector and provider-configuration checks and the opaque selector.",
+      "register_glossary_fit": "Neutral Spanish, informal tú in instructions, equipo/agente/modelo, sentence case, no exclamation or region-specific wording. Prose wraps; no fixed maxCells/maxChars hint."
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "source": "This team member is unavailable. Check its model configuration and agent definition.",
+      "current_text": "Este miembro del equipo no está disponible. Revisa su configuración de modelo y su definición de agente.",
+      "status": "passed",
+      "placeholder_types": "()",
+      "chars": 104,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans.",
+      "native_semantic_review": "Este miembro del equipo no está disponible preserves the defensive unknown/legacy warning; pronouns point to the member, no launch success or new cause is implied.",
+      "register_glossary_fit": "Neutral Spanish, informal tú in instructions, equipo/agente/modelo, sentence case, no exclamation or region-specific wording. Prose wraps; no fixed maxCells/maxChars hint."
+    }
+  ],
+  "mechanical_execution": {
+    "command": "env -i PATH=\"$PATH\" HOME=/Users/damian/.local-operator/sessions/289d6604993c/scratchpad/isolated-home LOCAL_OPERATOR_CONFIG_DIR=/Users/damian/.local-operator/sessions/289d6604993c/scratchpad/isolated-home/config PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/289d6604993c/scratchpad/validate_es_second.py",
+    "exit_code": 0,
+    "scope": "Repository check.check_catalogues() with catalogues._CATALOGUES pointed to isolated scratch fixture containing only English, sidecar, and Spanish target; separate manual/strict checks of every key. Not the whole check.py ratchet/CLI.",
+    "log": "/Users/damian/.local-operator/sessions/289d6604993c/scratchpad/es.second.audit.log"
+  },
+  "semantic_notes_kind": "audit_notes_not_execution_log",
+  "independence": "Read source, context and target and completed per-key semantic verdict before opening first auditor receipt. No translation/MT API/SDK/service used. No target edits.",
+  "coverage_gaps": [
+    "Runtime resolution/fallback execution NOT RUN",
+    "Pseudo-localization NOT RUN",
+    "Rendered wrapping/visual fit NOT RUN; sidecar has no fixed-width hints",
+    "Bidi runtime/rendering NOT RUN; Spanish LTR and no embedded bidi controls in stored target"
+  ],
+  "retention": "Scratch-only per delegation; manager must retain final record/report/log/receipt under canonical tracked evidence root before applying ledger. No repository edits or ledger application by this auditor."
+}

@@ -77,6 +77,7 @@ from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
 from local_operator.i18n.keys import wire_settings_hub_org as _ho
 from local_operator.i18n.keys import wire_settings_keymap as _wk
+from local_operator.i18n.keys import wire_settings_transcript_display as _td
 from local_operator.i18n.keys import wire_voice as _wv
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
@@ -128,6 +129,10 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.settings.hub_defaults",
     "wire.settings.hub_org",
     "wire.settings.keymap",
+    # The transcript layout switch (`display.transcript_display`): its own child
+    # namespace so its six English keys never move the audited `wire.settings`
+    # source hash — the `hub_org` pattern.
+    "wire.settings.transcript_display",
     "wire.aida_cadence",
     "wire.host_speed",
     "wire.guardrails",
@@ -229,6 +234,26 @@ _KEYMAP_COPY = {
     "keymap.quick_send": (_wk.quick_send_label, _wk.quick_send_help),
     "keymap.push_to_talk": (_wk.push_to_talk_label, _wk.push_to_talk_help),
     "keymap.start_recording": (_wk.start_recording_label, _wk.start_recording_help),
+    "keymap.command_palette": (_wk.command_palette_label, _wk.command_palette_help),
+    "keymap.toggle_sidebar": (_wk.toggle_sidebar_label, _wk.toggle_sidebar_help),
+    "keymap.focus_sidebar": (_wk.focus_sidebar_label, _wk.focus_sidebar_help),
+    "keymap.aside": (_wk.aside_label, _wk.aside_help),
+    "keymap.fork_aside": (_wk.fork_aside_label, _wk.fork_aside_help),
+    "keymap.toggle_todos": (_wk.toggle_todos_label, _wk.toggle_todos_help),
+    "keymap.toggle_subagents": (_wk.toggle_subagents_label, _wk.toggle_subagents_help),
+    "keymap.toggle_pin": (_wk.toggle_pin_label, _wk.toggle_pin_help),
+    "keymap.toggle_asks": (_wk.toggle_asks_label, _wk.toggle_asks_help),
+    "keymap.prev_session": (_wk.prev_session_label, _wk.prev_session_help),
+    "keymap.next_session": (_wk.next_session_label, _wk.next_session_help),
+    "keymap.cycle_effort": (_wk.cycle_effort_label, _wk.cycle_effort_help),
+    "keymap.clear_transcript": (_wk.clear_transcript_label, _wk.clear_transcript_help),
+    "keymap.transcript_up": (_wk.transcript_up_label, _wk.transcript_up_help),
+    "keymap.transcript_down": (_wk.transcript_down_label, _wk.transcript_down_help),
+    "keymap.transcript_half_up": (_wk.transcript_half_up_label, _wk.transcript_half_up_help),
+    "keymap.transcript_half_down": (
+        _wk.transcript_half_down_label,
+        _wk.transcript_half_down_help,
+    ),
 }
 
 
@@ -2955,6 +2980,33 @@ SETTINGS: tuple[Setting, ...] = (
                 "24h",
                 _t(_ws.display_time_format_choice_24h_label()),
                 _t(_ws.display_time_format_choice_24h_description()),
+            ),
+        ),
+    ),
+    Setting(
+        key="display.transcript_display",
+        # FLAT-DOTTED like every other ``display.*`` key: the dot is part of a
+        # literal top-level key, which is what ``tui/settings.py`` reads. Written
+        # as a nested tuple this key would be stored where nothing looks for it.
+        path=("display.transcript_display",),
+        section="appearance",
+        label=_t(_td.label()),
+        kind=Kind.ENUM,
+        # A literal, not an import (this module must stay off the consumers'
+        # import path); ``tests/unit/test_settings_io.py``'s ``_consumer_defaults``
+        # pins it to ``tui.settings.DEFAULT_TRANSCRIPT_DISPLAY``.
+        default="by-turn",
+        help=_t(_td.help()),
+        choices=(
+            Choice(
+                "by-turn",
+                _t(_td.choice_by_turn_label()),
+                _t(_td.choice_by_turn_description()),
+            ),
+            Choice(
+                "by-response",
+                _t(_td.choice_by_response_label()),
+                _t(_td.choice_by_response_description()),
             ),
         ),
     ),

@@ -544,18 +544,11 @@ _monitor_backoff = _MonitorBackoff()
 
 
 def _read_monitor_index(config_dir: Path) -> dict[str, dict[str, Any]]:
-    """The monitor index, each row's due time taken from its COUNTERS file.
+    """The monitor index with current due/disable state for wake decisions.
 
-    The index row's ``next_due_at`` is not rewritten on quiet ticks (§10.2: a
-    30 s monitor would rewrite it 2,880×/day), so a live session's index says
-    "due" long after the counters moved on — trusting it would re-engage every
-    slice. The counters file is what the scheduler writes on every check; the
-    index row is the fallback only when no counters file exists yet (an arm
-    whose first counters write has not landed). ``disabled`` is OR-ed in from
-    the counters for the same reason. Never raises: a monitors read that fails
-    must not take the wake pass with it.
+    The index is not rewritten on quiet ticks: trusting its due time alone
+    would re-engage every slice after the counters had already moved on.
     """
-    from local_operator.monitors import state as monitor_state
     from local_operator.monitors import store as monitor_store
 
     try:
@@ -564,22 +557,9 @@ def _read_monitor_index(config_dir: Path) -> dict[str, dict[str, Any]]:
         logger.warning("monitor index unreadable; skipping the monitors pass", exc_info=True)
         return {}
     for session_id, entry in index.items():
-        rows: list[dict[str, Any]] = []
-        for raw in entry.get("monitors") or ():
-            if not isinstance(raw, Mapping):
-                continue
-            row = dict(raw)
-            monitor_id = row.get("id")
-            if isinstance(monitor_id, str) and monitor_id:
-                try:
-                    counters = monitor_state.read_counters(config_dir, session_id, monitor_id)
-                except Exception:  # noqa: BLE001 — one bad file costs one row's freshness
-                    counters = None
-                if counters is not None:
-                    row["next_due_at"] = counters.get("next_due_at")
-                    row["disabled"] = bool(row.get("disabled") or counters.get("disabled"))
-            rows.append(row)
-        entry["monitors"] = rows
+        entry["monitors"] = list(
+            monitor_store.effective_rows(config_dir, session_id, entry, include_health=False)
+        )
     return index
 
 
@@ -1366,7 +1346,8 @@ async def _engage_one(
     task, so it must not block or raise — ``_note_spooled_attempt`` neither does.
     """
     outcome: Callable[[str], None] = on_outcome or (lambda _reason: None)
-    ledger = not schedule_id.startswith("monitor:")
+    is_goal = schedule_id == "goal"
+    ledger = not (is_goal or schedule_id.startswith("monitor:"))
     from local_operator.session.runtime.launch import WakeErrand, engage_runtime
 
     overdue_s = (moment - due_ms) / 1000.0
@@ -1473,6 +1454,13 @@ async def _engage_one(
                 )
             outcome("wedged")
             return False
+        if is_goal:
+            from local_operator.wakes.goals import permits_wake
+
+            # The scan is only a hint. Clear/replace/stop may have landed while
+            # this task was waiting for a slot or probing the previous owner.
+            if not permits_wake(config_dir / "sessions" / session_id, due_ms):
+                return False
         # Only the conditions we just cleared: reaching here means the session
         # is no longer skipped for a live/ghost/wedged/stale reason (nor
         # live-stalled, the live skip's escalated form). Whether the engage
@@ -2295,6 +2283,7 @@ class _Sweeper:
         (:class:`_MonitorBackoff`) instead.
         """
         is_monitor = schedule_id.startswith("monitor:")
+        is_goal = schedule_id == "goal"
         self.raise_if_failed()
         key = (session_id, due_ms)
         if key in self._in_flight:
@@ -2324,6 +2313,8 @@ class _Sweeper:
                 that did not happen, which is exactly what ``failed`` means.
                 """
                 outcomes.append(reason)
+                if is_goal:
+                    return
                 if is_monitor:
                     # A monitor row is not a trigger record or a spooled turn:
                     # its only bookkeeping is the in-memory backoff.
@@ -2354,7 +2345,7 @@ class _Sweeper:
                     on_outcome=_outcome,
                     # Only a monitor row passes it, so a wake engagement's call
                     # is exactly what it was before the monitors pass existed.
-                    **({"schedule_id": schedule_id} if is_monitor else {}),
+                    **({"schedule_id": schedule_id} if is_monitor or is_goal else {}),
                 )
             except asyncio.CancelledError:
                 # Shutdown, not a failure: `shutdown()` cancels in-flight work
@@ -2394,7 +2385,7 @@ class _Sweeper:
                     # Persist backoff before releasing retry ownership, even on
                     # cancellation. Failed bookkeeping latches this engagement
                     # against a hot retry; task error stays observable to owner.
-                    for reason in outcomes if not is_monitor else ():
+                    for reason in outcomes if not (is_monitor or is_goal) else ():
                         await await_spool_write(
                             _note_spooled_attempt, config_dir, session_id, reason=reason
                         )
@@ -3032,7 +3023,9 @@ async def _should_retire(config_dir: Path) -> bool:
     index, deliveries, spooled, pending_triggers, monitors = await asyncio.to_thread(
         _load_and_reconcile_state, config_dir
     )
-    return not _has_fireable_wakes(
+    from local_operator.wakes.goals import candidates
+
+    return not await asyncio.to_thread(candidates, config_dir, index) and not _has_fireable_wakes(
         index,
         config_dir=config_dir,
         deliveries=deliveries,
@@ -3070,6 +3063,8 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
     is not the supervisor's, and an in-place exec of THAT process would replace a
     command the operator is watching. ``--once`` never moves either.
     """
+    from local_operator.wakes.goals import GOAL_RETRY_S
+    from local_operator.wakes.goals import candidates as goal_candidates
     from local_operator.wakes.owned_runtimes import (
         OWNER_ENV,
         SUPERVISOR_PID_ENV,
@@ -3119,6 +3114,8 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
         stop_signals = _install_stop_handlers(loop, _on_stop)
     sweeper = _Sweeper()
     triggers_seat = _TriggerSweep(config_dir)
+    next_goal_scan = 0.0
+    goal_rows: list[tuple[str, str, int]] = []
     residency = _ResidencySweep(config_dir)
     memory_sweep = _MachineMemorySweep(config_dir)
     store_maintenance = _MemoryMaintenanceSeat(config_dir)
@@ -3149,7 +3146,19 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
             index, deliveries, spooled, pending_triggers, monitors = await asyncio.to_thread(
                 _load_and_reconcile_state, config_dir
             )
-            if not _has_fireable_wakes(
+            # The goal sidecar is the queue: no wake-index write or one-shot
+            # acknowledgement can lose a retry on owner exit. Scan at the
+            # recovery cadence, not on every wake-index slice.
+            if time.monotonic() >= next_goal_scan:
+                goal_rows = await asyncio.to_thread(goal_candidates, config_dir, index)
+                next_goal_scan = time.monotonic() + GOAL_RETRY_S
+                goal_now = int(time.time() * 1000)
+                for session_id, cwd, due_ms in goal_rows:
+                    if due_ms <= goal_now:
+                        sweeper.engage(
+                            config_dir, session_id, cwd, due_ms, goal_now, schedule_id="goal"
+                        )
+            if not goal_rows and not _has_fireable_wakes(
                 index,
                 config_dir=config_dir,
                 deliveries=deliveries,
@@ -3196,6 +3205,7 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
                     )
                     sweeper.raise_if_failed()
                     return 0
+                next_goal_scan = 0.0
                 logger.info("a wake was armed during the retirement grace; staying up")
                 continue
 
@@ -3219,7 +3229,7 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
             index, deliveries, spooled, pending_triggers, monitors = await asyncio.to_thread(
                 _load_and_reconcile_state, config_dir
             )
-            if not _has_fireable_wakes(
+            if not goal_rows and not _has_fireable_wakes(
                 index,
                 config_dir=config_dir,
                 deliveries=deliveries,
@@ -3299,6 +3309,7 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
                     residency.seconds_until(),
                     memory_sweep.seconds_until(),
                     rescue_seat.seconds_until(),
+                    max(0.0, next_goal_scan - time.monotonic()),
                 ),
             )
             logger.debug("sleeping %.1fs until the next wake (in %.0fs slices)", delay, SLICE_S)

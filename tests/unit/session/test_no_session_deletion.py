@@ -73,6 +73,21 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
+        "local_operator/network/file_release_coordinator.py::FileReleaseCoordinator._write",
+        "os.replace",
+        "Only state.json/initialized.json in the no-follow owner-domain directory: supplied "
+        "dir-fd must match a fresh validated domain open; source is its O_EXCL regular "
+        "single-link UUID stage, destination metadata rejects directories/symlinks. No session "
+        "path accepted; regular-file rename also refuses a raced directory destination.",
+    ),
+    (
+        "local_operator/network/file_release_coordinator.py::FileReleaseCoordinator._write",
+        "os.unlink",
+        "Only this call's UUID .state.json/.initialized.json stage basename relative to "
+        "the freshly identity-checked owner-domain dir-fd, after successful O_EXCL creation; "
+        "never accepts a session path, and unlink refuses even a substituted directory.",
+    ),
+    (
         "local_operator/remote_files/cache.py::evict",
         "os.unlink",
         "Removes only 32-hex digest blobs/sidecars relative to a held cache/remote-files "
@@ -383,6 +398,36 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.replace",
         "Atomic swap of a sibling pid-temp FILE onto the derived cache record "
         "under <config>/cache; never a session path.",
+    ),
+    # ``_write_settled`` publishes the boot prewarm's settlement record by renaming
+    # its own pid-suffixed temp FILE onto ``<config>/cache/prewarm_settled/<id>.json``
+    # (``index_prewarm.SETTLED_DIRNAME``), and unlinks only that temp when the
+    # write fails. ``_settled_path`` builds both from the CONFIG ROOT plus an id
+    # checked against ``_SETTLED_STEM``, so no ``sessions/`` path can be named;
+    # the record is a derived cache, re-proven from the journal when missing.
+    (
+        "local_operator/session/index_prewarm.py::_write_settled",
+        "os.replace",
+        "Atomic swap of a sibling pid-temp FILE onto the derived prewarm settlement "
+        "record under <config>/cache/prewarm_settled; never a session path.",
+    ),
+    (
+        "local_operator/session/index_prewarm.py::_write_settled",
+        "<path>.unlink",
+        "Removes only the failed write's own pid-temp FILE under "
+        "<config>/cache/prewarm_settled; never a session path.",
+    ),
+    # ``_record_absence`` publishes the absence-proof sidecar beside that record:
+    # ``<config>/cache/cold_replay/<id>.absence.json``, named by
+    # ``absence_proof_path`` (``with_name`` on the record path, so the same
+    # directory), from a pid/thread-suffixed temp FILE in that directory. Its
+    # only caller passes ``safe_metadata_path`` (config root + a _SESSION_STEM-
+    # validated id), so neither side is ever a session directory.
+    (
+        "local_operator/session/replay_cache.py::_record_absence",
+        "<path>.replace",
+        "Atomic swap of a sibling pid/thread-temp FILE onto the derived absence-proof "
+        "sidecar under <config>/cache/cold_replay; never a session path.",
     ),
     (
         "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
@@ -1544,6 +1589,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         1,
     ),
     (
+        "local_operator/network/credentials/lends.py::_set_aside",
+        "os.replace",
+        "Renames an unparsable lend ledger FILE to lends.json.corrupt beside itself: both "
+        "paths are <config>/network/credentials/<network_id>/ (lends_path joins a "
+        "safe_component network id under credentials_root), a child of network/ and a "
+        "sibling of sessions/ — never a session directory. A rename, never a delete (G9 R1-6)",
+    ),
+    (
         "local_operator/network/store.py::purge_identity",
         "<path>.unlink",
         "`uninstall --purge-identity`: the keypair FILE <config>/network/identity/"
@@ -1750,22 +1803,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "files whose shape+size+age passed",
     ),
     #
-    # Two FILE unlinks, both named by the function that owns the sidecars' paths:
-    # the per-session scan cache and the spool write lock. Neither path can be a
-    # session directory — the first comes from `session_files.ledger.cache_path`
-    # (`<config>/cache/session_files/<id>.json`) and the second from
-    # `spooled.lock_name` (`<config>/wakes/spooled/.<id>.lock`) — and both are
-    # written OUTSIDE the session directory by the modules that own them. The
-    # call runs only after `_bounded_rmtree` has already removed THIS session's
+    # Three FILE unlinks, each named by the module that owns the sidecar's path:
+    # `session_files.ledger.cache_path` names the scan cache at
+    # `<config>/cache/session_files/<id>.json`; `index_prewarm.settled_record_path`
+    # names the settlement record at `<config>/cache/prewarm_settled/<id>.json`;
+    # `spooled.lock_name` names the spool lock at `<config>/wakes/spooled/.<id>.lock`.
+    # All three are OUTSIDE the session directory, and unlink rejects directories.
+    # The call runs only after `_bounded_rmtree` has already removed THIS session's
     # directory, and it is keyed by that session's id: a sidecar whose session
-    # directory still exists is never touched.
+    # directory still exists is never touched. The spool lock is unlinked only
+    # while held; a busy or unopenable lock remains in place.
     (
         "local_operator/session/cleanup.py::_drop_session_sidecars",
         "<path>.unlink",
-        "Unlinks the removed session's own file-scan cache entry and spool lock — "
-        "regular files named by the owning modules' path helpers, never a directory, "
-        "and only for a session whose directory this removal just deleted",
-        2,
+        "Unlinks the removed session's own file-scan cache entry, prewarm settlement "
+        "record and held spool lock — regular files named by the owning modules' path "
+        "helpers, never a directory, and only for a session whose directory this "
+        "removal just deleted",
+        3,
     ),
     # -- transcript compression ----------------------------------------------
     # The compression pass RENAMES nothing and REMOVES nothing but the two files
@@ -2285,6 +2340,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "the broker's own socket file, at a fixed basename it bound, matched by inode",
     ),
+    # Withdrawing a secret-session lineage marker. Both callers pass a path
+    # under `session.lineage_dir()` = config_dir()/secrets/live-sessions: the
+    # `<pid>-<start>-<hex8>` FILE `_publish_lineage_marker` O_EXCL-created for
+    # this registration (on close), or an entry of that same directory whose
+    # name starts `<digits>-<digits>` and whose process is gone (stale-marker
+    # pruning). Never under sessions/, and unlink refuses directories.
+    (
+        "local_operator/secrets/session.py::_withdraw_lineage_marker",
+        "<path>.unlink",
+        "a <pid>-<start>-<hex> marker FILE under config_dir()/secrets/live-sessions",
+    ),
     # Same path, same reasoning, opposite direction: a socket left behind by a
     # broker that was SIGKILLed is a corpse, and it is only removed after a
     # connect() probe proves nothing is listening on it.
@@ -2292,6 +2358,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/secrets/broker.py::SecretBroker._reap_stale_socket",
         "<path>.unlink",
         "a dead broker's socket file, after probing that nothing listens",
+    ),
+    # The broker roll (PR #4389). All three paths are fixed basenames in the
+    # broker's own 0700 runtime dir (`protocol.successor_socket_path`,
+    # `rolling_path`, `socket_path`), derived from the config dir alone: no
+    # caller input reaches them, so none can name a session directory.
+    (
+        "local_operator/secrets/roll.py::_kill_successor",
+        "<path>.unlink",
+        "a failed successor's temp socket `broker.next`, beside the broker socket",
+    ),
+    (
+        "local_operator/secrets/roll.py::_roll_locked",
+        "<path>.unlink",
+        "the roll sentinel `broker.rolling`, after a roll that moved nothing",
+    ),
+    (
+        "local_operator/secrets/roll.py::_hand_off",
+        "os.rename",
+        "the successor's temp socket renamed onto `broker.sock`, the roll's commit point",
     ),
     # `lop secret harden` removes the PLAINTEXT master key once the scrypt-
     # wrapped copy is safely on disk. The path is `keys.key_path()` — the same
@@ -3427,7 +3512,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "cleanup of this function's own mkstemp temp FILE",
     ),
     (
-        "local_operator/wakes/install.py::uninstall",
+        "local_operator/wakes/install.py::ensure_supervisor_installed",
+        "<path>.unlink",
+        "the fixed .wake-supervisor-uninstalled FILE at the store root, cleared on rearm",
+    ),
+    (
+        "local_operator/wakes/install.py::_uninstall_locked",
         "<path>.unlink",
         "the LaunchAgent plist, or the systemd SERVICE + TIMER units, or the "
         "recorded Windows task definition — one platform's set, never a directory",
@@ -3720,6 +3810,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.remove",
         "widget.remove()",
         2,
+    ),
+    (
+        "local_operator/tui/tool_fold.py::ToolFoldLayer._remove_bar",
+        "<path>.remove",
+        "widget.remove() on a FoldBarBlock the layer mounted; no filesystem path",
+    ),
+    (
+        "local_operator/tui/tool_fold.py::ToolFoldLayer._remove_foot",
+        "<path>.remove",
+        "widget.remove() on a TurnFootBlock the layer mounted; no filesystem path",
     ),
     (
         "local_operator/mcp/credentials.py::store_credentials.persist",
@@ -5116,6 +5216,41 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only this call's failed run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp "
         "temp FILE; unlink rejects directories.",
     ),
+    (
+        "local_operator/remote_compute/records.py::_compact_if_grown",
+        "os.replace",
+        "Publishes the run-record FILE over itself: config_dir/remote-compute/runs.jsonl, "
+        "from a same-directory mkstemp temp. records_path() is the only path this module "
+        "builds and it never leaves <config>/remote-compute/, so no session directory is "
+        "reachable; os.replace refuses to put a file over a directory.",
+    ),
+    (
+        "local_operator/remote_compute/records.py::_compact_if_grown",
+        "os.unlink",
+        "Removes only this call's own failed mkstemp temp FILE in that same "
+        "<config>/remote-compute/ directory; unlink refuses directories, and the record "
+        "rows are not session state.",
+    ),
+    (
+        "local_operator/remote_compute/results.py::extract",
+        "os.replace",
+        "Renames this call's OWN mkdtemp staging directory onto the results destination. "
+        "The source is a directory this call created (mkdtemp, 0700, this call's random "
+        "suffix); the destination is refused unless it is ABSENT immediately before the "
+        "rename, and a results destination is <config>/remote-compute/results/<run id> or "
+        "an operator-supplied dest_dir — nothing here derives a path from a session id. "
+        "The one thing os.replace could still overwrite is an EMPTY directory appearing in "
+        "that check-then-rename window, and copying into sessions/ goes through "
+        "restore_session, not this path.",
+    ),
+    (
+        "local_operator/remote_compute/results.py::extract",
+        "shutil.rmtree",
+        "Removes ONLY the staging directory this call created, on the refusal path, by the "
+        "exact path it captured from mkdtemp - a name that did not exist before this call "
+        "and carries its random suffix. No session directory can carry that name, so this "
+        "can never remove one.",
+    ),
     # Heavy-lease audit trail rotation. Every caller of heavy_audit.record passes
     # the same `heavy_lease.lease_dir()`; `audit_path(directory)` is the fixed
     # `heavy-lease.jsonl` there, and rotation only shifts its fixed `.1`..`.3`
@@ -5357,6 +5492,13 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # receiver is the config dir plus the session id, and it names a FILE
         # under cache/, so neither side can be a session directory.
         "local_operator/session/cold_metadata.py::write_cold_metadata",
+        # tmp FILE -> <config>/cache/prewarm_settled/<id>.json: the boot prewarm's
+        # settlement record, same derived-cache argument (config root + a
+        # _SETTLED_STEM-checked id, a FILE under cache/).
+        "local_operator/session/index_prewarm.py::_write_settled",
+        # tmp FILE -> <config>/cache/cold_replay/<id>.absence.json: the absence-proof
+        # sidecar beside that record, same directory, same derived-cache argument.
+        "local_operator/session/replay_cache.py::_record_absence",
         # tmp -> update-window.json (the update window's handover marker)
         "local_operator/session/runtime/inbox.py::write_update_window",
         # stop-sweeps.jsonl -> stop-sweeps.jsonl.1 (a FILE under config_dir()/logs)

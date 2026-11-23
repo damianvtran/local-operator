@@ -95,6 +95,140 @@ def test_status_json_is_the_index_rows(tmp_path: Path, capsys: pytest.CaptureFix
     assert payload[0]["dormant"] is False
 
 
+def test_status_uses_live_counters_without_replacing_spec_or_park_marker(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.state import write_counters
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    due = now + 60_000
+    for session_id, preserve in (("msess01", None), ("msess02", {"stopped_at": now})):
+        write_entry(
+            tmp_path,
+            session_id,
+            cwd="/w",
+            monitors=[_row(next_due_at=now - 1, checks=2, until_at=now + 120_000)],
+            preserve=preserve,
+        )
+        write_counters(
+            tmp_path,
+            session_id,
+            "m1",
+            {
+                "schema": 1,
+                "next_due_at": due,
+                "last_check_at": now,
+                "checks": 3,
+                "until_at": now - 1,
+                "content_hash": "private-dedupe-state",
+            },
+        )
+
+    assert monitor_command(_args(json=True)) == 0
+    live, parked = sorted(json.loads(capsys.readouterr().out), key=lambda row: row["session_id"])
+    for row in (live, parked):
+        assert (row["next_due_at"], row["last_check_at"], row["checks"]) == (due, now, 3)
+        assert row["until_at"] == now + 120_000
+        assert "content_hash" not in row
+    assert live["dormant"] is False
+    assert parked["dormant"] is True
+
+
+def test_status_and_supervisor_use_rearmed_due_before_first_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.scheduler import (
+        CheckOutcome,
+        MonitorScheduler,
+        fresh_counters,
+    )
+    from local_operator.monitors.settings import MonitorSettings
+    from local_operator.monitors.spec import MonitorSpec
+    from local_operator.monitors.state import read_counters, write_counters
+    from local_operator.monitors.store import read_index, write_entry
+    from local_operator.session.session import Session
+    from local_operator.wakes.supervisor import (
+        _due_monitor_rows,
+        _next_monitor_ms,
+        _read_monitor_index,
+    )
+
+    async def unexpected_check(_spec: MonitorSpec) -> CheckOutcome:
+        pytest.fail("rebuilding status must not run a monitor check")
+
+    session_id = "reopen01"
+    now, old_due, rearmed_due = 200_000, 100_000, 201_000
+    row = _row(created_at=40_000)
+    _session(tmp_path, session_id, [row])
+    write_entry(
+        tmp_path,
+        session_id,
+        cwd="/w",
+        monitors=[{**row, "next_due_at": old_due}],
+        preserve={"stopped_at": 150_000},
+    )
+    counters = fresh_counters("m1", old_due)
+    counters.update(checks=3, last_check_at=40_000, content_hash="previous-baseline")
+    write_counters(tmp_path, session_id, "m1", counters)
+    scheduler = MonitorScheduler(
+        now=lambda: now,
+        config_dir=tmp_path,
+        session_id=session_id,
+        settings=MonitorSettings(),
+        validate=lambda _tool, _args: None,
+        run_check=unexpected_check,
+        deliver=lambda _delivery: pytest.fail("rebuilding status must not deliver"),
+        persist=lambda _specs: pytest.fail("rebuilding status must not persist specs"),
+        uniform=lambda low, _high: low,
+    )
+    # Use the real session rebuild without booting unrelated session services.
+    session = Session.__new__(Session)
+    session._session_id = session_id
+    session._cwd = "/w"
+    session._monitors = scheduler
+    try:
+        scheduler.load([MonitorSpec.model_validate(row)])
+        session._rebuild_monitor_index_entry()
+        assert scheduler.next_monitor_due_at() == rearmed_due
+        index = read_index(tmp_path)[session_id]
+        assert index["monitors"][0]["next_due_at"] == rearmed_due
+        assert "stopped_at" not in index
+        assert monitor_command(_args(json=True)) == 0
+        status = json.loads(capsys.readouterr().out)[0]
+        assert (status["next_due_at"], status["last_check_at"], status["checks"]) == (
+            rearmed_due,
+            40_000,
+            3,
+        )
+        assert status["dormant"] is False
+        effective_index = _read_monitor_index(tmp_path)
+        assert _next_monitor_ms(effective_index, now, config_dir=tmp_path) == rearmed_due
+        assert _due_monitor_rows(effective_index, now, config_dir=tmp_path, exclude=set()) == []
+        assert read_counters(tmp_path, session_id, "m1") == {
+            **counters,
+            "next_due_at": rearmed_due,
+        }
+
+        # A quiet check updates counters without rewriting the index. That newer
+        # deadline must still win; this must not become an index-first fallback.
+        quiet_due = rearmed_due + row["every_ms"]
+        write_counters(
+            tmp_path,
+            session_id,
+            "m1",
+            {**counters, "next_due_at": quiet_due, "last_check_at": rearmed_due, "checks": 4},
+        )
+        assert read_index(tmp_path)[session_id] == index
+        assert monitor_command(_args(json=True)) == 0
+        assert json.loads(capsys.readouterr().out)[0]["next_due_at"] == quiet_due
+        assert _next_monitor_ms(_read_monitor_index(tmp_path), rearmed_due) == quiet_due
+    finally:
+        scheduler.dispose()
+
+
 def test_status_names_a_monitors_state_and_health(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

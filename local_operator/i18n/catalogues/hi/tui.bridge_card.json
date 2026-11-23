@@ -2,7 +2,7 @@
   "tui.bridge_card.frame.untrusted": "बाहरी संदेश · अविश्वसनीय सामग्री",
   "tui.bridge_card.body.loading": "संदेश लोड हो रहा है…",
   "tui.bridge_card.body.pending": "आपके एजेंट तक पहुँचाए जाने का इंतज़ार है",
-  "tui.bridge_card.body.held": "मॉडरेशन ने रोक रखा है",
+  "tui.bridge_card.body.held": "समीक्षा के लिए रोका गया",
   "tui.bridge_card.body.held_transient": "स्क्रीनिंग का इंतज़ार है — अभी आपके एजेंट को नहीं दिखाया गया",
   "tui.bridge_card.body.refused": "मॉडरेशन ने अस्वीकार किया",
   "tui.bridge_card.body.not_admitted": "आपके एजेंट तक नहीं पहुँचाया गया",
@@ -10,12 +10,16 @@
   "tui.bridge_card.body.signed_out": "यह संदेश देखने के लिए Radient में साइन इन करें",
   "tui.bridge_card.body.other_account": "किसी दूसरे Radient खाते में प्राप्त हुआ",
   "tui.bridge_card.body.not_member": "अब आप इस बातचीत में शामिल नहीं हैं",
-  "tui.bridge_card.body.offline": "Radient से संपर्क नहीं हुआ — दोबारा कोशिश के लिए बंद करके फिर खोलें",
+  "tui.bridge_card.body.offline": "Radient से संपर्क नहीं हुआ — फिर से कोशिश की जा रही है",
   "tui.bridge_card.body.deleted": "यह संदेश हटा दिया गया",
   "tui.bridge_card.body.show_more": "पूरा संदेश दिखाएँ · {total, plural, one {# पंक्ति} other {# पंक्तियाँ}}",
   "tui.bridge_card.body.show_less": "कम दिखाएँ",
   "tui.bridge_card.body.more_messages": "{count, plural, one {इस कार्ड में # और संदेश} other {इस कार्ड में # और संदेश}}",
   "tui.bridge_card.header.held_transient": "स्क्रीनिंग का इंतज़ार",
   "tui.bridge_card.header.open_to_load": "संदेश लोड करने के लिए खोलें",
-  "tui.bridge_card.header.offline": "Radient से संपर्क नहीं हुआ — दोबारा कोशिश के लिए खोलें"
+  "tui.bridge_card.header.offline": "Radient से संपर्क नहीं हुआ — दोबारा कोशिश के लिए खोलें",
+  "tui.bridge_card.context.dm": "सीधा संदेश",
+  "tui.bridge_card.context.channel": "चैनल",
+  "tui.bridge_card.context.group": "समूह वार्तालाप",
+  "tui.bridge_card.context.thread_reply": "थ्रेड में जवाब"
 }

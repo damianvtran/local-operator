@@ -1,0 +1,49 @@
+{
+  "record_reference": "i18n/audits/evidence/fr/tui.provider_state/fa25/record.json",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "25fe1758fc50",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-22",
+    "independent_from_translator_session": "e0c1b7382197",
+    "actual_model_source": "Host model-switch notice: quota fallback before audit execution and linguistic assessment",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "result": "passed",
+    "findings": 0
+  },
+  "audit_date": "2026-11-22",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/record.json",
+      "sha256": "c9e64c92f547e952dee2c1653e759b9a77932cbdf380fcff470b53a065da0afc"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/report.md",
+      "sha256": "a5e2dfd2b0f7eba26ac90e605cd417df6d7a3ccadbad5397a6bcb3079a49aead"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/script.py.txt",
+      "sha256": "e50e1c369849dbcf21db70ddadacc9aaeaf981cb280169a7938dc693938444e5"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/audit.log",
+      "sha256": "32997fb5e84e2da7eb7631f66a63ac3eba5b3112b0e31a32a145d67c72d5c0eb"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/harness-failure.log",
+      "sha256": "0d7eb5fb2eb3aac0692e250fe5ab408840bee6035e1f9f9cb79065cec9c2281f"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/ledger-receipt.json",
+      "sha256": "fb16b83becaeb05b51d357346bb19386afc2fa487ba82b9557eb1a84ffa8b2e1"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.provider_state/fa25/ledger-dry-run.log",
+      "sha256": "742c7afcce132829aa4fa722b60b97012cf0c652281098059b500f58defed4e6"
+    }
+  ]
+}

@@ -2,6 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sendCommand } from "./api";
 import { getPendingContinuation, submitContinuation } from "./continuation-command";
+import { clearHeldContinuations } from "./continuation-memory";
+import { clearPrivateSessionStorage } from "./private-storage";
 
 vi.mock("./api", () => ({ sendCommand: vi.fn() }));
 
@@ -13,6 +15,8 @@ const mockedSendCommand = vi.mocked(sendCommand);
 vi.stubGlobal("crypto", { randomUUID: vi.fn(() => "12345678-1234-4678-9234-567812345678") });
 
 afterEach(() => {
+	vi.restoreAllMocks();
+	clearHeldContinuations();
 	localStorage.clear();
 	mockedSendCommand.mockReset();
 });
@@ -153,6 +157,95 @@ describe("submitContinuation", () => {
 		} finally {
 			now.mockRestore();
 		}
+	});
+
+	describe("when localStorage cannot hold the retry copy", () => {
+		/* iOS Safari gives the whole origin ~5 M characters; two screenshots are
+		   ~2.9 M. A second image-bearing envelope used to throw BEFORE the request,
+		   surfacing as the composer's catch-all banner with no Retry control. */
+		const quota = () =>
+			vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+				throw new DOMException("quota", "QuotaExceededError");
+			});
+
+		it("still sends, and holds the envelope in memory for an in-page retry", async () => {
+			quota();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(
+				submitContinuation("rotom", "prompt", "with screenshots", [
+					{ data_b64: "AAAA", mime_type: "image/png" },
+				]),
+			).rejects.toThrow("Load failed");
+			expect(mockedSendCommand).toHaveBeenCalledOnce();
+			expect(localStorage.getItem("lo-mobile-command:rotom")).toBeNull();
+			/* The retry affordance exists, under the same UUID. */
+			const pending = getPendingContinuation("rotom");
+			expect(pending?.command_id).toBe("12345678-1234-4678-9234-567812345678");
+
+			mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
+			const retry = await submitContinuation("rotom", "prompt", "edited draft");
+			expect(retry.envelope).toEqual(mockedSendCommand.mock.calls[0]?.[1]);
+			expect(getPendingContinuation("rotom")).toBeNull();
+		});
+
+		it("sends an envelope over the per-envelope bound instead of refusing it", async () => {
+			mockedSendCommand.mockResolvedValue({ ok: true, detail: "prompt sent" });
+			const huge = "A".repeat(4 * 1024 * 1024 + 1);
+			await expect(
+				submitContinuation("big", "prompt", "x", [{ data_b64: huge, mime_type: "image/png" }]),
+			).resolves.toMatchObject({ ok: true });
+			expect(mockedSendCommand).toHaveBeenCalledOnce();
+			expect(getPendingContinuation("big")).toBeNull();
+		});
+
+		it("is emptied with the rest of the private state", async () => {
+			quota();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(submitContinuation("rotom", "prompt", "private words")).rejects.toThrow();
+			expect(getPendingContinuation("rotom")).not.toBeNull();
+			clearPrivateSessionStorage();
+			expect(getPendingContinuation("rotom")).toBeNull();
+		});
+
+		it("persists later envelopes normally once storage recovers, keeping the held one retryable", async () => {
+			const spy = quota();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(submitContinuation("a", "prompt", "one")).rejects.toThrow();
+			spy.mockRestore();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(submitContinuation("b", "prompt", "two")).rejects.toThrow();
+			expect(localStorage.getItem("lo-mobile-command:b")).not.toBeNull();
+			expect(localStorage.getItem("lo-mobile-command:a")).toBeNull();
+			expect(getPendingContinuation("a")).not.toBeNull();
+		});
+
+		it("expires a held envelope after the 24 h TTL like a persisted one", async () => {
+			let clock = 1_000_000;
+			vi.spyOn(Date, "now").mockImplementation(() => clock);
+			quota();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(submitContinuation("ttl", "prompt", "old")).rejects.toThrow();
+			clock += 23 * 60 * 60 * 1000;
+			expect(getPendingContinuation("ttl")).not.toBeNull();
+			clock += 2 * 60 * 60 * 1000;
+			expect(getPendingContinuation("ttl")).toBeNull();
+		});
+
+		it("does not refresh a legacy raw envelope's age on every read while the write is refused", async () => {
+			let clock = 5_000_000;
+			vi.spyOn(Date, "now").mockImplementation(() => clock);
+			const legacy = {
+				op: "prompt",
+				command_id: "12345678-1234-4678-9234-567812345678",
+				text: "legacy",
+			};
+			localStorage.setItem("lo-mobile-command:old", JSON.stringify(legacy));
+			quota();
+			expect(getPendingContinuation("old")?.text).toBe("legacy");
+			expect(localStorage.getItem("lo-mobile-command:old")).toBeNull();
+			clock += 25 * 60 * 60 * 1000;
+			expect(getPendingContinuation("old")).toBeNull();
+		});
 	});
 });
 

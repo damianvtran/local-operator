@@ -1,0 +1,396 @@
+{
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "authoring_base": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+  "scope": "Two selected labels for safety A/B; not full namespace/native approval",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "keys": [
+    "wire.settings.tool_approval_mode.choice.ask.label",
+    "wire.settings.tool_approval_mode.choice.auto.label"
+  ],
+  "records": [
+    {
+      "locale": "en",
+      "source_path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "whole_file_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+      "selected_canonical_sha256": "9914ac66bb51db26ab03ea0672af262adddbb62ef7cedcd8d6b0b6d4bd68de29",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "Ask",
+        "wire.settings.tool_approval_mode.choice.auto.label": "Automatic"
+      },
+      "capture_provenance": {
+        "reuse_from": "i18n/audits/evidence/approval-choice-input-cache.json",
+        "immutable_cache_sha256": "e9227b235b387253b2603e0d4b5c1dc47bf3b4b4bf6c7b207c8671537ed4ef3d",
+        "basis": "Original sequential approved capture; source full-file unchanged at H"
+      }
+    },
+    {
+      "locale": "fr",
+      "source_path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+      "whole_file_sha256": "8a6fcb21ed6799b4ff69f52d8f61bf70256b40f2bc10e7d9ee72dd799f8f8876",
+      "selected_canonical_sha256": "9ad27d98138bfcb771e92b1df923fa1acb17ac375bb4f28324d5c6edbfa73476",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "demander",
+        "wire.settings.tool_approval_mode.choice.auto.label": "automatique"
+      },
+      "capture_provenance": {
+        "route": "read_public_copy",
+        "serial": true,
+        "calls": [
+          {
+            "key": "wire.settings.tool_approval_mode.choice.ask.label",
+            "tool_call_id": "call_fc070e55c14d408f9608c7d1b3ccf7cb:e00ee6afb7ae431084124ac93032e34f",
+            "details": {
+              "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.ask.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "bdbc2ecfe3670f80796c217e1aca36cc31353ca6f7ddf1a754f969a83145a5aa",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          },
+          {
+            "key": "wire.settings.tool_approval_mode.choice.auto.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:d7c4e3cff1d246a8b8a11000d7f97309",
+            "details": {
+              "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.auto.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "aaa7302b9bea344fe48364326ef368475235661913068ea63f4b4fa94e4059e7",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "locale": "es",
+      "source_path": "local_operator/i18n/catalogues/es/wire.settings.json",
+      "whole_file_sha256": "e1026565e8003ddb8985c82e0b23de028a7ac4e01b5fbd5e4b6a3294660c64a5",
+      "selected_canonical_sha256": "b3137442b15468777e795f323bd276f56a688d8c1109dcd9ce65e160bd44fd64",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "preguntar",
+        "wire.settings.tool_approval_mode.choice.auto.label": "automático"
+      },
+      "capture_provenance": {
+        "route": "read_public_copy",
+        "serial": true,
+        "calls": [
+          {
+            "key": "wire.settings.tool_approval_mode.choice.ask.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:ad4c24dc5017404bb129f4a1ea6f8ea0",
+            "details": {
+              "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.ask.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "f050c681c1c302639eed409e6e6adb229f60c4ce6f1bea79b0a20c8ad5773d4a",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          },
+          {
+            "key": "wire.settings.tool_approval_mode.choice.auto.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:af36f5971fda4ee8b084398f3c7f16ca",
+            "details": {
+              "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.auto.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "dcaf84d1f23c8714136e5915ca4f828638174824f82766f2ce77526ec4eb86a3",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "locale": "zh-CN",
+      "source_path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "whole_file_sha256": "8d44389ff7b4b19be7fde38015eecb50caac7555a771ad6cc52fb1820d489f5a",
+      "selected_canonical_sha256": "3dd1e07963471910edc08acafa8f587b01d94be19966634e5e3c63742bcbfc40",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "询问",
+        "wire.settings.tool_approval_mode.choice.auto.label": "自动"
+      },
+      "capture_provenance": {
+        "route": "read_public_copy",
+        "serial": true,
+        "calls": [
+          {
+            "key": "wire.settings.tool_approval_mode.choice.ask.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:d09557e577bc4e85a6842ad9eb08bd7e",
+            "details": {
+              "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.ask.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "bc7086effa33bfccd5475d076185fb0eefcce92f75fa263ccad19ce36ea40d86",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          },
+          {
+            "key": "wire.settings.tool_approval_mode.choice.auto.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:a738ee5682f74a5b8cf0e9541143edbc",
+            "details": {
+              "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.auto.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "b61f4203b94c2cedae07c77827acc9e496e9a090310d173249899e71e1235203",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "locale": "ru",
+      "source_path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+      "whole_file_sha256": "87ac6464c94f359c7ba6a045fe0e8d0ed1297c653d036d47da0aaedf3b90f4f8",
+      "selected_canonical_sha256": "3a4ecc144843136ae0cd58eb5385b3d88644a236ebecbf343ff0f72dc2b0eaa3",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "спрашивать",
+        "wire.settings.tool_approval_mode.choice.auto.label": "автоматически"
+      },
+      "capture_provenance": {
+        "route": "read_public_copy",
+        "serial": true,
+        "calls": [
+          {
+            "key": "wire.settings.tool_approval_mode.choice.ask.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:1a73af0edfce4d18bd83e1a4815cf20e",
+            "details": {
+              "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.ask.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "1cd9cad80ab02edfa1b31269a88fdc91c1150faa379658d5e05a5df0c6bad505",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          },
+          {
+            "key": "wire.settings.tool_approval_mode.choice.auto.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:fee8aa18d34c416d967b7bc8e604875f",
+            "details": {
+              "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.auto.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "64054a5a0a0667676b9a74e9d1d15f8b66b8314126ff681a04b863c9d350f79f",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "locale": "ur",
+      "source_path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "whole_file_sha256": "79869c119f2cb73152c50a4a3ffb647441cd0b0db0fb1f49a76f29a15324bc5e",
+      "selected_canonical_sha256": "fde72a767a645ec6097c3fad3d1663a702018271e26153ab4bef791e181775d6",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "پوچھیں",
+        "wire.settings.tool_approval_mode.choice.auto.label": "خودکار"
+      },
+      "capture_provenance": {
+        "route": "read_public_copy",
+        "serial": true,
+        "calls": [
+          {
+            "key": "wire.settings.tool_approval_mode.choice.ask.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:eca2e1fae7b64b2aa6d311316c77c5c6",
+            "details": {
+              "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.ask.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "4f3ce9e2648c0b3d4de4a35401d284d0e8e88f0ce627296c7f4424649af212a7",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          },
+          {
+            "key": "wire.settings.tool_approval_mode.choice.auto.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:eaccb0dd41054453ae33c64787897f5e",
+            "details": {
+              "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.auto.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "8718a42369b4ef4656a317831bc678dc197f4f6a35fe09d3d053dca4e7b687ea",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "locale": "vi",
+      "source_path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+      "whole_file_sha256": "830fc55bf9a1df0dfb3d915574800b0aa563b83a95a9ed36caf7ebeb9ecbf28b",
+      "selected_canonical_sha256": "94367d26f1ed4d0f23fc9742ed53bd1e7e2a852611e73986bb3293f8aafa3fc8",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "hỏi trước",
+        "wire.settings.tool_approval_mode.choice.auto.label": "Tự động"
+      },
+      "capture_provenance": {
+        "route": "read_public_copy",
+        "serial": true,
+        "calls": [
+          {
+            "key": "wire.settings.tool_approval_mode.choice.ask.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:a8c0cddf396246218b1011ed60bb9490",
+            "details": {
+              "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.ask.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "7e869990eb88e1328075edb704993cff17a535ac14cd1e4d15d0def95f24c1a7",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          },
+          {
+            "key": "wire.settings.tool_approval_mode.choice.auto.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:0237a81d4a7d44ababc6932229911a92",
+            "details": {
+              "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.auto.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "522ae97923ba1b1d689b3ff657c19817a00aabfa7bd443efa3ba9785b33d7e3c",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "locale": "hi",
+      "source_path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+      "whole_file_sha256": "64bf453ca81721ed35d89ba95d7e5e5aac343765d5e6010fbd37ccbc50704f48",
+      "selected_canonical_sha256": "9d7ea71b3d1ab904d78a16436b800b78e294b1786a617acb15d059c1f215823e",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "पूछें",
+        "wire.settings.tool_approval_mode.choice.auto.label": "स्वचालित"
+      },
+      "capture_provenance": {
+        "route": "read_public_copy",
+        "serial": true,
+        "calls": [
+          {
+            "key": "wire.settings.tool_approval_mode.choice.ask.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:bc7c9a905f494dc9bb1dc17bb9d335f2",
+            "details": {
+              "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.ask.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "1d40c02cb24c0c3a7ffae0e7db3eea3d076e25dbd99de08fdd5cd19b7a90c4cf",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          },
+          {
+            "key": "wire.settings.tool_approval_mode.choice.auto.label",
+            "tool_call_id": "call_400fe0ef9cac45eaa70be3fc8a73c734:d63a90553b5f418f82b1a58d96c6ae87",
+            "details": {
+              "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+              "key": "wire.settings.tool_approval_mode.choice.auto.label",
+              "public_copy": true,
+              "policy": "docs/security/redaction-policy.md",
+              "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+              "sha256": "15643e0c8571d3a9aea963f725adceac8970a0b17a8d9bb9d9d86f7ea02ca3fa",
+              "repository_root": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+              "repository": "damianvtran/local-operator",
+              "repository_verified": true,
+              "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+              "checkout_head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "contexts": {
+    "wire.settings.tool_approval_mode.choice.ask.label": {
+      "role": "approval mode dropdown choice label",
+      "tone": "concise, neutral, sentence case",
+      "note": "Human-facing name for the prompting mode, not the ask tool or a command. Translate naturally as a mode label; do not preserve the raw English enum token. Choice.value remains the machine value ask, while Choice.label is independently localized display copy. Ask mode prompts for write and command tools, not unconditionally for every tool call. Existing guardrail risk checks and mandatory human-approval requirements still apply in both modes. This label is neither authorization nor permission to execute a tool. Keep it compact; no ICU arguments. See settings_io.py's tool_approval_mode choices, harness/approval.py and guardrails/check.py."
+    },
+    "wire.settings.tool_approval_mode.choice.auto.label": {
+      "role": "approval mode dropdown choice label",
+      "tone": "concise, neutral, sentence case",
+      "note": "Human-facing name for the automatic tool-approval mode. Translate naturally as a mode label, not as an untranslated machine token; use an idiomatic local abbreviation only if natural. Choice.value remains the machine value auto, while Choice.label is independently localized display copy. Automatic does not mean every action is allowed: existing guardrail risk checks and mandatory human-approval requirements still apply, including person-only gates for account profile saves and community posts. Do not imply a guardrail bypass, unconditional approval, authorization or permission to execute a tool. Keep it compact; no ICU arguments. See settings_io.py's tool_approval_mode choices, harness/approval.py and guardrails/check.py."
+    }
+  },
+  "contexts_provenance": {
+    "reuse_from": "i18n/audits/evidence/approval-choice-input-cache.json",
+    "immutable_cache_sha256": "e9227b235b387253b2603e0d4b5c1dc47bf3b4b4bf6c7b207c8671537ed4ef3d",
+    "basis": "Both approved cached contexts exactly match committed H full-file source sidecar; context file bytes unchanged from pre-authoring base"
+  },
+  "invariant": "14 read_public_copy calls executed serially after H commit; new locale values taken only from successful audited outputs. EN and two contexts reused from immutable approved input cache with full-file byte compatibility. Canonical subset digests and full-file hashes checked against committed H; never reconstructed prose from hashes."
+}

@@ -1,0 +1,402 @@
+{
+  "audited_head": "fad3ab5703fc5bb159f48cb43755c8d9e1323b6c",
+  "prepared_by_session": "4930e1cd3312",
+  "actual_preparation_model": "openai/gpt-6.1-sol (quota fallback from anthropic/claude-opus-5-5)",
+  "scope": "evidence-only; no new product execution or formal QA clearance",
+  "merge_base": "fa4fb006319718935477ffae732cab76708062fe",
+  "cached_origin_main": "bd7bf7520d5a87a438a04d760f556ab67199c678",
+  "live_github_base_at_preparation": "bd7bf7520d5a87a438a04d760f556ab67199c678",
+  "live_base_catalogue_comparison": [
+    {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "live_base_blob": "0a7663c97283d8db3a9c9c893f07e5434db6a662",
+      "candidate_blob": "a2523a64b75074384be2793be098b1ed92d360fa",
+      "identical": false
+    },
+    {
+      "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+      "live_base_blob": "f9892c17f966b5feb4fb573bcb933a482240cc90",
+      "candidate_blob": "49834b517b83486e02fbc0212b3fd7f22f4cc3a5",
+      "identical": false
+    },
+    {
+      "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+      "live_base_blob": "e4e2d1727b12d1592de98a5b31bcc735d821ca9f",
+      "candidate_blob": "7ffff3758f6075258f761e6a8ca2b04e8cdfb95c",
+      "identical": false
+    },
+    {
+      "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+      "live_base_blob": "1786e68f58076c6a3ecd8f7c227b0c55089b36c7",
+      "candidate_blob": "d7e3fe90eabd800e19a3b136d065ef806e0c1b4a",
+      "identical": false
+    },
+    {
+      "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+      "live_base_blob": "75ffa5aba5bdacaeb3e8cd678be1e28eeb6cb0a8",
+      "candidate_blob": "f2ca1c45b05d4f9750b17c115656b8259d806832",
+      "identical": false
+    },
+    {
+      "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "live_base_blob": "0ce8809a31cf1de7bab282873b6b601257745e7d",
+      "candidate_blob": "ba5d01d293e6a29f15ac352ae5e668d0a8f0ade5",
+      "identical": false
+    },
+    {
+      "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+      "live_base_blob": "4128f5263f0bae37f5d499b69c8effb47aa72cb6",
+      "candidate_blob": "b16cbebc161b872f7e3ac0954287150c77e021bf",
+      "identical": false
+    },
+    {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "live_base_blob": "9a22a3d8624edd92f365796d307712d4b65299fd",
+      "candidate_blob": "e05eb73e20b396a45a086f8ac646170b5c862840",
+      "identical": false
+    },
+    {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "live_base_blob": "3dc9c46d103c3eb93c21b869a475a11eed53a313",
+      "candidate_blob": "ca046ea079bfbdaab0a0f58cd5c17479fbd94460",
+      "identical": false
+    }
+  ],
+  "superseded": false,
+  "preparation_started_with_clean_tracked_tree": true,
+  "original_pr_scope": {
+    "shipping_catalogues_context": {
+      "paths": [
+        "local_operator/i18n/catalogues/en/wire.settings.context.json",
+        "local_operator/i18n/catalogues/en/wire.settings.json",
+        "local_operator/i18n/catalogues/es/wire.settings.json",
+        "local_operator/i18n/catalogues/fr/wire.settings.json",
+        "local_operator/i18n/catalogues/hi/wire.settings.json",
+        "local_operator/i18n/catalogues/ru/wire.settings.json",
+        "local_operator/i18n/catalogues/ur/wire.settings.json",
+        "local_operator/i18n/catalogues/vi/wire.settings.json",
+        "local_operator/i18n/catalogues/zh-CN/wire.settings.json"
+      ],
+      "path_count": 9,
+      "target_bytes": 976018
+    },
+    "audit_histories": {
+      "paths": [
+        "i18n/audit-history/es/wire.settings.json",
+        "i18n/audit-history/fr/wire.settings.json",
+        "i18n/audit-history/hi/wire.settings.json",
+        "i18n/audit-history/ru/wire.settings.json",
+        "i18n/audit-history/ur/wire.settings.json",
+        "i18n/audit-history/vi/wire.settings.json",
+        "i18n/audit-history/zh-CN/wire.settings.json"
+      ],
+      "path_count": 7,
+      "target_bytes": 3353660
+    },
+    "audit_artifacts": {
+      "paths": [
+        "i18n/audits/evidence/Englishvoiceconstant-source-author.json",
+        "i18n/audits/evidence/approval-choice-input-cache.json",
+        "i18n/audits/evidence/approval-choice-postauthor-input-cache.json",
+        "i18n/audits/evidence/approval-choice-postauthor-manifest.json",
+        "i18n/audits/evidence/approval-choice-source-pin.json",
+        "i18n/audits/evidence/approval-choice-translator-es.json",
+        "i18n/audits/evidence/approval-choice-translator-fr.json",
+        "i18n/audits/evidence/approval-choice-translator-hi.json",
+        "i18n/audits/evidence/approval-choice-translator-ru.json",
+        "i18n/audits/evidence/approval-choice-translator-ur.json",
+        "i18n/audits/evidence/approval-choice-translator-vi.json",
+        "i18n/audits/evidence/approval-choice-translator-zh-CN.json",
+        "i18n/audits/evidence/approval-full-artifact-manifest.json",
+        "i18n/audits/evidence/approval-full-deduplicated-ledger.json",
+        "i18n/audits/evidence/approval-full-deduplicated-ledger.md",
+        "i18n/audits/evidence/approval-full-es-A-controls-original.json",
+        "i18n/audits/evidence/approval-full-es-A-original.json",
+        "i18n/audits/evidence/approval-full-es-B-original.json",
+        "i18n/audits/evidence/approval-full-fr-A-completion-original.json",
+        "i18n/audits/evidence/approval-full-fr-A-original.json",
+        "i18n/audits/evidence/approval-full-fr-B-original.json",
+        "i18n/audits/evidence/approval-full-hi-A-original.json",
+        "i18n/audits/evidence/approval-full-hi-B-original.json",
+        "i18n/audits/evidence/approval-full-hi-B-supplement-original.json",
+        "i18n/audits/evidence/approval-full-inputs/Englishvoiceconstant-full-en-approved-capture.json",
+        "i18n/audits/evidence/approval-full-inputs/en-approved-envelope.json",
+        "i18n/audits/evidence/approval-full-inputs/es-approved-envelope.json",
+        "i18n/audits/evidence/approval-full-inputs/fr-approved-envelope.json",
+        "i18n/audits/evidence/approval-full-inputs/hi-approved-envelope.json",
+        "i18n/audits/evidence/approval-full-inputs/manifest.json",
+        "i18n/audits/evidence/approval-full-inputs/ru-approved-envelope.json",
+        "i18n/audits/evidence/approval-full-inputs/ur-approved-envelope.json",
+        "i18n/audits/evidence/approval-full-inputs/vi-approved-envelope.json",
+        "i18n/audits/evidence/approval-full-inputs/zh-CN-approved-envelope.json",
+        "i18n/audits/evidence/approval-full-repair-author-es.json",
+        "i18n/audits/evidence/approval-full-repair-author-fr.json",
+        "i18n/audits/evidence/approval-full-repair-author-hi.json",
+        "i18n/audits/evidence/approval-full-repair-author-ru.json",
+        "i18n/audits/evidence/approval-full-repair-author-ur.json",
+        "i18n/audits/evidence/approval-full-repair-author-vi.json",
+        "i18n/audits/evidence/approval-full-repair-author-zh-CN.json",
+        "i18n/audits/evidence/approval-full-root-adjudication.json",
+        "i18n/audits/evidence/approval-full-ru-A-original.json",
+        "i18n/audits/evidence/approval-full-ru-B-original.json",
+        "i18n/audits/evidence/approval-full-ur-A-controls-original.json",
+        "i18n/audits/evidence/approval-full-ur-A-original.json",
+        "i18n/audits/evidence/approval-full-ur-A-scoped-observation-original.json",
+        "i18n/audits/evidence/approval-full-ur-B-completed-original.json",
+        "i18n/audits/evidence/approval-full-ur-B-original.json",
+        "i18n/audits/evidence/approval-full-vi-A-controls-original.json",
+        "i18n/audits/evidence/approval-full-vi-A-original.json",
+        "i18n/audits/evidence/approval-full-vi-B-original.json",
+        "i18n/audits/evidence/approval-full-zh-CN-A-original.json",
+        "i18n/audits/evidence/approval-full-zh-CN-B-original.json",
+        "i18n/audits/evidence/approval-native-admission-commit-manifest.json",
+        "i18n/audits/evidence/approval-native-admission-fork-scope-only.json",
+        "i18n/audits/evidence/approval-native-admission-generate-check.json",
+        "i18n/audits/evidence/approval-native-admission-generate.json",
+        "i18n/audits/evidence/approval-native-admission-ledger-cli.json",
+        "i18n/audits/evidence/approval-native-admission-private-transport.json",
+        "i18n/audits/evidence/approval-native-admission-readiness-controls.json",
+        "i18n/audits/evidence/approval-native-admission-runtime-catalogue-cache.json",
+        "i18n/audits/evidence/approval-native-admission-strict-origin-main.json",
+        "i18n/audits/evidence/approval-owner-private-eligibility-disposition.json",
+        "i18n/audits/evidence/approval-r2-parent-primary-receipt-index.json",
+        "i18n/audits/evidence/approval-r3-parent-primary-receipt-index.json",
+        "i18n/audits/evidence/approval-repair-explicit-retention-manifest.json",
+        "i18n/audits/evidence/approval-repair-parent-count-verification.json",
+        "i18n/audits/evidence/approval-repair-postauthor-inputs/es-approved-envelope.json",
+        "i18n/audits/evidence/approval-repair-postauthor-inputs/fr-approved-envelope.json",
+        "i18n/audits/evidence/approval-repair-postauthor-inputs/hi-approved-envelope.json",
+        "i18n/audits/evidence/approval-repair-postauthor-inputs/manifest.json",
+        "i18n/audits/evidence/approval-repair-postauthor-inputs/ru-approved-envelope.json",
+        "i18n/audits/evidence/approval-repair-postauthor-inputs/ur-approved-envelope.json",
+        "i18n/audits/evidence/approval-repair-postauthor-inputs/vi-approved-envelope.json",
+        "i18n/audits/evidence/approval-repair-postauthor-inputs/zh-CN-approved-envelope.json",
+        "i18n/audits/evidence/approval-repair-private-freeze-controls.json",
+        "i18n/audits/evidence/approval-repair-private-freeze-sourcebinding.json",
+        "i18n/audits/evidence/approval-repair-r2-artifact-manifest.json",
+        "i18n/audits/evidence/approval-repair-r2-clean-stream-retention.json",
+        "i18n/audits/evidence/approval-repair-r2-deduplicated-ledger.json",
+        "i18n/audits/evidence/approval-repair-r2-deduplicated-ledger.md",
+        "i18n/audits/evidence/approval-repair-r2-exit-matrix.json",
+        "i18n/audits/evidence/approval-repair-r2-exit-matrix.md",
+        "i18n/audits/evidence/approval-repair-r2-originals/es-A.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/es-B.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/fr-A.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/fr-B.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/hi-A.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/hi-B.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/ru-A.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/ru-B.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/ur-A.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/ur-B.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/vi-A.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/vi-B.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/zh-A.json",
+        "i18n/audits/evidence/approval-repair-r2-originals/zh-B.json",
+        "i18n/audits/evidence/approval-repair-r2-referenced-support/0be89bc16927-Englishvoiceconstant-full-en-approved-capture.json",
+        "i18n/audits/evidence/approval-repair-r2-referenced-support/119c681eb085-ru-r2-derived-controls.json",
+        "i18n/audits/evidence/approval-repair-r2-referenced-support/46477cf7eb33-audit-checks.json",
+        "i18n/audits/evidence/approval-repair-r2-referenced-support/465096fd021d-vi-B-r2-validation.json",
+        "i18n/audits/evidence/approval-repair-r2-referenced-support/e764273c566b-vi-A-r2-verification.json",
+        "i18n/audits/evidence/approval-repair-r2-referenced-support/e764273c566b-vi_r2_semantics.json",
+        "i18n/audits/evidence/approval-repair-r3-K2-source-binding.json",
+        "i18n/audits/evidence/approval-repair-r3-author-es.json",
+        "i18n/audits/evidence/approval-repair-r3-author-vi.json",
+        "i18n/audits/evidence/approval-repair-r3-frozen-transition-matrix.json",
+        "i18n/audits/evidence/approval-repair-r3-integration-control.json",
+        "i18n/audits/evidence/approval-repair-r3-originals/approval-repair-audit-es-A-r3.json",
+        "i18n/audits/evidence/approval-repair-r3-originals/approval-repair-audit-es-B-r3.json",
+        "i18n/audits/evidence/approval-repair-r3-originals/approval-repair-audit-vi-A-r3.json",
+        "i18n/audits/evidence/approval-repair-r3-originals/approval-repair-audit-vi-B-r3.json",
+        "i18n/audits/evidence/approval-repair-r3-postauthor-inputs/es-approved-envelope.json",
+        "i18n/audits/evidence/approval-repair-r3-postauthor-inputs/manifest.json",
+        "i18n/audits/evidence/approval-repair-r3-postauthor-inputs/vi-approved-envelope.json",
+        "i18n/audits/evidence/approval-repair-r3-readerbrief.json",
+        "i18n/audits/evidence/approval-repair-root-ready-readerbrief.json"
+      ],
+      "path_count": 118,
+      "target_bytes": 39980009
+    }
+  },
+  "product_paths": [
+    {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "blob_at_audited_head": "a2523a64b75074384be2793be098b1ed92d360fa",
+      "sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+      "bytes": 92819
+    },
+    {
+      "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+      "blob_at_audited_head": "49834b517b83486e02fbc0212b3fd7f22f4cc3a5",
+      "sha256": "36132ff7f31a6a42c941661fb983f8b14b54954bdaf54f268f8f69eb9672c52b",
+      "bytes": 104406
+    },
+    {
+      "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+      "blob_at_audited_head": "7ffff3758f6075258f761e6a8ca2b04e8cdfb95c",
+      "sha256": "e093d4481ac0d477c86b562ff8ab1f59c2a00e948fddce1b3f34c1da73064ffa",
+      "bytes": 107151
+    },
+    {
+      "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+      "blob_at_audited_head": "d7e3fe90eabd800e19a3b136d065ef806e0c1b4a",
+      "sha256": "b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a",
+      "bytes": 159488
+    },
+    {
+      "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+      "blob_at_audited_head": "f2ca1c45b05d4f9750b17c115656b8259d806832",
+      "sha256": "5c50edd1aa20e5755f5704f95835117852dd9e0e39b222ce421bf6c47f003651",
+      "bytes": 139511
+    },
+    {
+      "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "blob_at_audited_head": "ba5d01d293e6a29f15ac352ae5e668d0a8f0ade5",
+      "sha256": "66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b",
+      "bytes": 121720
+    },
+    {
+      "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+      "blob_at_audited_head": "b16cbebc161b872f7e3ac0954287150c77e021bf",
+      "sha256": "100fc2ccedd6bc0def2837912b4332d9b0438c1f0dc5451e072d37bf94e1e964",
+      "bytes": 111253
+    },
+    {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "blob_at_audited_head": "e05eb73e20b396a45a086f8ac646170b5c862840",
+      "sha256": "c17c1cf7e60d836a2e15bfdb341977ceab0ff15d4c62cfa92e7f03b8ed2e53ba",
+      "bytes": 92633
+    },
+    {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "blob_at_audited_head": "ca046ea079bfbdaab0a0f58cd5c17479fbd94460",
+      "sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+      "bytes": 47037
+    },
+    {
+      "path": "i18n/audit-history/es/wire.settings.json",
+      "blob_at_audited_head": "f9b9084be63d6d43a517a3ea1fae22bf685e8670",
+      "sha256": "7b2fbce0d956d943c3d5b9c1afc7ffa566d5ef1505ec90eae9044f2363bf511d",
+      "bytes": 470470
+    },
+    {
+      "path": "i18n/audit-history/fr/wire.settings.json",
+      "blob_at_audited_head": "366dd5bfa9b3d82a66ffaa320422eb41b083661d",
+      "sha256": "4a53316b6490a506155988e8aceb48aa07235eb0aba0864623763874da6ce20d",
+      "bytes": 475126
+    },
+    {
+      "path": "i18n/audit-history/hi/wire.settings.json",
+      "blob_at_audited_head": "fd925e40356a23b0fbb0c49fc88f79693039e6ab",
+      "sha256": "8aa12bba337924eeaf8048159aa3a2c48266a550b543410e4293f4410fff87ae",
+      "bytes": 482710
+    },
+    {
+      "path": "i18n/audit-history/ru/wire.settings.json",
+      "blob_at_audited_head": "575d76b8efceda576749a15d3690f059a236078e",
+      "sha256": "e6103da63fe16a23873b31458d551a77fa49b95c223df7a8b7961f82467dfe2b",
+      "bytes": 488993
+    },
+    {
+      "path": "i18n/audit-history/ur/wire.settings.json",
+      "blob_at_audited_head": "15664482b1430c3ed102e05dad612a0ab3fd216e",
+      "sha256": "cee6980ad39e8d58058a7890fd4b12e677239516e61c9303ab3ab4ef906b8119",
+      "bytes": 487016
+    },
+    {
+      "path": "i18n/audit-history/vi/wire.settings.json",
+      "blob_at_audited_head": "694da331a24a53b799c6b23a2398b9564a91be63",
+      "sha256": "7081db45fb40a36d895f008d7d73236f205ff30bcfa38cf3f223ada905379994",
+      "bytes": 472537
+    },
+    {
+      "path": "i18n/audit-history/zh-CN/wire.settings.json",
+      "blob_at_audited_head": "5656eb9d7189cf05448ab5e96115de6f44875b84",
+      "sha256": "a358e35c500d907023e367f585705c927ff2a606418183ebb71dbaced28ea1c6",
+      "bytes": 476808
+    }
+  ],
+  "all_target_maps": [
+    {
+      "locale": "zh-CN",
+      "wire_settings_raw_sha256": "c17c1cf7e60d836a2e15bfdb341977ceab0ff15d4c62cfa92e7f03b8ed2e53ba",
+      "keys": 895,
+      "wire_bundle_cache_sha256": "77324858a7ebe09ed00ae42cf3c40a369662c03fec82b3d4fa5e6b24885f6445",
+      "membership": "deferred"
+    },
+    {
+      "locale": "fr",
+      "wire_settings_raw_sha256": "e093d4481ac0d477c86b562ff8ab1f59c2a00e948fddce1b3f34c1da73064ffa",
+      "keys": 895,
+      "wire_bundle_cache_sha256": "8674e77ba8159d75bd0fb31d4d1a8491d81fa9300fdb066a8778bb711b335e8b",
+      "membership": "deferred"
+    },
+    {
+      "locale": "ru",
+      "wire_settings_raw_sha256": "5c50edd1aa20e5755f5704f95835117852dd9e0e39b222ce421bf6c47f003651",
+      "keys": 895,
+      "wire_bundle_cache_sha256": "dc1dbd5735a1b8b031470a72a9d87d94c8cd3221dbcb6d4e8bfa1d2ccf9d3dc9",
+      "membership": "deferred"
+    },
+    {
+      "locale": "hi",
+      "wire_settings_raw_sha256": "b030c730c0f8a179773b082a8e907d4487e8cf31a590714b62bab51614a5c30a",
+      "keys": 895,
+      "wire_bundle_cache_sha256": "6923533609f3abb67cb97b8ffa1e5d8ddc5b547f0dbec1373e6e4ac621fbcc9c",
+      "membership": "deferred"
+    },
+    {
+      "locale": "ur",
+      "wire_settings_raw_sha256": "66c856c3c9ab823665241301511c50286e4dae574a0dd617d0c764a43d99331b",
+      "keys": 895,
+      "wire_bundle_cache_sha256": "93a9acff0a269ddbc6ed2609ee72316299775fb548e4997c96ea1b6977d17ce1",
+      "membership": "deferred"
+    },
+    {
+      "locale": "es",
+      "wire_settings_raw_sha256": "36132ff7f31a6a42c941661fb983f8b14b54954bdaf54f268f8f69eb9672c52b",
+      "keys": 895,
+      "wire_bundle_cache_sha256": "08aeb74531ec297f5a3567ae859345827a8b4128cc732c89a995d9b0defaa65a",
+      "membership": "deferred"
+    },
+    {
+      "locale": "vi",
+      "wire_settings_raw_sha256": "100fc2ccedd6bc0def2837912b4332d9b0438c1f0dc5451e072d37bf94e1e964",
+      "keys": 895,
+      "wire_bundle_cache_sha256": "bfecd4ef2d5f3a15417dcee3616ee9c470a1c03e51a93d35fac0b7b7b222f205",
+      "membership": "deferred"
+    }
+  ],
+  "english_source_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+  "catalogue_context_sha256_bindings_verified": 1669,
+  "consumer_blob_bindings_verified": {
+    "local_operator/settings_io.py": "3cc9bab6fc07d17527370c15193dd1e1c90161b6",
+    "local_operator/tui/widgets/settings_view.py": "144b307af8c4a65d47ea4d6c8d2b6ad62a1d989f",
+    "local_operator/tui/app.py": "bc260efaa74ca761dfdf57ab1788c077bcf4fdec",
+    "local_operator/tui/local_operator.tcss": "ffe7dc9400edfa00558865161d1d01a7587ea8c0",
+    "scripts/visual_capture.py": "c41e1e8983317039f0c7c1c7b725deecf3fdb94b",
+    "tests/unit/tui/test_app_pilot.py": "00383730a9f78c921ddb07c70d05d278d82bfb11"
+  },
+  "retained_after_svg_bindings_verified": 9,
+  "copied_source_files": 226,
+  "copied_source_bytes": 10628636,
+  "privacy_scan": {
+    "patterns": [
+      "private_key",
+      "github_token",
+      "aws_access",
+      "provider_key",
+      "authorization"
+    ],
+    "findings": [],
+    "limitation": "bounded known-pattern review, not an arbitrary-secret detector"
+  },
+  "generator_receipt": "../approval-native-admission-generate-check.json (Root execution retained; 200 byte-identical artifacts, not rerun)",
+  "version_diff_from_merge_base": "",
+  "limitations": [
+    "strict --audit-base origin/main receipt is BLOCKED on upstream wire.remote_compute suffixes; fork-scope PASS is not a waiver",
+    "original invalid baseline comparison-* images remain only in QA scratch and are not endorsed",
+    "non-shipping evidence storage is explicitly requested by this task despite the general AGENTS.md PR-evidence exclusion",
+    "formal independent pushed-head review/QA/design/UX remain manager-owned"
+  ]
+}

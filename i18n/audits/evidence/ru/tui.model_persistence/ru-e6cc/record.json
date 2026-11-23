@@ -1,0 +1,109 @@
+{
+  "record_kind": "translation_author_receipt_not_independent_audit",
+  "locale": "ru",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "authored_at": "2026-11-22T10:34:17.670575+00:00",
+  "key_count": 4,
+  "status": "translated",
+  "source_revision": "87d87ec8b02ef3c279fda673302ce775f4a0329e",
+  "source_author": "a97",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e6cc991f4cd7",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch message: provider failure: quota; temporary fallback before translation",
+    "requested_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_model": "openai/gpt-6.1-sol",
+    "translation_method": "LLM native reasoning; no MT/API/service"
+  },
+  "auditor": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "independent_from_translator_session": false,
+    "actual_model_source": "Not performed: author receipt only; independent A/B pending"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/tui.model_persistence.json",
+      "sha256": "9d08bddeee59461ae1a9f27de2839c39dc7b0cad17b6171e26fd7cde82946940"
+    }
+  },
+  "frozen_source_context_before_after_equal": true,
+  "glossary_inputs": [
+    {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  ],
+  "glossary_choices": {
+    "model": "модель",
+    "session": "сессия",
+    "save": "сохранить",
+    "saved": "сохранённый",
+    "boot_default": "модель по умолчанию"
+  },
+  "glossary_proposals": [
+    "save → сохранить; saved → сохранённый (inflect naturally)",
+    "boot default → модель по умолчанию; persistence clause specifies new sessions"
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-e6cc/notes.md",
+      "sha256": "5f28bcc99627a07790d64d0857e81a98090192d89d1e530f1cb2bbb6c25115df"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-e6cc/script.py.txt",
+      "sha256": "eb613c069ca34b901456933ce2f76b9eacb0285e47fc34ce8f1077d5373e2994"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.model_persistence/ru-e6cc/actualvalidation.log",
+      "sha256": "cdd7f759fb9c66c348f2ed5f1f407504b33db3380ecd4630704aaeb4df8602b9"
+    }
+  ],
+  "validation": {
+    "command": "env -i HOME=\"/Users/damian/.local-operator/sessions/e6cc991f4cd7/scratchpad/ru-home\" LOCAL_OPERATOR_CONFIG_DIR=\"/Users/damian/.local-operator/sessions/e6cc991f4cd7/scratchpad/ru-home/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/ru/tui.model_persistence/ru-e6cc/script.py.txt /Users/damian/local-operator/.worktrees/i18n-model-persist-notice",
+    "exit_code": 0,
+    "official_scoped_result": [],
+    "scope": "en/ru tui.model_persistence only; checker namespace/locale enumerations narrowed, rules unchanged",
+    "cases": {
+      "keys": 4,
+      "plural_arms": 0,
+      "select_arms": 0,
+      "plain_rich_width_cases": 18
+    },
+    "actual_execution_log": "i18n/audits/evidence/ru/tui.model_persistence/ru-e6cc/actualvalidation.log",
+    "notes_kind": "audit_notes_not_execution_log",
+    "module_provenance": "Worktree module paths printed in actualvalidation.log; primary checkout interpreter",
+    "width_limitation": "Plain Rich only, normal-space command folding observed; not styled/native NoticeBlock or transcript-family proof"
+  },
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "independent_audit_performed": false
+  },
+  "not_claimed": [
+    "independent linguistic audit",
+    "passed status",
+    "global validator green",
+    "eligibility/admission",
+    "styled/native UI proof",
+    "completed UI qualification"
+  ],
+  "next_gate": "Manager private root commit before approved-reader independent A/B; no uncommitted-reader bypass"
+}

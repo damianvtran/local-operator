@@ -1,0 +1,224 @@
+{
+  "locale": "ru",
+  "namespace": "wire.settings",
+  "source_sha256": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+  "context_file_sha256": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+  "target_file_sha256": "68a0809d4356416703208d407734abe6433ec1b7b6796d61b7a2706691b3a624",
+  "full_file_sha256": {
+    "source": "227d478cddfcef3d92a977393a2447c301037bc8c53b89d23024ca063b391381",
+    "context": "e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1",
+    "target": "68a0809d4356416703208d407734abe6433ec1b7b6796d61b7a2706691b3a624",
+    "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "style": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5",
+    "preflight": "f7db934c8284b92b94e0e2adbb82360d0f70fafe93e0efec14e71ce60424e059"
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "scope": "eight voice tone/expressiveness DISPLAY label value changes only; NOT a full namespace re-audit",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-voice-choice-backfill",
+  "head": "0bf4305da8f4b113f3ce2120bfdf58845b3218c9",
+  "base": "4128f2a2",
+  "round": 1,
+  "working_tree_note": "Eight target values are uncommitted atop the supplied HEAD; exact target bytes are bound by target_file_sha256, not falsely attributed to the HEAD commit.",
+  "contribution_keys": [
+    "wire.settings.speech_voice_tone.choice.warm.label",
+    "wire.settings.speech_voice_tone.choice.neutral.label",
+    "wire.settings.speech_voice_tone.choice.bright.label",
+    "wire.settings.speech_voice_tone.choice.calm.label",
+    "wire.settings.speech_voice_tone.choice.authoritative.label",
+    "wire.settings.speech_voice_expressiveness.choice.low.label",
+    "wire.settings.speech_voice_expressiveness.choice.medium.label",
+    "wire.settings.speech_voice_expressiveness.choice.high.label"
+  ],
+  "keys_read": {
+    "contribution_labels": 8,
+    "unchanged_choice_descriptions": 8,
+    "surrounding_parent_label_help": 4,
+    "total_distinct_source_target_keys": 20,
+    "context_entries": 16
+  },
+  "translator": {
+    "agent": "Separate translator agent, per manager task brief (exact session identity not supplied)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "provenance_source": "manager task brief",
+    "fallback": "provider quota fallback; original model not supplied"
+  },
+  "auditor": {
+    "agent": "translation-auditor / voice-audit-ru; session 293b7f66ef77",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "read_route_verified": true,
+    "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol due provider quota failure, explicit model-switch event"
+  },
+  "independence": "Separate agent from translator; same actual model family disclosed. Auditor edited no repository files.",
+  "findings": [],
+  "namespace_verdicts": {
+    "wire.settings": "clean for exact eight-key contribution; terminal linguistic audit; no claim of whole namespace approval"
+  },
+  "semantic_assessment": {
+    "tone": "тёплый / нейтральный / бодрый / спокойный / уверенный are idiomatic masculine adjectives agreeing with Тон. тёплый conventionally describes friendly delivery; бодрый selects energetic, not visual brightness; уверенный follows Confident and assured, avoiding authoritarian connotations.",
+    "expressiveness": "низкая / средняя / высокая are idiomatic feminine level adjectives agreeing with Выразительность; they do not imply volume or pitch in this labeled control.",
+    "register": "Consistent lowercase terse choice labels; no address form or T/V mismatch.",
+    "glossary": "No glossary-prescribed common term drift. нейтральный is established Russian vocabulary, not unsanctioned English; all eight values use Cyrillic.",
+    "descriptions": "Seven explanatory descriptions align naturally. medium description has a pre-existing literal-wording concern recorded separately; no changed-label defect."
+  },
+  "out_of_scope_observations": [
+    {
+      "severity": "minor",
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "current": "Текущая константа.",
+      "proposal": "Стандартная подача.",
+      "reason": "Pre-existing literal константа sounds mathematical rather than existing standard delivery; new English context explicitly distinguishes those senses. Verified unchanged against 4128f2a2; the new label средняя is correct, so this does not gate the eight-label contribution.",
+      "code_context": "settings_io.py:6324-6328, description displayed alongside medium label; settings_view.py:4242-4243 appends description."
+    }
+  ],
+  "checks": [
+    {
+      "control": "Exact contribution coverage",
+      "result": "PASS",
+      "actual": "Only the eight contribution key values differ from base target; descriptions unchanged; source/target namespace key sets equal."
+    },
+    {
+      "control": "Placeholder/token parity and order",
+      "result": "PASS",
+      "actual": "All eight English and Russian values have empty placeholder/markup token sequences; no ICU patterns, number/date skeletons or count use."
+    },
+    {
+      "control": "CLDR plural execution",
+      "result": "N/A",
+      "actual": "No plural messages in the eight labels."
+    },
+    {
+      "control": "Configured locale and actual consumer resolver",
+      "result": "PASS",
+      "actual": "ConfigManager wrote isolated language=ru; resolve.config_value()=ru; boot.activate_resolved_locale(); text.active_locale()=ru; settings_io.BY_KEY choices emitted exact eight target labels and unchanged descriptions in stable machine-value order."
+    },
+    {
+      "control": "Negative operational control",
+      "result": "PASS",
+      "actual": "PASS: LOP_I18N=0 resolves en and refreshes all eight choice labels; removing switch restores ru"
+    },
+    {
+      "control": "Bidi storage scan",
+      "result": "PASS",
+      "actual": "No directional override/isolate characters in any changed label. Russian is LTR; Urdu-specific checks N/A."
+    },
+    {
+      "control": "Fit cell measurement",
+      "result": "PASS (measurement only)",
+      "actual": [
+        {
+          "key": "wire.settings.speech_voice_tone.choice.warm.label",
+          "value": "warm",
+          "english": "warm",
+          "target": "тёплый",
+          "description_en": "Friendly and approachable.",
+          "description_ru": "Дружелюбно и открыто.",
+          "english_cells": 4,
+          "target_cells": 6,
+          "label_plus_two_spaces_description_cells": 29,
+          "placeholder_tokens": []
+        },
+        {
+          "key": "wire.settings.speech_voice_tone.choice.neutral.label",
+          "value": "neutral",
+          "english": "neutral",
+          "target": "нейтральный",
+          "description_en": "Even and unmarked.",
+          "description_ru": "Ровно и без оттенков.",
+          "english_cells": 7,
+          "target_cells": 11,
+          "label_plus_two_spaces_description_cells": 34,
+          "placeholder_tokens": []
+        },
+        {
+          "key": "wire.settings.speech_voice_tone.choice.bright.label",
+          "value": "bright",
+          "english": "bright",
+          "target": "бодрый",
+          "description_en": "Upbeat and energetic.",
+          "description_ru": "Бодро и энергично.",
+          "english_cells": 6,
+          "target_cells": 6,
+          "label_plus_two_spaces_description_cells": 26,
+          "placeholder_tokens": []
+        },
+        {
+          "key": "wire.settings.speech_voice_tone.choice.calm.label",
+          "value": "calm",
+          "english": "calm",
+          "target": "спокойный",
+          "description_en": "Unhurried and steady.",
+          "description_ru": "Неспешно и ровно.",
+          "english_cells": 4,
+          "target_cells": 9,
+          "label_plus_two_spaces_description_cells": 28,
+          "placeholder_tokens": []
+        },
+        {
+          "key": "wire.settings.speech_voice_tone.choice.authoritative.label",
+          "value": "authoritative",
+          "english": "authoritative",
+          "target": "уверенный",
+          "description_en": "Confident and assured.",
+          "description_ru": "Уверенно и твёрдо.",
+          "english_cells": 13,
+          "target_cells": 9,
+          "label_plus_two_spaces_description_cells": 29,
+          "placeholder_tokens": []
+        },
+        {
+          "key": "wire.settings.speech_voice_expressiveness.choice.low.label",
+          "value": "low",
+          "english": "low",
+          "target": "низкая",
+          "description_en": "Restrained and plain.",
+          "description_ru": "Сдержанно и просто.",
+          "english_cells": 3,
+          "target_cells": 6,
+          "label_plus_two_spaces_description_cells": 27,
+          "placeholder_tokens": []
+        },
+        {
+          "key": "wire.settings.speech_voice_expressiveness.choice.medium.label",
+          "value": "medium",
+          "english": "medium",
+          "target": "средняя",
+          "description_en": "Today's constant.",
+          "description_ru": "Текущая константа.",
+          "english_cells": 6,
+          "target_cells": 7,
+          "label_plus_two_spaces_description_cells": 27,
+          "placeholder_tokens": []
+        },
+        {
+          "key": "wire.settings.speech_voice_expressiveness.choice.high.label",
+          "value": "high",
+          "english": "high",
+          "target": "высокая",
+          "description_en": "Lively and expressive.",
+          "description_ru": "Живо и выразительно.",
+          "english_cells": 4,
+          "target_cells": 7,
+          "label_plus_two_spaces_description_cells": 29,
+          "placeholder_tokens": []
+        }
+      ]
+    },
+    {
+      "control": "Rendered layout / overflow / pseudo-localization",
+      "result": "NOT RUN",
+      "actual": "Explicitly reserved for independent QA; no pseudo-layout, browser/native dispatch, suite, or install. Static consumer confirms full choice row truncates with ellipsis, not wrapping; no per-label width cap invented."
+    }
+  ],
+  "fit_followup": "Rendered QA should cover materially longer labels warm 4→6, neutral 7→11, calm 4→9, low 3→6, high 4→7 cells (medium 6→7, bright unchanged 6, authoritative shrinks 13→9). These are compact idiomatic labels; no shorter synonym is required absent actual clipping evidence. Row text measurements exclude indentation, selector and localized default marker; they are not proof of final fit.",
+  "evidence_files": {
+    "probe": "/Users/damian/.local-operator/sessions/293b7f66ef77/scratchpad/audit_ru_voice.py",
+    "actual_output": "/Users/damian/.local-operator/sessions/293b7f66ef77/scratchpad/ru-voice-audit-evidence.json"
+  },
+  "preflight_reconciliation": "Preflight source hash matches current. Its old context hash 2ee6972b... and listed missing contexts describe translator preflight only; independently read current NEW16 context entries and measured current hash e5c44bf0a9bcfdfa159a5bbf1c5caffcde2318946561fa4d7550bc30255e85a1. Preflight old target hash also predates changed values; current target hash measured separately."
+}

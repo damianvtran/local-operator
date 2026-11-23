@@ -1,0 +1,10 @@
+{
+  "command": [
+    "/Users/damian/local-operator/.venv/bin/python",
+    "-c",
+    "import copy,json\nimport local_operator\nfrom scripts.i18n import generate as g\nprint(local_operator.__file__)\nreal=g._ledger_entries\nentries=real()\npositive=g._shipped_locales()\nassert len(positive)==8,positive\n# Counterfactual changes an in-memory receipt only, not authoritative history.\nmut=copy.deepcopy(entries)\nfor e in mut:\n if e['locale']=='fr' and e['namespace']=='wire.settings': e['source_sha256']='0'*64\ng._ledger_entries=lambda:mut\nnegative=g._shipped_locales()\nassert 'fr' not in negative and set(negative)==set(positive)-{'fr'},negative\nprint(json.dumps({'positive_shipped':positive,'wrong_source_shipped':negative,'security_held':sorted(g.SECURITY_HELD_LOCALES)}))\n"
+  ],
+  "returncode": 0,
+  "stdout": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/__init__.py\n{\"positive_shipped\": [\"en\", \"fr\", \"es\", \"zh-CN\", \"ru\", \"vi\", \"ur\", \"hi\"], \"wrong_source_shipped\": [\"en\", \"es\", \"zh-CN\", \"ru\", \"vi\", \"ur\", \"hi\"], \"security_held\": []}\n",
+  "stderr": ""
+}

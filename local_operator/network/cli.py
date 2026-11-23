@@ -51,12 +51,17 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from local_operator.i18n.cli_help import help_text
 from local_operator.i18n.keys import cli_group_help as _gg
+from local_operator.i18n.keys import cli_network_send as _network_send
 from local_operator.i18n.keys import wire_github as _github_strings
 from local_operator.i18n.text import tr as _github_tr
+
+if TYPE_CHECKING:
+    from local_operator.mobile.types import SessionRecord
+    from local_operator.session.attached import _RuntimeLocator
 
 _github_text = _github_tr("wire.github")
 
@@ -703,7 +708,7 @@ def add_parser(
         "--around-id", default=None, metavar="ID", help="with --peek: the steps around that entry"
     )
     net_sessions.add_argument(
-        "--query", default=None, metavar="TEXT", help="with --peek: window around the newest match"
+        "--query", default=None, metavar="TEXT", help="with --peek: window and count for a search"
     )
     net_sessions.add_argument(
         "--regex", action="store_true", default=None, help="with --peek --query: match as a regex"
@@ -5064,6 +5069,14 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             timed_out=int(live.get("timed_out") or 0),
             unacknowledged=int(live.get("unacknowledged") or 0),
         )
+        # G9: what it was LENT, beside what was copied to it (``lends.py``).
+        endings += messages_mod.render_removal_lends(
+            _member_name(record, device_id) or str(live.get("removed") or device_id),
+            revoked=int(live.get("lends_revoked") or 0),
+            open_lends=list(live.get("lends_open") or []),
+            told=int(live.get("lends_told") or 0),
+            renewal_ended=int(live.get("lends_renewal_ended") or 0),
+        )
         return _emit(
             args,
             {"ok": True, **live},
@@ -5084,6 +5097,11 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # what the ledger shows, or a removal with live copies reads as a clean sweep.
     copies, unacknowledged = _unconfirmed_copies(record.network_id, device_id)
     outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
+    # G9, relay-less: nothing can tell the member (no link) and no broker runs to
+    # DELETE an App token, so every unexpired lend is reported as left usable.
+    from local_operator.network.credentials.lends import removal_lends
+
+    lends = removal_lends(None, record.network_id, device_id, told=False, revokes_at_issuer=False)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
             continue
@@ -5120,6 +5138,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             "wiped": 0,
             "timed_out": 0,
             "unacknowledged": unacknowledged,
+            **lends,
         },
         [
             f"removed {args.device} from {record.name}; epoch is now {outcome.epoch}",
@@ -5129,6 +5148,13 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
                 copies=copies,
                 wiped=0,
                 unacknowledged=unacknowledged,
+            ),
+            *messages_mod.render_removal_lends(
+                _member_name(record, device_id) or args.device,
+                revoked=int(lends["lends_revoked"]),
+                open_lends=list(lends["lends_open"]),
+                told=0,
+                renewal_ended=int(lends["lends_renewal_ended"]),
             ),
         ],
     )
@@ -5660,7 +5686,43 @@ def _cmd_join(args: argparse.Namespace) -> int:
                 lines=link_result[0],
             )
         return _emit(args, {"ok": True, **link_result[1]}, link_result[0])
-    failure = MeshRefusal(
+    failure = _join_failure(last_reason)
+    _attach_join_block(failure, _attempt_block_from_record(_attempt_record(store)))
+    if explain:
+        return _explain_refusal(args, failure, preflight, store, from_attempt=True)
+    raise failure
+
+
+class _KnownJoinCause(str):
+    """A per-host join sentence whose cause the joiner KNOWS (``code``).
+
+    A ``str`` so every caller that loops over ``_join_one``'s sentences keeps working;
+    the ``code`` lets :func:`_join_failure` drop the ambiguous-close tail, which is
+    true of a silent close and false of a refusal this device decided itself.
+    """
+
+    code: str
+
+    def __new__(cls, code: str, sentence: str) -> _KnownJoinCause:
+        made = super().__new__(cls, sentence)
+        made.code = code
+        return made
+
+
+def _join_failure(last_reason: str) -> Any:
+    """The ``join_failed`` refusal for the last host's sentence.
+
+    The token tail ("a redeemed token, a rejected one and a wrong address all end
+    the same way") explains a SILENT close, and ends in "mint a fresh one". After a
+    refusal THIS device decided (the inviter could not prove itself, or another
+    device answered) it is wrong, and re-minting from the same old inviter fails the
+    same way, so the specific sentence stands alone (UX U2, review N2).
+    """
+    from local_operator.network.types import MeshRefusal
+
+    if isinstance(last_reason, _KnownJoinCause):
+        return MeshRefusal("join_failed", f"could not join: {last_reason}.")
+    return MeshRefusal(
         "join_failed",
         "could not join: "
         f"{last_reason or 'every endpoint in the invite refused or was unreachable'}. "
@@ -5669,10 +5731,6 @@ def _cmd_join(args: argparse.Namespace) -> int:
         "every refusal tells an attacker which tokens are real. If you are not certain "
         "the token is still open, mint a fresh one with `lop network invite`.",
     )
-    _attach_join_block(failure, _attempt_block_from_record(_attempt_record(store)))
-    if explain:
-        return _explain_refusal(args, failure, preflight, store, from_attempt=True)
-    raise failure
 
 
 def _read_token(argument: str) -> str:
@@ -6238,6 +6296,8 @@ def _join_one(
 
     Handshake = helpers["Handshake"]
     Credential = helpers["Credential"]
+    from local_operator.network.handshake import DialerExpectation
+
     store = helpers["store"]
     invite_mod = helpers["invite_mod"]
     relay_mod = helpers["relay_mod"]
@@ -6323,9 +6383,23 @@ def _join_one(
         # ``_JoinAttempt`` names it, and without this line a death while WRITING the
         # auth frame was filed at `challenge` — one statement behind the wire.
         attempt.stage = "auth"
+        # A challenge from anyone but the token's inviter is refused before our auth
+        # frame leaves (``Handshake.refuse_unexpected_peer``); the proof check below
+        # is what actually authenticates the inviter.
+        inviter = DialerExpectation(device_id=envelope.inviter_device_id)
+        handshake.refuse_unexpected_peer(inviter)
         handshake.send_auth(sock, credential)
         attempt.stage = "welcome"
-        handshake.read_welcome(reader, deadline)
+        # PINNED TO THE TOKEN'S INVITER (mesh-listener-auth §5). The joiner has no
+        # member table, so the welcome proof is verified under the key the inviter
+        # sends in ``welcome.inviter`` — accepted only because its fingerprint is
+        # the token's ``inviter_device_id`` — and MACed under the invite key. That MAC
+        # is NOT the identity check: every member can derive the invite key (epoch
+        # secret + the plaintext invite id), so join security rests on the signature
+        # under the fingerprint-bound key (design §5, review N-1). Without this the SAS
+        # digits were the only MITM defence, and ``--automated`` joins
+        # (``typed = result.sas``) skip that comparison.
+        handshake.read_welcome(reader, deadline, inviter)
         attempt.stage = "establish"
         result = handshake.establish()
         attempt.result = result
@@ -6441,6 +6515,19 @@ def _join_one(
         # sentence below would be unreachable.
         attempt.note("handshake", refusal.code)
         _record_join_attempt(attempt, envelope, store, ok=False)
+        if refusal.code == "listener_unproven":
+            # A KNOWN CAUSE, not an ambiguous wire close (UX U2, security S-5): the
+            # inviter answered and could not prove itself. The sentence already names
+            # the only way forward (update the inviter), so the caller must not bury
+            # it under the generic "mint a fresh token" tail, which loops.
+            return _KnownJoinCause(refusal.code, refusal.sentence)
+        if refusal.code in ("invite_wrong_inviter", "peer_identity_mismatch"):
+            return _KnownJoinCause(
+                refusal.code,
+                f"a different device answered at {host}, not the one that issued this "
+                "invite, so this device stopped before joining; nothing was shared. Check "
+                "the address (or drop --host) and try again",
+            )
         return f"the handshake at {host} stopped: {refusal.sentence}"
     except MeshRefusal as exc:
         if isinstance(exc, JoinParkUnanswered):
@@ -6613,6 +6700,35 @@ def _refuse_offer_against_policy(
         raise MeshRefusal("protocol_error", sentence)
 
 
+def _pin_inviter_key(answer: dict[str, Any], envelope: Any, handshake: Any) -> None:
+    """Refuse a member table whose inviter row carries a key the handshake did not verify.
+
+    The welcome proof bound the inviter to ONE key (fingerprint == the token's
+    ``inviter_device_id``, signature under it). The ``pair_result`` table that
+    follows is what the joiner persists and later verifies every dial against, so
+    an inviter row with a different ``public_key`` would undo the handshake's pin
+    on the very next dial (mesh-listener-auth §5). A row for the inviter that is
+    absent is left to ``_persist_join``; a row that disagrees is refused here,
+    before anything is written.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    for row in answer.get("members") or []:
+        if not isinstance(row, dict) or row.get("device_id") != envelope.inviter_device_id:
+            continue
+        verified = (
+            str(getattr(handshake, "peer_public_key", "") or "")
+            if getattr(handshake, "auth_verified", False)
+            else ""
+        )
+        if not verified or str(row.get("public_key") or "") != verified:
+            raise MeshRefusal(
+                "invite_wrong_inviter",
+                "the inviter's member row carries a different key than the one it proved "
+                "in the handshake; nothing was admitted",
+            )
+
+
 def _finish_pairing(
     *,
     typed: str,
@@ -6717,6 +6833,7 @@ def _finish_pairing(
     # be relabelled a peer-side stop (review round 1, F2).
     if attempt is not None:
         attempt.stage = "persist"
+    _pin_inviter_key(answer, envelope, handshake)
     record = _persist_join(
         answer,
         envelope,
@@ -7720,6 +7837,12 @@ _STOP_REMEDIES: dict[str, str] = {
 #: socket default. It is the same reason the TUI grants a peer call 260 s.
 PILOT_BIND_TIMEOUT_S = 120.0
 
+#: Publication grace for a stored send after the peer ACKs engage. Use the
+#: existing local cold-start allowance (runtime.launch.DEFAULT_DEADLINE_S),
+#: inside, never on top of, the CLI's bind deadline. A warm or refused engage
+#: never gets this grace.
+PILOT_COLD_BOOT_BUDGET_S = 30.0
+
 #: How much of :data:`PILOT_BIND_TIMEOUT_S` the BIND hands back before its own
 #: outer bound fires. The viewer is given the bind budget as an absolute deadline
 #: (``AttachedSession.bind_runtime(deadline=...)``) so a busy runtime gets the
@@ -8242,7 +8365,7 @@ def _peek_journal_receipt(
     ``_peek_body`` is the function ``sessions op='peek'`` prints locally, fed
     the window the owner's readers produced — so the two outputs cannot drift.
     """
-    from local_operator.session.peek import _peek_body, window_from_wire
+    from local_operator.session.peek import _peek_body, digest_receipt, window_from_wire
 
     mode = str(answer.get("mode") or "")
     name = str(answer.get("name") or f"session {session_id}")
@@ -8259,12 +8382,22 @@ def _peek_journal_receipt(
         "request": answer.get("request") if isinstance(answer.get("request"), dict) else {},
     }
     if mode == "digest":
-        raw_digest = answer.get("digest")
-        digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
+        digest, text = digest_receipt(answer.get("digest"))
         payload["digest"] = digest
-        return payload, [str(digest.get("text") or "")]
-    window = window_from_wire(answer.get("window") or {})
-    payload["window"] = answer.get("window") or {}
+        return payload, text.splitlines()
+    raw_window = answer.get("window") or {}
+    window = window_from_wire(raw_window, mode=mode)
+    if mode == "search" and window.match_count is None:
+        # JSON consumers (including the sessions tool) need the same notice
+        # as the human-readable receipt, not a raw legacy match on its own.
+        raw_window = dict(
+            raw_window,
+            match_count=None,
+            match_count_complete=False,
+            note=window.note,
+            miss=window.miss,
+        )
+    payload["window"] = raw_window
     if window.miss:
         return payload, [window.miss]
     raw_request = answer.get("request")
@@ -8403,6 +8536,7 @@ async def _pilot_act(
     the resolution works on the RESOLVED id, so a name is one spelling of an
     address rather than a second kind of session.
     """
+    from local_operator.network.projection import ProjectionRefusal
     from local_operator.network.types import MeshRefusal
     from local_operator.session.remote_open import (
         open_remote_viewer,
@@ -8548,12 +8682,26 @@ async def _pilot_act(
             # it, which is where a stored session on the peer ENGAGES a runtime.
             # The viewer gets THIS verb's budget as its deadline; without it the
             # bind kept the TUI's 15 s foreground envelope inside a 120 s bound.
-            await asyncio.wait_for(
-                viewer.bind_runtime(
-                    deadline=bind_started + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
-                ),
-                timeout=PILOT_BIND_TIMEOUT_S,
-            )
+            deadline = bind_started + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
+            if verb == "send" and not live:
+
+                async def _wait_for_publication(
+                    locate: _RuntimeLocator, bind_deadline: float
+                ) -> SessionRecord:
+                    return await _pilot_wait_for_runtime_record(
+                        locate, bind_deadline, session_id, device
+                    )
+
+                bind = viewer.bind_runtime(
+                    deadline=deadline, wait_for_publication=_wait_for_publication
+                )
+            else:
+                bind = viewer.bind_runtime(deadline=deadline)
+            await asyncio.wait_for(bind, timeout=PILOT_BIND_TIMEOUT_S)
+        except ProjectionRefusal as exc:
+            if verb != "send":
+                raise
+            raise MeshRefusal(exc.code, exc.sentence) from exc
         except (TimeoutError, ConnectionError) as exc:
             # ONE HANDLER, THREE RUNGS, ASKED IN THIS ORDER. A runtime that was
             # REACHED and is merely busy comes first: two of its three shapes are
@@ -8728,14 +8876,17 @@ async def _pilot_mailbox_direct(
         )
         return MeshRefusal(code, sentence)
 
+    bind_deadline = time.monotonic() + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
+
     async def _locate() -> Any:
         # ENGAGE, THEN LOCATE — the order ``AttachedSession._bind_under_lock``
         # uses, for the same reason: a stored session on the peer gets its
         # runtime here (the act is what warms it, §8.3 — a send is a write), and
         # a warm one answers the engage at once. The short locate retry is the
         # bind loop's own, by its constants rather than a copy of their values:
-        # a runtime that has just been spawned publishes its record a moment
-        # after the engage returns.
+        # a runtime that has just been spawned publishes its record after the
+        # engage returns. Only a catalogued stored session is eligible for the
+        # longer publication wait; a warm row keeps its existing dial failure.
         try:
             await owner.engage(cwd="")
         except ProjectionRefusal as exc:
@@ -8745,6 +8896,10 @@ async def _pilot_mailbox_direct(
             record, _pid = await asyncio.to_thread(owner.locate)
             if record is not None:
                 return record
+            if not str(getattr(row, "live_state", "") or ""):
+                return await _pilot_wait_for_runtime_record(
+                    owner.locate, bind_deadline, session_id, device
+                )
             if attempt < _BIND_RETRY_ATTEMPTS - 1:
                 await asyncio.sleep(delay)
                 delay *= 2
@@ -8787,6 +8942,60 @@ async def _pilot_mailbox_direct(
             await client.detach()
         except Exception:  # noqa: BLE001 — see above
             logging.getLogger(__name__).debug("closing the mailbox dial failed", exc_info=True)
+
+
+async def _pilot_wait_for_runtime_record(
+    locate: _RuntimeLocator, bind_deadline: float, session_id: str, device: str
+) -> SessionRecord:
+    """Wait only for publication: the existing engage succeeded, but locate missed.
+
+    No second engage or write is allowed here. Both send paths remain unable to
+    hand over the text until this returns a record and the normal dial succeeds.
+    """
+    from local_operator.i18n.text import tr
+    from local_operator.network.types import MeshRefusal
+    from local_operator.session.attached import (
+        _BIND_RETRY_DELAY_CAP_S,
+        _BIND_RETRY_FACTOR,
+        _BIND_RETRY_INITIAL_S,
+    )
+
+    started = time.monotonic()
+    budget = max(0.0, min(PILOT_COLD_BOOT_BUDGET_S, bind_deadline - started))
+    logger = logging.getLogger(__name__)
+    scope = asyncio.timeout(budget)
+    delay = _BIND_RETRY_INITIAL_S
+    try:
+        async with scope:
+            while True:
+                logger.debug(
+                    "pilot cold ready miss session=%s peer=%s blocked_s=%.3f deadline_s=%.3f",
+                    session_id,
+                    device,
+                    time.monotonic() - started,
+                    budget,
+                )
+                await asyncio.sleep(delay)
+                record, _pid = await asyncio.to_thread(locate)
+                if record is not None:
+                    return record
+                delay = min(delay * _BIND_RETRY_FACTOR, _BIND_RETRY_DELAY_CAP_S)
+    except TimeoutError as exc:
+        if not scope.expired():
+            raise
+        logger.warning(
+            "pilot cold ready deadline session=%s peer=%s blocked_s=%.3f deadline_s=%.3f",
+            session_id,
+            device,
+            time.monotonic() - started,
+            budget,
+        )
+        raise MeshRefusal(
+            "session_unreachable",
+            tr("cli.network_send")(
+                _network_send.still_starting(session_id=session_id, peer=device)
+            ),
+        ) from exc
 
 
 class _MailboxMode:
@@ -10232,6 +10441,26 @@ def _peer_line(row: Any) -> str:
     return line + readiness_mod.build_suffix(comparison)
 
 
+def _listener_proof_line(row: Any) -> str:
+    """The dedicated line for a member whose listener cannot prove its identity.
+
+    NOT PART OF THE REACHABILITY PARENTHETICAL, on purpose: that clause follows
+    ``reason``, which the redial loop overwrites with each later ``connect_failed``,
+    while ``listener_proof`` is the relay's sticky fact (``RelayServer.
+    _unproven_listeners``) — so this line stays put until a verified outbound link
+    to the member exists, and the remedy is never hidden by backoff.
+    """
+    from local_operator.resume import UNNAMED_DEVICE, listener_unproven_sentence
+
+    if not isinstance(row, Mapping):
+        return ""
+    proof = row.get("listener_proof")
+    if not isinstance(proof, Mapping) or proof.get("state") != "unproven":
+        return ""
+    name = str(row.get("name") or "").strip() or UNNAMED_DEVICE
+    return "  " + listener_unproven_sentence(name, proof, device_id=str(row.get("device_id") or ""))
+
+
 def _cmd_peers(args: argparse.Namespace) -> int:
     # A LISTING PROBES ITS PEERS, so it needs the relay's own listing budget plus
     # slack rather than the 5s default: with the default, one unreachable member
@@ -10267,11 +10496,16 @@ def _cmd_peers(args: argparse.Namespace) -> int:
     if not isinstance(raw_rows, list):
         raw_rows = live.get("peers")
     rows: list[Any] = raw_rows if isinstance(raw_rows, list) else []
+    lines: list[str] = []
+    for row in rows:
+        lines.append(_peer_line(row))
+        proof_line = _listener_proof_line(row)
+        if proof_line:
+            lines.append(proof_line)
     return _emit(
         args,
         {"ok": True, "peers": rows},
-        [_peer_line(row) for row in rows]
-        or ["no peers: this device is the only member of its networks"],
+        lines or ["no peers: this device is the only member of its networks"],
     )
 
 
@@ -10933,8 +11167,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             # ``ready`` — neither a failure nor a verification — and the raw
             # dial result does not ride along.
             state = "n/a "
+        elif check.get("ok"):
+            state = "ok "
         else:
-            state = "ok " if check.get("ok") else "FAIL"
+            # ``severity: warn`` (the unproven-listener finding): named, not gating.
+            state = "warn" if check.get("severity") == "warn" else "FAIL"
         # The shared clause hangs here with one separator spelling: the
         # sentences live in ``readiness``, so these lines and the readiness
         # readings cannot drift apart (design round 1, D3).
@@ -10944,12 +11181,37 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         else:
             clause = readiness_mod.informational_clause(check)
             detail_words = doctor_detail_words(str(check.get("detail", "")))
+            if check.get("check") == "listener_proof" and check.get("message"):
+                # The warning's own sentence; its ``detail`` stays a code (UX U8).
+                detail_words = str(check["message"])
+            elif check.get("endpoint_removed") and check.get("endpoint"):
+                # Said only when the address really left the row (UX U6): the
+                # ``bad_mac`` demotion, never an unauthenticated answer (review M1).
+                owner = str(check.get("device_name") or check.get("device_id") or "")
+                detail_words += f"; this device removed the address from {owner}'s record"
+        # Empty columns are dropped, not joined: a row with no endpoint printed two
+        # spaces where the address would be (UX U7).
+        # ``state`` keeps its padding ("ok " aligns with "FAIL"); only the columns
+        # after it collapse.
+        head = f"{state} " + " ".join(
+            str(part)
+            for part in (
+                check.get("check", ""),
+                check.get("device_id", ""),
+                check.get("endpoint", ""),
+                detail_words,
+            )
+            if part
+        )
         lines.append(
-            f"{state} {check.get('check', '')} {check.get('device_id', '')} "
-            f"{check.get('endpoint', '')} {detail_words}".rstrip()
+            head
             + (f" {check['latency_ms']}ms" if check.get("latency_ms") is not None else "")
             + (f" — {clause}" if clause else "")
         )
+        if check.get("check") == "listener_proof":
+            # The member cannot be dialled until it updates, so the remedy is the
+            # point of the row: printed, not left to ``--json``.
+            lines.extend(f"    - {remedy}" for remedy in check.get("remedies") or ())
     if not lines:
         lines.append("nothing to check: no networks, or no other members yet")
     if not payload.get("identity_present", True):
@@ -10963,8 +11225,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             f"{doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
         )
 
+    # A ``severity: warn`` row (the unproven-listener finding) is NAMED but does not
+    # gate: the handshake row beside it already reports the failed dial, and an
+    # inbound link from that member can still be healthy.
     link_failures = [
-        failure_words(check) for check in checks if not check.get("ok") and check["class"] == "link"
+        failure_words(check)
+        for check in checks
+        if not check.get("ok") and check["class"] == "link" and check.get("severity") != "warn"
     ]
     payload_failures = [
         failure_words(check)

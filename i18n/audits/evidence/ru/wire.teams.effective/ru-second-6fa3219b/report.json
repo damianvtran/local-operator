@@ -1,0 +1,127 @@
+{
+  "locale": "ru",
+  "namespace": "wire.teams.effective",
+  "audit_kind": "second_independent_translation_audit",
+  "created_at": "2026-11-19T19:29:49.961255+00:00",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6fa3219bb25e",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session-state model declaration",
+    "fallback": "none observed",
+    "independent_from_translator_session": "9588c120c894",
+    "independent_from_first_auditor_session": "18a5766f5b20"
+  },
+  "key_count": 9,
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "ru": {
+      "path": "/Users/damian/.local-operator/sessions/9588c120c894/scratchpad/ru/wire.teams.effective.json",
+      "sha256": "82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1"
+    }
+  },
+  "independence": {
+    "first_receipt_read_before_semantic_verdict": false,
+    "semantic_verdict_frozen_before_first_receipt_read": true
+  },
+  "per_key": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "source": "No team named {role} was found.",
+      "current_text": "Команда с именем «{role}» не найдена.",
+      "verdict": "passed",
+      "reason": "«{role}» frames an opaque name without forced Russian declension; команда and not-found meaning preserved.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "source": "The agent registry could not be read. Check the agent definitions and try again.",
+      "current_text": "Не удалось прочитать реестр агентов. Проверьте определения агентов и повторите попытку.",
+      "verdict": "passed",
+      "reason": "Impersonal read failure; реестр агентов and definitions remedy accurate, no invented corrupt file or exception.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "source": "The model configuration could not be read. Check your configuration and try again.",
+      "current_text": "Не удалось прочитать конфигурацию моделей. Проверьте настройки и повторите попытку.",
+      "verdict": "passed",
+      "reason": "Model configuration read failure preserved; настройки is a natural configuration remedy, retry retained.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "source": "The value at subagents.models.{tier} is invalid. Set it to a provider/model selector or a model mapping.",
+      "current_text": "Недопустимое значение в subagents.models.{tier}. Укажите идентификатор provider/model или объект с настройками модели.",
+      "verdict": "passed",
+      "reason": "объект с настройками модели denotes configuration mapping/object, not model association; provider/model alternative and literal path preserved.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "source": "The mapping at subagents.models.{tier} is invalid. Set model to a provider/model selector and, optionally, effort to a supported reasoning effort.",
+      "current_text": "Недопустимый объект настроек в subagents.models.{tier}. Задайте для model идентификатор provider/model и, при необходимости, для effort — поддерживаемый уровень рассуждений.",
+      "verdict": "passed",
+      "reason": "Задайте для model … is required; и, при необходимости, для effort … marks effort alone optional. объект настроек preserves mapping semantics; supported reasoning effort is naturally уровень рассуждений.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "source": "No model is configured at subagents.models.{tier}.",
+      "current_text": "Модель в subagents.models.{tier} не настроена.",
+      "verdict": "passed",
+      "reason": "Unconfigured model at exact path, not an invalid-value or unavailable-model claim.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "source": "The model selector at subagents.models.{tier} is invalid. Use the provider/model format.",
+      "current_text": "Недопустимый идентификатор модели в subagents.models.{tier}. Используйте формат provider/model.",
+      "verdict": "passed",
+      "reason": "Invalid model identifier distinguished from missing configuration; provider/model syntax remedy literal and readable.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "source": "The model {selector} could not be resolved. Check the model selector and provider configuration.",
+      "current_text": "Не удалось определить модель {selector}. Проверьте идентификатор модели и настройки провайдера.",
+      "verdict": "passed",
+      "reason": "Не удалось определить модель is natural resolver failure wording; opaque selector uninflected, model identifier and provider remedies retained.",
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "source": "This team member is unavailable. Check its model configuration and agent definition.",
+      "current_text": "Этот участник команды недоступен. Проверьте настройки его модели и определение агента.",
+      "verdict": "passed",
+      "reason": "Участник команды matches team-member meaning; его unambiguously refers to participant; model settings and agent-definition remedies retained, no launch claim.",
+      "findings": []
+    }
+  ],
+  "findings": [],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_notes_not_execution_log": {
+    "idiom_register": "All nine read as concise Russian product diagnostics; formal plural imperatives and impersonal failures; Russian quotes «…», appropriate punctuation; no glossary violations. No MT/translation service used.",
+    "fit": "No maxCells/maxChars sidecar budgets. Desktop inline warnings explicitly wrap naturally. No static-copy overflow finding; runtime layout not exercised.",
+    "plural": "No plural/select messages or counts. Russian one/few/many/other branches are not applicable.",
+    "scope_exclusions": [
+      "rendered client validation",
+      "pseudo-localization",
+      "fallback behavior",
+      "bidi runtime gates",
+      "shipping eligibility",
+      "ledger application"
+    ]
+  }
+}

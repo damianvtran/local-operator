@@ -1,0 +1,74 @@
+{
+  "locale": "fr",
+  "namespace": "tui.settings_view",
+  "round": 3,
+  "verdict": "clean",
+  "status": "passed",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "05b324f2411be3e87f9f3ac0ae9596b8c2f139eee6bada3c288182d8a8bc509c",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "head": "464c2500c7ab94c2c2335cfb2c277eb801d7b858",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "52b434ca406c",
+    "model": "openai/gpt-6.1-sol",
+    "result": "passed",
+    "findings": 0
+  },
+  "keys_read": 21,
+  "delta_keys": [
+    "tui.settings_view.editor.contract_unset",
+    "tui.settings_view.pane.empty_hint"
+  ],
+  "restored_key_verified": "tui.settings_view.scope.new_sessions",
+  "findings": [],
+  "checks": {
+    "message_arguments": "21/21 exact ordered parity",
+    "render_message": "21/21 pass; French one/many/other at 0,1,2,1000000,1500000",
+    "scope_new_sessions_cells": 14,
+    "scope_maxCells": 14,
+    "unset_widths": {
+      "en": 42,
+      "HEAD_fr": 52,
+      "current_fr": 42
+    },
+    "unset_maxCells": 23,
+    "unset_fit_ladder": [
+      {
+        "room": 23,
+        "unset_selected": false,
+        "selected_cells": 33
+      },
+      {
+        "room": 25,
+        "unset_selected": false,
+        "selected_cells": 33
+      },
+      {
+        "room": 33,
+        "unset_selected": false,
+        "selected_cells": 33
+      },
+      {
+        "room": 43,
+        "unset_selected": false,
+        "selected_cells": 33
+      },
+      {
+        "room": 44,
+        "unset_selected": true,
+        "selected_cells": 44
+      },
+      {
+        "room": 60,
+        "unset_selected": true,
+        "selected_cells": 44
+      }
+    ]
+  },
+  "note": "Read-only full HEAD delta re-audit: 2 changed keys; scope.new_sessions byte-identical to HEAD. Full 21-key side-by-side read. Unset hint exceeds advisory maxCells (English too); current translation improves HEAD width, and consumer 4482-4486 chooses full only at room >=44 including indent, otherwise existing generic contract. Not a newly introduced overflow. Scope full/short/omit ladder checked at 4147-4157. Short suggestion is 23 cells before indent. No rendered-frame sign-off claimed; real ICU renderer/cell_len probes plus consumer code inspection only."
+}

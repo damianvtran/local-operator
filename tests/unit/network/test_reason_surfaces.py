@@ -324,6 +324,13 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "a local DaemonStatus.reason, quoted in central_services_incomplete_reason",
     ),
+    #   * ``_broker_roll_refresh`` — this device's own secret-broker roll outcome
+    #     (``secrets.roll.RollResult.reason``, a sentence authored for the reader,
+    #     never a peer token), folded into the failed step's detail.
+    ("local_operator/update.py", "_broker_roll_refresh", "reason"): (
+        1,
+        "this device's own broker-roll sentence (secrets.roll), never a mesh token",
+    ),
     # Assigned to the payload's ``code`` key, not to a line: the human half of that
     # refusal is ``message``.
     ("local_operator/network/cli.py", "_cmd_service", "reason"): (1, "a payload key, not a line"),
@@ -896,6 +903,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/session/session.py", "Session._run_idle_compaction", "reason"): (
         1,
         "the session's own compaction refusal token, journalled as bookkeeping, never rendered",
+    ),
+    # Economic compaction's two decline paths mirror the idle journal above:
+    # the planner's refusal and the economic gate's recheck verdict are LOCAL
+    # machine tokens, prefixed into ``why`` by _journal_economic_decline. It
+    # appends COMPACTION_ECONOMIC_DECLINED_TYPE as a custom bookkeeping record,
+    # not a message; _economic_declined_at reads only marker_id/context_tokens
+    # for growth gating. Neither token is rendered as a human explanation.
+    ("local_operator/session/session.py", "Session._maybe_economic_compact", "reason"): (
+        2,
+        "local planner/gate refusal tokens journalled for economic growth gating, never rendered",
     ),
     # A node site card's signed decision the browser bridge refused: ``reason`` is
     # the bridge's machine refusal code (``unsigned_decision``/``no_approver``/

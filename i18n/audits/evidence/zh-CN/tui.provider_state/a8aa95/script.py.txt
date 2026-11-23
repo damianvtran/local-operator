@@ -1,0 +1,128 @@
+"""Independent A mechanical execution; native reasoning is in report.md.
+Adapted from the committed author validator; executed afresh by auditor A.
+
+Call the actual repo catalogue checker with only its discovery methods scoped to
+this namespace and en/zh-CN. No base checker, generation or eligibility override.
+Rich output and deliberately expanded pseudo strings are width diagnostics, not
+real SettingsView, native font or consumer integration evidence.
+"""
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import unicodedata
+from unittest.mock import patch
+
+import local_operator
+from local_operator.i18n import catalogues, messages, runtime
+from scripts.i18n import check
+from rich.console import Console
+from rich.text import Text
+
+ROOT = Path('/Users/damian/local-operator/.worktrees/i18n-provider-state-labels')
+NS = 'tui.provider_state'
+KEYS = [NS + '.' + name for name in (
+    'logged_in', 'env_key', 'needs_login', 'local_ready', 'local_unconfigured')]
+assert Path(local_operator.__file__).resolve() == ROOT / 'local_operator/__init__.py'
+assert Path(check.__file__).resolve() == ROOT / 'scripts/i18n/check.py'
+assert Path.home() == Path(os.environ['VALIDATION_HOME'])
+assert os.environ['LOCAL_OPERATOR_CONFIG_DIR'] == str(Path.home() / '.local-operator')
+assert not any(k.startswith(('CMUX_', 'LOP_')) for k in os.environ)
+print('MODULE', local_operator.__file__)
+print('CHECKER', check.__file__)
+print('PYTHON', sys.executable)
+print('HOME', Path.home())
+print('CONFIG', os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+print('Isolation checked; env isolation is NOT a network sandbox claim')
+expected_hashes = {
+    'local_operator/i18n/catalogues/en/tui.provider_state.json':
+        '113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912',
+    'local_operator/i18n/catalogues/en/tui.provider_state.context.json':
+        '67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be',
+}
+expected_hashes['local_operator/i18n/catalogues/zh-CN/tui.provider_state.json'] = 'ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1'
+for path, expected in expected_hashes.items():
+    actual = hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+    assert actual == expected, (path, actual)
+    print('FROZEN', path, actual)
+
+# Discovery alone is narrowed; the official checker, context schema, ICU parser,
+# plural rules and catalogue loaders below remain the repository implementation.
+with patch.object(catalogues, 'namespaces', side_effect=lambda locale: (NS,) if locale in ('en', 'zh-CN') else ()), \
+     patch.object(catalogues, 'locales', return_value=('en', 'zh-CN')):
+    problems = check.check_catalogues()
+assert problems == [], problems
+print('OFFICIAL check.check_catalogues scoped en/zh-CN+tui.provider_state: []')
+source = catalogues.load_catalogue('en', NS)
+target = catalogues.load_catalogue('zh-CN', NS)
+context = catalogues.context('en', NS)
+assert list(source) == list(target) == list(context) == KEYS
+assert len(target) == 5
+for key in KEYS:
+    assert catalogues.context_entry_problem(context[key]) is None
+    assert runtime.message_arguments(source[key]) == runtime.message_arguments(target[key]) == ()
+    assert runtime.plural_selectors(source[key]) == runtime.plural_selectors(target[key]) == ()
+    assert not any('maxCells' in context[k] or 'maxChars' in context[k] for k in KEYS)
+    assert unicodedata.normalize('NFC', target[key]) == target[key]
+    assert not any(unicodedata.category(c) == 'Cf' for c in target[key])
+    # No source protected tokens exist; fail if a token/control is introduced.
+    token_re = r'`[^`]*`|<[^>]+>|\[[^\]]+\]|%[-+0-9.]*[sdif]|https?://\S+|--[\w-]+|[{}]'
+    assert re.findall(token_re, source[key]) == re.findall(token_re, target[key]) == []
+    assert runtime.render_message(target[key], {}, 'zh-CN') == target[key]
+    for locale, reference in [('en', source[key]), ('zh-CN', target[key])]:
+        rendered = messages.render_record(key, {}, locale=locale)
+        assert rendered.text == reference and rendered.source_locale == locale, rendered
+    print('KEY', key, 'args=0 plural/select=0 NFC=ok protected_tokens=0',
+          'en_cells=' + str(Text(source[key]).cell_len),
+          'zh_cells=' + str(Text(target[key]).cell_len), 'text=' + target[key])
+print('ORDERED KEYS', json.dumps(KEYS))
+print('OFFICIAL render_message and render_record en/zh-CN: 10/10 exact values and provenance')
+
+# Standalone Rich same-code English control and synthetic expanded pseudo text.
+# This reproduces the documented segment formula, not the unimplemented adapter.
+for locale, catalogue in [('en', source), ('zh-CN', target)]:
+    for provider_id in ('openrouter', 'synthetic-long-id'):
+        segment = max(31 - Text(provider_id).cell_len - 4, 3)
+        for key in KEYS:
+            raw = catalogue[key]
+            fitted = Text(raw)
+            fitted.truncate(segment, overflow='ellipsis')
+            assert fitted.cell_len <= segment
+            console = Console(file=io.StringIO(), width=31, color_system=None, force_terminal=False)
+            console.print(Text(provider_id + '  ') + fitted)
+            print('WIDTH', locale, key.rsplit('.', 1)[-1], 'pane=31', 'id=' + provider_id,
+                  'segment=' + str(segment), 'raw=' + str(Text(raw).cell_len),
+                  'fitted=' + str(fitted.cell_len), 'truncated=' + str(fitted.plain != raw),
+                  'rich=' + repr(console.file.getvalue().rstrip('\n')))
+            pseudo = Text('⟦' + raw + ' · ' + raw + '⟧')
+            before = pseudo.cell_len
+            pseudo.truncate(segment, overflow='ellipsis')
+            assert pseudo.cell_len <= segment
+            print('PSEUDO synthetic expansion', locale, key.rsplit('.', 1)[-1],
+                  'before=' + str(before), 'after=' + str(pseudo.cell_len),
+                  'segment=' + str(segment))
+print('PASS: independent A mechanical checks; linguistic verdict separately in report.md')
+print('NOT PROVEN: SettingsView integration, native fonts, global UI, network isolation, release eligibility')
+
+# Counterfactual controls use only in-memory catalogue mutations, never file edits.
+original_loader = catalogues.load_catalogue
+for kind in ('missing-key', 'added-argument'):
+    modified = dict(target)
+    if kind == 'missing-key':
+        del modified[KEYS[0]]
+    else:
+        modified[KEYS[0]] += ' {unexpected}'
+    def loader(locale, namespace):
+        if locale == 'zh-CN' and namespace == NS:
+            return modified
+        return original_loader(locale, namespace)
+    with patch.object(catalogues, 'namespaces', side_effect=lambda locale: (NS,) if locale in ('en', 'zh-CN') else ()), patch.object(catalogues, 'locales', return_value=('en', 'zh-CN')), patch.object(catalogues, 'load_catalogue', side_effect=loader):
+        errors = check.check_catalogues()
+    assert errors and any(('missing key' if kind == 'missing-key' else 'arguments') in e for e in errors), errors
+    print('NEGATIVE CONTROL', kind, 'REJECTED', errors)
+for relative in list(expected_hashes) + ['local_operator/i18n/catalogues/zh-CN/tui.provider_state.json']:
+    print('AFTER_SHA256', relative, hashlib.sha256((ROOT / relative).read_bytes()).hexdigest())
+print('PASS: negative controls and unchanged file hashes')

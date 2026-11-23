@@ -38,6 +38,7 @@ from typing import Any
 from local_operator.team_bridge import hold_release as hr
 from local_operator.team_bridge.screening import HOLD_CODES
 from local_operator.team_bridge.store import (
+    OWNER_RELEASE_LOCAL_TERMINAL,
     Store,
     StoreRefused,
     screening_hold_message_id,
@@ -61,6 +62,12 @@ _SCREENING_KIND = frozenset(
         "bounce_without_category",
     }
 )
+
+
+#: The ``decision.outcome`` words a list or receipt may show; any other stored
+#: outcome (``refused:<code>``) is shown as ``refused``. ``pending`` is the
+#: only non-final one: the local terminal is final for the person's purposes.
+_OUTCOME_WORDS = frozenset({"pending", "admitted", "rejected", OWNER_RELEASE_LOCAL_TERMINAL})
 
 
 class HoldRefused(Exception):
@@ -209,6 +216,15 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
             and now <= deliver_until
             and code not in hr.DISCARD_ONLY_HOLD_CODES
         )
+        # PR #4358 R1-M1: ``decide`` refuses unless the DECISION's own
+        # conversation equals the posted one, so a row whose decision names
+        # another (or no) conversation is not something either button can
+        # settle; counting it would be the stuck badge again.
+        decision_bound = bool(
+            decision is not None
+            and conversation_id
+            and str(decision.get("conversation_id") or "") == conversation_id
+        )
         items.append(
             {
                 "message_id": bare,
@@ -234,14 +250,14 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
                 # on). A recorded decision — pending, applied or refused — is
                 # settled from the person's side and never counted again.
                 "actionable": bool(
-                    release is None and conversation_id and (can_deliver or can_discard)
+                    release is None and decision_bound and (can_deliver or can_discard)
                 ),
                 # Present only where Discard is open and undecided: lets the
                 # renderer discard a hold whose body can no longer be loaded
                 # (see :func:`discard_receipt`). Never offered for Deliver.
                 "discard_receipt": (
                     discard_receipt(owner, bare, decision)
-                    if can_discard and release is None and decision is not None
+                    if can_discard and release is None and decision_bound and decision is not None
                     else None
                 ),
                 # PR #4212 S-4: an aged hold that NO model read (provider outage,
@@ -266,14 +282,18 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
     }
 
 
+def _outcome_word(release: dict[str, Any]) -> str:
+    outcome = str(release.get("outcome") or "pending")
+    return outcome if outcome in _OUTCOME_WORDS else "refused"
+
+
 def _decision_view(release: dict[str, Any] | None) -> dict[str, Any] | None:
     if release is None:
         return None
-    outcome = str(release.get("outcome") or "pending")
     return {
         "word": release.get("word"),
         "decided_at": _iso(release.get("decided_at")),
-        "outcome": outcome if outcome in ("pending", "admitted", "rejected") else "refused",
+        "outcome": _outcome_word(release),
         "key_id": release.get("key_id"),
     }
 
@@ -370,40 +390,77 @@ def decide(
         word=word,
         decided_at=now,
     )
+    # THE LOCAL TERMINAL (follow-on to PR #4358). A receipt-bound Discard means
+    # the renderer sent a hold receipt instead of a body hash: no body was
+    # presented, so no hub confirmation of the record was obtained. That is the
+    # ONLY signal. This server does not verify that the hub failed to serve the
+    # body; any renderer holding the desktop bearer may choose the receipt
+    # binding (#4371 security review S-1). That is safe because it is the
+    # owner's own signed Discard, past the window, still honoured at the hub if
+    # the envelope is ever served again. Past the EXISTING Deliver window
+    # nothing else can ever settle such a row,
+    # because the connector consumes a Discard only from an envelope the hub
+    # serves. So that one case settles HERE, locally and atomically with an
+    # audit row, instead of sitting ``pending`` forever. Deliberately narrow:
+    # no new absence threshold (the decision time plus ``DELIVER_WINDOW_S`` is
+    # the whole test), never a body-bound Discard (a presented body hash takes
+    # the ordinary connector path), never inferred
+    # from a missing record or a 404, and no hub call, delivery or sender
+    # notice. Every owner/generation/decision/conversation check above runs
+    # first, and the row is still signed like any Discard.
+    deliver_until = float(decision["created_at"]) + hr.DELIVER_WINDOW_S
+    settle_locally = word == "discard" and hold_receipt is not None and now > deliver_until
     try:
         signature, key_id = hr.sign_release(config_dir, message)
     except hr.ReleaseSigningUnavailable:
         raise HoldRefused(409, "release_signing_unavailable") from None
+    release_row = {
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "body_sha256": str(decision["body_sha256"]),
+        "envelope_digest": str(decision["envelope_digest"]),
+        "hold_code": str(decision["hold_code"]),
+        "screener_provider": str(decision["screener_provider"]),
+        "screener_model": str(decision["screener_model"]),
+        "template_sha256": str(decision["template_sha256"]),
+        "categories": str(decision["categories"]),
+        "word": word,
+        "decided_at": now,
+        "account_id": account_id,
+        "key_id": key_id,
+        "signature": signature,
+        "surface": "desktop",
+        "screener_verdict": str(decision.get("screener_verdict") or ""),
+        "screener_hop": (
+            -1 if decision.get("screener_hop") is None else int(decision["screener_hop"])
+        ),
+        "screener_preferred": 1 if decision.get("screener_preferred") else 0,
+    }
     try:
-        row = store.record_owner_release(
-            owner,
-            {
-                "message_id": message_id,
-                "conversation_id": conversation_id,
-                "body_sha256": str(decision["body_sha256"]),
-                "envelope_digest": str(decision["envelope_digest"]),
-                "hold_code": str(decision["hold_code"]),
-                "screener_provider": str(decision["screener_provider"]),
-                "screener_model": str(decision["screener_model"]),
-                "template_sha256": str(decision["template_sha256"]),
-                "categories": str(decision["categories"]),
-                "word": word,
-                "decided_at": now,
-                "account_id": account_id,
-                "key_id": key_id,
-                "signature": signature,
-                "surface": "desktop",
-                "screener_verdict": str(decision.get("screener_verdict") or ""),
-                "screener_hop": (
-                    -1 if decision.get("screener_hop") is None else int(decision["screener_hop"])
-                ),
-                "screener_preferred": 1 if decision.get("screener_preferred") else 0,
-            },
-        )
+        if settle_locally:
+            row = store.record_owner_release_local_terminal(
+                owner,
+                release_row,
+                outcome=OWNER_RELEASE_LOCAL_TERMINAL,
+                # A persisted audit word (``owner_release_local_terminals.reason``,
+                # shipped in #4371), so it is kept as written. Read it as "no hub
+                # confirmation was obtained", never "the hub was verified to have
+                # failed" (S-1 above).
+                reason="hub_unconfirmed_after_deliver_window",
+                deliver_until=deliver_until,
+                now=now,
+            )
+        else:
+            row = store.record_owner_release(owner, release_row)
     except StoreRefused as failure:
         if failure.code == "already_decided":
             raise HoldRefused(409, "already_decided") from None
         raise HoldRefused(409, "state_unavailable") from None
+    if settle_locally:
+        # Closed words only, like every release line; nothing for the
+        # connector to pick up, so the hold's backoff is left alone.
+        hr.log_release(f"recorded word={word} outcome={OWNER_RELEASE_LOCAL_TERMINAL}")
+        return _receipt(row)
     hr.log_release(f"recorded word={word}")
     # The next connector pass picks it up: make the hold due now rather than
     # after its doubling backoff (DESIGN §9.5).
@@ -430,4 +487,8 @@ def _receipt(row: dict[str, Any]) -> dict[str, Any]:
         # A fingerprint of the signed record (never the signature itself), so a
         # renderer can tell two answers for the same message apart.
         "record_digest": hashlib.sha256(str(row.get("signature") or "").encode()).hexdigest()[:16],
+        # Additive: what became of the record. ``pending`` means signed and
+        # queued for the connector (not confirmed at the hub);
+        # ``discarded_local_unconfirmed`` means settled on this machine only.
+        "outcome": _outcome_word(row),
     }

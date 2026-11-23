@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "audit_id": "sc1",
+  "locale": "ru",
+  "namespace": "tui.settings_view.chrome",
+  "record": "i18n/audits/evidence/ru/tui.settings_view.chrome/sc1/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable receipt, copied byte-for-byte from its session scratchpad (~/.local-operator/sessions/6daebc40bb12/scratchpad/chrome-audit-ru.receipt.json)",
+  "record_sha256": "e844944e1c9d317fc187632cb07e996dd6430f14a540c4213a451d20f77a6122",
+  "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+  "context_sha256": "33a29a836b8de99019887c9025e98e2d9382b8799a8bfe9e4f189cbc86d0df7d",
+  "target_sha256": "a82fb14a35089c4d766cff201d62f54ded39cec01b78b0689fbceb6ed64a18d8",
+  "verdict": "failed",
+  "commit_audited": "3c1b6a24f035 (pre-rebase worktree head; locale bytes uncommitted at audit time)",
+  "auditor": {
+    "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+    "session": "6daebc40bb12",
+    "model": "anthropic/claude-opus-5-5",
+    "pinned_model": "openai/gpt-6.1-sol",
+    "fallback_used": true
+  },
+  "ledger_receipt": {
+    "locale": "ru",
+    "namespace": "tui.settings_view.chrome",
+    "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+    "context_sha256": "33a29a836b8de99019887c9025e98e2d9382b8799a8bfe9e4f189cbc86d0df7d",
+    "target_sha256": "a82fb14a35089c4d766cff201d62f54ded39cec01b78b0689fbceb6ed64a18d8",
+    "translator": {
+      "agent": "translator (lopdev task subagent, profile 'translator')",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-21",
+      "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+      "session": "6daebc40bb12",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-21",
+      "result": "fail",
+      "findings": 5,
+      "unresolved_blocker_major": 2,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 2,
+        "minor": 1,
+        "nit": 2
+      },
+      "finding_ids": [
+        "RUC1",
+        "RUC2",
+        "RUC3",
+        "RUC4",
+        "RUC5"
+      ],
+      "fallback_used": true,
+      "fallback_note": "pinned openai/gpt-6.1-sol hit a provider quota (HTTP 429); the audit was performed by anthropic/claude-opus-5-5 — the same model family as the translator: an independent agent instance and context, not model-independent",
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own receipt (model field)",
+      "session_source": "auditor receipt carries no session field; id taken from the session scratchpad directory holding the receipt (6daebc40bb12)"
+    },
+    "status": "failed",
+    "note": "Independent full audit (round 1) of the new tui.settings_view.chrome namespace (49 keys), source commit 3c1b6a24f035. Auditor 6daebc40bb12 (anthropic/claude-opus-5-5, quota fallback from openai/gpt-6.1-sol) verdict fail: 0 blocker, 2 major, 1 minor, 2 nit (RUC1, RUC2, RUC3, RUC4, RUC5). Superseded: target_sha256 is the round-1 file; the translator then revised it and the round-2 audit (row sc2) covers the current bytes. Record: i18n/audits/evidence/ru/tui.settings_view.chrome/sc1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/ru/tui.settings_view.chrome/sc1/record.json",
+    "round": "sc1"
+  }
+}

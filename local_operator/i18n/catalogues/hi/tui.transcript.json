@@ -15,5 +15,7 @@
   "tui.transcript.group.steered": "{count, plural, one {{label} दिशा बदलने वाला संदेश} other {{label} दिशा बदलने वाले संदेश}}",
   "tui.transcript.hub.reply_requested": "उत्तर माँगा गया",
   "tui.transcript.hub.steered": "दिशा बदलने वाला संदेश",
-  "tui.transcript.hub.from": "{identity} से"
+  "tui.transcript.hub.from": "{identity} से",
+  "tui.transcript.jump_to_latest": "नवीनतम पर जाएँ",
+  "tui.transcript.jump_to_latest.short": "नवीनतम"
 }

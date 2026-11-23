@@ -1,0 +1,27 @@
+{
+  "locale": "fr",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "34a8703ccbff",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19T18:43:22.329429+00:00",
+    "actual_model_source": "Translator receipt, independently hash-verified; not an auditor-observed translator runtime",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "32077ea6da37",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "34a8703ccbff",
+    "actual_model_source": "Host Model field in developer session context",
+    "fallback_used": false,
+    "date": "2026-11-19T18:57:26.539314+00:00",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "Independent 9/9 linguistic audit passed; no B/M. Scratch record: /Users/damian/.local-operator/sessions/32077ea6da37/scratchpad/record.fr.json. Second error-copy audit and rendered/pseudo checks remain integration gates.",
+  "record_sha256": "b0d97076d73bc97f602f9ec9e1d1a5a95730aabe4a01861c89ce020a68e12e90"
+}

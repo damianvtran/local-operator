@@ -104,8 +104,8 @@
   "tui.chrome.bindings.legend_app_ctrl_home_end": {
     "role": "Keys-legend row description for the transcript top/end jumps",
     "tone": "lowercase, telegraphic",
-    "maxCells": 36,
-    "note": "EN-only context sidecar. `ctrl+home/end` in the key column is one chord pair; the description must not imply the jump moves the cursor. No ICU arguments."
+    "maxCells": 50,
+    "note": "EN-only context sidecar. `ctrl+home/end` in the key column is one chord pair; `option+k/j` (the two-row scroll pair) and `ctrl+]/\\` (its no-setup fallback) are named in the description rather than growing the key column — a wider key column pushes the whole card into its stacked layout at narrow widths. `option` is the macOS spelling the /help block already uses for the same modifier; the keycap tokens stay Latin in every locale. The description must not imply the jump moves the cursor. No ICU arguments."
   },
   "tui.chrome.bindings.legend_app_ctrl_n_ctrl_s": {
     "role": "Keys-legend row description for the new/resume session chord pair",

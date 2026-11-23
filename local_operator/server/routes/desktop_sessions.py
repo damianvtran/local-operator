@@ -135,6 +135,7 @@ from local_operator.server.utils.store_failures import (
 from local_operator.session import open_trace, transcript_index
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import (
+    BULK_RECEIPT_SESSION_ID_PATTERN,
     SUPERSEDED_TOKEN_CODE,
     SupersededCompletionToken,
 )
@@ -176,9 +177,18 @@ from local_operator.supplements.contract import (
 )
 
 if TYPE_CHECKING:
+    from typing import TypedDict
+
     # Type-only: the ``cast`` on each ``diff_bindings`` unpack names it as a string, so
     # this route module keeps its lazy ``tools.diff_archive`` import at runtime.
     from local_operator.tools.diff_archive import DiffBindingReadOptions
+
+    class _AnswerSessionOptions(TypedDict, total=False):
+        control_only: bool
+
+    class _EventsSessionOptions(TypedDict, total=False):
+        ingress_trace: open_trace.DesktopEventsIngressTrace
+
 
 logger = logging.getLogger(__name__)
 
@@ -4421,10 +4431,14 @@ async def bridge_card_body(
     """What one inbound Team Bridge card's messages are to THIS viewer.
 
     ``{v:1, items:[{message_id, conversation_id, state, body?, source?, hold?,
-    reason?}], more}`` (bridge-body design §4; feature key
-    ``team_bridge_card_body``). ``state`` is one of admitted, pending, held,
-    refused, not_admitted, unavailable; ``body`` is UNTRUSTED third-party
-    markdown, present only when admitted. A READ: keyed by the transcript row
+    reason?}], more, card?: {received_at?, thread_reply}}`` (bridge-body design
+    §4; feature key ``team_bridge_card_body``). ``card`` is additive within
+    ``v:1``: facts of the card's own journal row (``received_at`` ISO-8601 UTC,
+    ``thread_reply`` bool), present on every answer for a found card so a client
+    can show when and where beside the body (``card_body._card_facts``).
+    ``state`` is one of admitted, pending, held, refused, not_admitted,
+    unavailable; ``body`` is UNTRUSTED third-party markdown, present only when
+    admitted. A READ: keyed by the transcript row
     the caller can already page, so it cannot be used to probe message ids.
     The display store and the hub's admitted-only history read are the only
     sources; the screener's classification fetch (``/messages/{id}/body``) is
@@ -5290,7 +5304,15 @@ async def answer(session_id: str, body: Answer, request: Request):
     # ``answer_gate`` is the only consumer; the queued-ask branch below answers
     # from the ask log and is not subject to it.
     deadline = time.monotonic() + DESKTOP_ANSWER_BUDGET_S
-    async with errors(request), host(request).session(session_id) as bridge:
+    # A queued ask is addressed by durable ID, not by the display epoch. Its
+    # control transport must remain usable when an older owner's canonical
+    # snapshot exceeds the line limit; the pool still owns lookup and retirement.
+    # Keep the key absent for gate answers, and don't infer that this bool can
+    # fill unrelated pool keywords (such as the events-only ingress trace).
+    session_options: _AnswerSessionOptions = (
+        {"control_only": True} if body.ask_id is not None else {}
+    )
+    async with errors(request), host(request).session(session_id, **session_options) as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
             # A QUEUED ASK (design §2.4/§4). Answered by id, BEFORE the epoch
@@ -5528,7 +5550,7 @@ class SeenItem(Input):
     later, unseen result.
     """
 
-    session_id: Annotated[str, Field(pattern=r"^[a-f0-9]{12}$")]
+    session_id: Annotated[str, Field(pattern=BULK_RECEIPT_SESSION_ID_PATTERN)]
     completion_token: RequestID
 
 
@@ -5536,7 +5558,7 @@ class SeenMany(Input):
     #: 1..500, and the bound is the CATALOGUE's own maximum page
     #: (``GET /v1/desktop/sessions?limit=``, ``le=500``), so a client can always
     #: send every row it holds in one call and never has to chunk a single user
-    #: gesture. The worst-case body is ~30 KB against the 900 KB control-frame
+    #: gesture. The worst-case body is under 60 KB against the 900 KB control-frame
     #: limit.
     items: Annotated[list[SeenItem], Field(min_length=1, max_length=500)]
 
@@ -6780,6 +6802,14 @@ async def events(
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
+    scope = getattr(request, "scope", None)
+    ingress_trace = (
+        scope.get(early_paint_hold.TRACE_SCOPE_KEY)
+        if open_trace.enabled() and scope is not None and open_frame == 1
+        else None
+    )
+    if ingress_trace is not None:
+        ingress_trace.start()
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
     # ``allow_draft``: the pane's subscription is the bridge user that holds a
@@ -6809,8 +6839,14 @@ async def events(
     # middleware stack (``server.early_paint_hold``). Dropped only AFTER the
     # route's hold is taken, so the count never reaches zero in between, and
     # from here on the snapshot-frame release above is the only one owed.
-    early_paint_hold.hand_off(getattr(request, "scope", None))
-    context = pool.session(session_id, read=True, allow_draft=True)
+    early_paint_hold.hand_off(scope)
+    # Keep one acquire for the OPEN handshake. Omit the trace keyword on the
+    # untraced path; otherwise carry this request's trace explicitly because the
+    # single-flight lookup and bridge are shared by concurrent streams.
+    session_options: _EventsSessionOptions = (
+        {} if ingress_trace is None else {"ingress_trace": ingress_trace}
+    )
+    context = pool.session(session_id, read=True, allow_draft=True, **session_options)
     try:
         async with errors(request):
             bridge: DesktopSessionBridge = await context.__aenter__()

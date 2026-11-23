@@ -1,0 +1,37 @@
+{
+ "slot": "independent slot 2 — convergence (merged namespace)",
+ "pr": 4378,
+ "head": "7c7541d29bddf2981d048b5ae4b6fc5aab030715",
+ "scope": "60dcbe088..7c7541d29",
+ "locale": "ur",
+ "namespace": "cli.sessions_move_workset",
+ "source_sha256": "0f5602723eb92b22c93931ddc3f2cbffec94da232249504726202a45aaf4db1b",
+ "context_sha256": "be34b5769c82454dd0fe0b13177833cd7f3bd209a7e022cdfe7ff4e54a9ccb78",
+ "target_sha256": "28dae9b7b003353426fc8ce95621188224b75f1a88d703ffb8ee5ca9d4ce8684",
+ "pr4380_rows_full_audit": {
+  "needs_confirmation": "PASS",
+  "help_yes": "PASS",
+  "yes_preflight_failed": "PASS",
+  "yes_carry_unavailable": "PASS",
+  "agent_needs_operator": "PASS",
+  "plan_not_honoured": "PASS"
+ },
+ "deps_rows": "20 deps_* byte-identical to 70878bbaf (slot2-r3 certified; tree evidence slot2-r3 byte-identical to auditor scratch); read beside #4380 rows: coherent",
+ "other_rows": "85 byte-identical to 70878bbaf and to merge 5e860469d",
+ "findings": {},
+ "concurred_first_slot": [],
+ "blocker": 0,
+ "major": 0,
+ "verdict": "PASS",
+ "chained_on": {
+  "first_slot_receipt_sha256": "89690ea59d25d2e4ef9ea36ef937f014dd9beb89298ac00e6afc8bcc2eba39cd",
+  "history_sha_before": "72a48bfbc6fbd14e8ad080edf087a1d36c4e3202291d045fe6d0efac9f1dbaed",
+  "history_sha_after_first_slot": "59af679c6869fb4dd864ab96d80be9d851dffff592fc39f3babc3e8a47380b0c"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev) slot 2, session 6fd346121602",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none"
+ },
+ "limits": "no native-speaker review; no rendered terminal frame; agent-independent only (same model family as translators and first-slot auditors)"
+}

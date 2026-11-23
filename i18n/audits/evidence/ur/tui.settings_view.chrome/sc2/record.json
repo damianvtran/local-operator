@@ -1,0 +1,33 @@
+{
+ "audit": "tui.settings_view.chrome",
+ "locale": "ur",
+ "round": 2,
+ "worktree_head": "183ed01e92cc05c1654bf44a8c3bb1dfe398c8d7",
+ "sha256": {
+  "en": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+  "ur": "28b60e05e1b1653d218ab7ecd6609797e587608b4ce0f4d1b04b274d7053c726",
+  "en_context": "4d981004bb67852a6b4f8420ecb6eabba2f6c2c3d2328780830bcb4313dc8b40"
+ },
+ "keys_read": 49,
+ "changed_keys_verified": [
+  "capture.takes_from",
+  "value.auto",
+  "error.retired",
+  "gate_kept.long",
+  "clause.would_remove"
+ ],
+ "check_py_catalogues_only": "0 problem(s), no ur lines",
+ "over_cap": [
+  {
+   "key": "error.unexpected_structure",
+   "ur": 95,
+   "en": 99,
+   "max": 74,
+   "disposition": "not a finding: cut-with-ellipsis key, en also over, ur leads with failure"
+  }
+ ],
+ "findings": [],
+ "verdict": "clean",
+ "auditor": "translation-auditor",
+ "model": "anthropic/claude-opus-5-5 (fallback; primary openai/gpt-6.1-sol hit quota 429)"
+}

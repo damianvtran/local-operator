@@ -104,10 +104,10 @@ PEER_REGEX_REPLY_RESERVE_S = 2.0
 #: the owner's named refusal reaches the viewer first.
 PEER_REGEX_BUDGET_S = 4.0
 
-#: Encoded ceiling for one reply. Steps are already clipped by the renderer
-#: (``comms.PEEK_STEP_CHARS``) and capped at ``PEEK_MAX_STEPS``, so a real
-#: window is tens of KB; the bound exists so a pathological one is a refusal
-#: rather than a record ``wire.LinkCrypto.seal`` rejects (which closes the link).
+#: Encoded ceiling for one full peek ACK before compression and framing.
+#: Steps are clipped (``comms.PEEK_STEP_CHARS``) and capped (``PEEK_MAX_STEPS``).
+#: The bound makes a pathological window a refusal, rather than letting the
+#: larger link record ceiling fail in ``wire.LinkCrypto.seal`` and close the link.
 SESSION_PEEK_REPLY_BUDGET_BYTES = 2 * 1024 * 1024
 
 #: The refusal codes from THIS device's relay that mean "this relay predates the
@@ -213,8 +213,6 @@ def serve(root: Path, frame: dict[str, Any], *, own_label: str) -> dict[str, Any
     same directory a local peek reads. Refusals raise :class:`MeshRefusal` so
     the relay answers in the family's shape.
     """
-    import json
-
     from local_operator.network.store import safe_component
     from local_operator.session import peek
 
@@ -271,11 +269,30 @@ def serve(root: Path, frame: dict[str, Any], *, own_label: str) -> dict[str, Any
     # the local tool does (``_peek_body``'s ``anchor``/``query``).
     answer["request"] = peek.wire_request(request, request.given)
     live_name = getattr(record, "conversation_name", "") if record is not _UNRESOLVED else ""
-    answer["name"] = live_name or session_name(directory) or f"session {session_id}"
-    if len(json.dumps(answer).encode("utf-8")) > SESSION_PEEK_REPLY_BUDGET_BYTES:
+    fallback_name = f"session {session_id}"
+    if answer["mode"] == "search":
+        # The stored-name fallback can independently read the opener from the
+        # journal. Optional header decoration must not resurrect a malformed
+        # row that the counted reader already omitted, or count it twice.
+        try:
+            name = live_name or session_name(directory) or fallback_name
+            name.encode("utf-8")
+        except Exception:
+            name = fallback_name
+        answer["name"] = name
+    else:
+        answer["name"] = live_name or session_name(directory) or fallback_name
+    # Cap the same ACK the relay would send, including the actual request ID.
+    # Like LinkCrypto's separate record ceiling, this is on uncompressed JSON,
+    # not the compressed/encrypted record: a peer's codec must not change which
+    # windows fit. The shared envelope keeps measurement and send in lockstep.
+    ack_bytes = len(wire.encode_peer_payload(wire.peer_ack(frame.get("req"), answer)))
+    if ack_bytes > SESSION_PEEK_REPLY_BUDGET_BYTES:
         raise MeshRefusal(
             "reply_too_large",
-            "that window is too large to send in one reply; ask for fewer `steps`.",
+            f"This uncompressed peek ACK is {ack_bytes:,} bytes; the peek ACK limit is "
+            f"{SESSION_PEEK_REPLY_BUDGET_BYTES:,} bytes. Try `head=1` (opening step), "
+            "`digest` (compact fold), or fewer `steps` for this window.",
         )
     return answer
 

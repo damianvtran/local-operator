@@ -1,0 +1,20 @@
+[Capture metadata, not command stdout: record_reference=i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/record.json; auditor=i18n-auditor; session=0ecda03ab969; actual_model=openai/gpt-6.1-sol; fallback=provider quota]
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/0ecda03ab969/scratchpad/validate_fr.py", line 9, in <module>
+    spec=importlib.util.spec_from_file_location('scoped_check', ROOT/'scripts/i18n/check.py'); check=importlib.util.module_from_spec(spec); spec.loader.exec_module(check)
+                                                                                                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/check.py", line 103, in <module>
+    @dataclass(frozen=True)
+     ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/dataclasses.py", line 1265, in wrap
+    return _process_class(cls, init, repr, eq, order, unsafe_hash,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/dataclasses.py", line 983, in _process_class
+    and _is_type(type, cls, dataclasses, dataclasses.KW_ONLY,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/dataclasses.py", line 749, in _is_type
+    ns = sys.modules.get(cls.__module__).__dict__
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute '__dict__'. Did you mean: '__dir__'?

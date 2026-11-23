@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.extra.compose.composed": "{size} composés",
+  "tui.tool_card.extra.compose.composing": "composition… {facts}",
+  "tui.tool_card.extra.compose.never_sent": "jamais envoyé · {facts}",
+  "tui.tool_card.extra.compose.nothing_composed": "rien de composé",
+  "tui.tool_card.extra.fetch.attempts": "{count, plural, one {{shown} tentative} many {{shown} de tentatives} other {{shown} tentatives}}",
+  "tui.tool_card.extra.fetch.attempts_profiles": "{count, plural, one {{shown} tentative ({profiles})} many {{shown} de tentatives ({profiles})} other {{shown} tentatives ({profiles})}}",
+  "tui.tool_card.extra.fetch.lines": "{count, plural, one {{shown} ligne} many {{shown} de lignes} other {{shown} lignes}}",
+  "tui.tool_card.extra.search.provider": "Fournisseur : {provider}",
+  "tui.tool_card.extra.search.provider_auth": "Fournisseur : {provider} ({auth_mode})",
+  "tui.tool_card.extra.search.sources": "Sources :",
+  "tui.tool_card.extra.search.untitled": "Résultat sans titre",
+  "tui.tool_card.extra.send.failed_reason": "{word} : {cause}",
+  "tui.tool_card.extra.send.mode.now": "immédiat",
+  "tui.tool_card.extra.send.mode.quiet": "discret",
+  "tui.tool_card.extra.send.mode.wake": "réveil",
+  "tui.tool_card.extra.send.model": "modèle"
+}

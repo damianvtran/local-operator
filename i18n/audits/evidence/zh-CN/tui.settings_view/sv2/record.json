@@ -1,0 +1,140 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "033743c27e42370446d5b7a47a313365c9e309b0e89b78aa655a1a2a0a2adb95",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied in delegation; not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "f92fa3f56540",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true,
+    "fallback_used": false
+  },
+  "status": "passed",
+  "round": "2",
+  "note": "Scoped independent re-audit of pane.more spacing change, not a new full-namespace audit. Read all 21 English/Chinese namespace pairs for context plus tui.small.settings_view.overflow_more (22 distinct keys); audited 1 changed key and neighbouring pane composition. Idiomatic factual overflow count, correct classifier and Chinese other-only plural; no English UI copy in changed value. No repository edits. No native-speaker or rendered-frame certification claimed.",
+  "scope": {
+    "changed_keys": [
+      "tui.settings_view.pane.more"
+    ],
+    "namespace_keys_read": 21,
+    "neighbour_namespace_keys_read": 1,
+    "total_keys_read": 22
+  },
+  "checks": {
+    "message_arguments_parity": true,
+    "arguments": [
+      [
+        "count",
+        "plural"
+      ],
+      [
+        "shown",
+        "simple"
+      ]
+    ],
+    "plural_selectors": [
+      [
+        "other"
+      ]
+    ],
+    "render_samples": [
+      {
+        "count": 0,
+        "english": "… 0 more",
+        "target": "……另有0项",
+        "english_cells": 8,
+        "target_cells": 9,
+        "maxCells": 16,
+        "small_composition_match": true
+      },
+      {
+        "count": 1,
+        "english": "… 1 more",
+        "target": "……另有1项",
+        "english_cells": 8,
+        "target_cells": 9,
+        "maxCells": 16,
+        "small_composition_match": true
+      },
+      {
+        "count": 2,
+        "english": "… 2 more",
+        "target": "……另有2项",
+        "english_cells": 8,
+        "target_cells": 9,
+        "maxCells": 16,
+        "small_composition_match": true
+      },
+      {
+        "count": 5,
+        "english": "… 5 more",
+        "target": "……另有5项",
+        "english_cells": 8,
+        "target_cells": 9,
+        "maxCells": 16,
+        "small_composition_match": true
+      },
+      {
+        "count": 21,
+        "english": "… 21 more",
+        "target": "……另有21项",
+        "english_cells": 9,
+        "target_cells": 10,
+        "maxCells": 16,
+        "small_composition_match": true
+      },
+      {
+        "count": 100,
+        "english": "… 100 more",
+        "target": "……另有100项",
+        "english_cells": 10,
+        "target_cells": 11,
+        "maxCells": 16,
+        "small_composition_match": true
+      },
+      {
+        "count": 999,
+        "english": "… 999 more",
+        "target": "……另有999项",
+        "english_cells": 10,
+        "target_cells": 11,
+        "maxCells": 16,
+        "small_composition_match": true
+      },
+      {
+        "count": 12345678,
+        "english": "… 12345678 more",
+        "target": "……另有12345678项",
+        "english_cells": 15,
+        "target_cells": 16,
+        "maxCells": 16,
+        "small_composition_match": true
+      },
+      {
+        "count": 123456789,
+        "english": "… 123456789 more",
+        "target": "……另有123456789项",
+        "english_cells": 16,
+        "target_cells": 17,
+        "maxCells": 16,
+        "small_composition_match": true
+      }
+    ],
+    "consumer": "local_operator/tui/widgets/settings_view.py:556-562,5835-5869,5934-5976",
+    "width_analysis": "Normal 1-3 digit counts are 9-11 cells, versus English 8-10, under maxCells 16. Exactly 16 at 8 digits; 9-digit synthetic stress is 17. Consumer inserts two-space indentation, uses no-wrap ellipsis and cell-budgeted collapsed tab composition. Counts derive from actual hidden provider/roster entries; 9-digit stress is not a plausible translation regression. No materially longer normal-case wording or rendered-check finding.",
+    "composition": "Two-space indent + pane.more equals existing tui.small.settings_view.overflow_more byte-for-byte after rendering for every sample."
+  },
+  "findings": []
+}

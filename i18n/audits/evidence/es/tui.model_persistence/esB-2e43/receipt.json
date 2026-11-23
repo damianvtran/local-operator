@@ -1,0 +1,52 @@
+{
+  "locale": "es",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "status": "passed",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e069889d36f8",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Runtime model-switch message in this session explicitly names openai/gpt-6.1-sol as temporary quota fallback; Spanish authorship and validation occurred after this message. No external provider telemetry queried.",
+    "independent_from_translator_session": false,
+    "role": "author; not an independent auditor"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "2e43efb61fa1",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Runtime [model switch] message explicitly identifies openai/gpt-6.1-sol temporary quota fallback before all target assessment and execution. No provider telemetry queried.",
+    "independent_from_translator_session": true,
+    "translator_session": "e069889d36f8",
+    "audit_pass": "B"
+  },
+  "audit_date": "2026-11-22",
+  "date": "2026-11-22",
+  "auditor_result": "passed",
+  "unresolved_blocker_major_count": 0,
+  "note": "Independent Spanish B; 4 keys, zero blocker/major. Record: i18n/audits/evidence/es/tui.model_persistence/esB-2e43/record.json; plain Rich only, native integration not certified.",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esB-2e43/record.json",
+      "sha256": "1062484c5007a64382c2a77c10081755821a9ed5390dfe3ad02c7f75d88e5b24"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esB-2e43/report.md",
+      "sha256": "c037bdf1462fc7a2dadd00b69d49cd0d4596f101388706f0397a7ce18ca5fa59"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esB-2e43/script.py.txt",
+      "sha256": "4a686049ddcf60c7c7cccc3ade60919152b29702061465273e3c724f4e8a075e"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esB-2e43/audit.log",
+      "sha256": "921956fa236691937e271d8bcb6d43e720b6e845b08097bbe6182cda06e21538"
+    }
+  ]
+}

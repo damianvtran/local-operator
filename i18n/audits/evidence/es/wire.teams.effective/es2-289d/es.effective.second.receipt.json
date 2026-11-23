@@ -1,0 +1,52 @@
+{
+  "locale": "es",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "8fba0458db34",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Runtime session model declaration in developer context",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed in this session. No translation service/API/SDK used.",
+    "date": "2026-11-19"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "289d6604993c",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "8fba0458db34",
+    "independent_from_first_auditor_session": "2fb9f8e55f96",
+    "actual_model_source": "Developer-provided runtime model declaration in this session",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed or invoked.",
+    "date": "2026-11-19",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "Record: i18n/audits/evidence/es/wire.teams.effective/es2-289d/record.json (retention pending). Second independent audit; 9/9 passed. Runtime/pseudo/fallback/visual unrun.",
+  "audit_date": "2026-11-19",
+  "key_count": 9,
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "es": {
+      "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.json",
+      "sha256": "aad6efce35fa6fccc25573506b0ec3d3ee042f6e23f6e52d5440d2289a519e25"
+    }
+  },
+  "record_sha256": "1bb6143478d020053f1ec35c9291e7dc45faf5d03575035a031cfd43cd5bba9e",
+  "audit_scope": "translation_only",
+  "audit_instance": "second-independent",
+  "report_sha256": "ab44147906a4148fa1e15dbadaaf38a07dcd0cf22dc84d96fed1e7fd1727a5ca",
+  "record_staging_path": "/Users/damian/.local-operator/sessions/289d6604993c/scratchpad/es.effective.second.record.json",
+  "rendered_evidence_executed": false
+}

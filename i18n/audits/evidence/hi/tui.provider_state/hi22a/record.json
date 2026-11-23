@@ -1,0 +1,72 @@
+{
+  "record_kind": "translation_author_receipt_not_independent_audit",
+  "locale": "hi",
+  "namespace": "tui.provider_state",
+  "audit_date": null,
+  "translation_date": "2026-11-22",
+  "key_count": 5,
+  "status": "translated",
+  "source_revision": "a54ec02de48a94b68d6c3dc92e1307c97ea776ad",
+  "english_author_session": "93b7 (delegator supplied; not this translator)",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "520071768802",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Fresh served-response transcript payload.usage.provider/model_id, extracted during this task; see provenance.json",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota; model-switch notice before authoring"
+    },
+    "independent_from_translator_session": false
+  },
+  "auditor": null,
+  "independent_audit_performed": false,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/hi/tui.provider_state.json",
+      "sha256": "6842f379ee5668e28c087ef764491411da67b5580ade695a03164975364da7b1"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22a/notes.md",
+      "sha256": "217ab58f886764e8048f0e6ae8c5c186c9c94f32d77b908882fe7b314a6c8d27"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22a/validator.py.txt",
+      "sha256": "fc28ea29df50876d531c321c58abcb63d650fbd2a75ad30aa7c8fd1b7be453f2"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22a/validation.log",
+      "sha256": "32c19830c8673f5100ee67e61421a264259d59393800d719dfbcb25873954017"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22a/provenance.json",
+      "sha256": "2118842a8d49490837e5079b171b6ed91fbcb7676540a0754e2ec4a54eb30bad"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22a/receipt.json",
+      "sha256": "858641de70f67e5a269475473d8ea90d58aa3367aa02e3be33792ee2f7af5d5f"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "note": "Author receipt only. Independent A/B audits not performed; no pass verdict."
+  },
+  "notes_kind": "audit_notes_not_execution_log",
+  "execution_log": "validation.log",
+  "native_choices_and_glossary_proposals": "notes.md",
+  "validation_exit_code": 0,
+  "no_native_visual_certification": true
+}

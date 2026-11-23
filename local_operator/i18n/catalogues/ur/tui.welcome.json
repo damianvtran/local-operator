@@ -28,5 +28,6 @@
   "tui.welcome.tip.setup": "نئے ہیں؟ {login} براؤزر سائن ان ہے؛ کلید پیسٹ نہیں کرنی",
   "tui.welcome.tip.shell": "خالی کمپوزر میں ! شیل کمانڈ چلاتا ہے",
   "tui.welcome.tip.subagents": "متوازی کام کہیں؛ ایجنٹ کام ذیلی ایجنٹس میں بانٹ دیتا ہے",
-  "tui.welcome.tip.team": "/team <name> <message> مینیجر کو کام بھیجتا ہے"
+  "tui.welcome.tip.team": "/team <name> <message> مینیجر کو کام بھیجتا ہے",
+  "tui.welcome.tip.transcript_scroll": "option+k/j گفتگو کو اسکرول کرتا ہے جب آپ ٹائپ کرتے ہیں"
 }

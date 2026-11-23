@@ -12,6 +12,7 @@ developer's own settings.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +133,87 @@ async def test_bool_toggle_writes_and_survives_reopen(tmp_path: Path) -> None:
         await pilot.pause()
         index = _select(view, "display.shimmer")
         assert " off" in view.render_lines_for_test()[index + 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key,initial,committed",
+    (
+        ("tool_approval_mode", "ask", "auto"),
+        ("display.nerd_icons", None, True),
+        ("display.nerd_icons", True, False),
+        ("display.nerd_icons", False, None),
+        ("speech.voice.tone", "removed-choice", "warm"),
+    ),
+)
+async def test_localized_enum_browsing_preserves_wire_values(
+    tmp_path: Path,
+    key: str,
+    initial: Any,
+    committed: Any,
+) -> None:
+    """Painting/expansion/cancel are read-only; accept still writes typed wire data."""
+    from local_operator.i18n import text
+    from local_operator.server.routes.settings import _view
+    from local_operator.tui.widgets import settings_view as sv_mod
+
+    previous = text.active_locale()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    try:
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause()
+            app._open_settings_view()
+            view = app.query_one(SettingsView)
+            setting = settings_io.BY_KEY[key]
+            if initial == "removed-choice":
+                # External/stale configuration bypasses today's enum validator.
+                view._manager.set_config_value("speech", {"voice": {"tone": initial}})
+            else:
+                settings_io.write_setting(view._manager, setting, initial)
+            path = tmp_path / "config.yml"
+            original = path.read_bytes() if path.exists() else None
+            wire = _view(view._manager, setting).model_dump(mode="json")
+
+            def projection(body):
+                return (body["value"], body["default"], [c["value"] for c in body["choices"]])
+
+            baseline = json.dumps(projection(wire))
+            text.set_active_locale("fr")
+            index = _select(view, key)
+            view._row_text(view._rows[index], index, 116)
+            painted = _view(view._manager, setting).model_dump(mode="json")
+            assert json.dumps(projection(painted)) == baseline
+            view.action_activate()
+            await pilot.pause()
+            if initial == "removed-choice":
+                assert all(c.value != initial for c in sv_mod._choices_for(setting))
+                for offset, row in enumerate(view._rows):
+                    if row.kind == "choice":
+                        assert row.setting is not None
+                        if row.setting.key == key:
+                            assert "●" not in view._row_text(row, offset, 116).plain
+            await pilot.press("escape")
+            assert (path.read_bytes() if path.exists() else None) == original
+            _select(view, key)
+            view.action_activate()
+            for index, row in enumerate(view._rows):
+                if (
+                    row.kind == "choice"
+                    and type(row.choice.value) is type(committed)
+                    and row.choice.value == committed
+                ):
+                    view._selected = index
+                    break
+            else:
+                raise AssertionError("missing target choice")
+            view.action_activate()
+            stored = settings_io.read_setting(view._manager, setting)
+            assert type(stored) is type(committed) and stored == committed
+            body = _view(view._manager, setting).model_dump(mode="json")
+            assert type(body["value"]) is type(committed) and body["value"] == committed
+            assert sv_mod._edit_seed(stored) == ("" if stored is None else str(stored))
+    finally:
+        text.set_active_locale(previous)
 
 
 @pytest.mark.asyncio
@@ -874,7 +956,8 @@ async def test_settings_keeps_a_body_row_on_a_short_terminal() -> None:
     body widget reported height 1 while painting zero rows onto the
     frame, which is how a size assertion would have shipped the defect.
     """
-    from local_operator.tui.widgets.settings_view import _TOO_SHORT
+    # Spelled out (not read from the catalogue) so a wording change fails here.
+    _TOO_SHORT = "terminal too short for settings — make it taller"
 
     counts: dict[int, int] = {}
     for height in (14, 15, 16, 17, 18, 20, 24):
@@ -5279,6 +5362,60 @@ async def test_subagent_dock_row_renders_in_appearance_with_its_three_choices(
         view.action_activate()
         await pilot.pause()
         assert _values(tmp_path)["display.dock"] == "hidden"
+        assert "display" not in _values(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_the_transcript_display_row_offers_both_layouts_and_writes_flat(
+    tmp_path: Path,
+) -> None:
+    """The row the `/transcript` command is the discoverable half of.
+
+    Two things can go wrong silently here: the row sits under the wrong section
+    (a layout is Appearance, not Session), or its commit nests the key —
+    `values.display.transcript_display` instead of the literal top-level key
+    `display.transcript_display` that `tui/settings.py` reads.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        index = _select(view, "display.transcript_display")
+        lines = view.render_lines_for_test()
+        row = lines[index + 2]
+        # The collapsed row paints the LABEL, not the stored token: localization
+        # landed beside this row's choices, and the token is what the write at
+        # the end of this test checks (`by-turn` on disk).
+        assert "Transcript display" in row and "By turn" in row, row
+        headers = [
+            (offset, line)
+            for offset, line in enumerate(lines[: index + 2])
+            if line.strip().lower().startswith("appearance") or line.strip().lower() == "session"
+        ]
+        assert headers and headers[-1][1].strip().lower().startswith("appearance"), headers
+
+        view.action_activate()
+        await pilot.pause()
+        assert view._expanded == "display.transcript_display"
+        choices = [row.choice.value for row in view._rows if row.kind == "choice"]
+        assert choices == ["by-turn", "by-response"], choices
+        # The labels are the settings row's copy, not the stored tokens: the
+        # `/transcript` receipt names a mode by the same words this list paints.
+        labels = [row.choice.label for row in view._rows if row.kind == "choice"]
+        assert labels == ["By turn", "By response"], labels
+        assert any(
+            "By response" in line for line in view.render_lines_for_test()
+        ), "the expanded list must paint the mode labels"
+
+        for offset, row in enumerate(view._rows[index + 1 :], start=index + 1):
+            if row.kind == "choice" and row.choice.value == "by-response":
+                view._selected = offset
+                break
+        view.action_activate()
+        await pilot.pause()
+        assert _values(tmp_path)["display.transcript_display"] == "by-response"
         assert "display" not in _values(tmp_path)
 
 

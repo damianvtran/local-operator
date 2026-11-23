@@ -1,0 +1,723 @@
+{
+  "stage": "mechanical integration only; NOT independent native clearance",
+  "base": "8f1e45a3a98ca9f8b7312b6707c36e21b758966d",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "integration_model": "openai/gpt-6.1-sol",
+  "integration_fallback": "anthropic/claude-opus-5-5 quota provider failure; host model-switch notice",
+  "locales": {
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.info.json",
+      "before_sha256": "937193f1bfb9552b0d59a86cea9e3185c9db65dabb32d0512640a377f58f2a2d",
+      "target_sha256": "a3c7fef5c7f39382aad8ee62e2e2d90915344119892a45719531e14115ba8e02",
+      "keys": 277,
+      "changed_count": 4,
+      "unchanged_count": 273,
+      "changed_keys": [
+        "tui.info.approval.auto_full",
+        "tui.info.export.build_age",
+        "tui.info.export.uptime",
+        "tui.info.state.stale"
+      ],
+      "changed_key_authors": {
+        "tui.info.approval.auto_full": {
+          "agent": null,
+          "session": "1af53bef9d51",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.build_age": {
+          "agent": null,
+          "session": "1af53bef9d51",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.uptime": {
+          "agent": null,
+          "session": "1af53bef9d51",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.state.stale": {
+          "agent": null,
+          "session": "1af53bef9d51",
+          "model": "openai/gpt-6.1-sol"
+        }
+      },
+      "retained_key_author": {
+        "agent": "info-translate-zh-CN / session6593cb284c1f",
+        "model": "openai/gpt-6.1-sol",
+        "fallback_from": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "provenance_source": "/Users/damian/.local-operator/sessions/6593cb284c1f/scratchpad/zh-info-mechanical.json; full target hash independently verified from git show and worktree bytes"
+      },
+      "retained_authority": "i18n/audits/evidence/pr4420-initial-native-zh-CN-r1.json",
+      "authoring_receipt": "i18n/audits/evidence/pr4420-translator-zh-CN-remediation.json"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/tui.info.json",
+      "before_sha256": "c57433a8f818a7aa95ac804ffc778c50203ddc26cab40925755175ba94379f14",
+      "target_sha256": "f27b54408cc8b9efbe08aabdc341544f7853196f029dd9f2a03e0f81c57898fe",
+      "keys": 277,
+      "changed_count": 11,
+      "unchanged_count": 266,
+      "changed_keys": [
+        "tui.info.fleet_caveats.lower_bound",
+        "tui.info.agents.retained_full",
+        "tui.info.agents.tree_counts",
+        "tui.info.not_answering_clause.no_rows",
+        "tui.info.not_answering_clause.full",
+        "tui.info.tree_lines.deeper",
+        "tui.info.export.build_age",
+        "tui.info.export.uptime",
+        "tui.info.export.session_counts",
+        "tui.info.export.tree_counts",
+        "tui.info.state.stale"
+      ],
+      "changed_key_authors": {
+        "tui.info.fleet_caveats.lower_bound": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.agents.retained_full": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.agents.tree_counts": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.not_answering_clause.no_rows": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.not_answering_clause.full": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.tree_lines.deeper": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.build_age": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.uptime": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.session_counts": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.tree_counts": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.state.stale": {
+          "agent": "info-remediate-fr",
+          "session": "4c438522c145",
+          "model": "openai/gpt-6.1-sol"
+        }
+      },
+      "retained_key_author": {
+        "agent": "info-translate-fr",
+        "session": "90155d1f61b8",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21",
+        "fallback_from": "anthropic/claude-opus-5-5 quota failure",
+        "source": "Parent assignment plus translator fr-info-mechanical.json; target digest independently verified"
+      },
+      "retained_authority": "i18n/audits/evidence/pr4420-initial-native-fr-r1.json",
+      "authoring_receipt": "i18n/audits/evidence/pr4420-translator-fr-remediation.json"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/tui.info.json",
+      "before_sha256": "cd9603eaf49a117499f1680092b9f42ef695ad1b7219cbe3107ede40ef96eb09",
+      "target_sha256": "6d7db1f3fe45f99f638cbd51bdc304e5412cd3f548733df8b6d347fefc1ce327",
+      "keys": 277,
+      "changed_count": 10,
+      "unchanged_count": 267,
+      "changed_keys": [
+        "tui.info.agents.unreported_full",
+        "tui.info.agents.unreported_short",
+        "tui.info.agents.unreported_suffix",
+        "tui.info.agents.retained_full",
+        "tui.info.export.build_age",
+        "tui.info.export.uptime",
+        "tui.info.export.trajectories_unreported",
+        "tui.info.export.session_counts",
+        "tui.info.export.mobile",
+        "tui.info.state.stale"
+      ],
+      "changed_key_authors": {
+        "tui.info.agents.unreported_full": {
+          "agent": "translator/info-remediate-es",
+          "session": "d7ad5e38f7b6",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.agents.unreported_short": {
+          "agent": "translator/info-remediate-es",
+          "session": "d7ad5e38f7b6",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.agents.unreported_suffix": {
+          "agent": "translator/info-remediate-es",
+          "session": "d7ad5e38f7b6",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.agents.retained_full": {
+          "agent": "translator/info-remediate-es",
+          "session": "d7ad5e38f7b6",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.build_age": {
+          "agent": "translator/info-remediate-es",
+          "session": "d7ad5e38f7b6",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.uptime": {
+          "agent": "translator/info-remediate-es",
+          "session": "d7ad5e38f7b6",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.trajectories_unreported": {
+          "agent": "translator/info-remediate-es",
+          "session": "d7ad5e38f7b6",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.session_counts": {
+          "agent": "translator/info-remediate-es",
+          "session": "d7ad5e38f7b6",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.mobile": {
+          "agent": "translator/info-remediate-es",
+          "session": "d7ad5e38f7b6",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.state.stale": {
+          "agent": "translator/info-remediate-es",
+          "session": "d7ad5e38f7b6",
+          "model": "openai/gpt-6.1-sol"
+        }
+      },
+      "retained_key_author": {
+        "agent": "translator/info-translate-es",
+        "session": "fe613bb2e394",
+        "model": "openai/gpt-6.1-sol",
+        "fallback_from": "anthropic/claude-opus-5-5",
+        "fallback_reason": "provider failure: quota",
+        "date": null,
+        "date_provenance": "Translator mechanical receipt does not record date; not invented"
+      },
+      "retained_authority": "i18n/audits/evidence/pr4420-initial-native-es-r1.json",
+      "authoring_receipt": "i18n/audits/evidence/pr4420-translator-es-remediation.json"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/tui.info.json",
+      "before_sha256": "c6b6287844dcc19f0a98d71d5a72a6da38599c7f15c085066b2ee1754a8cd071",
+      "target_sha256": "76d33638ccd3a9f6490babea6c6c0c761bad1d6db80aa5a18c508eef765c773f",
+      "keys": 277,
+      "changed_count": 15,
+      "unchanged_count": 262,
+      "changed_keys": [
+        "tui.info.status.bound_held",
+        "tui.info.sessions.not_answering_clause",
+        "tui.info.fleet_caveats.lower_bound",
+        "tui.info.agents.runtimes",
+        "tui.info.agents.unreported_full",
+        "tui.info.agents.unreported_short",
+        "tui.info.agents.unreported_suffix",
+        "tui.info.env.mcp_connected",
+        "tui.info.export.build_age",
+        "tui.info.export.uptime",
+        "tui.info.export.sessions_summary",
+        "tui.info.export.runtimes",
+        "tui.info.export.trajectories_unreported",
+        "tui.info.export.mcp",
+        "tui.info.state.stale"
+      ],
+      "changed_key_authors": {
+        "tui.info.status.bound_held": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.sessions.not_answering_clause": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.fleet_caveats.lower_bound": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.agents.runtimes": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.agents.unreported_full": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.agents.unreported_short": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.agents.unreported_suffix": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.env.mcp_connected": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.build_age": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.uptime": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.sessions_summary": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.runtimes": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.trajectories_unreported": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.mcp": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.state.stale": {
+          "agent": "info-remediate-ru / translator; session 6301b4199e0c",
+          "session": null,
+          "model": "openai/gpt-6.1-sol"
+        }
+      },
+      "retained_key_author": {
+        "agent": "info-translate-ru / translator; session 217837a8d6b4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21"
+      },
+      "retained_authority": "i18n/audits/evidence/pr4420-initial-native-ru-r1.json",
+      "authoring_receipt": "i18n/audits/evidence/pr4420-translator-ru-remediation.json"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/tui.info.json",
+      "before_sha256": "a61a967b3abbd7250f4fc220d5a806957abb843a09633784165297f243fa3174",
+      "target_sha256": "7e0f97d45840a223868d89907d4d5da6010931b1fd486ab399728a0a091ab15b",
+      "keys": 277,
+      "changed_count": 10,
+      "unchanged_count": 267,
+      "changed_keys": [
+        "tui.info.status.bound_held",
+        "tui.info.latest.behind_short",
+        "tui.info.not_answering_clause.no_rows",
+        "tui.info.not_answering_clause.remedy_one",
+        "tui.info.not_answering_clause.remedy_many",
+        "tui.info.not_answering_clause.full",
+        "tui.info.tree_lines.deeper",
+        "tui.info.export.build_age",
+        "tui.info.export.uptime",
+        "tui.info.state.stale"
+      ],
+      "changed_key_authors": {
+        "tui.info.status.bound_held": {
+          "agent": "info-remediate-vi / translator",
+          "session": "25413fcdc8db",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.latest.behind_short": {
+          "agent": "info-remediate-vi / translator",
+          "session": "25413fcdc8db",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.not_answering_clause.no_rows": {
+          "agent": "info-remediate-vi / translator",
+          "session": "25413fcdc8db",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.not_answering_clause.remedy_one": {
+          "agent": "info-remediate-vi / translator",
+          "session": "25413fcdc8db",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.not_answering_clause.remedy_many": {
+          "agent": "info-remediate-vi / translator",
+          "session": "25413fcdc8db",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.not_answering_clause.full": {
+          "agent": "info-remediate-vi / translator",
+          "session": "25413fcdc8db",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.tree_lines.deeper": {
+          "agent": "info-remediate-vi / translator",
+          "session": "25413fcdc8db",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.build_age": {
+          "agent": "info-remediate-vi / translator",
+          "session": "25413fcdc8db",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.uptime": {
+          "agent": "info-remediate-vi / translator",
+          "session": "25413fcdc8db",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.state.stale": {
+          "agent": "info-remediate-vi / translator",
+          "session": "25413fcdc8db",
+          "model": "openai/gpt-6.1-sol"
+        }
+      },
+      "retained_key_author": {
+        "agent": "info-translate-vi",
+        "session": "685380b18640",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21",
+        "fallback_from": "anthropic/claude-opus-5-5",
+        "fallback_reason": "provider quota failure; identity source: translator mechanical receipt, independently hash-matched"
+      },
+      "retained_authority": "i18n/audits/evidence/pr4420-initial-native-vi-r1.json",
+      "authoring_receipt": "i18n/audits/evidence/pr4420-translator-vi-remediation.json"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/tui.info.json",
+      "before_sha256": "76406c8f5c7f42bb71d6fdf872090a7407701531688151c0e96152be25aa0702",
+      "target_sha256": "1a841571a322478b0294935ea760abe48d7984accd3fd5839d47af7d129697d2",
+      "keys": 277,
+      "changed_count": 5,
+      "unchanged_count": 272,
+      "changed_keys": [
+        "tui.info.fleet_caveats.lower_bound",
+        "tui.info.tree_lines.deeper",
+        "tui.info.export.build_age",
+        "tui.info.export.uptime",
+        "tui.info.state.stale"
+      ],
+      "changed_key_authors": {
+        "tui.info.fleet_caveats.lower_bound": {
+          "agent": "translator / info-remediate-hi / ad9306355f35",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.tree_lines.deeper": {
+          "agent": "translator / info-remediate-hi / ad9306355f35",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.build_age": {
+          "agent": "translator / info-remediate-hi / ad9306355f35",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.uptime": {
+          "agent": "translator / info-remediate-hi / ad9306355f35",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.state.stale": {
+          "agent": "translator / info-remediate-hi / ad9306355f35",
+          "model": "anthropic/claude-opus-5-5"
+        }
+      },
+      "retained_key_author": {
+        "agent": "i18n-translator / info-hi / session 1b869b8efad8",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21"
+      },
+      "retained_authority": "i18n/audits/evidence/pr4420-initial-native-hi-r1.json",
+      "authoring_receipt": "i18n/audits/evidence/pr4420-translator-hi-remediation.json"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/tui.info.json",
+      "before_sha256": "87aa9c70a1f3e8bd55454f4ca4fa304a88846f35c5d129fc47a6fef4db8b692d",
+      "target_sha256": "ccc8fd0eca869fbd1f70785b070e0d2ff59578241393d75477a84e5cce2efc03",
+      "keys": 277,
+      "changed_count": 5,
+      "unchanged_count": 272,
+      "changed_keys": [
+        "tui.info.label.answering",
+        "tui.info.fleet_caveats.lower_bound",
+        "tui.info.env.credentials_set",
+        "tui.info.export.build_age",
+        "tui.info.export.uptime"
+      ],
+      "changed_key_authors": {
+        "tui.info.label.answering": {
+          "agent": "translator / info-remediate-ur",
+          "session": "efc432b4d171",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.fleet_caveats.lower_bound": {
+          "agent": "translator / info-remediate-ur",
+          "session": "efc432b4d171",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.env.credentials_set": {
+          "agent": "translator / info-remediate-ur",
+          "session": "efc432b4d171",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.build_age": {
+          "agent": "translator / info-remediate-ur",
+          "session": "efc432b4d171",
+          "model": "openai/gpt-6.1-sol"
+        },
+        "tui.info.export.uptime": {
+          "agent": "translator / info-remediate-ur",
+          "session": "efc432b4d171",
+          "model": "openai/gpt-6.1-sol"
+        }
+      },
+      "retained_key_author": {
+        "agent": "info-translate-ur / translator",
+        "session": "54dba55779e0",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21",
+        "fallback_from": "anthropic/claude-opus-5-5",
+        "fallback_reason": "provider quota failure",
+        "provenance": "/Users/damian/.local-operator/sessions/54dba55779e0/scratchpad/ur-info-mechanical.json"
+      },
+      "retained_authority": "i18n/audits/evidence/pr4420-initial-native-ur-r1.json",
+      "authoring_receipt": "i18n/audits/evidence/pr4420-translator-ur-remediation.json"
+    }
+  },
+  "changed_context_keys": [
+    "tui.info.status.bound_held",
+    "tui.info.install.build_age",
+    "tui.info.latest.checked_full",
+    "tui.info.latest.checked_short",
+    "tui.info.session.started",
+    "tui.info.fleet_caveats.lower_bound",
+    "tui.info.latest_line.checked",
+    "tui.info.not_answering_clause.full",
+    "tui.info.tree_lines.deeper",
+    "tui.info.export.build_age",
+    "tui.info.export.uptime",
+    "tui.info.state.stale"
+  ],
+  "preflight": {
+    "import_path": "/Users/damian/local-operator/.worktrees/i18n-info-readout/local_operator/__init__.py",
+    "icu": {
+      "zh-CN": {
+        "parsed_keys": 277,
+        "ordered_arguments_and_select_arms_exact": true,
+        "missing_duration_controls": {
+          "tui.info.export.build_age": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          },
+          "tui.info.export.uptime": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          }
+        }
+      },
+      "fr": {
+        "parsed_keys": 277,
+        "ordered_arguments_and_select_arms_exact": true,
+        "missing_duration_controls": {
+          "tui.info.export.build_age": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          },
+          "tui.info.export.uptime": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          }
+        }
+      },
+      "es": {
+        "parsed_keys": 277,
+        "ordered_arguments_and_select_arms_exact": true,
+        "missing_duration_controls": {
+          "tui.info.export.build_age": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          },
+          "tui.info.export.uptime": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          }
+        }
+      },
+      "ru": {
+        "parsed_keys": 277,
+        "ordered_arguments_and_select_arms_exact": true,
+        "missing_duration_controls": {
+          "tui.info.export.build_age": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          },
+          "tui.info.export.uptime": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          }
+        }
+      },
+      "vi": {
+        "parsed_keys": 277,
+        "ordered_arguments_and_select_arms_exact": true,
+        "missing_duration_controls": {
+          "tui.info.export.build_age": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          },
+          "tui.info.export.uptime": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          }
+        }
+      },
+      "hi": {
+        "parsed_keys": 277,
+        "ordered_arguments_and_select_arms_exact": true,
+        "missing_duration_controls": {
+          "tui.info.export.build_age": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          },
+          "tui.info.export.uptime": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          }
+        }
+      },
+      "ur": {
+        "parsed_keys": 277,
+        "ordered_arguments_and_select_arms_exact": true,
+        "missing_duration_controls": {
+          "tui.info.export.build_age": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          },
+          "tui.info.export.uptime": {
+            "none_marker_not_leaked": true,
+            "english_unknown_absent": true,
+            "zero_distinct": true
+          }
+        }
+      }
+    },
+    "missing_argument_negative_control": true,
+    "historical_append_dry_runs": [
+      {
+        "locale": "zh-CN",
+        "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+        "status": "failed",
+        "returncode": 0,
+        "stdout": "i18n/audit-history/zh-CN/tui.info.json",
+        "stderr": "",
+        "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      {
+        "locale": "fr",
+        "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+        "status": "passed",
+        "returncode": 0,
+        "stdout": "i18n/audit-history/fr/tui.info.json",
+        "stderr": "",
+        "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      {
+        "locale": "es",
+        "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+        "status": "passed",
+        "returncode": 0,
+        "stdout": "i18n/audit-history/es/tui.info.json",
+        "stderr": "",
+        "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      {
+        "locale": "ru",
+        "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+        "status": "failed",
+        "returncode": 0,
+        "stdout": "i18n/audit-history/ru/tui.info.json",
+        "stderr": "",
+        "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      {
+        "locale": "vi",
+        "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+        "status": "passed",
+        "returncode": 0,
+        "stdout": "i18n/audit-history/vi/tui.info.json",
+        "stderr": "",
+        "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      {
+        "locale": "hi",
+        "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+        "status": "failed",
+        "returncode": 0,
+        "stdout": "i18n/audit-history/hi/tui.info.json",
+        "stderr": "",
+        "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      {
+        "locale": "ur",
+        "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+        "status": "failed",
+        "returncode": 0,
+        "stdout": "i18n/audit-history/ur/tui.info.json",
+        "stderr": "",
+        "history_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      }
+    ],
+    "control_append_dry_run": {
+      "returncode": 0,
+      "stdout": "i18n/audit-history/zh-CN/tui.info.json"
+    },
+    "ledger_mutations": false
+  },
+  "limitations": [
+    "No native judgment or clearance; translators report semantic adaptations, not independently reapproved here.",
+    "No pytest/App/browser/native/build/install/generation/full check/CI dispatch or wait.",
+    "Source-code 8f four fixes still require independent R2 review/QA/design/UX.",
+    "No active passed rows or actual append; historical snapshots and marker untouched.",
+    "Some receipt dates and zh-CN authoring agent label are absent; preserve unknowns, exact named session and evidence rather than inventing."
+  ]
+}

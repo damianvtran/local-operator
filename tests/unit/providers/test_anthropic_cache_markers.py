@@ -126,3 +126,84 @@ async def test_the_guardrail_judge_request_caches_its_system_prompt_only() -> No
     assert request.purpose == "guardrail" and request.cache_markers == "system"
     body = AnthropicClient()._build_body(request, oauth=False)
     assert _marker_paths(body) == [".system[0]"]
+
+
+def _radient_request(**update: Any) -> ChatRequest:
+    request = ChatRequest(
+        model=ModelSpec(
+            provider="radient",
+            model_id="anthropic/claude-sonnet-5.5",
+            context_window=200_000,
+            supports_prompt_cache=True,
+        ),
+        system_blocks=["instructions", "inventory", "skills", "env"],
+        messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+    )
+    return request.model_copy(update=update)
+
+
+def test_openai_compat_cache_markers_none_emits_zero_markers() -> None:
+    """Radient/OpenRouter screening calls with ``cache_markers="none"`` must
+    emit zero ``cache_control`` markers so unique prompts do not pay 1.25x
+    cache-write."""
+    from local_operator.providers.clients import OpenAICompatClient
+
+    client = OpenAICompatClient("https://api.radienthq.com/v1")
+    body = client._build_body(_radient_request(cache_markers="none"))
+    assert _marker_paths(body) == []
+    # Content stays intact; only cache_control markers are omitted.
+    system_texts = [m["content"] for m in body["messages"] if m["role"] == "system"]
+    assert system_texts == ["instructions", "inventory", "skills", "env"]
+
+
+def test_openai_compat_cache_markers_system_marks_last_system_block_only() -> None:
+    """``cache_markers="system"`` on OpenAICompatClient marks only the last
+    system message (matching AnthropicClient, including 1-block judge prompts)
+    and skips conversation message markers."""
+    from local_operator.providers.clients import OpenAICompatClient
+
+    client = OpenAICompatClient("https://api.radienthq.com/v1")
+    body = client._build_body(_radient_request(cache_markers="system"))
+    assert _marker_paths(body) == [".messages[3].content[0]"]
+    assert body["messages"][3]["role"] == "system"
+
+    # Single-block static head (e.g. guardrail judge) still gets its system marker.
+    single = client._build_body(
+        _radient_request(system_blocks=["static judge prompt"], cache_markers="system")
+    )
+    assert _marker_paths(single) == [".messages[0].content[0]"]
+    assert single["messages"][0]["role"] == "system"
+
+    # Empty system_blocks emits no markers at all.
+    empty = client._build_body(_radient_request(system_blocks=[], cache_markers="system"))
+    assert _marker_paths(empty) == []
+
+
+def test_openai_compat_cache_markers_auto_marks_system_and_conversation_within_cap() -> None:
+    """``cache_markers="auto"`` (default) keeps both system and conversation
+    markers while capping the total at ``MAX_CACHE_BREAKPOINTS`` (4)."""
+    from local_operator.providers.clients import OpenAICompatClient
+
+    client = OpenAICompatClient("https://api.radienthq.com/v1")
+    default = client._build_body(_radient_request())
+    explicit = client._build_body(_radient_request(cache_markers="auto"))
+    assert default == explicit
+    paths = _marker_paths(default)
+    sys_marked = [
+        i
+        for i, m in enumerate(default["messages"])
+        if m["role"] == "system" and "cache_control" in str(m.get("content"))
+    ]
+    conv_marked = [
+        i
+        for i, m in enumerate(default["messages"])
+        if m["role"] != "system" and "cache_control" in str(m.get("content"))
+    ]
+    assert sys_marked and conv_marked
+    assert len(paths) <= OpenAICompatClient.MAX_CACHE_BREAKPOINTS
+
+    # Even with many system blocks, total markers never exceed 4.
+    many = client._build_body(
+        _radient_request(system_blocks=[f"block-{i}" for i in range(8)], cache_markers="auto")
+    )
+    assert len(_marker_paths(many)) <= OpenAICompatClient.MAX_CACHE_BREAKPOINTS

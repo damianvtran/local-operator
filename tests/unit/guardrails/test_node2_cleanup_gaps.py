@@ -512,10 +512,13 @@ def test_1_github_default_repos_field_shape_end_to_end(
         assert risk is Risk.LOW, (command, reason)
 
 
-# -- 3: copy-overhaul, a merged tree "dirty" only by Vite's ignored SSR output ----
+# -- 3: copy-overhaul, a merged tree with and without ignored SSR output ----
 
 
-def test_3_ignored_dist_ssr_is_regenerable(home: Path, repo: Path) -> None:
+@pytest.mark.parametrize("ignored", [False, True], ids=["clean", "unwitnessed-dist-ssr"])
+def test_3_merged_plain_cleanup_requires_preserved_payload(
+    home: Path, repo: Path, ignored: bool
+) -> None:
     _merged_branch(repo, "feat/site-copy-overhaul")
     # Created by an unrelated session (58de2f8ff79b in the field), not running.
     _run_recorded(
@@ -524,13 +527,18 @@ def test_3_ignored_dist_ssr_is_regenerable(home: Path, repo: Path) -> None:
         sid=S2,
     )
     wt = repo / ".worktrees" / "copy-overhaul"
-    (wt / "dist-ssr").mkdir()
-    (wt / "dist-ssr" / "entry-server.js").write_text("export {}\n")
+    if ignored:
+        (wt / "dist-ssr").mkdir()
+        (wt / "dist-ssr" / "entry-server.js").write_text("export {}\n")
+    # Legacy state and merged history do not witness the ignored bytes.
     assert prov.worktree_state(str(wt)) == "clean"
-    risk, reason = _rank(
-        home, "git -C ~/local-operator worktree remove .worktrees/copy-overhaul", sid=S
-    )
-    assert risk is Risk.LOW, reason
+    command = "git -C ~/local-operator worktree remove .worktrees/copy-overhaul"
+    verdict = classify_bash(command, cwd=str(home), env=_env(home), scratchpad=None, session_id=S)
+    if ignored:
+        assert verdict.risk is Risk.HIGH and verdict.targets[0].cleanup_hold, verdict.reasons
+        assert "1 ignored entry the guard cannot prove regenerable" in verdict.targets[0].reason
+    else:
+        assert verdict.risk is Risk.LOW, verdict.reasons
     # ``--force`` and ``rm -rf`` of another session's tree still go to the judge.
     assert (
         _rank(home, "git -C ~/local-operator worktree remove --force .worktrees/copy-overhaul")[0]

@@ -320,7 +320,11 @@ class _GuidanceClient:
 async def test_inbox_handling_carries_the_response_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake_execute(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
+    # build_bridge_tool passes the optional display on every execute_bridge call;
+    # non-send operations ignore it, so this test-only fake must accept it too.
+    async def fake_execute(
+        runtime: BridgeRuntime, args: dict[str, Any], *, session_agent_display: str | None = None
+    ) -> dict[str, Any]:
         return {"ok": True, "state": "working", "message_id": "bmsg_1"}
 
     monkeypatch.setattr(tool_mod, "execute_bridge", fake_execute)

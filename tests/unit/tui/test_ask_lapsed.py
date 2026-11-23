@@ -38,6 +38,7 @@ from local_operator.tui.widgets.ask_queue import (
     filter_counts,
     settled_chip,
 )
+from tests.unit.tui.conftest import await_booted
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_ask_queue_surface import _AskSession, _row
 
@@ -132,7 +133,7 @@ async def test_x_on_a_lapsed_row_dismisses_and_sends_nothing_else(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -158,7 +159,7 @@ async def test_the_door_on_a_lapsed_only_queue_opens_the_list(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a2", "Which region?", status="timed_out")]))
         await _settle(pilot)
         bar = app.query_one(AskBar)
@@ -175,7 +176,7 @@ async def test_one_open_ask_beside_lapsed_ones_still_goes_straight_to_its_card(e
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?", status="timed_out")])
         )
@@ -193,7 +194,7 @@ async def test_a_mounted_card_whose_ask_lapses_stays_but_no_longer_sends(enabled
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         app._expand_asks()
@@ -232,7 +233,7 @@ async def test_a_card_mounted_from_the_list_returns_to_the_list_after_lapse(enab
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which tier?")]))
         await _settle(pilot)
         app._expand_asks()
@@ -353,7 +354,7 @@ async def test_the_bar_glyph_is_muted_when_nothing_is_answerable(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a2", "Which region?", status="timed_out")]))
         await _settle(pilot)
         muted = str(theme_mod.semantic_color("muted")).lower()
@@ -378,7 +379,7 @@ async def test_sidebar_marks_and_total_count_answerable_asks_only(enabled, tmp_p
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         counts, total = app._read_fleet_asks()
         assert counts == {"s-mixed": 1}
         assert total == 1
@@ -395,7 +396,7 @@ async def test_enter_and_click_on_a_lapsed_row_open_the_read_only_card(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -468,7 +469,7 @@ async def test_x_dismiss_is_acknowledged_at_once(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -501,7 +502,7 @@ async def test_a_refused_dismiss_clears_the_in_flight_mark(enabled):
     session.dismiss_refusals["a2"] = "already dismissed on the phone."
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows(
                 [
@@ -526,7 +527,7 @@ async def test_a_read_only_card_refuses_paste_and_space_and_stops_inviting_text(
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         multi = _row("a1", "Which regions?")
         multi["questions"][0]["multi"] = True
         app._sync_ask_surface(ask_rows([multi]))
@@ -558,7 +559,7 @@ async def test_a_lapse_drops_text_typed_before_it(enabled):
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
         await _settle(pilot)
         app._expand_asks()
@@ -589,7 +590,7 @@ async def test_a_fleet_row_lapsing_on_screen_becomes_read_only(enabled):
 
     app = _app(_AskSession())
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         now = app._ask_now_ms()
         past = fleet_row("b1", session_id="s-other", expires_at=now - 1_000)
         live = fleet_row("b2", session_id="s-other")
@@ -649,7 +650,7 @@ async def test_a_fleet_ops_guard_survives_collapse_and_a_session_snapshot(
     hold, engages, cancelled, fleet_row = await _fleet_op_held(monkeypatch, tmp_path)
     app = _app(_AskSession())
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._ask_fleet_rows = ask_rows([fleet_row("b1", session_id="s-other")])
         app._ask_scope = SCOPE_FLEET
         app._mount_ask_list(scope=SCOPE_FLEET)
@@ -703,7 +704,7 @@ async def test_a_read_only_card_offers_the_reading_keys_and_shows_the_whole_ques
     """
     app = _app(_AskSession())
     async with app.run_test(size=(80, 24)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(
             ask_rows([_long_lapsed_row(), _row("a2", "Which tier?", status="timed_out")])
         )
@@ -737,7 +738,7 @@ async def test_a_read_only_card_names_the_arrows_only_when_the_options_are_clipp
 
     app = _app(_AskSession())
     async with app.run_test(size=(80, 22)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_long_lapsed_row()]))
         await _settle(pilot)
         app._expand_asks()
@@ -754,7 +755,7 @@ async def test_a_read_only_card_names_the_arrows_only_when_the_options_are_clipp
         assert "↑↓ scroll" in lines, lines
     short = _app(_AskSession())
     async with short.run_test(size=(120, 40)) as pilot:
-        await _settle(pilot)
+        await await_booted(short, pilot)
         short._sync_ask_surface(ask_rows([_row("a2", "Which tier?", status="timed_out")]))
         await _settle(pilot)
         short._expand_asks()
@@ -778,7 +779,7 @@ async def test_an_unfocused_read_only_card_names_no_reading_keys(enabled):
 
     app = _app(_AskSession())
     async with app.run_test(size=(80, 24)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_long_lapsed_row()]))
         await _settle(pilot)
         app._expand_asks()
@@ -835,7 +836,7 @@ async def test_the_arrows_scroll_a_read_only_card_without_wrapping(enabled):
 
     app = _app(_AskSession())
     async with app.run_test(size=(80, 22)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_long_lapsed_row()]))
         await _settle(pilot)
         app._expand_asks()
@@ -900,7 +901,7 @@ async def test_the_bar_keeps_its_chevron_and_whole_clauses_down_to_fifty_columns
     app = _app(_AskSession())
     for width in (50, 54, 58, 62):
         async with app.run_test(size=(width, 24)) as pilot:
-            await _settle(pilot)
+            await await_booted(app, pilot)
             app._sync_ask_surface(
                 ask_rows(
                     [
@@ -934,7 +935,7 @@ async def test_the_chevron_is_muted_with_the_bar_when_nothing_is_answerable(enab
 
     app = _app(_AskSession())
     async with app.run_test(size=(120, 30)) as pilot:
-        await _settle(pilot)
+        await await_booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("t1", "Old one?", status="timed_out")]))
         await _settle(pilot)
         painted = app.query_one(AskBar).render()

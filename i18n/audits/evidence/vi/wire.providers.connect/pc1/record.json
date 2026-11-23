@@ -1,0 +1,130 @@
+{
+  "locale": "vi",
+  "namespace": "wire.providers.connect",
+  "source_sha256": "6277c0656675f9e4cfe3704cd2d62035b49f11e717aab2bd8c8e392438fd7959",
+  "target_sha256": "986969acfed223b3a3f12be52165450abc080716fa5003a33becb1adac935fc8",
+  "context_sha256": "c4dbbb698f0cc7c17f5f19434146b46de2376c93e5c89b8dc2368cc38dd2ab38",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-21",
+    "provenance": "Identity supplied by manager brief; auditor did not inspect translator session",
+    "fallback": "not reported to auditor"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev), conn-audit-vi",
+    "session": "f1f6647cbb53",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback": "none observed",
+    "result": "clean",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "independent_from_translator": true
+  },
+  "status": "passed",
+  "keys_read": 5,
+  "findings": [],
+  "scope": {
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-backend-english",
+    "head": "b5bb56079c5067fd2efc81d6d223ac0283171142",
+    "catalogue_state": "uncommitted target read directly",
+    "namespaces": [
+      {
+        "namespace": "wire.providers.connect",
+        "keys_read": 5,
+        "verdict": "clean"
+      }
+    ]
+  },
+  "checks": {
+    "catalogues_only": {
+      "command": "PYTHONPATH=<worktree> ~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only",
+      "exit_code": 0,
+      "stdout": "check.py: catalogue checks: 0 problem(s)"
+    },
+    "message_arguments": "5/5 exact tuple equality including first-appearance order",
+    "render_message": [
+      {
+        "key": "wire.providers.connect.key_invalid_characters",
+        "arguments_in_order": [],
+        "english": "This key contains characters an API key cannot have. Re-copy it and try again.",
+        "vietnamese": "Khóa này chứa ký tự mà khóa API không thể có. Hãy sao chép lại rồi thử lại.",
+        "rendered_en": "This key contains characters an API key cannot have. Re-copy it and try again.",
+        "rendered_vi": "Khóa này chứa ký tự mà khóa API không thể có. Hãy sao chép lại rồi thử lại.",
+        "source_cells": 78,
+        "target_cells": 75
+      },
+      {
+        "key": "wire.providers.connect.key_rejected",
+        "arguments_in_order": [
+          [
+            "label",
+            "simple"
+          ]
+        ],
+        "english": "{label} rejected this API key. Check it and try again.",
+        "vietnamese": "{label} đã từ chối khóa API này. Hãy kiểm tra khóa rồi thử lại.",
+        "rendered_en": "OpenAI rejected this API key. Check it and try again.",
+        "rendered_vi": "OpenAI đã từ chối khóa API này. Hãy kiểm tra khóa rồi thử lại.",
+        "source_cells": 54,
+        "target_cells": 63
+      },
+      {
+        "key": "wire.providers.connect.key_unreachable",
+        "arguments_in_order": [
+          [
+            "label",
+            "simple"
+          ]
+        ],
+        "english": "Could not reach {label} to check this key. It was saved without being verified.",
+        "vietnamese": "Không thể kết nối tới {label} để kiểm tra khóa này. Khóa đã được lưu nhưng chưa được xác minh.",
+        "rendered_en": "Could not reach OpenAI to check this key. It was saved without being verified.",
+        "rendered_vi": "Không thể kết nối tới OpenAI để kiểm tra khóa này. Khóa đã được lưu nhưng chưa được xác minh.",
+        "source_cells": 79,
+        "target_cells": 94
+      },
+      {
+        "key": "wire.providers.connect.key_unverified",
+        "arguments_in_order": [
+          [
+            "label",
+            "simple"
+          ],
+          [
+            "status",
+            "simple"
+          ]
+        ],
+        "english": "{label} could not check this key right now (HTTP {status}). It was saved without being verified.",
+        "vietnamese": "{label} hiện không thể kiểm tra khóa này (HTTP {status}). Khóa đã được lưu nhưng chưa được xác minh.",
+        "rendered_en": "OpenAI could not check this key right now (HTTP 429). It was saved without being verified.",
+        "rendered_vi": "OpenAI hiện không thể kiểm tra khóa này (HTTP 429). Khóa đã được lưu nhưng chưa được xác minh.",
+        "source_cells": 96,
+        "target_cells": 100
+      },
+      {
+        "key": "wire.providers.connect.suggested_automatic",
+        "arguments_in_order": [],
+        "english": "Automatic",
+        "vietnamese": "Tự động",
+        "rendered_en": "Automatic",
+        "rendered_vi": "Tự động",
+        "source_cells": 9,
+        "target_cells": 7
+      }
+    ],
+    "unicode": "5/5 NFC; no added direction controls",
+    "plurals": "No plural/date/number/markup syntax in these five keys; Vietnamese other-only rule not exercised",
+    "rtl": "Not applicable: Vietnamese is LTR",
+    "visual": "No browser frame or pixel-fit claim. Inline sentence expansion measured in text cells; only compact model-name label shrinks (9 to 7)."
+  },
+  "note": "Read English and Vietnamese complete five-key namespace and English context sidecar, key_check invalid/rejected/unreachable/unverified paths, suggested_model_for/_keyed_name, auth/models route consumers, UI provider suggested-name/error usage. Reference copy: vi wire.errors.auth, wire.errors.bedrock and wire.settings, vi style guide and glossary. API/HTTP preserved as sanctioned technical tokens; HTTP {status} unchanged; label names untouched. Distinction between rejected/not-saved and saved/unverified preserved. Terms khóa API/từ chối/xác minh match reference copy. Tự động agrees with vi UI ui.common.models model_select auto_recommended and help prose; fr Auto/Automatique and zh-CN 自动 are descriptive display wording, not machine id auto. All five texts accurate, idiomatic and consistent direct pronoun-free register; no unsanctioned English. Prose-only expansion: key_rejected 54→63, key_unreachable 79→94, key_unverified 96→100 template cells, no maxCells in context. References were contextual checks, not independent full-namespace re-audits."
+}

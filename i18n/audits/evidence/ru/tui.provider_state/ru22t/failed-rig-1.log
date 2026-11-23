@@ -1,0 +1,25 @@
+UTC: 2026-11-22T11:42:04.195822+00:00
+COMMAND: ['/Users/damian/local-operator/.venv/bin/python', '/Users/damian/local-operator/.worktrees/i18n-provider-state-labels/i18n/audits/evidence/ru/tui.provider_state/ru22t/validator.py.txt']
+ENV: HOME=/Users/damian/.local-operator/sessions/29d4fc18d1a7/scratchpad/ru22t-home LOCAL_OPERATOR_CONFIG_DIR=/Users/damian/.local-operator/sessions/29d4fc18d1a7/scratchpad/ru22t-home/.local-operator PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-provider-state-labels CMUX_*=removed PYTHONDONTWRITEBYTECODE=1
+module proof: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/__init__.py
+isolation: HOME/config redirected; CMUX_* absent; no app startup
+Traceback (most recent call last):
+  File "/Users/damian/local-operator/.worktrees/i18n-provider-state-labels/i18n/audits/evidence/ru/tui.provider_state/ru22t/validator.py.txt", line 31, in <module>
+    spec.loader.exec_module(checker)
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py", line 103, in <module>
+    @dataclass(frozen=True)
+     ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/dataclasses.py", line 1265, in wrap
+    return _process_class(cls, init, repr, eq, order, unsafe_hash,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/dataclasses.py", line 983, in _process_class
+    and _is_type(type, cls, dataclasses, dataclasses.KW_ONLY,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/dataclasses.py", line 749, in _is_type
+    ns = sys.modules.get(cls.__module__).__dict__
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute '__dict__'. Did you mean: '__dir__'?
+
+EXIT: 1

@@ -145,9 +145,10 @@ def tr_record(namespace: str) -> Callable[[Msg], RenderedMessage]:
                 source_locale,
             )
         try:
-            rendered = _runtime.render_message(source, dict(message.params), source_locale)
+            parts = _runtime.render_message_parts(source, dict(message.params), source_locale)
+            rendered = "".join(text for text, _ in parts)
             provenance = None if _runtime.is_passthrough_message(source) else source_locale
-            return RenderedMessage(rendered, provenance)
+            return RenderedMessage(rendered, provenance, parts)
         except _runtime.MessageError:
             return RenderedMessage(message.code, None)
 

@@ -311,6 +311,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_REF_PREFIX`` ('r1') is the version tag of an opaque history-row ref "
         "(``row_ref``), a wire token, never a session-directory entry.",
     ),
+    "local_operator/tools/integrations_tool.py": (
+        1,
+        "``TOOL_NAME`` ('integrations') identifies the registered provisioning tool, "
+        "not a session-directory entry. Its consent records live in the existing "
+        "ask queue, which already travels; credentials stay in the device secret store.",
+    ),
     "local_operator/session/temporary.py": (
         3,
         "``TOMBSTONES_NAME`` ('.temporary-tombstones.json'), ``STATE_NAME`` "
@@ -369,6 +375,40 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "directory, and explicitly not copyable: the delegation is this device's authority "
         "and a copy would hand another device a second refresher, which is the one thing "
         "the design's Fence 1 forbids.",
+    ),
+    "local_operator/remote_compute/records.py": (
+        2,
+        "``RECORD_FILENAME`` ('runs.jsonl') is this DEVICE's record of the remote runs "
+        "it submitted, under <config>/remote-compute/ (the directory beside it, "
+        "``RECORD_SUBDIRECTORY``) -- machine state outside the session "
+        "directories, never an entry of one. It must not travel with a session: the "
+        "file answers 'what did this device send, and where is it now', and a copy "
+        "would let the destination report another machine's runs as its own. "
+        "``LOCK_FILENAME`` ('.runs.lock') is the side file the record's cross-process "
+        "flock is taken on -- beside that same file, machine-local by construction "
+        "and meaningless on another device.",
+    ),
+    "local_operator/remote_compute/repo.py": (
+        1,
+        "``REMOTE_NAME`` ('origin') is a GIT REMOTE's name -- a key in .git/config, "
+        "not a file or directory this product writes. Nothing under it is ever an "
+        "entry of a session directory.",
+    ),
+    "local_operator/remote_compute/errors.py": (
+        1,
+        "``ATTESTATION_CODE_PREFIX`` ('attestation_') is the prefix the server's "
+        "refusal CODES share, matched against a ``code`` field of a JSON answer -- a "
+        "vocabulary, not a path. Nothing is written under it, here or anywhere.",
+    ),
+    "local_operator/remote_compute/results.py": (
+        2,
+        "``REASON_ABSOLUTE_PATH`` ('absolute_path') and ``REASON_SPECIAL_FILE`` "
+        "('special_file') are REFUSAL REASON CODES: the ``reason`` an "
+        "``errors.UnsafeArchive`` carries and the ``error.code`` a surface branches on "
+        "when a results archive holds an entry this device will not extract. No code "
+        "path opens either spelling as a path. They read as path-shaped only because "
+        "the heuristic matches a name ending in ``_PATH``/``_FILE`` whose value is one "
+        "segment, which a code is.",
     ),
     "local_operator/guardrails/provenance.py": (
         3,
@@ -545,6 +585,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "(<config>/cache/) holding a session's deferred-open metadata record. A derived "
         "cache file, rebuilt from the journal on the next open, never an entry of a "
         "session directory and never part of what a sync copy carries.",
+    ),
+    "local_operator/session/index_prewarm.py": (
+        1,
+        "``SETTLED_DIRNAME`` ('prewarm_settled'): the segment under the DEVICE cache "
+        "root (<config>/cache/) holding the boot prewarm's per-journal settlement "
+        "record. It pins an inode, so it is meaningless on another device; a derived "
+        "cache file, never an entry of a session directory or part of a sync copy.",
     ),
     "local_operator/role_provenance.py": (
         2,
@@ -1018,7 +1065,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "a key name and never used as a bare session entry",
     ),
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
-    "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
+    "local_operator/secrets/protocol.py": (
+        4,
+        "the secret broker's socket and lock, plus the roll's temp socket "
+        "(``broker.next``) and sentinel (``broker.rolling``) beside them (PR #4389)",
+    ),
     "local_operator/session/cleanup.py": (
         7,
         "the cleanup log, the value-hold index and the last-cleanup record (all at the "
@@ -1218,6 +1269,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``network/credentials/<network_id>/``: the broker's per-network record of who owns "
         "a credential and who may borrow it — a store file beside ``sessions/``, never an "
         "entry a session directory holds",
+    ),
+    "local_operator/network/credentials/lends.py": (
+        1,
+        "``LENDS_FILENAME`` (``lends.json``) under ``network/credentials/<network_id>/``: "
+        "the OWNER's ids-only record of what it lent to which member and until when "
+        "(G9), read by ``member rm``'s receipt — DEVICE-LOCAL and never copied to a "
+        "peer: it describes this owner's lends, and ``copy_set``/``content_trees`` "
+        "walk only ``sessions/<id>/``, so no sync path reaches it",
     ),
     "local_operator/network/credentials/lifecycle.py": (
         3,
@@ -1592,7 +1651,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``compaction-carried`` prefixes the synthetic carried-tier row's message id in "
         "the live/replay context, never a filename or session entry",
     ),
-    "local_operator/keymap.py": (1, "``keymap.`` prefixes a config key name"),
+    "local_operator/keymap.py": (
+        2,
+        "``keymap.`` prefixes a config key name, and ``keymap.transcript_`` is the "
+        "printable-chord id prefix — the same kind of name, not a path",
+    ),
     "local_operator/mobile/peer_send.py": (1, "``peer-`` prefixes a message id"),
     "local_operator/mobile/push_payload.py": (1, "``attention-`` prefixes a push payload key"),
     "local_operator/network/invite.py": (1, "``lop1`` prefixes an invite token string"),

@@ -1,0 +1,151 @@
+{
+  "head": "2c282261f27b66390061563359f9cf72f2520538",
+  "records": [
+    {
+      "side": "A",
+      "locale": "fr",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/e27453d08b46/scratchpad/pr4420-native-r2-A-fr-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-A-fr-original.json",
+      "sha256": "b495fd10c0aa3e2e9dbeba2bb5895518f12cf282599d2f65f5a2fa7e718a0961"
+    },
+    {
+      "side": "A",
+      "locale": "es",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/8226700e4a90/scratchpad/pr4420-native-r2-A-es-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-A-es-original.json",
+      "sha256": "ef45a92ca3f4431ba3a965ae7ea3ef2d4b6b900eb13d942faa462c08b0db5a13"
+    },
+    {
+      "side": "A",
+      "locale": "ru",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/e97a76d8eb05/scratchpad/pr4420-native-r2-A-ru-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-A-ru-original.json",
+      "sha256": "80d27ec86d5d3c363cf6e1752646963769af0b0feeb36e39d862790c06e81d99"
+    },
+    {
+      "side": "A",
+      "locale": "vi",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/386d8d3d80de/scratchpad/pr4420-r2-receipt-A-vi-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-A-vi-original.json",
+      "sha256": "5bbf38b5a6ac5590a6f3b7ce4de6aa534c781f4fed556869841ba188c32c199f"
+    },
+    {
+      "side": "A",
+      "locale": "hi",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/62fc4a10e1ba/scratchpad/pr4420-r2-receipt-A-hi-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-A-hi-original.json",
+      "sha256": "04af9ae0811e2412a4727b228a45f9c24b499beb2bc3ddaef56fc44b587b61da"
+    },
+    {
+      "side": "A",
+      "locale": "ur",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/a96fdedd3a8f/scratchpad/pr4420-r2-A-ur-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-A-ur-original.json",
+      "sha256": "eb1808d9b1024406ca1b880c63654cd40cda8b33ed6e5b41baa044a4ac6204b1"
+    },
+    {
+      "side": "B",
+      "locale": "zh-CN",
+      "status": "failed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/4da41afcb2ca/scratchpad/pr4420-native-r2-B-zh-CN-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-B-zh-CN-original.json",
+      "sha256": "ae4c954a91ec3d2054d8486f60192da251687c99eea2b8c29f4fa1201e2fcd17"
+    },
+    {
+      "side": "B",
+      "locale": "fr",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/74b5dead1da3/scratchpad/pr4420-native-r2-B-fr-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-B-fr-original.json",
+      "sha256": "4a5ed6c06fc268f539c56cb77d917291a581e0ceef616bd4828ab9f1e3de7b7e"
+    },
+    {
+      "side": "B",
+      "locale": "es",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/f1e2ba1d3ae5/scratchpad/pr4420-native-r2-B-es-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-B-es-original.json",
+      "sha256": "82b4a4a5e9beefbb61028e140f79c4052b723e727a3a9d6a2bcce94f79fd6ab0"
+    },
+    {
+      "side": "B",
+      "locale": "ru",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/2cb1ce08cca6/scratchpad/pr4420-native-r2-B-ru-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-B-ru-original.json",
+      "sha256": "ff0504ebebbfa19a2dc82e1e9acf1409645d92132c8f716982ab010b23dc04cf"
+    },
+    {
+      "side": "B",
+      "locale": "vi",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/d1b11927b624/scratchpad/pr4420-native-r2-B-vi-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-B-vi-original.json",
+      "sha256": "ed1428b457d9f417790d9b694f347e3c0fe88bf752b5d5d23d57dde09192e737"
+    },
+    {
+      "side": "B",
+      "locale": "hi",
+      "status": "passed",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/3a194798c645/scratchpad/pr4420-native-r2-B-hi-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-B-hi-original.json",
+      "sha256": "22b5cbe8e39e79b5fc1df995e5721d32c10eedae275ee1075267e53e8a6f0d43"
+    },
+    {
+      "side": "B",
+      "locale": "ur",
+      "status": "blocked",
+      "auditor_model": "openai/gpt-6.1-sol",
+      "host_model": "openai/gpt-6.1-sol",
+      "source_path": "/Users/damian/.local-operator/sessions/cdc25865c2e9/scratchpad/pr4420-native-r2-B-ur-complete.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-B-ur-original.json",
+      "sha256": "05321728e1ff0882d790af8a73c2cc72f96033f61d3757d1f280e61554b861a9"
+    },
+    {
+      "side": "A",
+      "locale": "zh-CN",
+      "status": "failed",
+      "auditor_model": null,
+      "host_model": null,
+      "source_path": "/Users/damian/.local-operator/sessions/e7fd28e667dc/scratchpad/pr4420-native-r2-A-zh-CN-final.json",
+      "archive_path": "i18n/audits/evidence/pr4420-native-r2-A-zh-CN-original.json",
+      "sha256": "30918dc8de0ebf0be0f0108c82b0158b24a09d8dfc3fb74efc8db63fc0b4ec48"
+    }
+  ],
+  "counts": {
+    "passed": 11,
+    "failed": 2,
+    "blocked": 1
+  },
+  "policy": "Original verdict bytes preserved. Unknown-model failed A-zh stays unknown, never clearance. Two failed rows corroborate ONE Chinese held-label major; Urdu B blocked on two unreadable public label segments, not a semantic pass."
+}

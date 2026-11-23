@@ -1,0 +1,131 @@
+{
+  "locale": "ur",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "d0be03c65a2d0ec5075ab14550a0d16ef1f78aee8c156a3a172f1b07b2f42da7",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor (status-audit-ur)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "keys_read": 18,
+  "unresolved_blocker_major": 0,
+  "findings": [],
+  "desktop_comparison": [
+    {
+      "key": "ui.chat.trace.send.delivery.failed.word",
+      "tui_key": "tui.tool_card.status.send.not_delivered",
+      "text": "نہیں پہنچا",
+      "match": true
+    },
+    {
+      "key": "ui.chat.trace.send.delivery.mailbox.word",
+      "tui_key": "tui.tool_card.status.send.wake_unconfirmed",
+      "text": "بیداری غیر مصدقہ",
+      "match": true
+    },
+    {
+      "key": "ui.chat.trace.send.delivery.unconfirmed.word",
+      "tui_key": "tui.tool_card.status.send.delivery_unconfirmed",
+      "text": "ترسیل کی تصدیق نہیں",
+      "match": true
+    },
+    {
+      "key": "ui.chat.canonical.tool_row.outcome.interrupted",
+      "tui_key": "tui.tool_card.status.interrupted",
+      "text": "روکی گئی",
+      "match": true
+    },
+    {
+      "key": "ui.chat.canonical.tool_row.outcome.never_ran",
+      "tui_key": "tui.tool_card.status.not_run",
+      "text": "کبھی نہیں چلی",
+      "match": true
+    }
+  ],
+  "cell_widths": {
+    "tui.tool_card.status.cut_off": {
+      "actual": 6,
+      "maxCells": 14
+    },
+    "tui.tool_card.status.error": {
+      "actual": 5,
+      "maxCells": null
+    },
+    "tui.tool_card.status.interrupted": {
+      "actual": 8,
+      "maxCells": 14
+    },
+    "tui.tool_card.status.not_run": {
+      "actual": 13,
+      "maxCells": null
+    },
+    "tui.tool_card.status.partial": {
+      "actual": 4,
+      "maxCells": 12
+    },
+    "tui.tool_card.status.queued": {
+      "actual": 4,
+      "maxCells": 7
+    },
+    "tui.tool_card.status.running": {
+      "actual": 4,
+      "maxCells": 7
+    },
+    "tui.tool_card.status.send.delivery_unconfirmed": {
+      "actual": 19,
+      "maxCells": 22
+    },
+    "tui.tool_card.status.send.no_new_wake": {
+      "actual": 14,
+      "maxCells": 14
+    },
+    "tui.tool_card.status.send.not_delivered": {
+      "actual": 10,
+      "maxCells": 16
+    },
+    "tui.tool_card.status.send.receipt_reused": {
+      "actual": 10,
+      "maxCells": 16
+    },
+    "tui.tool_card.status.send.wake_unconfirmed": {
+      "actual": 16,
+      "maxCells": 22
+    },
+    "tui.tool_card.status.session_reset": {
+      "actual": 11,
+      "maxCells": 16
+    },
+    "tui.tool_card.status.switch.partial": {
+      "actual": 17,
+      "maxCells": 20
+    },
+    "tui.tool_card.status.switch.pending": {
+      "actual": 9,
+      "maxCells": 16
+    },
+    "tui.tool_card.status.switch.switched": {
+      "actual": 12,
+      "maxCells": 16
+    },
+    "tui.tool_card.status.switch.unchanged": {
+      "actual": 16,
+      "maxCells": 16
+    },
+    "tui.tool_card.status.waiting": {
+      "actual": 5,
+      "maxCells": 7
+    }
+  },
+  "note": "Independent read-only audit against worktree HEAD 66c87c0755e264db07ea375c67242cffbe302bc0. All 18 source/target/context keys read. Translator identity supplied by delegator, not independently attested. Actual auditor model openai/gpt-6.1-sol; no fallback. message_arguments equality and render_message roundtrip passed for every key; no placeholders/plurals/markup exist. All declared maxCells pass rich.cells.cell_len. No Latin or manual bidi controls. Five shipped desktop labels byte-match exact cited keys. ur/tui.tool_card.json is absent both on disk and in tracked files, so neighboring-catalogue comparison is unavailable (not a defect introduced here). جاري/جاری running means ongoing, not launched; منتظر means awaiting at approval-gated state; سیشن ری سیٹ retains reset, not new-session meaning. پچھلی رسید · پھر نہیں جگایا is idiomatic terse prior-receipt/no-repeat-wake rendering of suppressed duplicate. Urdu has no capitalization distinction. All longer labels fit caps, including no_new_wake 14/14 and unchanged 16/16. Consumers read: tool_card.py _partial_label, _reset_label, running_label, queued_label, _interrupt_word, model/delivery outcome helpers, _delivery_outcome_summary, _status_runs (whole-label shedding for column words, reason truncation for reason slots). Parenthesized error qualifier is logical-order balanced; terminal shaping/isolation remains renderer responsibility. No actual rendered terminal frame was captured; this receipt certifies catalogue semantic/mechanical audit, not visual RTL completion."
+}

@@ -1026,7 +1026,9 @@ class MeshCredentialClient:
 
         A source deadline is transient, unlike an answered deny. During the
         proactive re-ask margin a CURRENT lease may still serve; after its actual
-        expiry it may not. A second miss returns truthfully, with no retry loop.
+        expiry this rescue never serves it as a plain lease (inside its hold
+        ``_held_or`` may already have served it, marked held). A second miss returns
+        truthfully, with no retry loop.
         """
         from local_operator.network.credentials.github import is_github_key
 
@@ -3945,6 +3947,17 @@ class MeshCredentialClient:
             dropped.append(key)
         return dropped
 
+    def invalidate_membership(self) -> None:
+        """Run the membership-loss drop NOW, for a caller that has just learned of it.
+
+        The relay calls this when a current member proved on a live handshake that
+        this device was removed while offline (G9-B): the same persistent deny,
+        borrowed-cache drop, GitHub revoke and held-row retirement every serve path
+        runs lazily once ``_self_membership_active`` reads False, so the offline hold
+        ends at once instead of at its expiry. Only reduces authority.
+        """
+        self._invalidate_membership_scope("")
+
     def self_membership_active(self) -> bool:
         """Public read of :meth:`_self_membership_active`, for the owner-wait hint."""
         return self._self_membership_active()
@@ -4271,8 +4284,10 @@ def _audit_cause(code: str) -> str:
     """The closed ``audit.CAUSES`` word for a refusal that reached the borrower.
 
     A busy owner is ``busy`` (its remedy is time), an absent one ``owner_offline``;
-    any other code is spelled out in the row's ``code`` detail, so the cause is
-    left empty rather than guessed.
+    any other code returns ``""`` rather than a guess. ``""`` is itself a member of
+    ``audit.CAUSES``, so ``AuditLog.record`` writes it unchanged (only a word
+    outside ``CAUSES`` becomes ``"internal"``): those rows READ ``cause: ""``, and
+    the row's ``code`` detail, not the cause, is the authoritative reason for them.
     """
     if code in _BUSY_REFUSALS:
         return "busy"

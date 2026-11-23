@@ -1575,9 +1575,9 @@ def _cwd_entries(*, fresh: bool = False) -> tuple[CwdEntry, ...] | None:
     named. A success is cached for :data:`_CWD_INVENTORY_TTL_S` unless
     ``fresh``.
 
-    ``hidepid``: ``/proc`` mounted ``hidepid=1|2|invisible`` hides OTHER uids'
-    processes only, and this inventory reads this uid's alone, so it is
-    unaffected.
+    The inventory only sees processes exposed by the current procfs view.
+    The liveness re-check for an observed holder (:func:`_still_exists`) does
+    not treat a missing procfs entry as proof of exit.
 
     A per-pid ``EACCES`` on this uid's ``cwd`` link does NOT fail the scan
     (operator directive 2026-11-14, node-2 field cases 1c and 2): see
@@ -2044,13 +2044,14 @@ def _still_exists(pid: int) -> bool:
     between the scan and this check reads as existing and keeps the tree
     busy: the safe direction, so no start-time comparison is needed.
 
-    Read from the SAME source as :func:`_cwd_entries`: ``<_PROC_ROOT>/<pid>``
-    where that process table exists (Linux; tests point it at a fake tree),
-    ``kill(pid, 0)`` elsewhere. The inventory lists this uid's pids only, so
-    ``hidepid`` (which hides other uids) cannot make a holder look gone.
+    A visible procfs entry is positive evidence. A missing entry can reflect
+    restricted visibility rather than exit, so confirm it with ``kill(pid, 0)``
+    just as on systems without procfs.
     """
-    if os.path.isdir(os.path.join(_PROC_ROOT, "self")):
-        return os.path.lexists(os.path.join(_PROC_ROOT, str(pid)))
+    if os.path.isdir(os.path.join(_PROC_ROOT, "self")) and os.path.lexists(
+        os.path.join(_PROC_ROOT, str(pid))
+    ):
+        return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -2469,20 +2470,52 @@ def _cleanup_status_path(row: str) -> str | None:
     return entry if entry and not os.path.isabs(entry) and ".." not in entry.split("/") else None
 
 
-def plain_cleanup_ignored_preserved(real: str) -> bool | None:
-    """Plain Git refuses ordinary changes but deletes ignored payload too."""
+@dataclass(frozen=True)
+class IgnoredInventory:
+    """What one strict status read says about a plain cleanup's ignored payload.
+
+    Why counts and not just a verdict (operator follow-up 2026-11-21, PR #4359
+    field case): the hold refusal used to give commit/stash/push guidance even
+    for a clean tree whose only blocker was 66 ignored entries, which read like
+    the earlier open-PR/unpushed-work refusal. The counts let the refusal name
+    the condition that actually failed. Both come from the SAME status read
+    the verdict already needed — no extra filesystem walk, no file names.
+    """
+
+    #: Ignored entries Git would delete that are not the one supported
+    #: regenerable witness (the shared ``node_modules`` link).
+    unverified_ignored: int
+    #: Tracked or untracked status rows (the work plain Git itself refuses).
+    changes: int
+
+
+def plain_cleanup_ignored_inventory(real: str) -> IgnoredInventory | None:
+    """Count unverified ignored entries and other changes; ``None`` = unreadable."""
     status = _strict_cleanup_status(real)
     if status is None:
         return None
+    unverified = changes = 0
     # A tracked edit cannot mask an independent ignored-data hold.
     for row in status.split("\0"):
-        if row.startswith("!! "):
-            entry = _cleanup_status_path(row)
-            if entry is None:
-                return None
-            if not _shared_dependencies_link(real, entry):
-                return False
-    return True
+        if not row:
+            continue
+        if not row.startswith("!! "):
+            changes += 1
+            continue
+        entry = _cleanup_status_path(row)
+        if entry is None:
+            return None
+        if not _shared_dependencies_link(real, entry):
+            unverified += 1
+    return IgnoredInventory(unverified, changes)
+
+
+def plain_cleanup_ignored_preserved(real: str) -> bool | None:
+    """Plain Git refuses ordinary changes but deletes ignored payload too."""
+    inventory = plain_cleanup_ignored_inventory(real)
+    if inventory is None:
+        return None
+    return inventory.unverified_ignored == 0
 
 
 def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:

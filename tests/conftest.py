@@ -388,6 +388,7 @@ _AMBIENT_VARS = (
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    "LOP_RUNTIME_GOAL_WAKE_DUE",
     # The wake supervisor's per-invocation ownership stamp (#3028,
     # ``wakes/owned_runtimes.OWNER_ENV``) and the flag that lets ``launch``
     # propagate it. serve() sets both in its own environment, so a suite run
@@ -549,6 +550,7 @@ _AMBIENT_VARS = (
     "GOOGLE_VERTEX_OAUTH_CLIENT_ID",
     "GOOGLE_VERTEX_OAUTH_CLIENT_SECRET",
     "GOOGLE_VERTEX_TOKEN_URI",
+    "GOOGLE_VERTEX_OAUTH_TOKEN_URI",
     "GOOGLE_VERTEX_ALLOW_CUSTOM_TOKEN_URI",
     "XAI_API_KEY",
     # Amazon Bedrock (``providers/bedrock``). The bearer token is a live
@@ -1676,10 +1678,14 @@ def refuse_real_secret_broker_spawn(request, monkeypatch):
         return
     from local_operator.secrets import client as secrets_client
 
+    # Match the explicit broker budget keywords: secret access forwards its
+    # shared deadline even when this guard selects the keyfile fallback. Accepting
+    # that budget must never start a daemon or change the fallback result; avoid
+    # **kwargs so future API drift still fails rather than silently going untested.
     monkeypatch.setattr(
         secrets_client,
         "ensure_broker",
-        lambda base=None, *, timeout=None: False,
+        lambda base=None, *, timeout=None, deadline=None: False,
     )
 
 

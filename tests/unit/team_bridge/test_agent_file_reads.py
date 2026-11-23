@@ -317,6 +317,9 @@ def _status_payload(**block: Any) -> dict[str, Any]:
 
 def test_agent_read_is_its_own_strict_grant() -> None:
     assert agent_file_reads_capability(_status_payload(agent_read=True)) is not None
+    assert agent_file_reads_capability(_status_payload(agent_read=True, enabled=False)) is None
+    assert agent_file_reads_capability(_status_payload(agent_read=True, version=2)) is None
+    assert agent_file_reads_capability(_status_payload(agent_read=True, version=True)) is None
     assert agent_file_reads_capability(_status_payload(agent_upload=True)) is None
     assert agent_file_reads_capability(_status_payload(agent_read=False)) is None
     assert agent_file_reads_capability(_status_payload(agent_read="true")) is None
@@ -817,6 +820,9 @@ async def test_the_context_caption_reports_a_refusal_and_a_mismatch_as_themselve
     block = (await _history_files(_runtime(client), CID, _page((refused, tampered)), "bep_1"))[0]
     assert "the hub did not serve them (revoked, expired or not admitted)" in block
     assert "they did not match the descriptor's size and sha256" in block
+    assert [call["id"] for call in client.calls] == [refused.id, tampered.id]
+    assert all(call["purpose"] == "context" for call in client.calls)
+    assert "unavailable for agent context" not in block, "this path attempted a fetch"
     assert "budget" not in block
 
 
@@ -852,10 +858,32 @@ async def test_an_unverified_set_is_listed_and_never_fetched() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_withheld_message_states_a_count_and_no_descriptor() -> None:
-    page = {"messages": [{"id": MID, "seq": 1, "file_count": 2}]}
-    block = (await _history_files(_runtime(_HistoryClient({})), CID, page, "bep_1"))[0]
-    assert "[2 file(s) withheld: not admitted by screening]" in block
+@pytest.mark.parametrize("file_projection", [{}, {"files": []}, {"files": None}])
+@pytest.mark.parametrize(
+    "body_projection",
+    [
+        {"body": "admitted plaintext"},
+        {"body": None, "body_state": "held"},
+        {"body": None, "body_state": "not_admitted"},
+        {"body": None, "body_state": "rejected"},
+        {"body": None, "body_state": "unavailable"},
+    ],
+)
+async def test_a_withheld_message_states_a_count_and_no_descriptor(
+    file_projection: dict[str, Any], body_projection: dict[str, Any]
+) -> None:
+    # These are projection shapes, NOT diagnoses of why the hub withheld files.
+    # A readable body and an unreadable file set may coexist; body_state remains
+    # the hub's independent fact and must not be overwritten by this formatter.
+    message = {"id": MID, "seq": 1, "file_count": 2, **file_projection, **body_projection}
+    page = {"messages": [message]}
+    client = _HistoryClient({})
+    block = (await _history_files(_runtime(client), CID, page, "bep_1"))[0]
+    assert "[2 file(s) withheld: unavailable for agent context]" in block
+    assert "not admitted by screening" not in block
+    assert client.calls == [], "a count is not a descriptor or a file-read grant"
+    assert {key: message[key] for key in body_projection} == body_projection
+    assert "file batt_" not in block
     assert block.startswith(BRIDGE_UNTRUSTED_CLAUSE)
 
 

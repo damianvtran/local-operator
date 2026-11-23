@@ -96,7 +96,11 @@ from local_operator.session.attached import (
     AttachedSession,
 )
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
-from local_operator.session.attention import AttentionStore, acknowledge_session_receipt
+from local_operator.session.attention import (
+    BULK_RECEIPT_SESSION_ID_RE,
+    AttentionStore,
+    acknowledge_session_receipt,
+)
 from local_operator.session.catalog import (
     DECORATION_ATTENTION,
     CatalogueScope,
@@ -2189,8 +2193,18 @@ class DesktopSessionBridge:
             "verified_at": verified_at,
         }
 
-    async def acquire(self, *, read: bool = False) -> AttachedSession:
+    async def acquire(
+        self,
+        *,
+        read: bool = False,
+        control_only: bool = False,
+        ingress_trace: open_trace.DesktopEventsIngressTrace | None = None,
+    ) -> AttachedSession:
         """Take one reference on this bridge, binding the owner if it is cold.
+
+        ``control_only`` reserves the same reference without binding display
+        state. Durable ask controls own their authenticated one-shot connection;
+        transient epoch-bound gates must keep the normal acquisition path.
 
         ``read`` is the READ envelope, and it is a property of the ROUTE rather
         than of the facade: reading state must never be able to fail because an
@@ -2223,12 +2237,17 @@ class DesktopSessionBridge:
         (see :meth:`_read_attach_settled`).
         """
         tracing = open_trace.enabled()
+        trace_id = uuid.uuid4().hex if tracing else None
+        if ingress_trace is not None:
+            # Join the existing acquisition diagnostics without copying their
+            # session field into the new, payload-free request trace. Keep this
+            # extra write outside the existing acquire/witness duration.
+            ingress_trace.mark("desktop.events.acquire", acquire_id=trace_id)
         trace_at = time.monotonic() if tracing else 0.0
         # Nested spans, not additive: birth/cold belong to facade, facade to
         # held. Missing fields mean the phase was skipped or did not finish.
         # Pass this call's metadata explicitly; readers share the bridge/task.
         phases: dict[str, float] | None = {} if tracing else None
-        trace_id = uuid.uuid4().hex if tracing else None
         loop_handle: asyncio.Handle | None = None
         loop_delay_ms: float | None = None
         if tracing:
@@ -2306,7 +2325,11 @@ class DesktopSessionBridge:
                         attach_landed = bool(done)
                         if not done:
                             self.read_attach_outran.add(task)
-                else:
+                elif not control_only:
+                    # A durable ask is validated by ID at its owner, independently
+                    # of display epochs. Do not require a canonical snapshot before
+                    # delivering it: older owners can exceed the snapshot line cap
+                    # while their control socket remains fully operational.
                     await remote.attach_existing(control_budget=DESKTOP_CONTROL_ATTACH_S)
             except BaseException:
                 # SHIELDED, the shape the routes' ``_give_the_bridge_back`` settled in
@@ -9411,12 +9434,10 @@ class DesktopSessions:
             outcomes: list[tuple[str, dict[str, Any] | None]] = [("unknown", None) for _ in items]
             batched: list[int] = []
             for index, (session_id, token) in enumerate(items):
+                if not BULK_RECEIPT_SESSION_ID_RE.fullmatch(session_id):
+                    continue
                 path = self.root / "sessions" / session_id
-                if (
-                    not SESSION_ID.fullmatch(session_id)
-                    or not path.is_dir()
-                    or not is_user_session(path)
-                ):
+                if not path.is_dir() or not is_user_session(path):
                     continue
                 batched.append(index)
             verdicts = store.acknowledge_many(
@@ -11335,9 +11356,19 @@ class DesktopSessions:
 
     @contextlib.asynccontextmanager
     async def session(
-        self, session_id: str, *, read: bool = False, allow_draft: bool = False
+        self,
+        session_id: str,
+        *,
+        read: bool = False,
+        allow_draft: bool = False,
+        control_only: bool = False,
+        ingress_trace: open_trace.DesktopEventsIngressTrace | None = None,
     ) -> AsyncIterator[DesktopSessionBridge]:
         """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
+
+        ``control_only`` skips only display attachment at acquisition, not
+        lookup, draft exclusion, retirement, or the bridge reference lifetime.
+        The durable ask transport authenticates separately against its owner.
 
         ``read`` says the caller is READING state (``snapshot``, ``history``,
         ``events``, the ``/watch`` presence beat), and it is threaded down to
@@ -11424,6 +11455,8 @@ class DesktopSessions:
         takes 2453 ms and **24** requests complete inside it (median 70 ms, worst
         308 ms). See ``docs/evidence/session-load-central-cache``.
         """
+        if ingress_trace is not None:
+            ingress_trace.mark("desktop.events.pool")
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
         await self._refuse_deleted_temporary(session_id)
@@ -11635,7 +11668,14 @@ class DesktopSessions:
                             )
                             self.bridges[session_id] = bridge
             assert bridge is not None  # resolved above: either found or built
-            await bridge.acquire(read=read)
+            if ingress_trace is not None:
+                await bridge.acquire(
+                    read=read, control_only=control_only, ingress_trace=ingress_trace
+                )
+            elif control_only:
+                await bridge.acquire(read=read, control_only=True)
+            else:
+                await bridge.acquire(read=read)
         finally:
             # The window closes when acquire() returns, success or failure: from
             # here on the bridge is an ordinary resident one, and ``users`` (which

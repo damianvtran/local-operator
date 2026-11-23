@@ -1,0 +1,8 @@
+ISOLATION PASS: scratch HOME/config; CMUX absent
+MODULE local_operator.i18n.catalogues /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/catalogues.py
+MODULE local_operator.i18n.runtime /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+Traceback (most recent call last):
+  File "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/validator.py.txt", line 49, in <module>
+    assert check.arguments_match(source_args, target_args, source=source, translated=target)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: arguments_match() got multiple values for argument 'source'

@@ -278,6 +278,27 @@ AUDIT_WORKSET_PREFLIGHT = "session.workset.preflight"
 #: One destination-side probe served for a peer (security S1/S9, round 1): the
 #: destination acted on the network at a peer's request, so it keeps a row.
 AUDIT_WORKSET_PROBE = "session.workset.probe"
+#: The owner accepted a working-set consent (security ruling for the v0.111.0
+#: non-interactive offload fix): WHICH surface consented, to WHICH scope digest, and
+#: whether the files will travel — written after the P3 gate, before the journal and
+#: before any byte is staged, so the record exists even for a move that later fails.
+AUDIT_WORKSET_CONSENT = "session.workset.consent"
+
+#: The surfaces a working-set consent may name (``_consent_frame``'s ``surface``).
+#: A CLOSED SET because the value crosses the wire and lands in the audit log: a
+#: peer can only ever put one of these tokens there, never free text. It is
+#: ATTRIBUTION, not authority: CLAIMED by the requesting surface and not verified
+#: (any same-uid process, or a relayed hop, can claim any of them), so nothing
+#: branches on it except the audit row, and the row is never proof of who consented.
+CONSENT_SURFACES: frozenset[str] = frozenset(
+    {
+        "cli-prompt",  # the y/N prompt after the carrying preflight was shown
+        "cli-yes",  # `--yes`: the carrying preflight this same invocation computed
+        "cli-digest",  # `--confirm-working-set <digest>` (also the TUI's card)
+        "cli-without",  # `--without-working-set`
+        "desktop",  # the desktop app's move card (``confirmedDigest`` / its "leave")
+    }
+)
 
 # ---------------------------------------------------------------------------
 # The ``session_move`` contract (frozen at P0; slices V and DB build against it)
@@ -2743,6 +2764,32 @@ def _arrival_engagement(server: "RelayServer", session_id: str) -> MoveEngagemen
 ARRIVAL_NOTE_MARKER = "move-arrival-note.json"
 
 
+def _dependency_status(
+    server: "RelayServer", session_id: str, lease_epoch: str
+) -> dict[str, Any] | None:
+    """THIS device's read-only dependency status for the arrival note, or ``None``.
+
+    Read from THIS device's restore record and tree (``workset_setup``), never the
+    peer's block, and computed only: nothing runs, links or installs here. ``None``
+    means no working set arrived on this device WITH THIS MOVE: the record is bound
+    to ``lease_epoch``, because an earlier move's record outlives a return that
+    carried no files and must not be presented as this arrival's (S2-R2 on #4378).
+    A failure is NOT "nothing pending" (review R3 on #4378): it becomes
+    ``{"state": "unknown"}`` so the note keeps its do-not-set-up guard and points at
+    ``--status`` instead of omitting the paragraph.
+    """
+    try:
+        from local_operator.network import workset_move, workset_setup
+
+        status = workset_setup.dependency_status(
+            Path(server.root), workset_move.home_of(server), session_id, lease_epoch=lease_epoch
+        )
+    except Exception:  # noqa: BLE001 — advice only; the move has already committed
+        logger.debug("mobility: no dependency status for %s", session_id, exc_info=True)
+        return {"state": "unknown", "rows": [], "not_restored": []}
+    return None if status is None else status.to_json()
+
+
 def _arrival_resume_note(
     server: "RelayServer",
     session_id: str,
@@ -2791,6 +2838,7 @@ def _arrival_resume_note(
             session_id=session_id,
             source=source,
             destination=str(server._own_label()),  # noqa: SLF001
+            dependencies=_dependency_status(server, session_id, lease_epoch),
         )
         written = append_inbox(
             directory,
@@ -4349,18 +4397,26 @@ def _session_roles_refusal(
 
 
 def _consent_frame(working_set: Mapping[str, Any] | None) -> dict[str, Any]:
-    """The wire form of the user's consent: ``{version, confirm, without}``.
+    """The wire form of the user's consent: ``{surface, version, confirm, without}``.
 
     ONE SPELLING for every hop (request → relay → invite → prepare → queue record →
     resume invite), so a hop that forwards it cannot drop a field the gate reads.
     ``confirm`` is a scope digest or ``None``; ``without`` is the explicit "leave the
-    working set behind" consent (``--without-working-set``).
+    working set behind" consent (``--without-working-set``). ``surface`` is the
+    consenting surface's token from :data:`CONSENT_SURFACES` (anything else becomes
+    ``""``): CLAIMED by the requester and forwarded as given, never verified, so it
+    attributes the audit row and proves nothing about who consented.
     """
     from local_operator.network.workset import WORKSET_TRANSFER_VERSION
 
     raw = working_set if isinstance(working_set, Mapping) else {}
     confirm = str(raw.get("confirm") or "").strip()
+    surface = str(raw.get("surface") or "")
     return {
+        # WHO CONSENTED, for the owner's audit row only (``AUDIT_WORKSET_CONSENT``).
+        # Additive: an older hop drops it and the audit row says "unattributed"; the
+        # gate never reads it.
+        "surface": surface if surface in CONSENT_SURFACES else "",
         # THIS BUILD'S working-set protocol, re-stamped at every hop on purpose: the
         # prepare frame a DESTINATION sends therefore says what the destination
         # speaks, which is the one fact the owner's carry decision needs
@@ -5874,6 +5930,23 @@ def _source_prepare(
     if refused_ws is not None:
         return refused_ws
     lease_epoch = new_lease_epoch()
+    if workset_arrival is not None:
+        # THE CONSENT ROW, BEFORE THE TRANSFER STARTS (security ruling, offload
+        # --yes fix): the surface that consented, the digest the gate just matched
+        # and the carry decision it took, bound to this lease epoch. Never raises.
+        _audit(
+            server,
+            AUDIT_WORKSET_CONSENT,
+            session_id,
+            link.device_id,
+            # "unattributed", never "operator": a missing surface (an older hop, a
+            # caller that did not say) proves nothing about who consented.
+            surface=str(workset_consent.get("surface") or "") or "unattributed",
+            consent=str(workset_arrival.get("consent") or ""),
+            digest=str(workset_consent.get("confirm") or ""),
+            carry_decision="carry" if workset_manifest is not None else "stay",
+            lease_epoch=lease_epoch,
+        )
     # P4 — SNAPSHOT THE CONFIRMED WORKTREES (design §4, PR B). After the retire and the
     # P3 re-check, before the journal: private refs + new objects only, never HEAD, the
     # index or a working file. The handoff entry binds the confirmed scope, this epoch,
@@ -8182,7 +8255,11 @@ def _offload(
                 # decided at the prepare, after this block was computed.
                 from local_operator.network import workset_move
 
-                offload_workset = workset_move.source_receipt(offload_workset, ws_answer)
+                offload_workset = workset_move.source_receipt(
+                    offload_workset,
+                    ws_answer,
+                    sent_digest=str(offload_consent.get("confirm") or ""),
+                )
             result_doc["working_set"] = offload_workset
         # WHAT THIS DEVICE ASKED THE DESTINATION TO DO ON ARRIVAL (UI #1978 QA Q-1).
         # The engage is the destination's post-``done`` work and its outcome is never
@@ -8647,6 +8724,7 @@ def request_move(
     confirm_working_set: str = "",
     without_working_set: bool = False,
     dry_run: bool = False,
+    consent_surface: str = "",
 ) -> SessionMoveResult | SessionMoveRefusal | MoveDryRun:
     """Move (or with ``keep``, copy) ``session_id`` to the device named by ``to``.
 
@@ -8798,7 +8876,12 @@ def request_move(
         drop_session_roles=bool(drop_session_roles),
         # THE USER'S CONSENT, in the one wire spelling every hop forwards.
         working_set=_consent_frame(
-            {"confirm": confirm_working_set, "without": bool(without_working_set)}
+            {
+                "confirm": confirm_working_set,
+                "without": bool(without_working_set),
+                # Attribution for the owner's consent audit row (CONSENT_SURFACES).
+                "surface": consent_surface,
+            }
         ),
         dry_run=bool(dry_run),
     )

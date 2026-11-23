@@ -7572,3 +7572,22 @@ async def test_compaction_summary_never_receives_the_garbled_tool_name(tmp_path)
         assert span[2].text == "Tool not found: bashLecture"
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bridge_dispatch_context_freezes_resolved_profile_switch(tmp_path):
+    from types import SimpleNamespace
+
+    runtime = SimpleNamespace(session_agent_display="Birth agent")
+    session = make_session(tmp_path, ScriptedStream([[]]), bridge_runtime=runtime)
+    before = session._build_tool_context()
+    assert before.bridge_session_agent_display == "Birth agent"
+    session._stamp_agent_brief("resolved instructions", "Switched agent")
+    after = session._build_tool_context()
+    assert after.bridge_runtime is before.bridge_runtime is runtime
+    assert before.bridge_session_agent_display == "Birth agent"
+    assert after.bridge_session_agent_display == "Switched agent"
+    # A later detach must not resurrect the birth or endpoint name.
+    session.clear_agent_profile()
+    assert session._build_tool_context().bridge_session_agent_display is None
+    await session.dispose()

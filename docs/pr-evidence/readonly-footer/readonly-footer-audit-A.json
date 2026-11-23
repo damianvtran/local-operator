@@ -1,0 +1,1341 @@
+{
+  "schema": 1,
+  "kind": "independent-native-copy-audit-receipt-not-ledger-not-release",
+  "side": "A",
+  "round": 1,
+  "allocation": "hotfix <=15 minutes; seven keys only",
+  "time_utc": "2026-11-22T05:58:54.986853+00:00",
+  "scope": "tui.editor_readonly.hint ONLY; fr, zh-CN, es, ru, vi, hi, ur",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer",
+  "head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+  "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+  "auditor": {
+    "agent": "translation-auditor / readonly-footer-seven-locale-audit-A",
+    "session": "1282ebc28f39",
+    "model": "openai/gpt-6.1-sol",
+    "model_source": "Explicit host model-switch notice during this turn: temporary fallback from anthropic/claude-opus-5-5 due quota. Language judgments and probes occurred after switch; no independent provider telemetry. Initial i18n guide read preceded switch.",
+    "independence": "Distinct session from translator 9309411c87eb and integrator 61203766acfe; not English/code source author or manager. No current partner-B judgment read. Same actual model as the translator is disclosed; this is a different independent agent/session, not a second model family.",
+    "audit_kind": "Independent LLM native-copy linguistic assessment, not a human native-speaker certification"
+  },
+  "summary": {
+    "verdict": "PASS — terminal linguistic audit; rendered fit/native glyphs unverified",
+    "locales_assessed": 7,
+    "target_keys_read": 7,
+    "distinct_english_keys_read": 1,
+    "english_target_context_pairs": 7,
+    "fresh": 7,
+    "retained": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "verdict": "PASS",
+      "issues": [],
+      "blocker_major_count": 0,
+      "english": "Read-only · {key} back",
+      "target": "Lecture seule · {key} retour",
+      "backtranslation": "Read-only · {key} back/return",
+      "accuracy": "Lecture seule is the conventional read-only state, not a file-permission request. retour labels navigation back to chat rather than enabling editing.",
+      "idiom": "Both lecture seule and retour are settled terse French UI fragments; the key-before-action hint is natural in a terminal footer.",
+      "register": "Impersonal state plus noun navigation label; no tu/vous conflict and no unnecessary please. Sentence case is appropriate.",
+      "glossary": "No glossary entry binds read-only/back to a different rendering; lecture seule and retour are used consistently in this single-key namespace.",
+      "technical_exceptions": [
+        "Literal placeholder {key}, exactly once, mapped to typed string argument key=\"esc\"; esc remains byte-exact. No ordinary English-prose exemption."
+      ],
+      "placeholder": {
+        "exact_once": true,
+        "argument_name": "key",
+        "icu_kind": "simple",
+        "typed_kind": "string",
+        "value": "esc"
+      },
+      "width": {
+        "rich_cells": 26,
+        "english_cells": 20,
+        "delta_cells": 6,
+        "context_max_cells": 40,
+        "rendered_fit": "UNVERIFIED: Rich scalar estimate only; real app content box, padding, glyph shaping and truncation deferred to QA. Longer fr/es/ru/ur labels need the planned rendered check, not a speculative clipping finding."
+      },
+      "controls": {
+        "NFC": true,
+        "authored_controls": []
+      },
+      "CLDR": "N/A for this actual key: no number/count/plural/select. Separate synthetic per-locale controls are in mechanical evidence; not actual plural-translation coverage.",
+      "RTL": "N/A: LTR locale; technical token remains exact.",
+      "mechanical_evidence": {
+        "rendered": "Lecture seule · esc retour",
+        "cells": 26,
+        "budget": 40,
+        "delta_english": 6,
+        "nfc": true,
+        "authored_controls": [],
+        "placeholder_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "placeholder_count": 1,
+        "argument_kind": "string (typed API; ICU simple)",
+        "argument_value": "esc",
+        "negative_parity": {
+          "renamed": true,
+          "lost": true,
+          "wrong_kind": true
+        },
+        "missing_argument": "MessageError",
+        "wrong_runtime_type": {
+          "actual_render": "Lecture seule · 123 retour",
+          "runtime_rejected": false,
+          "explicit_string_contract_rejected": true
+        },
+        "pseudo": {
+          "fixture": "[LLeeccttuurree sseeuullee · {key} rreettoouurr]",
+          "rendered": "[LLeeccttuurree sseeuullee · esc rreettoouurr]",
+          "cells": 46,
+          "expands": true,
+          "placeholder_retained": true,
+          "budget_exceeded": true,
+          "not_native_evidence": true
+        },
+        "actual_plural_select": "N/A: no count, plural or select",
+        "synthetic_cldr": {
+          "categories": [
+            "many",
+            "one",
+            "other"
+          ],
+          "samples": {
+            "0": {
+              "category": "one",
+              "output": "0 one"
+            },
+            "1": {
+              "category": "one",
+              "output": "1 one"
+            },
+            "2": {
+              "category": "other",
+              "output": "2 other"
+            },
+            "3": {
+              "category": "other",
+              "output": "3 other"
+            },
+            "5": {
+              "category": "other",
+              "output": "5 other"
+            },
+            "11": {
+              "category": "other",
+              "output": "11 other"
+            },
+            "21": {
+              "category": "other",
+              "output": "21 other"
+            },
+            "101": {
+              "category": "other",
+              "output": "101 other"
+            },
+            "1.5": {
+              "category": "one",
+              "output": "1,5 one"
+            },
+            "1000000": {
+              "category": "many",
+              "output": "1 000 000 many"
+            }
+          },
+          "coverage": "sampled category routing; not actual-key plural coverage"
+        },
+        "selector_controls": {
+          "parser_accepts_missing_other": true,
+          "explicit_other_validation_rejects": true,
+          "unknown_category_parser_rejected": false,
+          "unknown_category_explicit_rejected": true,
+          "width_budget_positive_accepted": true,
+          "synthetic_41cell_prefix_overflow_detected": true,
+          "malformed_rejected": true,
+          "duplicate_selector_rejected": true
+        },
+        "rtl_projection": null
+      },
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "approved_input": {
+        "manifest_sha256": "8b77fa48911e788cba6dd8b271297f53e4484b442d4f677abc682bc2af768cb0",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/fr-approved.json",
+        "envelope_sha256": "72e168b6412717b5fa40a0d91f60a09c54e1eb2e459b6950c4cf8fa55a3182af",
+        "tool_sha256": "3b2875a26533320336019bac95a6f6f67b8677f1edf0b3f0f67a1a685552c5af",
+        "canonical_map_sha256": "26fb16974301080b3da6088beb7fac1b51fe7e9582e1009bb97d8e9e51ab908e",
+        "canonical_algorithm": "UTF-8 json.dumps(map, ensure_ascii=False, sort_keys=True, separators=(comma,colon))",
+        "key_count": 1,
+        "repository_verified": true,
+        "head_root_path_and_key_verified": true,
+        "opaque_raw_hash_matches_manifest": true
+      },
+      "auditor": {
+        "agent": "translation-auditor / readonly-footer-seven-locale-audit-A",
+        "session": "1282ebc28f39",
+        "model": "openai/gpt-6.1-sol",
+        "model_source": "Explicit host model-switch notice during this turn: temporary fallback from anthropic/claude-opus-5-5 due quota. Language judgments and probes occurred after switch; no independent provider telemetry. Initial i18n guide read preceded switch.",
+        "independence": "Distinct session from translator 9309411c87eb and integrator 61203766acfe; not English/code source author or manager. No current partner-B judgment read. Same actual model as the translator is disclosed; this is a different independent agent/session, not a second model family.",
+        "audit_kind": "Independent LLM native-copy linguistic assessment, not a human native-speaker certification"
+      }
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "verdict": "PASS",
+      "issues": [],
+      "blocker_major_count": 0,
+      "english": "Read-only · {key} back",
+      "target": "只读 · {key}返回",
+      "backtranslation": "Read-only · {key} return",
+      "accuracy": "只读 states that the composer cannot accept editing; 返回 names the return navigation. It neither promises a mode toggle nor refers to filesystem access.",
+      "idiom": "只读 and 返回 are native, concise software terms. Adjacent esc返回 is a readable key/action hint; no sentence-final punctuation is needed.",
+      "register": "Neutral short label, no pronoun. The style guide explicitly excludes input placeholders/filter hints from 请, so no politeness omission.",
+      "glossary": "只读/返回 are standard UI terms; no alternate spelling or English prose appears in this single-key namespace.",
+      "technical_exceptions": [
+        "Literal placeholder {key}, exactly once, mapped to typed string argument key=\"esc\"; esc remains byte-exact. No ordinary English-prose exemption."
+      ],
+      "placeholder": {
+        "exact_once": true,
+        "argument_name": "key",
+        "icu_kind": "simple",
+        "typed_kind": "string",
+        "value": "esc"
+      },
+      "width": {
+        "rich_cells": 14,
+        "english_cells": 20,
+        "delta_cells": -6,
+        "context_max_cells": 40,
+        "rendered_fit": "UNVERIFIED: Rich scalar estimate only; real app content box, padding, glyph shaping and truncation deferred to QA. Longer fr/es/ru/ur labels need the planned rendered check, not a speculative clipping finding."
+      },
+      "controls": {
+        "NFC": true,
+        "authored_controls": []
+      },
+      "CLDR": "N/A for this actual key: no number/count/plural/select. Separate synthetic per-locale controls are in mechanical evidence; not actual plural-translation coverage.",
+      "RTL": "N/A: LTR locale; technical token remains exact.",
+      "mechanical_evidence": {
+        "rendered": "只读 · esc返回",
+        "cells": 14,
+        "budget": 40,
+        "delta_english": -6,
+        "nfc": true,
+        "authored_controls": [],
+        "placeholder_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "placeholder_count": 1,
+        "argument_kind": "string (typed API; ICU simple)",
+        "argument_value": "esc",
+        "negative_parity": {
+          "renamed": true,
+          "lost": true,
+          "wrong_kind": true
+        },
+        "missing_argument": "MessageError",
+        "wrong_runtime_type": {
+          "actual_render": "只读 · 123返回",
+          "runtime_rejected": false,
+          "explicit_string_contract_rejected": true
+        },
+        "pseudo": {
+          "fixture": "[只只读读 · {key}返返回回]",
+          "rendered": "[只只读读 · esc返返回回]",
+          "cells": 24,
+          "expands": true,
+          "placeholder_retained": true,
+          "budget_exceeded": false,
+          "not_native_evidence": true
+        },
+        "actual_plural_select": "N/A: no count, plural or select",
+        "synthetic_cldr": {
+          "categories": [
+            "other"
+          ],
+          "samples": {
+            "0": {
+              "category": "other",
+              "output": "0 other"
+            },
+            "1": {
+              "category": "other",
+              "output": "1 other"
+            },
+            "2": {
+              "category": "other",
+              "output": "2 other"
+            },
+            "3": {
+              "category": "other",
+              "output": "3 other"
+            },
+            "5": {
+              "category": "other",
+              "output": "5 other"
+            },
+            "11": {
+              "category": "other",
+              "output": "11 other"
+            },
+            "21": {
+              "category": "other",
+              "output": "21 other"
+            },
+            "101": {
+              "category": "other",
+              "output": "101 other"
+            },
+            "1.5": {
+              "category": "other",
+              "output": "1.5 other"
+            },
+            "1000000": {
+              "category": "other",
+              "output": "1,000,000 other"
+            }
+          },
+          "coverage": "sampled category routing; not actual-key plural coverage"
+        },
+        "selector_controls": {
+          "parser_accepts_missing_other": true,
+          "explicit_other_validation_rejects": true,
+          "unknown_category_parser_rejected": false,
+          "unknown_category_explicit_rejected": true,
+          "width_budget_positive_accepted": true,
+          "synthetic_41cell_prefix_overflow_detected": true,
+          "malformed_rejected": true,
+          "duplicate_selector_rejected": true
+        },
+        "rtl_projection": null
+      },
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "approved_input": {
+        "manifest_sha256": "8b77fa48911e788cba6dd8b271297f53e4484b442d4f677abc682bc2af768cb0",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/zh-CN-approved.json",
+        "envelope_sha256": "cc7480401a450fc0199ed5d991589d0b758be1b1367ed880e50e45cad0497623",
+        "tool_sha256": "c897b4774e1f1af0553ff40e704151ee49304f667a29253d908957a706d726e6",
+        "canonical_map_sha256": "48f44363629d04eb0577268730ae02937ae6f93a9a42b939e7832a5136542d56",
+        "canonical_algorithm": "UTF-8 json.dumps(map, ensure_ascii=False, sort_keys=True, separators=(comma,colon))",
+        "key_count": 1,
+        "repository_verified": true,
+        "head_root_path_and_key_verified": true,
+        "opaque_raw_hash_matches_manifest": true
+      },
+      "auditor": {
+        "agent": "translation-auditor / readonly-footer-seven-locale-audit-A",
+        "session": "1282ebc28f39",
+        "model": "openai/gpt-6.1-sol",
+        "model_source": "Explicit host model-switch notice during this turn: temporary fallback from anthropic/claude-opus-5-5 due quota. Language judgments and probes occurred after switch; no independent provider telemetry. Initial i18n guide read preceded switch.",
+        "independence": "Distinct session from translator 9309411c87eb and integrator 61203766acfe; not English/code source author or manager. No current partner-B judgment read. Same actual model as the translator is disclosed; this is a different independent agent/session, not a second model family.",
+        "audit_kind": "Independent LLM native-copy linguistic assessment, not a human native-speaker certification"
+      }
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "verdict": "PASS",
+      "issues": [],
+      "blocker_major_count": 0,
+      "english": "Read-only · {key} back",
+      "target": "Solo lectura · {key} volver",
+      "backtranslation": "Read-only · {key} go back",
+      "accuracy": "Solo lectura names the non-editable state; volver is navigation back to chat, not a permission grant or editor enable action.",
+      "idiom": "Solo lectura is standard Spanish UI copy; volver is the natural infinitive label for going back.",
+      "register": "Neutral Spanish infinitive matches the locale action-label convention without introducing tú/usted variation.",
+      "glossary": "No read-only/back glossary conflict; solo lectura and volver are internally consistent within the only key reviewed.",
+      "technical_exceptions": [
+        "Literal placeholder {key}, exactly once, mapped to typed string argument key=\"esc\"; esc remains byte-exact. No ordinary English-prose exemption."
+      ],
+      "placeholder": {
+        "exact_once": true,
+        "argument_name": "key",
+        "icu_kind": "simple",
+        "typed_kind": "string",
+        "value": "esc"
+      },
+      "width": {
+        "rich_cells": 25,
+        "english_cells": 20,
+        "delta_cells": 5,
+        "context_max_cells": 40,
+        "rendered_fit": "UNVERIFIED: Rich scalar estimate only; real app content box, padding, glyph shaping and truncation deferred to QA. Longer fr/es/ru/ur labels need the planned rendered check, not a speculative clipping finding."
+      },
+      "controls": {
+        "NFC": true,
+        "authored_controls": []
+      },
+      "CLDR": "N/A for this actual key: no number/count/plural/select. Separate synthetic per-locale controls are in mechanical evidence; not actual plural-translation coverage.",
+      "RTL": "N/A: LTR locale; technical token remains exact.",
+      "mechanical_evidence": {
+        "rendered": "Solo lectura · esc volver",
+        "cells": 25,
+        "budget": 40,
+        "delta_english": 5,
+        "nfc": true,
+        "authored_controls": [],
+        "placeholder_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "placeholder_count": 1,
+        "argument_kind": "string (typed API; ICU simple)",
+        "argument_value": "esc",
+        "negative_parity": {
+          "renamed": true,
+          "lost": true,
+          "wrong_kind": true
+        },
+        "missing_argument": "MessageError",
+        "wrong_runtime_type": {
+          "actual_render": "Solo lectura · 123 volver",
+          "runtime_rejected": false,
+          "explicit_string_contract_rejected": true
+        },
+        "pseudo": {
+          "fixture": "[SSoolloo lleeccttuurraa · {key} vvoollvveerr]",
+          "rendered": "[SSoolloo lleeccttuurraa · esc vvoollvveerr]",
+          "cells": 44,
+          "expands": true,
+          "placeholder_retained": true,
+          "budget_exceeded": true,
+          "not_native_evidence": true
+        },
+        "actual_plural_select": "N/A: no count, plural or select",
+        "synthetic_cldr": {
+          "categories": [
+            "many",
+            "one",
+            "other"
+          ],
+          "samples": {
+            "0": {
+              "category": "other",
+              "output": "0 other"
+            },
+            "1": {
+              "category": "one",
+              "output": "1 one"
+            },
+            "2": {
+              "category": "other",
+              "output": "2 other"
+            },
+            "3": {
+              "category": "other",
+              "output": "3 other"
+            },
+            "5": {
+              "category": "other",
+              "output": "5 other"
+            },
+            "11": {
+              "category": "other",
+              "output": "11 other"
+            },
+            "21": {
+              "category": "other",
+              "output": "21 other"
+            },
+            "101": {
+              "category": "other",
+              "output": "101 other"
+            },
+            "1.5": {
+              "category": "other",
+              "output": "1,5 other"
+            },
+            "1000000": {
+              "category": "many",
+              "output": "1.000.000 many"
+            }
+          },
+          "coverage": "sampled category routing; not actual-key plural coverage"
+        },
+        "selector_controls": {
+          "parser_accepts_missing_other": true,
+          "explicit_other_validation_rejects": true,
+          "unknown_category_parser_rejected": false,
+          "unknown_category_explicit_rejected": true,
+          "width_budget_positive_accepted": true,
+          "synthetic_41cell_prefix_overflow_detected": true,
+          "malformed_rejected": true,
+          "duplicate_selector_rejected": true
+        },
+        "rtl_projection": null
+      },
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "approved_input": {
+        "manifest_sha256": "8b77fa48911e788cba6dd8b271297f53e4484b442d4f677abc682bc2af768cb0",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/es-approved.json",
+        "envelope_sha256": "73771856905d96fdde3bb386ea2105d152066bfc3de49098ab8b29977e968cd1",
+        "tool_sha256": "2c7c4f51b63192dacfe61350bcdc1caf451b2c5dc3feb3436caa3813691dac21",
+        "canonical_map_sha256": "54ea7faed1b2f54979550e21751d26fe2304090bac4f9b329b2c7e726b034e4c",
+        "canonical_algorithm": "UTF-8 json.dumps(map, ensure_ascii=False, sort_keys=True, separators=(comma,colon))",
+        "key_count": 1,
+        "repository_verified": true,
+        "head_root_path_and_key_verified": true,
+        "opaque_raw_hash_matches_manifest": true
+      },
+      "auditor": {
+        "agent": "translation-auditor / readonly-footer-seven-locale-audit-A",
+        "session": "1282ebc28f39",
+        "model": "openai/gpt-6.1-sol",
+        "model_source": "Explicit host model-switch notice during this turn: temporary fallback from anthropic/claude-opus-5-5 due quota. Language judgments and probes occurred after switch; no independent provider telemetry. Initial i18n guide read preceded switch.",
+        "independence": "Distinct session from translator 9309411c87eb and integrator 61203766acfe; not English/code source author or manager. No current partner-B judgment read. Same actual model as the translator is disclosed; this is a different independent agent/session, not a second model family.",
+        "audit_kind": "Independent LLM native-copy linguistic assessment, not a human native-speaker certification"
+      }
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "verdict": "PASS",
+      "issues": [],
+      "blocker_major_count": 0,
+      "english": "Read-only · {key} back",
+      "target": "Только чтение · {key} назад",
+      "backtranslation": "Read-only · {key} back",
+      "accuracy": "Только чтение is the familiar read-only state; назад is the conventional backward-navigation label. Neither implies a filesystem permission nor that Esc makes this same page editable.",
+      "idiom": "Both phrases are established Russian software labels rather than an awkward English calque. Key plus назад is natural in a shortcut legend.",
+      "register": "Impersonal concise fragments avoid вы/ты mismatch; sentence case and lowercase назад match footer syntax.",
+      "glossary": "Только чтение/назад show no terminology drift in this single-key namespace and do not contradict a defined glossary term.",
+      "technical_exceptions": [
+        "Literal placeholder {key}, exactly once, mapped to typed string argument key=\"esc\"; esc remains byte-exact. No ordinary English-prose exemption."
+      ],
+      "placeholder": {
+        "exact_once": true,
+        "argument_name": "key",
+        "icu_kind": "simple",
+        "typed_kind": "string",
+        "value": "esc"
+      },
+      "width": {
+        "rich_cells": 25,
+        "english_cells": 20,
+        "delta_cells": 5,
+        "context_max_cells": 40,
+        "rendered_fit": "UNVERIFIED: Rich scalar estimate only; real app content box, padding, glyph shaping and truncation deferred to QA. Longer fr/es/ru/ur labels need the planned rendered check, not a speculative clipping finding."
+      },
+      "controls": {
+        "NFC": true,
+        "authored_controls": []
+      },
+      "CLDR": "N/A for this actual key: no number/count/plural/select. Separate synthetic per-locale controls are in mechanical evidence; not actual plural-translation coverage.",
+      "RTL": "N/A: LTR locale; technical token remains exact.",
+      "mechanical_evidence": {
+        "rendered": "Только чтение · esc назад",
+        "cells": 25,
+        "budget": 40,
+        "delta_english": 5,
+        "nfc": true,
+        "authored_controls": [],
+        "placeholder_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "placeholder_count": 1,
+        "argument_kind": "string (typed API; ICU simple)",
+        "argument_value": "esc",
+        "negative_parity": {
+          "renamed": true,
+          "lost": true,
+          "wrong_kind": true
+        },
+        "missing_argument": "MessageError",
+        "wrong_runtime_type": {
+          "actual_render": "Только чтение · 123 назад",
+          "runtime_rejected": false,
+          "explicit_string_contract_rejected": true
+        },
+        "pseudo": {
+          "fixture": "[ТТооллььккоо ччттееннииее · {key} ннааззаадд]",
+          "rendered": "[ТТооллььккоо ччттееннииее · esc ннааззаадд]",
+          "cells": 44,
+          "expands": true,
+          "placeholder_retained": true,
+          "budget_exceeded": true,
+          "not_native_evidence": true
+        },
+        "actual_plural_select": "N/A: no count, plural or select",
+        "synthetic_cldr": {
+          "categories": [
+            "few",
+            "many",
+            "one",
+            "other"
+          ],
+          "samples": {
+            "0": {
+              "category": "many",
+              "output": "0 many"
+            },
+            "1": {
+              "category": "one",
+              "output": "1 one"
+            },
+            "2": {
+              "category": "few",
+              "output": "2 few"
+            },
+            "3": {
+              "category": "few",
+              "output": "3 few"
+            },
+            "5": {
+              "category": "many",
+              "output": "5 many"
+            },
+            "11": {
+              "category": "many",
+              "output": "11 many"
+            },
+            "21": {
+              "category": "one",
+              "output": "21 one"
+            },
+            "101": {
+              "category": "one",
+              "output": "101 one"
+            },
+            "1.5": {
+              "category": "other",
+              "output": "1,5 other"
+            },
+            "1000000": {
+              "category": "many",
+              "output": "1 000 000 many"
+            }
+          },
+          "coverage": "sampled category routing; not actual-key plural coverage"
+        },
+        "selector_controls": {
+          "parser_accepts_missing_other": true,
+          "explicit_other_validation_rejects": true,
+          "unknown_category_parser_rejected": false,
+          "unknown_category_explicit_rejected": true,
+          "width_budget_positive_accepted": true,
+          "synthetic_41cell_prefix_overflow_detected": true,
+          "malformed_rejected": true,
+          "duplicate_selector_rejected": true
+        },
+        "rtl_projection": null
+      },
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "approved_input": {
+        "manifest_sha256": "8b77fa48911e788cba6dd8b271297f53e4484b442d4f677abc682bc2af768cb0",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/ru-approved.json",
+        "envelope_sha256": "d32529ca7b42417865366f9e625fde110dfcabc95073d565732d42d55e73f03b",
+        "tool_sha256": "d7891bfdd66a3056b15b4f26d8a7b9806240beb380c0cd783dce042db573fa51",
+        "canonical_map_sha256": "e60f924b70dcdd7219a7f8f916422b82b3c825126b5b6da4d9976c640de38f30",
+        "canonical_algorithm": "UTF-8 json.dumps(map, ensure_ascii=False, sort_keys=True, separators=(comma,colon))",
+        "key_count": 1,
+        "repository_verified": true,
+        "head_root_path_and_key_verified": true,
+        "opaque_raw_hash_matches_manifest": true
+      },
+      "auditor": {
+        "agent": "translation-auditor / readonly-footer-seven-locale-audit-A",
+        "session": "1282ebc28f39",
+        "model": "openai/gpt-6.1-sol",
+        "model_source": "Explicit host model-switch notice during this turn: temporary fallback from anthropic/claude-opus-5-5 due quota. Language judgments and probes occurred after switch; no independent provider telemetry. Initial i18n guide read preceded switch.",
+        "independence": "Distinct session from translator 9309411c87eb and integrator 61203766acfe; not English/code source author or manager. No current partner-B judgment read. Same actual model as the translator is disclosed; this is a different independent agent/session, not a second model family.",
+        "audit_kind": "Independent LLM native-copy linguistic assessment, not a human native-speaker certification"
+      }
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "verdict": "PASS",
+      "issues": [],
+      "blocker_major_count": 0,
+      "english": "Read-only · {key} back",
+      "target": "Chỉ đọc · {key} quay lại",
+      "backtranslation": "Read-only · {key} go back",
+      "accuracy": "Chỉ đọc communicates the read-only composer state; quay lại conveys returning to the preceding chat view, not undo or permission changes.",
+      "idiom": "Chỉ đọc is conventional software Vietnamese; quay lại is a natural navigation phrase. No redundant pronoun or untranslated ordinary English remains.",
+      "register": "Unconjugated verb phrase and omitted bạn are consistent with the Vietnamese guide’s terse UI register.",
+      "glossary": "Chỉ đọc/quay lại are consistent in the single-key namespace; neither conflicts with an explicit glossary mapping.",
+      "technical_exceptions": [
+        "Literal placeholder {key}, exactly once, mapped to typed string argument key=\"esc\"; esc remains byte-exact. No ordinary English-prose exemption."
+      ],
+      "placeholder": {
+        "exact_once": true,
+        "argument_name": "key",
+        "icu_kind": "simple",
+        "typed_kind": "string",
+        "value": "esc"
+      },
+      "width": {
+        "rich_cells": 22,
+        "english_cells": 20,
+        "delta_cells": 2,
+        "context_max_cells": 40,
+        "rendered_fit": "UNVERIFIED: Rich scalar estimate only; real app content box, padding, glyph shaping and truncation deferred to QA. Longer fr/es/ru/ur labels need the planned rendered check, not a speculative clipping finding."
+      },
+      "controls": {
+        "NFC": true,
+        "authored_controls": []
+      },
+      "CLDR": "N/A for this actual key: no number/count/plural/select. Separate synthetic per-locale controls are in mechanical evidence; not actual plural-translation coverage.",
+      "RTL": "N/A: LTR locale; technical token remains exact.",
+      "mechanical_evidence": {
+        "rendered": "Chỉ đọc · esc quay lại",
+        "cells": 22,
+        "budget": 40,
+        "delta_english": 2,
+        "nfc": true,
+        "authored_controls": [],
+        "placeholder_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "placeholder_count": 1,
+        "argument_kind": "string (typed API; ICU simple)",
+        "argument_value": "esc",
+        "negative_parity": {
+          "renamed": true,
+          "lost": true,
+          "wrong_kind": true
+        },
+        "missing_argument": "MessageError",
+        "wrong_runtime_type": {
+          "actual_render": "Chỉ đọc · 123 quay lại",
+          "runtime_rejected": false,
+          "explicit_string_contract_rejected": true
+        },
+        "pseudo": {
+          "fixture": "[CChhỉỉ đđọọcc · {key} qquuaayy llạạii]",
+          "rendered": "[CChhỉỉ đđọọcc · esc qquuaayy llạạii]",
+          "cells": 37,
+          "expands": true,
+          "placeholder_retained": true,
+          "budget_exceeded": false,
+          "not_native_evidence": true
+        },
+        "actual_plural_select": "N/A: no count, plural or select",
+        "synthetic_cldr": {
+          "categories": [
+            "other"
+          ],
+          "samples": {
+            "0": {
+              "category": "other",
+              "output": "0 other"
+            },
+            "1": {
+              "category": "other",
+              "output": "1 other"
+            },
+            "2": {
+              "category": "other",
+              "output": "2 other"
+            },
+            "3": {
+              "category": "other",
+              "output": "3 other"
+            },
+            "5": {
+              "category": "other",
+              "output": "5 other"
+            },
+            "11": {
+              "category": "other",
+              "output": "11 other"
+            },
+            "21": {
+              "category": "other",
+              "output": "21 other"
+            },
+            "101": {
+              "category": "other",
+              "output": "101 other"
+            },
+            "1.5": {
+              "category": "other",
+              "output": "1,5 other"
+            },
+            "1000000": {
+              "category": "other",
+              "output": "1.000.000 other"
+            }
+          },
+          "coverage": "sampled category routing; not actual-key plural coverage"
+        },
+        "selector_controls": {
+          "parser_accepts_missing_other": true,
+          "explicit_other_validation_rejects": true,
+          "unknown_category_parser_rejected": false,
+          "unknown_category_explicit_rejected": true,
+          "width_budget_positive_accepted": true,
+          "synthetic_41cell_prefix_overflow_detected": true,
+          "malformed_rejected": true,
+          "duplicate_selector_rejected": true
+        },
+        "rtl_projection": null
+      },
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "approved_input": {
+        "manifest_sha256": "8b77fa48911e788cba6dd8b271297f53e4484b442d4f677abc682bc2af768cb0",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/vi-approved.json",
+        "envelope_sha256": "780feb55304cfaa7a3cedbc7a6cd8cee5617050c5e0bd5606d1c1087e296a7b9",
+        "tool_sha256": "786f6c632cc957d975b2a07a14e8e2b8738eb5ee664d68a74231d87e60f184ba",
+        "canonical_map_sha256": "917051d8def3d93700c0844f056743b554f41d0a12836cb1640d9d5930561d71",
+        "canonical_algorithm": "UTF-8 json.dumps(map, ensure_ascii=False, sort_keys=True, separators=(comma,colon))",
+        "key_count": 1,
+        "repository_verified": true,
+        "head_root_path_and_key_verified": true,
+        "opaque_raw_hash_matches_manifest": true
+      },
+      "auditor": {
+        "agent": "translation-auditor / readonly-footer-seven-locale-audit-A",
+        "session": "1282ebc28f39",
+        "model": "openai/gpt-6.1-sol",
+        "model_source": "Explicit host model-switch notice during this turn: temporary fallback from anthropic/claude-opus-5-5 due quota. Language judgments and probes occurred after switch; no independent provider telemetry. Initial i18n guide read preceded switch.",
+        "independence": "Distinct session from translator 9309411c87eb and integrator 61203766acfe; not English/code source author or manager. No current partner-B judgment read. Same actual model as the translator is disclosed; this is a different independent agent/session, not a second model family.",
+        "audit_kind": "Independent LLM native-copy linguistic assessment, not a human native-speaker certification"
+      }
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "verdict": "PASS",
+      "issues": [],
+      "blocker_major_count": 0,
+      "english": "Read-only · {key} back",
+      "target": "केवल पढ़ने के लिए · {key} लौटें",
+      "backtranslation": "For reading only · {key} return",
+      "accuracy": "केवल पढ़ने के लिए is the familiar Hindi read-only label. लौटें instructs return to chat in the supplied focus context, not an editing/permission promise.",
+      "idiom": "The state phrase is idiomatic Hindi software copy, not a literal-only mistranslation; लौटें is a natural short navigation imperative.",
+      "register": "लौटें uses the polite आप-compatible imperative. No तुम/तू, honorific padding or heavy Sanskritization.",
+      "glossary": "केवल पढ़ने के लिए/लौटें are consistent in the one-key namespace, with no conflicting explicit glossary mapping.",
+      "technical_exceptions": [
+        "Literal placeholder {key}, exactly once, mapped to typed string argument key=\"esc\"; esc remains byte-exact. No ordinary English-prose exemption."
+      ],
+      "placeholder": {
+        "exact_once": true,
+        "argument_name": "key",
+        "icu_kind": "simple",
+        "typed_kind": "string",
+        "value": "esc"
+      },
+      "width": {
+        "rich_cells": 21,
+        "english_cells": 20,
+        "delta_cells": 1,
+        "context_max_cells": 40,
+        "rendered_fit": "UNVERIFIED: Rich scalar estimate only; real app content box, padding, glyph shaping and truncation deferred to QA. Longer fr/es/ru/ur labels need the planned rendered check, not a speculative clipping finding."
+      },
+      "controls": {
+        "NFC": true,
+        "authored_controls": []
+      },
+      "CLDR": "N/A for this actual key: no number/count/plural/select. Separate synthetic per-locale controls are in mechanical evidence; not actual plural-translation coverage.",
+      "RTL": "N/A: LTR locale; technical token remains exact.",
+      "mechanical_evidence": {
+        "rendered": "केवल पढ़ने के लिए · esc लौटें",
+        "cells": 21,
+        "budget": 40,
+        "delta_english": 1,
+        "nfc": true,
+        "authored_controls": [],
+        "placeholder_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "placeholder_count": 1,
+        "argument_kind": "string (typed API; ICU simple)",
+        "argument_value": "esc",
+        "negative_parity": {
+          "renamed": true,
+          "lost": true,
+          "wrong_kind": true
+        },
+        "missing_argument": "MessageError",
+        "wrong_runtime_type": {
+          "actual_render": "केवल पढ़ने के लिए · 123 लौटें",
+          "runtime_rejected": false,
+          "explicit_string_contract_rejected": true
+        },
+        "pseudo": {
+          "fixture": "[ककेववलल पपढढ़नने कके ललिएए · {key} ललौटटें]",
+          "rendered": "[ककेववलल पपढढ़नने कके ललिएए · esc ललौटटें]",
+          "cells": 34,
+          "expands": true,
+          "placeholder_retained": true,
+          "budget_exceeded": false,
+          "not_native_evidence": true
+        },
+        "actual_plural_select": "N/A: no count, plural or select",
+        "synthetic_cldr": {
+          "categories": [
+            "one",
+            "other"
+          ],
+          "samples": {
+            "0": {
+              "category": "one",
+              "output": "0 one"
+            },
+            "1": {
+              "category": "one",
+              "output": "1 one"
+            },
+            "2": {
+              "category": "other",
+              "output": "2 other"
+            },
+            "3": {
+              "category": "other",
+              "output": "3 other"
+            },
+            "5": {
+              "category": "other",
+              "output": "5 other"
+            },
+            "11": {
+              "category": "other",
+              "output": "11 other"
+            },
+            "21": {
+              "category": "other",
+              "output": "21 other"
+            },
+            "101": {
+              "category": "other",
+              "output": "101 other"
+            },
+            "1.5": {
+              "category": "other",
+              "output": "1.5 other"
+            },
+            "1000000": {
+              "category": "other",
+              "output": "10,00,000 other"
+            }
+          },
+          "coverage": "sampled category routing; not actual-key plural coverage"
+        },
+        "selector_controls": {
+          "parser_accepts_missing_other": true,
+          "explicit_other_validation_rejects": true,
+          "unknown_category_parser_rejected": false,
+          "unknown_category_explicit_rejected": true,
+          "width_budget_positive_accepted": true,
+          "synthetic_41cell_prefix_overflow_detected": true,
+          "malformed_rejected": true,
+          "duplicate_selector_rejected": true
+        },
+        "rtl_projection": null
+      },
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "approved_input": {
+        "manifest_sha256": "8b77fa48911e788cba6dd8b271297f53e4484b442d4f677abc682bc2af768cb0",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/hi-approved.json",
+        "envelope_sha256": "89429d964f6cb1aacc5f272c35c3ce1789f537b84e6e8021f859b905977dc402",
+        "tool_sha256": "eed451f224aec89332799d8c8985ad6175f2ded129e0e2969b5b123200bfc39e",
+        "canonical_map_sha256": "13b669eb0d421ca462f1e2d000d16be7a8b32d56f35e44d6146235a596d34b23",
+        "canonical_algorithm": "UTF-8 json.dumps(map, ensure_ascii=False, sort_keys=True, separators=(comma,colon))",
+        "key_count": 1,
+        "repository_verified": true,
+        "head_root_path_and_key_verified": true,
+        "opaque_raw_hash_matches_manifest": true
+      },
+      "auditor": {
+        "agent": "translation-auditor / readonly-footer-seven-locale-audit-A",
+        "session": "1282ebc28f39",
+        "model": "openai/gpt-6.1-sol",
+        "model_source": "Explicit host model-switch notice during this turn: temporary fallback from anthropic/claude-opus-5-5 due quota. Language judgments and probes occurred after switch; no independent provider telemetry. Initial i18n guide read preceded switch.",
+        "independence": "Distinct session from translator 9309411c87eb and integrator 61203766acfe; not English/code source author or manager. No current partner-B judgment read. Same actual model as the translator is disclosed; this is a different independent agent/session, not a second model family.",
+        "audit_kind": "Independent LLM native-copy linguistic assessment, not a human native-speaker certification"
+      }
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.editor_readonly",
+      "key": "tui.editor_readonly.hint",
+      "keys_read": 1,
+      "fresh_keys": 1,
+      "retained_keys": 0,
+      "verdict": "PASS",
+      "issues": [],
+      "blocker_major_count": 0,
+      "english": "Read-only · {key} back",
+      "target": "صرف پڑھنے کے لیے · {key} واپس",
+      "backtranslation": "For reading only · {key} back",
+      "accuracy": "صرف پڑھنے کے لیے communicates the read-only state. واپس is the usual compact back-navigation label; with the supplied key it means leaving the read-only view for chat, not changing a file permission.",
+      "idiom": "Natural everyday Urdu UI phrasing. واپس is an acceptable label fragment, not an incomplete prose command requiring کریں.",
+      "register": "Impersonal state and navigation label avoid آپ/تم variation; no Hindi-script loan or excessive Persianization.",
+      "glossary": "صرف پڑھنے کے لیے/واپس are internally consistent for the one-key namespace; only the technical key argument remains Latin.",
+      "rtl_language": "Logical Urdu-script order is appropriate. The middle dot is a neutral separator, not a directional arrow; no authored bidi controls or terminal punctuation requiring relocation. esc is the only Latin runtime token and needs the existing display boundary’s LTR isolation where adopted.",
+      "technical_exceptions": [
+        "Literal placeholder {key}, exactly once, mapped to typed string argument key=\"esc\"; esc remains byte-exact. No ordinary English-prose exemption."
+      ],
+      "placeholder": {
+        "exact_once": true,
+        "argument_name": "key",
+        "icu_kind": "simple",
+        "typed_kind": "string",
+        "value": "esc"
+      },
+      "width": {
+        "rich_cells": 27,
+        "english_cells": 20,
+        "delta_cells": 7,
+        "context_max_cells": 40,
+        "rendered_fit": "UNVERIFIED: Rich scalar estimate only; real app content box, padding, glyph shaping and truncation deferred to QA. Longer fr/es/ru/ur labels need the planned rendered check, not a speculative clipping finding."
+      },
+      "controls": {
+        "NFC": true,
+        "authored_controls": []
+      },
+      "CLDR": "N/A for this actual key: no number/count/plural/select. Separate synthetic per-locale controls are in mechanical evidence; not actual plural-translation coverage.",
+      "RTL": {
+        "escaped": "'\\u2067\\u0635\\u0631\\u0641 \\u067e\\u0691\\u06be\\u0646\\u06d2 \\u06a9\\u06d2 \\u0644\\u06cc\\u06d2 \\xb7 \\u2066esc\\u2069 \\u0648\\u0627\\u067e\\u0633\\u2069'",
+        "raw_recovered_exactly": true,
+        "token_recovered": "esc",
+        "injection_controls": {
+          "RLO": "rejected",
+          "PDI": "rejected",
+          "RLM": "rejected",
+          "ANSI": "rejected"
+        },
+        "balanced": true,
+        "source_rtl": true,
+        "native_glyph_proof": false,
+        "actual_composer_projection_verified": false
+      },
+      "mechanical_evidence": {
+        "rendered": "صرف پڑھنے کے لیے · esc واپس",
+        "cells": 27,
+        "budget": 40,
+        "delta_english": 7,
+        "nfc": true,
+        "authored_controls": [],
+        "placeholder_arguments": [
+          [
+            "key",
+            "simple"
+          ]
+        ],
+        "placeholder_count": 1,
+        "argument_kind": "string (typed API; ICU simple)",
+        "argument_value": "esc",
+        "negative_parity": {
+          "renamed": true,
+          "lost": true,
+          "wrong_kind": true
+        },
+        "missing_argument": "MessageError",
+        "wrong_runtime_type": {
+          "actual_render": "صرف پڑھنے کے لیے · 123 واپس",
+          "runtime_rejected": false,
+          "explicit_string_contract_rejected": true
+        },
+        "pseudo": {
+          "fixture": "[صصررفف پپڑڑھھننےے ککےے للییےے · {key} ووااپپسس]",
+          "rendered": "[صصررفف پپڑڑھھننےے ککےے للییےے · esc ووااپپسس]",
+          "cells": 46,
+          "expands": true,
+          "placeholder_retained": true,
+          "budget_exceeded": true,
+          "not_native_evidence": true
+        },
+        "actual_plural_select": "N/A: no count, plural or select",
+        "synthetic_cldr": {
+          "categories": [
+            "one",
+            "other"
+          ],
+          "samples": {
+            "0": {
+              "category": "other",
+              "output": "0 other"
+            },
+            "1": {
+              "category": "one",
+              "output": "1 one"
+            },
+            "2": {
+              "category": "other",
+              "output": "2 other"
+            },
+            "3": {
+              "category": "other",
+              "output": "3 other"
+            },
+            "5": {
+              "category": "other",
+              "output": "5 other"
+            },
+            "11": {
+              "category": "other",
+              "output": "11 other"
+            },
+            "21": {
+              "category": "other",
+              "output": "21 other"
+            },
+            "101": {
+              "category": "other",
+              "output": "101 other"
+            },
+            "1.5": {
+              "category": "other",
+              "output": "1.5 other"
+            },
+            "1000000": {
+              "category": "other",
+              "output": "1,000,000 other"
+            }
+          },
+          "coverage": "sampled category routing; not actual-key plural coverage"
+        },
+        "selector_controls": {
+          "parser_accepts_missing_other": true,
+          "explicit_other_validation_rejects": true,
+          "unknown_category_parser_rejected": false,
+          "unknown_category_explicit_rejected": true,
+          "width_budget_positive_accepted": true,
+          "synthetic_41cell_prefix_overflow_detected": true,
+          "malformed_rejected": true,
+          "duplicate_selector_rejected": true
+        },
+        "rtl_projection": {
+          "escaped": "'\\u2067\\u0635\\u0631\\u0641 \\u067e\\u0691\\u06be\\u0646\\u06d2 \\u06a9\\u06d2 \\u0644\\u06cc\\u06d2 \\xb7 \\u2066esc\\u2069 \\u0648\\u0627\\u067e\\u0633\\u2069'",
+          "raw_recovered_exactly": true,
+          "token_recovered": "esc",
+          "injection_controls": {
+            "RLO": "rejected",
+            "PDI": "rejected",
+            "RLM": "rejected",
+            "ANSI": "rejected"
+          },
+          "balanced": true,
+          "source_rtl": true,
+          "native_glyph_proof": false,
+          "actual_composer_projection_verified": false
+        }
+      },
+      "source_sha256": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "target_sha256": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817",
+      "context_sha256": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee",
+      "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+      "current_head": "17d33b8e8cb332f0a8cc7c42fc0d139c2b6c3967",
+      "approved_input": {
+        "manifest_sha256": "8b77fa48911e788cba6dd8b271297f53e4484b442d4f677abc682bc2af768cb0",
+        "envelope": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer/docs/pr-evidence/readonly-footer/readonly-footer-inputs/ur-approved.json",
+        "envelope_sha256": "ef0e3e31445ac886ecf7d64d65c0640e0260a44be1c24486c7aa4eda559cf18d",
+        "tool_sha256": "5d52bb74e5ac14df50c2932755936a94b85ca692bbdfc97eaf5e8fde3c2f3360",
+        "canonical_map_sha256": "8f6223efb6683b12ae2ef98cfefcef6462dd5a7df47c313d873e99857ae71543",
+        "canonical_algorithm": "UTF-8 json.dumps(map, ensure_ascii=False, sort_keys=True, separators=(comma,colon))",
+        "key_count": 1,
+        "repository_verified": true,
+        "head_root_path_and_key_verified": true,
+        "opaque_raw_hash_matches_manifest": true
+      },
+      "auditor": {
+        "agent": "translation-auditor / readonly-footer-seven-locale-audit-A",
+        "session": "1282ebc28f39",
+        "model": "openai/gpt-6.1-sol",
+        "model_source": "Explicit host model-switch notice during this turn: temporary fallback from anthropic/claude-opus-5-5 due quota. Language judgments and probes occurred after switch; no independent provider telemetry. Initial i18n guide read preceded switch.",
+        "independence": "Distinct session from translator 9309411c87eb and integrator 61203766acfe; not English/code source author or manager. No current partner-B judgment read. Same actual model as the translator is disclosed; this is a different independent agent/session, not a second model family.",
+        "audit_kind": "Independent LLM native-copy linguistic assessment, not a human native-speaker certification"
+      }
+    }
+  ],
+  "input_validation": {
+    "manifest_sha256": "8b77fa48911e788cba6dd8b271297f53e4484b442d4f677abc682bc2af768cb0",
+    "approved_records_verified": 8,
+    "source_context_and_target_raw_hashes_match": true,
+    "canonical_key_maps_match": true,
+    "only_catalogue_prose_source": "Cached official approved-reader envelopes; no new catalogue read lease or direct decoded catalogue prose read. Opaque file bytes hashed only."
+  },
+  "source_binding_exact_object": {
+    "schema": 1,
+    "kind": "private-source-binding-not-audit",
+    "source_head": "1ad0b8c8547243f8257ee8838fbb35ed795b13f3",
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-readonly-footer",
+    "origin": "ssh://git@github.com/damianvtran/local-operator.git",
+    "source_title": "Private source handoff: read-only composer footer",
+    "source_document": "docs/i18n-readonly-footer-source.md",
+    "source_document_sha256": "f4fe2d80baf4de7e8951a77efb4965f0f529ad93eb2e1a245dd6969930a432f4",
+    "source_inputs_sha256": {
+      "local_operator/i18n/catalogues/en/tui.editor_readonly.json": "a2a8bfb8a250b38e3a950bb2b02d885ec76cc726d77521086801099b6e99b5f2",
+      "local_operator/i18n/catalogues/en/tui.editor_readonly.context.json": "46c48a659223ad5e4861a1407c2c7a685183b9c7caecf6e19f53adb8131389ee"
+    },
+    "author_receipt": "docs/pr-evidence/readonly-footer/readonly-footer-author.json",
+    "author_receipt_sha256": "61604b5a8ae9f29f96cfc114e47eb5cd64bf2d6e2a8b2ae46f4546b1909a7313",
+    "targets": [
+      {
+        "locale": "fr",
+        "path": "local_operator/i18n/catalogues/fr/tui.editor_readonly.json",
+        "raw_sha256": "98e716bcdc26c724f9e556e3ed366349cf0a596a8dc81bb350fc95a9f39d0ad5",
+        "canonical_map_sha256": "26fb16974301080b3da6088beb7fac1b51fe7e9582e1009bb97d8e9e51ab908e",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "zh-CN",
+        "path": "local_operator/i18n/catalogues/zh-CN/tui.editor_readonly.json",
+        "raw_sha256": "de698b3c4f9a184351bd627147bfe086da057890e287e01a78d87539471fa65f",
+        "canonical_map_sha256": "48f44363629d04eb0577268730ae02937ae6f93a9a42b939e7832a5136542d56",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "es",
+        "path": "local_operator/i18n/catalogues/es/tui.editor_readonly.json",
+        "raw_sha256": "d92fbdd397bbf7dd424c51c79b302c3b1b35b155a97a30cd5fd0973dbe1d950b",
+        "canonical_map_sha256": "54ea7faed1b2f54979550e21751d26fe2304090bac4f9b329b2c7e726b034e4c",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "ru",
+        "path": "local_operator/i18n/catalogues/ru/tui.editor_readonly.json",
+        "raw_sha256": "07740014857374da1b9bec31999f65955e6a6069faf97fa753e109e28f88d1e0",
+        "canonical_map_sha256": "e60f924b70dcdd7219a7f8f916422b82b3c825126b5b6da4d9976c640de38f30",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "vi",
+        "path": "local_operator/i18n/catalogues/vi/tui.editor_readonly.json",
+        "raw_sha256": "86c9aa76cd934591e291b4140ef3cc1b391662fe8f94d8db6646b7bc89366198",
+        "canonical_map_sha256": "917051d8def3d93700c0844f056743b554f41d0a12836cb1640d9d5930561d71",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "hi",
+        "path": "local_operator/i18n/catalogues/hi/tui.editor_readonly.json",
+        "raw_sha256": "6a682bddc90feaa5627dd033b11a30c6fa4e6bb53c623e0c09fa500d30bbae7f",
+        "canonical_map_sha256": "13b669eb0d421ca462f1e2d000d16be7a8b32d56f35e44d6146235a596d34b23",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      },
+      {
+        "locale": "ur",
+        "path": "local_operator/i18n/catalogues/ur/tui.editor_readonly.json",
+        "raw_sha256": "c423782b7450e73a070fa4f774a8c2324f89629909698d2a27175ced2e717817",
+        "canonical_map_sha256": "8f6223efb6683b12ae2ef98cfefcef6462dd5a7df47c313d873e99857ae71543",
+        "key_count": 1,
+        "arguments": [
+          "key"
+        ],
+        "author_session": "9309411c87eb"
+      }
+    ],
+    "integrator": {
+      "session": "61203766acfe",
+      "model": "openai/gpt-6.1-sol",
+      "provenance": "Host fallback notice; no independent provider telemetry"
+    },
+    "status": "private candidate; no audit or eligibility approval",
+    "excluded_auditors": [
+      "9309411c87eb (all seven target author)",
+      "61203766acfe (integrator; no self-audit)",
+      "English/code implementer and Root source author (manager to resolve exact IDs)"
+    ],
+    "validation": "Seven one-key maps; one key argument; NFC; no Unicode format controls; target raw hashes match author; English/context unchanged. No rendering or language audit."
+  },
+  "source_binding_file_sha256": "1193a373ff091333c9a71495aee255561e2dc50cc153713bd00a67a127b49749",
+  "author_original_sha256": "61604b5a8ae9f29f96cfc114e47eb5cd64bf2d6e2a8b2ae46f4546b1909a7313",
+  "mechanical_evidence_path": "/Users/damian/.local-operator/sessions/1282ebc28f39/scratchpad/readonly-footer-mechanics-A.json",
+  "mechanical_script_path": "/Users/damian/.local-operator/sessions/1282ebc28f39/scratchpad/readonly-footer-mechanics-A.py",
+  "method_limits": [
+    "No repository writes, ledger append, generated data changes, dependency installs, commits, push or eligibility decision.",
+    "No current partner-B report read and no author self-audit.",
+    "Pure existing ICU formatter/CLDR and Rich cell probes only, with isolated HOME/config and worktree PYTHONPATH. No app, browser, native build or broad test suite.",
+    "Missing-other and unknown-category synthetic ICU parse successfully; rejection was explicit selector validation, not parser rejection.",
+    "Simple interpolation accepts numeric key input; wrong type was rejected by the explicit string contract, not the runtime. Production caller source supplies literal esc, and generated API annotation declares str.",
+    "Urdu synthetic projection used the existing isolated_status_text boundary and technical span. Balanced RLI/LRI/PDI and exact raw esc recovery were verified; actual composer currently calls raw tr, so projection adoption and native shaping are NOT certified by this audit.",
+    "Pseudo fixtures are intentionally doubled-letter synthetic stress strings with exact {key}; not native copy, not a built-in pseudo workflow or rendered fit approval."
+  ]
+}

@@ -41,12 +41,14 @@ def _links(server_a: Any, server_b: Any, network_id: str) -> tuple[Any, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_3b_listener_link_is_peer_verified_and_dialer_link_is_not(root: Path) -> None:
+def test_3b_listener_and_dialer_links_are_both_peer_verified(root: Path) -> None:
+    """Post-G1 (``verify_welcome``): the dialer proves the listener too, so BOTH ends
+    of an admitted link vouch for their peer; ``_admit_link`` refuses any that cannot."""
     server_a, server_b, record = _pair(root)
     try:
         inbound, outbound = _links(server_a, server_b, record.network_id)
         assert inbound.outbound is False and inbound.peer_verified is True  # relay.py listener
-        assert outbound.outbound is True and outbound.peer_verified is False  # dialer, pre-G1
+        assert outbound.outbound is True and outbound.peer_verified is True  # dialer, G1
         block = server_a._peer_block(inbound)
         assert block == {
             "device_id": server_b.identity.device_id,
@@ -55,7 +57,7 @@ def test_3b_listener_link_is_peer_verified_and_dialer_link_is_not(root: Path) ->
             "link_id": inbound.link_id,
             "peer_verified": True,
         }
-        assert server_b._peer_block(outbound)["peer_verified"] is False
+        assert server_b._peer_block(outbound)["peer_verified"] is True
     finally:
         server_b.stop()
         server_a.stop()
@@ -73,17 +75,16 @@ def _peer_link_calls() -> list[tuple[str, ast.Call]]:
 
 
 def test_3b_every_peer_link_site_states_peer_verified_explicitly() -> None:
-    """Three sites (R2-4): listener register and pair listener take the handshake's
-    proved fact; the dialer pins False until G1 verifies the listener."""
+    """Three sites (R2-4): listener register, pair listener and (since G1) the dialer
+    all take the handshake's proved fact; none may pin a constant or omit it."""
     sites = {}
     for name, call in _peer_link_calls():
         values = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
         assert "peer_verified" in values, f"{name} builds a PeerLink without peer_verified"
         sites.setdefault(name, []).append(values["peer_verified"])
     assert len(_peer_link_calls()) == 3
-    dialer = [value for value in sites.values() if value == ["False"]]
-    listeners = [value for value in sites.values() if value == ["result.peer_verified"]]
-    assert len(dialer) == 1 and len(listeners) == 2, sites
+    proved = [value for value in sites.values() if value == ["result.peer_verified"]]
+    assert len(proved) == 3, sites
 
 
 def test_handshake_result_carries_peer_verified_from_verify_auth() -> None:

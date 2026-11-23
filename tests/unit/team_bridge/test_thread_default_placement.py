@@ -409,6 +409,10 @@ async def test_a_failed_placement_record_never_breaks_the_body_turn(
 # rollup), or an agent cannot tell which channel messages already HAVE a thread
 # to answer in. The model-facing copy goes through ``bound_inline_data_payload``;
 # a data URI in a body forces its copy-on-write path, the one that rebuilds dicts.
+# The model copy is COMPACT JSON (``_model_page_json``), so the check parses the
+# payload and reads the field rather than matching its spacing: the read head
+# (clause + rules, no blank line) comes first, then a blank line, then the JSON,
+# the same split ``harness/rows.py`` ``_bridge_json_tail`` uses.
 _DATA_URI = "data:image/png;base64," + "A" * 64
 
 
@@ -429,5 +433,9 @@ async def test_reply_count_survives_into_the_model_facing_reads(bound_runtime, b
         assert outcome["ok"] is True, outcome
         model_copy = outcome[_INLINE_DATA_KEY]
         model_text = model_copy if isinstance(model_copy, str) else json.dumps(model_copy)
-        assert '"reply_count": 2' in model_text
+        _head, blank, payload_text = model_text.partition("\n\n")
+        assert blank, model_text
+        payload = json.loads(payload_text)
+        rows = payload["messages"] if "messages" in payload else [payload["root"]]
+        assert [row.get("reply_count") for row in rows] == [2], payload
         assert _DATA_URI not in model_text

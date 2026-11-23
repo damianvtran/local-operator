@@ -1,0 +1,87 @@
+{
+  "purpose": "Immutable INPUT DATA only; captured through read_public_copy sequentially. Not translation authoring, semantic approval, or eligibility. Both independent auditors may read identical data, never partner judgments.",
+  "head": "2c282261f27b66390061563359f9cf72f2520538",
+  "reader_invariant": "Every map comes from the audited tool; API map canonical checksum equals pinned committed catalogue; source whole-file SHA matches sealed candidate; saved-cache bytes verified. No raw-file values used as fallback or substituted into API payload.",
+  "records": [
+    {
+      "locale": "en",
+      "source_path": "local_operator/i18n/catalogues/en/tui.info.json",
+      "committed_file_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+      "cache_path": "i18n/audits/evidence/pr4420-audited-input-cache/en.json",
+      "cache_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+      "canonical_map_sha256": "c06de4b6d6b19d71ff4fc20128937f72d6d18fc7757854f493e8e3834bb1423c",
+      "keys": 277,
+      "seconds": 11.25
+    },
+    {
+      "locale": "zh-CN",
+      "source_path": "local_operator/i18n/catalogues/zh-CN/tui.info.json",
+      "committed_file_sha256": "a3c7fef5c7f39382aad8ee62e2e2d90915344119892a45719531e14115ba8e02",
+      "cache_path": "i18n/audits/evidence/pr4420-audited-input-cache/zh-CN.json",
+      "cache_sha256": "591cb4b5a0a07d86f2049b663d29e03abafc99e53d4f2173d5b39c6c34b4bb6a",
+      "canonical_map_sha256": "afa640bc966d39aa6b3cf823be6912f265655304997daf9d649f525ad27b201a",
+      "keys": 277,
+      "seconds": 9.28
+    },
+    {
+      "locale": "fr",
+      "source_path": "local_operator/i18n/catalogues/fr/tui.info.json",
+      "committed_file_sha256": "f27b54408cc8b9efbe08aabdc341544f7853196f029dd9f2a03e0f81c57898fe",
+      "cache_path": "i18n/audits/evidence/pr4420-audited-input-cache/fr.json",
+      "cache_sha256": "f88c7e4a925a07dc07fe2ba4143f0266f90f97239eaa856786bdc983909d4f18",
+      "canonical_map_sha256": "ac0862cb0995399c326a74841a8424eacc379669926c74e4e239c6ca673feb92",
+      "keys": 277,
+      "seconds": 15.35
+    },
+    {
+      "locale": "es",
+      "source_path": "local_operator/i18n/catalogues/es/tui.info.json",
+      "committed_file_sha256": "6d7db1f3fe45f99f638cbd51bdc304e5412cd3f548733df8b6d347fefc1ce327",
+      "cache_path": "i18n/audits/evidence/pr4420-audited-input-cache/es.json",
+      "cache_sha256": "de48303b288bf451a94e38f751fc04040517ed13da8e998f13e84125357f0a05",
+      "canonical_map_sha256": "622d8c5e7ad0b004e0e64444ec1f0b5e4b368f3a18ccdc4d90f554b501071675",
+      "keys": 277,
+      "seconds": 8.8
+    },
+    {
+      "locale": "ru",
+      "source_path": "local_operator/i18n/catalogues/ru/tui.info.json",
+      "committed_file_sha256": "76d33638ccd3a9f6490babea6c6c0c761bad1d6db80aa5a18c508eef765c773f",
+      "cache_path": "i18n/audits/evidence/pr4420-audited-input-cache/ru.json",
+      "cache_sha256": "76d33638ccd3a9f6490babea6c6c0c761bad1d6db80aa5a18c508eef765c773f",
+      "canonical_map_sha256": "3ed09dc085d0a4c3f493a4798375db39d12e7e2fb7e0ac5c734b0fd330ee2a95",
+      "keys": 277,
+      "seconds": 8.43
+    },
+    {
+      "locale": "vi",
+      "source_path": "local_operator/i18n/catalogues/vi/tui.info.json",
+      "committed_file_sha256": "7e0f97d45840a223868d89907d4d5da6010931b1fd486ab399728a0a091ab15b",
+      "cache_path": "i18n/audits/evidence/pr4420-audited-input-cache/vi.json",
+      "cache_sha256": "7e0f97d45840a223868d89907d4d5da6010931b1fd486ab399728a0a091ab15b",
+      "canonical_map_sha256": "81ab38b0044d3dedd9bfd0205344e0307ac46ca399ccd0748d877816c08c6c8d",
+      "keys": 277,
+      "seconds": 8.38
+    },
+    {
+      "locale": "hi",
+      "source_path": "local_operator/i18n/catalogues/hi/tui.info.json",
+      "committed_file_sha256": "1a841571a322478b0294935ea760abe48d7984accd3fd5839d47af7d129697d2",
+      "cache_path": "i18n/audits/evidence/pr4420-audited-input-cache/hi.json",
+      "cache_sha256": "c7a03ed90357d0dc111b7ad0aeefee400ec9a51cd238c32f0a0edc0187303103",
+      "canonical_map_sha256": "80ba124bd6cf00cb45add707b08108ac3f9ed619c41a25796f41b2495a49afba",
+      "keys": 277,
+      "seconds": 9.56
+    },
+    {
+      "locale": "ur",
+      "source_path": "local_operator/i18n/catalogues/ur/tui.info.json",
+      "committed_file_sha256": "ccc8fd0eca869fbd1f70785b070e0d2ff59578241393d75477a84e5cce2efc03",
+      "cache_path": "i18n/audits/evidence/pr4420-audited-input-cache/ur.json",
+      "cache_sha256": "591afea90fe68414803fa5d1020b7153c4fb903103ae3514cc00a0172370aecd",
+      "canonical_map_sha256": "407ab045b5bd87b4cc21984e11cb7814a082d2135b0828090dc4232431ce20a5",
+      "keys": 277,
+      "seconds": 11.17
+    }
+  ]
+}

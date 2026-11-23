@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "wire.providers.connect",
+  "history_sha256": "2fe4168519e89b5ce99d0972e847c17601e026c73761769b724ca5a22eeb2ee1",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "wire.providers.connect",
+      "source_sha256": "6277c0656675f9e4cfe3704cd2d62035b49f11e717aab2bd8c8e392438fd7959",
+      "context_sha256": "c4dbbb698f0cc7c17f5f19434146b46de2376c93e5c89b8dc2368cc38dd2ab38",
+      "target_sha256": "eb4bc6efc9f780b320f2664a2dbabd854474802ee538eb894d0d49d13f577492",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-21",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator",
+        "session": "cfc6603aaa44",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-21",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "T-fr-1"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field); manager brief: actual model openai/gpt-6.1-sol, no fallback"
+      },
+      "status": "passed",
+      "post_audit_remediation": {
+        "finding": "T-fr-1",
+        "severity": "minor",
+        "key": "wire.providers.connect.key_invalid_characters",
+        "audited_value": "Cette clé contient des caractères qu’une clé API ne peut pas contenir. Copiez-la de nouveau, puis réessayez.",
+        "applied_value": "Cette clé API contient des caractères non autorisés. Copiez-la de nouveau, puis réessayez.",
+        "audited_target_sha256": "eb4bc6efc9f780b320f2664a2dbabd854474802ee538eb894d0d49d13f577492",
+        "shipped_target_sha256": "b442fc158944ece40c86207a3b547813b16e2c02a7d4383969cd3dd80594e4f9",
+        "proof": "shipped file with applied_value swapped back to audited_value re-hashes to audited_target_sha256: the only post-audit change is the auditor's own proposed text for this one key"
+      },
+      "note": "Independent full audit (round 1) of the new wire.providers.connect namespace (5 keys: 4 key-check verdicts + suggested_automatic), audited at worktree head b5bb56079c50 (rebased to 18a93a76a0c0, range-diff '='; English source hash unchanged). Auditor cfc6603aaa44 (openai/gpt-6.1-sol, no fallback) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 0 nit. Non-gating minor T-fr-1 applied after audit using the auditor's proposed text verbatim; target_sha256 is the AUDITED file hash, the shipped post-fix hash is b442fc158944ece40c86207a3b547813b16e2c02a7d4383969cd3dd80594e4f9 (see post_audit_remediation). Record: i18n/audits/evidence/fr/wire.providers.connect/pc1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/wire.providers.connect/pc1/record.json",
+      "round": "pc1"
+    }
+  ]
+}

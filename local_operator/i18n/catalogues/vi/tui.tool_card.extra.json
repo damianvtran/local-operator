@@ -1,0 +1,18 @@
+{
+  "tui.tool_card.extra.compose.composed": "đã soạn {size}",
+  "tui.tool_card.extra.compose.composing": "đang soạn… {facts}",
+  "tui.tool_card.extra.compose.never_sent": "chưa gửi đi · {facts}",
+  "tui.tool_card.extra.compose.nothing_composed": "chưa soạn gì",
+  "tui.tool_card.extra.fetch.attempts": "{count, plural, other {{shown} lần thử}}",
+  "tui.tool_card.extra.fetch.attempts_profiles": "{count, plural, other {{shown} lần thử ({profiles})}}",
+  "tui.tool_card.extra.fetch.lines": "{count, plural, other {{shown} dòng}}",
+  "tui.tool_card.extra.search.provider": "Nhà cung cấp: {provider}",
+  "tui.tool_card.extra.search.provider_auth": "Nhà cung cấp: {provider} ({auth_mode})",
+  "tui.tool_card.extra.search.sources": "Nguồn:",
+  "tui.tool_card.extra.search.untitled": "Kết quả không có tiêu đề",
+  "tui.tool_card.extra.send.failed_reason": "{word}: {cause}",
+  "tui.tool_card.extra.send.mode.now": "ngay",
+  "tui.tool_card.extra.send.mode.quiet": "im lặng",
+  "tui.tool_card.extra.send.mode.wake": "thức dậy",
+  "tui.tool_card.extra.send.model": "mô hình"
+}

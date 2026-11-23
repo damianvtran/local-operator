@@ -1203,6 +1203,12 @@ class Message(BaseModel):
     # not silently turn this raw-bearing row into apparently safe public JSON.
     _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
 
+    # Non-serialized internal marker for request-local transient frames (e.g.,
+    # PendingTurn's admitted Team Bridge body frame). Never enters wire JSON or
+    # transcript dumps; tells provider cache-breakpoint placement not to anchor
+    # the tail cache_control marker on a message that vanishes after this turn.
+    _ephemeral: bool = PrivateAttr(default=False)
+
     def _assert_publicly_serializable(self) -> None:
         if self._one_turn_secret is not None:
             raise OneTurnSecretSerializationError(
@@ -1534,6 +1540,10 @@ class CustomMessage(BaseModel):
     on_discard: Callable[[], None] | None = Field(
         default=None, exclude=True, json_schema_extra={"compare": False}
     )
+    # Non-serialized internal marker propagated to the rendered Message so
+    # transient frames (PendingTurn body frames) are skipped when placing the
+    # tail prompt-cache breakpoint.
+    _ephemeral: bool = PrivateAttr(default=False)
 
 
 class StaleAside:
@@ -2541,6 +2551,8 @@ class ToolContext(BaseModel):
     # exactly this field, and its absence is what keeps the tool out of a
     # session that has no bridge. Stays None until the session lane wires it.
     bridge_runtime: Any | None = Field(default=None, exclude=True, repr=False)
+    # Host identity frozen for this dispatch context, not a model argument.
+    bridge_session_agent_display: str | None = Field(default=None, exclude=True, repr=False)
     # The path a READER resolved, reported by the reader itself the instant it
     # resolved it: ``(resolved_path, resolvable)``. Installed by the loop for the
     # duration of ONE call -- the recorder it holds is bound to that call's own id
@@ -2949,19 +2961,23 @@ class ToolContext(BaseModel):
     #: session's teardown has begun — then nothing may be dispatched. Bound
     #: beside :attr:`enqueue_site_card`.
     begin_site_request: Callable[..., Any] | None = None
-    #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
-    #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
-    #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``
-    #: wherever it is, so its presence IS the mode, one fact. TOTAL and
-    #: fail-open: it returns a diversion mapping (``{"text": …, "details": …}``
-    #: carrying the hidden marker) or ``None``, and NEVER raises for any
-    #: policy, provider, parse or timeout condition — ``None`` means "enqueue,
-    #: unchanged". The in-callable policy read owns the kill switch; the
-    #: tool-side guard around the await is the last line so even a contract
-    #: breach cannot lose the ask (design §2.2's failure-semantics table).
-    gate_ask: Callable[..., Awaitable[Mapping[str, Any] | None]] | None = None
-    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async, mirroring
-    #: :attr:`gate_ask`: the ``no_reply`` tool awaits it for the run's refusal
+    #: THE TEAM INTEGRATIONS CONSENT SEAM (RFC "Radient Team Integrations"
+    #: §8.2): a ``team_bridge.integration_consent.IntegrationConsent`` over this
+    #: session's ask queue and the ids a PERSON answered in this run. Only the
+    #: session can say that — a tool reading the ask log cannot tell a card
+    #: answer from ``answered_in_chat`` — so publishing an app or minting a
+    #: credential is reachable only where the session binds this. ``None``
+    #: without a queued-ask engine (blocking arm, children, headless hosts),
+    #: which also keeps the ``integrations`` tool off those sessions.
+    integration_consent: Any | None = Field(default=None, exclude=True, repr=False)
+    #: Test seam only: a zero-arg factory returning an object with the
+    #: ``IntegrationsClient`` surface (a faked HTTP layer). Production never
+    #: sets it; the tool then rides the Team Bridge client's pinned OAuth row.
+    integrations_client_factory: Callable[[], Any] | None = Field(
+        default=None, exclude=True, repr=False
+    )
+    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async: the
+    #: ``no_reply`` tool awaits it for the run's refusal
     #: decision, and its presence IS the fact that this session may end a turn
     #: quietly — ``build_no_reply_tool`` returns ``None`` without it
     #: (footprint ladder rung 3: the tool is absent, not inert, where a quiet
@@ -3920,6 +3936,27 @@ class CompactionEndEvent(AgentEvent[Literal["compaction_end"]]):
     #: Optional and defaulting to ``None`` so a host that predates it (and
     #: every ordinary size-triggered pass) is unchanged.
     detail: str | None = None
+    #: Which SIZE term the gate was over when this pass ran, so a reader of a
+    #: recorded session need not reconstruct it: ``"tokens"``,
+    #: ``"wire_bytes"`` (the serialized-request trigger, which fires on image
+    #: weight far below any token line), ``"tokens+wire_bytes"``, or
+    #: ``"none"`` for a pass neither size term forced (manual, advised, idle;
+    #: ``reason`` and ``detail`` say which). Without it a byte-fired pass at
+    #: 35k tokens of a 400k threshold is indistinguishable from a misfire, and
+    #: the three episodes that motivated the field had to be diagnosed from
+    #: estimated artifact sizes. ``""`` when the pass failed or the session
+    #: could not measure. Diagnostic only: no host branches on it.
+    trigger: str = ""
+    #: Serialized request size (``compaction.tokens.estimate_wire_bytes``, a
+    #: BYTE ruler, never comparable with the token figures above) of the
+    #: history the pass planned against, and of the committed context the next
+    #: request sends. ``wire_bytes_trigger`` is the resolved soft byte trigger
+    #: the pair is read against (0 = disabled), so ``trigger - after`` is the
+    #: room the pass left before the next byte-fired one. All three default to
+    #: 0 so a host that predates them, and every failed pass, is unchanged.
+    wire_bytes_before: int = 0
+    wire_bytes_after: int = 0
+    wire_bytes_trigger: int = 0
 
 
 class RetryStartEvent(AgentEvent[Literal["retry_start"]]):

@@ -1,0 +1,27 @@
+COMMAND: env -i HOME=<session scratch isolated home> LOCAL_OPERATOR_CONFIG_DIR=<home>/.local-operator PATH=<inherited PATH> PYTHONPATH=<assigned worktree> PYTHONDONTWRITEBYTECODE=1 primary .venv/bin/python scripts/run_bounded.py --contract=command-status --timeout 120 -- primary .venv/bin/python i18n/audits/evidence/fr/tui.provider_state/fr22a/validator.py.txt
+[run_bounded] memory budget 3424 MiB (auto); sampled owned child group and escaped descendants
+module: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/__init__.py
+HOME: /Users/damian/.local-operator/sessions/e0c1b7382197/scratchpad/fr-provider-home.kNBkdz
+config: /Users/damian/.local-operator/sessions/e0c1b7382197/scratchpad/fr-provider-home.kNBkdz/.local-operator
+scope: en/fr tui.provider_state only; no eligibility patch or global checks
+official check.check_catalogues(): []
+tui.provider_state.logged_in | en: logged in | fr: connecté | args=0 plural/select=0 NFC=yes | cells en/fr/pseudo: 9 8 14
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= logged in fr-fit= connecté
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= logged in fr-fit= connecté
+tui.provider_state.env_key | en: env key | fr: clé d’environnement | args=0 plural/select=0 NFC=yes | cells en/fr/pseudo: 7 19 25
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= env key fr-fit= clé d’environnem…
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= env key fr-fit= clé d’environnement
+tui.provider_state.needs_login | en: needs login | fr: connexion requise | args=0 plural/select=0 NFC=yes | cells en/fr/pseudo: 11 17 23
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= needs login fr-fit= connexion requise
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= needs login fr-fit= connexion requise
+tui.provider_state.local_ready | en: configured server | fr: serveur configuré | args=0 plural/select=0 NFC=yes | cells en/fr/pseudo: 17 17 23
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= configured server fr-fit= serveur configuré
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= configured server fr-fit= serveur configuré
+tui.provider_state.local_unconfigured | en: configure server | fr: configurer le serveur | args=0 plural/select=0 NFC=yes | cells en/fr/pseudo: 16 21 27
+  diagnostic pane=31 synthetic-id= openrouter budget= 17 en-fit= configure server fr-fit= configurer le se…
+  diagnostic pane=31 synthetic-id= ollama budget= 21 en-fit= configure server fr-fit= configurer le serveur
+negative control rejected added ICU argument: ["fr/tui.provider_state: tui.provider_state.logged_in: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+RESULT: mechanical validation successful; status translated ONLY; independent A/B audit pending
+LIMITS: pure catalogue/ICU/render API and Rich width diagnostics; no settings/native/visual/network-isolation/release claim
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=16ad869ce2814d13a699060f8bdbb0dd completion=/Users/damian/.local-operator/sessions/e0c1b7382197/scratchpad/fr-provider-home.kNBkdz/.local-operator/run-bounded-runs/16ad869ce2814d13a699060f8bdbb0dd.completion.json
+exit_code=0

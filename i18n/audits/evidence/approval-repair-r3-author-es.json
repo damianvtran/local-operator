@@ -1,0 +1,354 @@
+{
+  "schema": "approval-repair-r3-author/v1",
+  "locale": "es",
+  "agent_id": "bbd6a68c6d69",
+  "task": "settings-R3-es-seven-help-references",
+  "round": 3,
+  "author_model": "openai/gpt-6.1-sol",
+  "requested_model": "anthropic/claude-opus-5-5",
+  "fallback": {
+    "used": true,
+    "reason": "host model-switch notice: provider failure: quota",
+    "serving_identity": "host-attested; no independent serving-provider verification"
+  },
+  "source_head": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+  "source_english_raw_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+  "source_context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "approved_input_manifest_sha256": "ded49b2ba05e698f284de1676ee4fa16ee5f89a91dc23be4fc714f4175595390",
+  "approved_es_envelope_sha256": "c6695c9c7498c0da21bebc643199c5fe50f979beb4adb47cac9761e04e210265",
+  "approved_en_envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+  "catalogue_path": "local_operator/i18n/catalogues/es/wire.settings.json",
+  "before_raw_sha256": "9cf60be5d36c7fe9f8359dc779cc03d9a2039496356e1d5001519e806394f43a",
+  "after_raw_sha256": "36132ff7f31a6a42c941661fb983f8b14b54954bdaf54f268f8f69eb9672c52b",
+  "before_key_count": 895,
+  "after_key_count": 895,
+  "changed_count": 7,
+  "changed_keys": [
+    "wire.settings.providers_openrouter_allow_fallbacks.help",
+    "wire.settings.providers_openrouter_data_collection.help",
+    "wire.settings.providers_openrouter_enforce_distillable_text.help",
+    "wire.settings.providers_openrouter_require_parameters.help",
+    "wire.settings.providers_openrouter_sort.help",
+    "wire.settings.providers_openrouter_zdr.help",
+    "wire.settings.shell_environment_mode.help"
+  ],
+  "key_order_identical": true,
+  "inverse_byte_proof": {
+    "exact": true,
+    "inverse_sha256": "9cf60be5d36c7fe9f8359dc779cc03d9a2039496356e1d5001519e806394f43a",
+    "scope": "all raw original bytes recovered by inversing only seven JSON field-value replacements"
+  },
+  "outside_scope_bytes_preserved": true,
+  "authored_other_locale": false,
+  "native_linguistic_pass_claimed": false,
+  "independent_audits_pending": [
+    "ES-A R3",
+    "ES-B R3"
+  ],
+  "open_major_findings_pending_independent_retest": [
+    "ES-B-R2-M1",
+    "ES-B-R2-M2",
+    "ES-B-R2-M3",
+    "ES-B-R2-M4",
+    "ES-B-R2-M5",
+    "ES-B-R2-M6",
+    "ES-B-R2-M7"
+  ],
+  "deferred_author_major_findings": [],
+  "deferred_major_status": "No assigned author remediation deferred; all seven prior MAJORs remain pending independent acceptance, not reported cleared",
+  "per_key": [
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "finding_id": "ES-B-R2-M1",
+      "old": "'default' no envía nada (OpenRouter pasa a otro host cuando falla el preferido); 'false' falla en vez de pasar a un host fuera de tus preferencias.",
+      "new": "“predeterminado” (`default`) no envía nada (OpenRouter pasa a otro servidor cuando falla el preferido); “desactivado” (`false`) falla en vez de pasar a un servidor fuera de tus preferencias.",
+      "source_english": "'default' sends nothing (OpenRouter falls through to another host when the preferred one fails); 'false' fails rather than fall through to a host outside your preferences.",
+      "backtranslation": "“default” (`default`) sends nothing (OpenRouter falls through to another server when the preferred one fails); “disabled” (`false`) fails rather than falling through to a server outside your preferences.",
+      "actual_choice_labels": {
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label": "desactivado",
+        "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label": "predeterminado"
+      },
+      "old_value_sha256": "dd20810f22fc3087be2e5482cd655d3efdcc17c5fea9c17f1712c3a9dd725e91",
+      "new_value_sha256": "c1bed4e20b02447c16ce7aa86382602c8334230518acb1f9403fa8bcccfc280b",
+      "source_value_sha256": "0377a1ae802b7ed0d3394ea39e2de86ef632527ca03ebe6dc70bf15bd28cc993",
+      "mechanical_checks": {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+        "old_cells": 147,
+        "new_cells": 190,
+        "english_cells": 171,
+        "code_tokens_preserved": [
+          "default",
+          "false"
+        ],
+        "placeholders": []
+      },
+      "author_disposition": "authored remediation; requires independent A/B linguistic acceptance",
+      "glossary": "exact existing choice labels; servidores for hosts as proposed by R2 auditors; Spanish curly quotes per es style guide",
+      "safety_code_facts": "All prior code tokens retained verbatim in backticks; labels are quoted Spanish. default remains an explanatory sentinel and nothing is sent. No API/config behavior changed."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "finding_id": "ES-B-R2-M2",
+      "old": "'deny' excluye los hosts que puedan entrenar con tus prompts o retenerlos. 'default' no envía preferencia (el valor predeterminado de OpenRouter: allow).",
+      "new": "“denegar” (`deny`) excluye los servidores que puedan entrenar con tus prompts o retenerlos. “predeterminado” (`default`) no envía preferencia (el valor predeterminado de OpenRouter es “permitir”, `allow`).",
+      "source_english": "'deny' excludes hosts that may train on or retain your prompts. 'default' sends no preference (OpenRouter's default: allow).",
+      "backtranslation": "“deny” (`deny`) excludes servers that may train on or retain your prompts. “default” (`default`) sends no preference (OpenRouter’s default is “allow”, `allow`).",
+      "actual_choice_labels": {
+        "wire.settings.providers_openrouter_data_collection.choice.allow.label": "permitir",
+        "wire.settings.providers_openrouter_data_collection.choice.deny.label": "denegar",
+        "wire.settings.providers_openrouter_data_collection.choice.unset.label": "predeterminado"
+      },
+      "old_value_sha256": "e2782daf94d164556816ba6bfddf58fbef6ecc4015ed6efebf96107487410849",
+      "new_value_sha256": "54c0ef285b0a812bfb9fd2220336cda3d4863bf39568d134b2ef3652894a013d",
+      "source_value_sha256": "add23594cdcbaf001deb1778965d6b5e0a0c714526d145782c09bb7e109334f4",
+      "mechanical_checks": {
+        "key": "wire.settings.providers_openrouter_data_collection.help",
+        "old_cells": 153,
+        "new_cells": 205,
+        "english_cells": 124,
+        "code_tokens_preserved": [
+          "deny",
+          "default"
+        ],
+        "placeholders": []
+      },
+      "author_disposition": "authored remediation; requires independent A/B linguistic acceptance",
+      "glossary": "exact existing choice labels; servidores for hosts as proposed by R2 auditors; Spanish curly quotes per es style guide",
+      "safety_code_facts": "All prior code tokens retained verbatim in backticks; labels are quoted Spanish. default remains an explanatory sentinel and nothing is sent. No API/config behavior changed."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "finding_id": "ES-B-R2-M3",
+      "old": "'true': restringe a los endpoints cuya salida de texto pueda destilarse. 'default': no se envía nada.",
+      "new": "“activado” (`true`): restringe a los endpoints cuya salida de texto pueda destilarse. “predeterminado” (`default`): no se envía nada.",
+      "source_english": "'true': restrict to endpoints whose text output may be distilled. 'default': nothing sent.",
+      "backtranslation": "“enabled” (`true`): restrict to endpoints whose text output may be distilled. “default” (`default`): nothing is sent.",
+      "actual_choice_labels": {
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label": "activado",
+        "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label": "predeterminado"
+      },
+      "old_value_sha256": "41b0197569fa1ced488323f149d74d1952916148355bd6462ad8c2e0149ce783",
+      "new_value_sha256": "ee40ddbfdaa4ead71880a8cabd230f7e8b064d8e53c2aef15fab0b0828fdd967",
+      "source_value_sha256": "3dd49fd7dd726202c05237c29f595f68d83f79864bcab233024dbee4d5ecba24",
+      "mechanical_checks": {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "old_cells": 101,
+        "new_cells": 133,
+        "english_cells": 90,
+        "code_tokens_preserved": [
+          "true",
+          "default"
+        ],
+        "placeholders": []
+      },
+      "author_disposition": "authored remediation; requires independent A/B linguistic acceptance",
+      "glossary": "exact existing choice labels; servidores for hosts as proposed by R2 auditors; Spanish curly quotes per es style guide",
+      "safety_code_facts": "All prior code tokens retained verbatim in backticks; labels are quoted Spanish. default remains an explanatory sentinel and nothing is sent. No API/config behavior changed."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "finding_id": "ES-B-R2-M4",
+      "old": "'true' restringe a los hosts que admiten todos los parámetros que envías (herramientas, salida estructurada); con 'default', OpenRouter puede descartar los no admitidos en silencio.",
+      "new": "“activado” (`true`) restringe a los servidores que admiten todos los parámetros que envías (herramientas, salida estructurada); con “predeterminado” (`default`), OpenRouter puede descartar los no admitidos en silencio.",
+      "source_english": "'true' restricts to hosts that support every parameter you send (tools, structured output); 'default' lets OpenRouter silently drop unsupported ones.",
+      "backtranslation": "“enabled” (`true`) restricts to servers supporting all parameters you send (tools, structured output); with “default” (`default`), OpenRouter may silently discard unsupported ones.",
+      "actual_choice_labels": {
+        "wire.settings.providers_openrouter_require_parameters.choice.true.label": "activado",
+        "wire.settings.providers_openrouter_require_parameters.choice.unset.label": "predeterminado"
+      },
+      "old_value_sha256": "070eb86bd8162663052686302318fbe3ab30b036f5450f10d72e5dd3e68331e5",
+      "new_value_sha256": "44991d2efab6f6a49c90062e66785db15a6bc546bda22d23557d1543d33c8130",
+      "source_value_sha256": "a97265c186f4e4bbf402f4ef6995bc28dde5db3d29ac4781498dabea4ca2c792",
+      "mechanical_checks": {
+        "key": "wire.settings.providers_openrouter_require_parameters.help",
+        "old_cells": 181,
+        "new_cells": 218,
+        "english_cells": 149,
+        "code_tokens_preserved": [
+          "true",
+          "default"
+        ],
+        "placeholders": []
+      },
+      "author_disposition": "authored remediation; requires independent A/B linguistic acceptance",
+      "glossary": "exact existing choice labels; servidores for hosts as proposed by R2 auditors; Spanish curly quotes per es style guide",
+      "safety_code_facts": "All prior code tokens retained verbatim in backticks; labels are quoted Spanish. default remains an explanatory sentinel and nothing is sent. No API/config behavior changed."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "finding_id": "ES-B-R2-M5",
+      "old": "Cómo clasifica OpenRouter los hosts para esta llamada. Puede desviarse del host que tiene tu caché de prompts en caliente (inicio en frío en conversaciones largas); 'default' no envía preferencia alguna.",
+      "new": "Cómo clasifica OpenRouter los servidores para esta llamada. Puede desviarse del servidor que tiene tu caché de prompts en caliente (inicio en frío en conversaciones largas); “predeterminado” (`default`) no envía preferencia alguna.",
+      "source_english": "How OpenRouter ranks hosts for this call. May route away from the host holding your warm prompt cache (a cold start on long conversations); 'default' sends no preference at all.",
+      "backtranslation": "How OpenRouter ranks servers for this call. It may route away from the server holding your warm prompt cache (cold start in long conversations); “default” (`default`) sends no preference at all.",
+      "actual_choice_labels": {
+        "wire.settings.providers_openrouter_sort.choice.unset.label": "predeterminado"
+      },
+      "old_value_sha256": "29cb88bfb2f32a8377f09f8c3babdf57a3b3ee5da3769d72be665a6c34bd9899",
+      "new_value_sha256": "c9ee75d6fc965ed6eb3d34d1328f3a1599c5f68e0d4550caed541b34c3a81384",
+      "source_value_sha256": "5cca89fe4275b21c362fee05e633d3a37ae965f3837336876e64ca4dd4a25b7a",
+      "mechanical_checks": {
+        "key": "wire.settings.providers_openrouter_sort.help",
+        "old_cells": 203,
+        "new_cells": 231,
+        "english_cells": 177,
+        "code_tokens_preserved": [
+          "default"
+        ],
+        "placeholders": []
+      },
+      "author_disposition": "authored remediation; requires independent A/B linguistic acceptance",
+      "glossary": "exact existing choice labels; servidores for hosts as proposed by R2 auditors; Spanish curly quotes per es style guide",
+      "safety_code_facts": "All prior code tokens retained verbatim in backticks; labels are quoted Spanish. default remains an explanatory sentinel and nothing is sent. No API/config behavior changed."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "finding_id": "ES-B-R2-M6",
+      "old": "'true': restringe a los endpoints con retención de datos cero. 'default': no se envía nada.",
+      "new": "“activado” (`true`): restringe a los endpoints con retención de datos cero. “predeterminado” (`default`): no se envía nada.",
+      "source_english": "'true': restrict to zero-data-retention endpoints. 'default': nothing sent.",
+      "backtranslation": "“enabled” (`true`): restrict to zero-data-retention endpoints. “default” (`default`): nothing is sent.",
+      "actual_choice_labels": {
+        "wire.settings.providers_openrouter_zdr.choice.true.label": "activado",
+        "wire.settings.providers_openrouter_zdr.choice.unset.label": "predeterminado"
+      },
+      "old_value_sha256": "2abfbaee37ca9887109b875c071435a9f497b7fb8ab2384c36e9fece6fb5593f",
+      "new_value_sha256": "fe7ad6d151a151275bd6162364d3b67cc42c8fc2549a3648701e89ca0dc66971",
+      "source_value_sha256": "98391a3db73b9fb5109db295b56984e1ccf05b774012159510a69a4013789346",
+      "mechanical_checks": {
+        "key": "wire.settings.providers_openrouter_zdr.help",
+        "old_cells": 91,
+        "new_cells": 123,
+        "english_cells": 75,
+        "code_tokens_preserved": [
+          "true",
+          "default"
+        ],
+        "placeholders": []
+      },
+      "author_disposition": "authored remediation; requires independent A/B linguistic acceptance",
+      "glossary": "exact existing choice labels; servidores for hosts as proposed by R2 auditors; Spanish curly quotes per es style guide",
+      "safety_code_facts": "All prior code tokens retained verbatim in backticks; labels are quoted Spanish. default remains an explanatory sentinel and nothing is sent. No API/config behavior changed."
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.help",
+      "finding_id": "ES-B-R2-M7",
+      "old": "'inherit' deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). 'allowlist' solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+      "new": "“heredar” (`inherit`) deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). “lista de permitidos” (`allowlist`) solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+      "source_english": "'inherit' lets a command the agent runs see your environment (gh, aws, npm keep their tokens). 'allowlist' passes only PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, so the provider key this session launched with is not handed to a command the model writes. Read once per session: changing it takes effect at the next launch.",
+      "backtranslation": "“inherit” (`inherit`) lets an agent-run command see your environment (gh, aws and npm keep their tokens). “allowlist” (`allowlist`) passes only PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two adjacent lists, so a model-written command is not handed the provider key used to launch this session. Read once per session; changing it takes effect at next launch.",
+      "actual_choice_labels": {
+        "wire.settings.shell_environment_mode.choice.allowlist.label": "lista de permitidos",
+        "wire.settings.shell_environment_mode.choice.inherit.label": "heredar"
+      },
+      "old_value_sha256": "2b7f8c9b0e4e634707516cfb6f3bce62793b7c42bbba32af1ea4163652ce0ebe",
+      "new_value_sha256": "b62cb272a8357668ab9a6b187dd0b108ab95fc80d2b9df5191b62f97b2202654",
+      "source_value_sha256": "5dcf493028adede98f672e7eb159c0910f0f3b8111640f2a19ab7b9e010050af",
+      "mechanical_checks": {
+        "key": "wire.settings.shell_environment_mode.help",
+        "old_cells": 401,
+        "new_cells": 437,
+        "english_cells": 344,
+        "code_tokens_preserved": [
+          "inherit",
+          "allowlist"
+        ],
+        "placeholders": []
+      },
+      "author_disposition": "authored remediation; requires independent A/B linguistic acceptance",
+      "glossary": "exact existing choice labels; servidores for hosts as proposed by R2 auditors; Spanish curly quotes per es style guide",
+      "safety_code_facts": "All prior code tokens retained verbatim in backticks; labels are quoted Spanish. default remains an explanatory sentinel and nothing is sent. No API/config behavior changed."
+    }
+  ],
+  "checks": {
+    "ICU_parser": "existing local_operator.i18n.runtime.parse_message",
+    "changed_messages_parsed": 7,
+    "placeholder_arguments_equal_source_and_K": true,
+    "plural_selectors_equal_source": true,
+    "NFC": true,
+    "no_bidi_controls": true,
+    "malformed_brace_negative_controls": [
+      {
+        "input": "{",
+        "rejected": true,
+        "error": "expected an argument name (at offset 1 of '{')"
+      },
+      {
+        "input": "{missing",
+        "rejected": true,
+        "error": "expected ',' or '}' after argument name 'missing' (at offset 8 of '{missing')"
+      },
+      {
+        "input": "{count, plural, one {uno}",
+        "rejected": true,
+        "error": "expected a word (at offset 25 of '{count, plural, one {uno}')"
+      }
+    ],
+    "negative_control_note": "An initial missing-other but syntactically closed plural was accepted by parse_message; this is not malformed brace syntax. Replaced it with truly unclosed plural as discriminating negative control; all three actual malformed-brace controls rejected. No CLDR audit claimed."
+  },
+  "technical_exceptions": [
+    "OpenRouter",
+    "API/config identifiers default false true deny allow inherit allowlist kept exactly in explicit code spans",
+    "gh aws npm and PATH/HOME/SHELL/TERM/USER/LOGNAME preserved",
+    "prompt, endpoint and caché follow shared/es style"
+  ],
+  "terms_invented": [],
+  "render_fit_risks": {
+    "rendered_validation": "not run: author-only bounded brief expressly disallows browser/native flows",
+    "all_changed_fields": "wrapping help copy, no menu label changed; no maxCells metadata on these seven keys",
+    "longest_help": {
+      "key": "wire.settings.shell_environment_mode.help",
+      "new_cells": 437,
+      "old_cells": 401
+    },
+    "expanded_help_keys": [
+      {
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+        "old_cells": 147,
+        "new_cells": 190
+      },
+      {
+        "key": "wire.settings.providers_openrouter_data_collection.help",
+        "old_cells": 153,
+        "new_cells": 205
+      },
+      {
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+        "old_cells": 101,
+        "new_cells": 133
+      },
+      {
+        "key": "wire.settings.providers_openrouter_require_parameters.help",
+        "old_cells": 181,
+        "new_cells": 218
+      },
+      {
+        "key": "wire.settings.providers_openrouter_sort.help",
+        "old_cells": 203,
+        "new_cells": 231
+      },
+      {
+        "key": "wire.settings.providers_openrouter_zdr.help",
+        "old_cells": 91,
+        "new_cells": 123
+      },
+      {
+        "key": "wire.settings.shell_environment_mode.help",
+        "old_cells": 401,
+        "new_cells": 437
+      }
+    ]
+  },
+  "constraints": "No staging/commit/push/head change, generated files, English, context, other locale or audit-history modification; no tests/framework/dependency/bootstrap/browser/API calls",
+  "source_auditor_receipts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/62b5777013c2/scratchpad/approval-repair-audit-es-A-r2.json",
+      "sha256": "b6124224ca10a08c1b60130752af8244b87e5b61bb17922924cab454d70ac8b7"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/1898eabd4159/scratchpad/approval-repair-audit-es-B-r2.json",
+      "sha256": "af116da3d3ee3b3d8b6d0bf798f725ee50639470fbc5cffe52d7cd87a581f1bb"
+    }
+  ],
+  "author_status": "SEVEN_VALUES_AUTHORED_MECHANICAL_PASS_ONLY"
+}

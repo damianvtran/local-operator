@@ -299,6 +299,91 @@ def drop_anchor(directory: str | Path) -> None:
         pass
 
 
+@dataclass(frozen=True)
+class NoAnchorPin:
+    """Why NO anchor belongs to a journal, pinned to a prefix so it outlives a process.
+
+    WHY IT EXISTS. ``build_anchor`` answers ``None`` for a journal that already
+    carries the checkpoint row, and prewarm used to remember that only in process
+    memory (``index_prewarm._NO_ANCHOR_NEEDED``). Every serve start therefore
+    re-selected the newest such journals and, with them, re-hydrated their whole
+    transcript index (#4362 QA, observation O1). This pin is what lets the answer
+    be written down once.
+
+    ONLY APPEND-MONOTONE REASONS ARE PINNED. ``checkpoint_present``: a row that
+    exists below ``size`` still exists after any append, because the bytes below
+    ``size`` are pinned by ``tail_digest`` (the same boundary pin a ``TailAnchor``
+    carries) and a compaction swaps the inode. ``over_scan_cap``: a journal whose
+    complete prefix is already past ``ABSENCE_SCAN_MAX_BYTES`` stays past it as it
+    grows. Every other ``None`` (unreadable, archive, no complete row, a foreign
+    spelling seen in a possibly torn tail) can change with the next append, so it
+    is never pinned and stays the in-process settlement it was.
+
+    DELIBERATELY NOT A ``TailAnchor``. Version 1 of the anchor once recorded
+    "a row exists at N" in the same file, and a later reader misread it as an
+    absence proof (see ``ANCHOR_VERSION``). A pin lives in its own record, under
+    the prewarm's cache directory, and no reader of the anchor ever sees it.
+    """
+
+    inode: int
+    size: int
+    tail_digest: str
+    reason: str
+
+
+#: The reasons :class:`NoAnchorPin` may carry; anything else is not a pin.
+NO_ANCHOR_REASONS = frozenset({"checkpoint_present", "over_scan_cap"})
+
+
+def _pin(path: Path, reason: str) -> NoAnchorPin | None:
+    """Pin ``reason`` to the journal's complete prefix, or ``None`` if it cannot be.
+
+    The stat is taken HERE, after the scan that justified ``reason``: a checkpoint
+    row the scan found was complete when found, so it ends at or below the last
+    complete row of this later stat, and the pinned prefix contains it.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    complete = _complete_row_end(path, stat.st_size)
+    if complete == 0:
+        return None
+    if reason == "over_scan_cap" and complete <= ABSENCE_SCAN_MAX_BYTES:
+        return None
+    row = _last_complete_row(path, complete)
+    if not row:
+        return None
+    return NoAnchorPin(stat.st_ino, complete, hashlib.sha256(row).hexdigest()[:16], reason)
+
+
+def pin_holds(directory: str | Path, pin: NoAnchorPin, *, recorded_ns: int) -> bool:
+    """Whether ``pin`` still describes the journal in ``directory``.
+
+    The anchor's own gate minus the suffix scan, which a pin does not need: both
+    reasons survive any append (see :class:`NoAnchorPin`). Refused when the file
+    was replaced (inode), shrank below the pin, had the row ending at the pin
+    change (a truncate-and-regrow), or — at the SAME size — had its metadata move
+    at or after ``recorded_ns`` (the record file's mtime): the in-place rewrite the
+    digest cannot see, refused with the reader's own "at or past" rule
+    (``index_prewarm._rewritten_since_record``). Costs one stat and one bounded
+    backward read of a single row.
+    """
+    if pin.reason not in NO_ANCHOR_REASONS:
+        return False
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return False
+    if stat.st_ino != pin.inode or stat.st_size < pin.size:
+        return False
+    if stat.st_size == pin.size and stat.st_ctime_ns >= recorded_ns:
+        return False
+    row = _last_complete_row(path, pin.size)
+    return bool(row) and hashlib.sha256(row).hexdigest()[:16] == pin.tail_digest
+
+
 def build_anchor(directory: str | Path) -> TailAnchor | None:
     """The anchor for this journal, or ``None`` when none is needed.
 
@@ -308,6 +393,17 @@ def build_anchor(directory: str | Path) -> TailAnchor | None:
     and proving that costs a whole-file scan — is the one that gets a record, and it
     is paid here rather than on a reader's first paint.
     """
+    return build_anchor_settled(directory)[0]
+
+
+def build_anchor_settled(
+    directory: str | Path,
+) -> tuple[TailAnchor | None, NoAnchorPin | None]:
+    """:func:`build_anchor`, plus a :class:`NoAnchorPin` when its ``None`` is durable.
+
+    One scan answers both, so prewarm can persist the "no anchor needed" answer
+    without paying the backward scan a second time.
+    """
     from local_operator.session import compression
 
     if compression.archive_path(Path(directory)) is not None:
@@ -315,12 +411,12 @@ def build_anchor(directory: str | Path) -> TailAnchor | None:
         # an archive has neither. Drop any stale record so the prewarm selector
         # does not read it as "this journal is warm".
         drop_anchor(directory)
-        return None
+        return None, None
     path = Path(directory) / TRANSCRIPT_FILENAME
     try:
         stat = os.stat(path)
     except OSError:
-        return None
+        return None, None
     # The compact spelling — the one ``to_json`` writes — keeps its PARSE-VERIFIED
     # search: a candidate that is not a checkpoint row (a torn tail, the spelling
     # nested in another row's details) does not cost the journal its record. Every
@@ -328,29 +424,32 @@ def build_anchor(directory: str | Path) -> TailAnchor | None:
     # so a plain byte proof of its absence is enough and errs toward the walk: any
     # occurrence, or a file past the scan cap, means no record.
     if find_row_for_custom_type(directory, ANCHOR_CUSTOM_TYPE) is not None:
-        return None
+        return None, _pin(path, "checkpoint_present")
     compact = _needles()[0]
     foreign = tuple(needle for needle in _needles() if needle != compact)
     if stat.st_size > ABSENCE_SCAN_MAX_BYTES:
-        return None
+        return None, _pin(path, "over_scan_cap")
     # ``_needle_absent`` is this module's own overlapped window scan, and it
     # answers "not proven" on a read error, so an unreadable byte refuses too.
     if not all(_needle_absent(path, 0, stat.st_size, needle) for needle in foreign):
-        return None
+        return None, None
     complete = _complete_row_end(path, stat.st_size)
     if complete == 0:
         # Nothing complete to anchor on: a record here would claim a region the
         # scan cannot describe, so no record is written and the walking reader
         # serves this journal (the ``0`` return of ``_complete_row_end`` has no
         # other caller — review round 2, N4).
-        return None
+        return None, None
     row = _last_complete_row(path, complete)
     if not row:
-        return None
-    return TailAnchor(
-        inode=stat.st_ino,
-        size=complete,
-        tail_digest=hashlib.sha256(row).hexdigest()[:16],
+        return None, None
+    return (
+        TailAnchor(
+            inode=stat.st_ino,
+            size=complete,
+            tail_digest=hashlib.sha256(row).hexdigest()[:16],
+        ),
+        None,
     )
 
 
@@ -440,9 +539,13 @@ __all__ = [
     "ANCHOR_CUSTOM_TYPE",
     "ANCHOR_FILENAME",
     "ANCHOR_VERSION",
+    "NO_ANCHOR_REASONS",
+    "NoAnchorPin",
     "TailAnchor",
     "anchor_path",
     "build_anchor",
+    "build_anchor_settled",
+    "pin_holds",
     "proves_absent",
     "read_anchor",
     "validate_anchor",
