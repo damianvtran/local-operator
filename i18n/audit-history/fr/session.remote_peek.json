@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "session.remote_peek",
-  "history_sha256": "30c15adcc2637d03b4867d500ad15a4fdae8fabd680dacb9e32febf18103a869",
+  "history_sha256": "01f84941c1bdcd09242a42953a0a7a53d7d69e284d88027657c92ca826950a32",
   "entries": [
     {
       "locale": "fr",
@@ -22,6 +22,25 @@
       },
       "status": "failed",
       "note": "PR #4478 at fddaf6021c, one of one keys. Lane: radient/auto. English author: coder (peek: head/query/digest for peers; fc728feacd6c), openai/gpt-6.2-sol fallback after anthropic/claude-opus-5-5 quota failure. Translator: coder (#4478 i18n translate; 6052aeaa5e38) on a translation-only brief, openai/gpt-6.2-sol fallback after anthropic/claude-opus-5-5 HTTP 402 quota failure. Independent auditor: translation-auditor (2c42b87648f0), openai/gpt-6.2-sol fallback after anthropic/claude-opus-5-5 quota failure. Polite vous: Essayez/ouvrez; historique/conversation; octets. MAJOR: “Limites de la page : {bytes} octets ou {messages} messages.” renders “1 octets ou 1 messages”; use “Limites de la page : en octets ({bytes}) ou en messages ({messages}).” MINOR: socket d’exécution vs house socket du runtime. Commands and placeholders are byte-exact; remedies first, owning device last. Actual width 88/110 cells via Rich (524,288 bytes, 120 messages). No second audit required: narrow exceptional overflow guidance, not a primary surface or safety copy."
+    },
+    {
+      "locale": "fr",
+      "namespace": "session.remote_peek",
+      "source_sha256": "2dbc9c5cb44bbf8446e3770cf936aac17a12ecea7c9b89c158360b71a30e1b94",
+      "translator": {
+        "agent": "coder",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #4478 round 2; 0d9893bf26cd85d47c53103337f569856d69480e, one of one keys. Original English author: coder (fc728feacd6c); translator: separate coder (6052aeaa5e38); round-1 independent auditor: translation-auditor (2c42b87648f0). Those runs and the round-2 implementer used openai/gpt-6.2-sol after anthropic/claude-opus-5-5 HTTP 402 quota failure (original provenance from round-1 comment; implementer fallback from round-2 brief). Round-2 independent auditor: translation-auditor (07ba56c3e660), radient/auto lane, served openai/gpt-6.2-sol after anthropic/claude-opus-5-5 quota failure (runtime model-switch notice). Polite vous (Essayez/ouvrez); historique/conversation, octets. The labels en octets / en messages are count-neutral; preserves the nonbreaking space before the colon; 88/110 cells. Existing minor socket d’exécution vs house socket du runtime is unchanged and deferred. Repository ICU formatter passed 1/1, 2/2, 1000000/999999, 999999/1000000 and production 524288/120; no new semantic or style defect. Exact backticked commands and one of each argument; remedies first, owning device last. No second audit required for this exceptional, reversible recovery copy."
     }
   ]
 }
