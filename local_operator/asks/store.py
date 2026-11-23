@@ -202,6 +202,14 @@ TIMEOUT_ROW_PREFIX = "ask-timeout-"
 #: so the note can never be mistaken for a response row belonging to the relay
 #: id (the relay's model was told nothing; the note is about the ORIGIN).
 RELAY_ROW_PREFIX = "ask-relay-"
+#: The DISPLAY-ONLY row the asker's own retraction writes
+#: (``ask_withdraw``, reason ``moot``). No reconcile owns it and
+#: :func:`expected_row_ids` never names it: a withdrawal delivers nothing to the
+#: model, so it owes no row. Its own prefix, not ``ask-response-``, because the
+#: response prefix is the delivery marker every reader treats as "an answer
+#: arrived" — a withdrawn ask that carried one would be read as answered by the
+#: dedupe in ``AskQueue`` alone.
+WITHDRAWN_ROW_PREFIX = "ask-withdrawn-"
 
 #: How long past its deadline an ask can still be answered and ATTRIBUTED, and
 #: how long a timeout notice or response is still worth injecting. Defined HERE
@@ -416,6 +424,18 @@ def relay_row_id(ask_id: str) -> str:
     a crash could lose.
     """
     return f"{RELAY_ROW_PREFIX}{ask_id}"
+
+
+def withdrawn_row_id(ask_id: str) -> str:
+    """The visible row for an ask the AGENT withdrew, or ``""`` for no ask id.
+
+    The same structural marker the other ask rows use, for the same reason: a
+    replay of the journal — or a second ``ask_withdraw`` reaching the writer —
+    is a constant-time ``transcript.has_entry`` check rather than a duplicate
+    line. Unlike those, nothing reconciles this row: the withdrawal is a fact
+    the operator reads and the model never sees (``ASK_WITHDRAWN_MESSAGE_TYPE``).
+    """
+    return f"{WITHDRAWN_ROW_PREFIX}{ask_id}" if ask_id else ""
 
 
 #: The separator in a MIRROR request id (design §4, "legacy mirror"): the
@@ -1629,5 +1649,6 @@ __all__ = [
     "response_row_id",
     "session_dir",
     "timeout_row_id",
+    "withdrawn_row_id",
     "write_entry",
 ]
