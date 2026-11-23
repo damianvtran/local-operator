@@ -21,6 +21,10 @@ vi.mock("./api", async (importOriginal) => {
 		getCommands: vi.fn(async () => ({ commands: [] })),
 		getSkills: vi.fn(async () => ({ skills: [] })),
 		getModels: vi.fn(async () => ({ models: [] })),
+		// The composer's working-directory chip asks for the home path on every
+		// mount. Unmocked, that was a real fetch to happy-dom's localhost:3000
+		// (the ECONNREFUSED noise in every run of this file).
+		getDirectories: vi.fn(async () => ({ home: "/home/test", recent: [] })),
 		sendCommand: vi.fn(async (_sessionId: string, _op: Record<string, unknown>) => ({
 			ok: true,
 			detail: "",
@@ -137,10 +141,19 @@ function availableCapability(): Capabilities {
 	return { stt: { available: true, path: "provider_stt_radient", reason: "" } };
 }
 
+/** React's scheduler runs passive effects from a setImmediate task queued at commit; a task queued now runs after it. */
+function flushPassiveEffects(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
+}
+
 /** Click the mic and wait for the recording state; returns the live recorder. */
 async function startRecording(): Promise<FakeRecorder> {
 	fireEvent.click(screen.getByRole("button", { name: "start voice input" }));
 	await waitFor(() => expect(screen.getByRole("button", { name: "stop and transcribe" })).toBeTruthy());
+	// The button is in the DOM at COMMIT; the window-level Enter listener is a
+	// passive effect that runs a scheduler task later. A key sent in that gap is
+	// lost, so let React flush before the test acts.
+	await flushPassiveEffects();
 	return FakeRecorder.instances.at(-1)!;
 }
 
@@ -176,6 +189,12 @@ afterEach(() => {
 	cleanup();
 	localStorage.clear();
 	vi.clearAllMocks();
+	// clearAllMocks keeps the mockResolvedValueOnce queue, so a test that fails
+	// before consuming its queued reply would hand it to the NEXT test: one
+	// flake became eleven red tests (CI run 45130125496). Reset drops the
+	// queue and restores the factory reply.
+	mockedTranscribe.mockReset();
+	mockedSendCommand.mockReset();
 	vi.unstubAllGlobals();
 	Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
 });
