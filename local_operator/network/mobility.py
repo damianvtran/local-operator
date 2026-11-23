@@ -608,10 +608,8 @@ class MoveCarryBlock(TypedDict, total=False):
     #: there. Additive inside an already-optional block, so a move that carried
     #: nothing new parses exactly as before.
     cwd: dict[str, str]
-    #: Present only when the source could NOT refresh the session's team/agent
-    #: definitions and the operator's custom instructions on the destination before
-    #: the move (``_push_move_definitions``): names what may be stale there. The
-    #: move itself still completed — a brief refresh never gates a move.
+    #: Non-fatal notice about the standing instructions on the destination.
+    #: Attachment definitions reconcile independently and are checked at arrival.
     definitions_notice: str
 
 
@@ -2317,13 +2315,14 @@ def _destination_move(
     try:
         team_identity = move_team.check_arrival(server.root, staging, prepared.get(move_team.KEY))
     except move_team.TeamIdentityRefused as refusal:
-        # Check only after the normal pre-invite definitions push and verified
-        # pull, but before ready can authorize deletion of the source copy.
-        _report_destination_rollback(transport, session_id, lease_epoch, move_team.CODE)
+        # The pull carries evidence, not declarations. Roll back even for
+        # definitions still in flight so the source can prepare a fresh retry.
+        code = refusal.code
+        _report_destination_rollback(transport, session_id, lease_epoch, code)
         _roll_back_destination(server, session_id, staging)
         return (
             None,
-            _move_refusal(session_id, move_team.CODE, str(refusal), phase_reached="prepared"),
+            _move_refusal(session_id, code, str(refusal), phase_reached="prepared"),
             "",
         )
     # THE DESTINATION'S OWN CONTENT DIGEST, computed from the bytes it actually
@@ -8139,13 +8138,10 @@ def _offload(
     )
     if blocked is not None:
         return blocked
-    # THE DESTINATION GETS THIS DEVICE'S DEFINITIONS BEFORE IT PULLS, so the moved
-    # session restores against the CURRENT team/agent brief and the operator's custom
-    # instructions rather than whatever mirror the cadence last left there (a team
-    # edited a minute ago, or a node paired since the last tick). It runs before the
-    # invite, and therefore before any commit. A failed push is reported rather
-    # than itself refusing the move: the destination may already have the exact
-    # team. The pull independently refuses if it cannot verify that identity.
+    # Refresh standing instructions over the existing channel, not the roster
+    # or its roles. An invite has not been admitted yet and cannot install its
+    # own authority; the pull compares recorded evidence with definitions the
+    # destination already has from independent reconciliation.
     definitions_notice = _push_move_definitions(
         server, session_id, target_device, target_name or target_device
     )
@@ -8437,37 +8433,17 @@ def _offload(
 
 
 def _push_move_definitions(
-    server: "RelayServer", session_id: str, target_device: str, target_label: str
+    server: RelayServer, session_id: str, target_device: str, target_label: str
 ) -> str:
-    """Reconcile the moving session's team/agent (and the operator's instructions)
-    onto the destination; return the receipt's notice, or ``""`` when it landed.
-
-    The names come from the session's own ``attachment.json`` (what ``/team`` and
-    ``/agent`` put on it); ``definitions.push_to_peer`` expands a team to its roster
-    and always carries the operator-instructions singleton, so a session with no
-    attachment still gets the operator's standing rules. Never raises: the actual
-    team-identity decision belongs to the destination pull, not the push receipt.
-    """
+    """Refresh the standing-instructions singleton, never attachment definitions."""
     from local_operator.network import definitions
-    from local_operator.resume import read_session_attachment
 
-    team = agent = ""
+    # Empty selectors are explicit: omitting them sends the whole registry,
+    # and a team selector alone expands to authority-conferring role rows.
     try:
-        attachment = read_session_attachment(Path(server.root) / "sessions" / session_id)
-    except Exception:  # noqa: BLE001 — an unreadable sidecar still moves
-        attachment = None
-    if attachment is not None:
-        team, agent = attachment.team, attachment.agent
-    # A team owns the agent slot: its recorded speaker is not an independent
-    # attachment. Roster expansion supplies the manager and delegated roles for
-    # the ceiling check, not a binding for the arriving session.
-    names = {"agents": [agent] if agent and not team else [], "teams": [team] if team else []}
-    try:
-        pushed = definitions.push_to_peer(server, target_device, names=names)
+        pushed = definitions.push_to_peer(server, target_device, names={"agents": [], "teams": []})
     except Exception as exc:  # noqa: BLE001 — non-fatal, see the call site
-        logger.warning(
-            "mobility: definitions push before moving %s failed", session_id, exc_info=True
-        )
+        logger.warning("mobility: pre-invite refresh for %s failed", session_id, exc_info=True)
         pushed = {"ok": False, "message": str(exc)}
     report = pushed.get(definitions.OPERATOR_INSTRUCTIONS_KIND)
     report = report if isinstance(report, dict) else {}
@@ -8476,38 +8452,25 @@ def _push_move_definitions(
     # keep its instructions, which is not "could not be refreshed". Informational —
     # the move still completes.
     kept_own = str(report.get("notice") or "") if outcome == "conflict" else ""
-    # THE INSTRUCTIONS ARE NAMED ONLY WHEN THEY ARE WHAT FAILED (R1-4). ``ok`` is
-    # False for an agent/team conflict or a transport failure; the instructions
-    # outcome never sets it, so naming them on every failure blamed them for a
-    # team conflict. No report at all (the push never reached the peer) leaves
-    # them unknown, so they stay named then.
-    instructions_stale = not kept_own and outcome not in definitions.INSTRUCTIONS_SETTLED_OUTCOMES
-    parts: list[str] = []
-    if not pushed.get("ok") or instructions_stale:
-        named = [
-            part
-            for part in (f"team {team!r}" if team else "", f"agent {agent!r}" if agent else "")
-            if part
-        ]
-        if instructions_stale:
-            named.append("the custom instructions")
+    # No report (e.g. a transport failure) leaves the instructions unverified.
+    # Never claim the attachment definitions are stale based on this push:
+    # they were deliberately not in its scope.
+    if kept_own:
+        notice = kept_own
+    elif outcome not in definitions.INSTRUCTIONS_SETTLED_OUTCOMES:
         if not pushed.get("ok"):
             reason = str(pushed.get("message") or pushed.get("code") or "no answer")
         else:
             reason = str(report.get("reason") or outcome or "no answer")
-        if named:
-            subject = " and ".join(named)
-            parts.append(
-                f"{subject} on {target_label} may be an older copy — "
-                f"{'it' if len(named) == 1 else 'they'} could not be refreshed before the "
-                f"move ({reason})"
-            )
-    if kept_own:
-        parts.append(kept_own)
-    if not parts:
+        notice = (
+            f"the custom instructions on {target_label} may be an older copy — "
+            f"they could not be refreshed before the move ({reason})"
+        )
+    else:
         return ""
-    notice = "; ".join(parts)
-    logger.warning("mobility: after moving %s to %s: %s", session_id, target_label, notice)
+    logger.warning(
+        "mobility: pre-invite refresh for %s on %s: %s", session_id, target_label, notice
+    )
     return notice
 
 

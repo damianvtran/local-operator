@@ -1703,29 +1703,27 @@ def _authorize_source(root: Path, directory: Path, name: str) -> None:
     session.attach_team(team)
 
 
-def test_an_offload_refreshes_definitions_on_the_destination_before_the_invite(
+def test_no_authority_conferring_install_before_invite_and_retry_after_sync(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Gap B (remote-session-parity): a moved team session restores against the
-    CURRENT team brief and the operator's custom instructions, not a stale mirror.
-
-    ``_offload`` pushes the session's attachment (team + roster) and the
-    operator-instructions singleton to the destination BEFORE the invite, so the
-    destination holds them before it ever pulls, let alone commits. Asserted on the
-    real two-relay rig: the order of the push and the invite, and the bytes that
-    landed on B.
-    """
+    """No authority-conferring install may happen before the invite completes."""
+    from local_operator.agents import AgentEditFields, AgentRegistry
     from local_operator.network import definitions
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
+    # Hold the independent cadence until the test explicitly reconciles below;
+    # pairing can nudge it immediately, before the invite reaches the peer.
+    monkeypatch.setattr(definitions.DefinitionsSyncer, "tick", lambda *_a, **_k: [])
     server_a, server_b, _host, _port = pair
     _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
     session_dir = _owned_session(server_a)
+    manager = "offload-manager"
+    AgentRegistry(server_a.root).create_agent(AgentEditFields(name=manager, tags=["role"]))
     TeamRegistry(server_a.root).create_team(
         TeamEditFields(
             name="lopdev",
             description="the team",
-            manager="manager",
+            manager=manager,
             members=[TeamMember(role="coder")],
             instructions="Every PR gets a review round.",
             project="local-operator",
@@ -1743,32 +1741,48 @@ def test_an_offload_refreshes_definitions_on_the_destination_before_the_invite(
         events.append(("push", kwargs.get("names")))
         return real_push(server, device_id, **kwargs)
 
-    def ask(self: Any, frame: dict[str, Any]) -> dict[str, Any]:
+    def ask(self: Any, frame: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         events.append(("ask", frame.get("phase")))
-        return real_ask(self, frame)
+        return real_ask(self, frame, **kwargs)
 
     monkeypatch.setattr(definitions, "push_to_peer", push)
     monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
 
     result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
 
-    assert result["ok"] is True, result
     pushes = [i for i, (kind, _) in enumerate(events) if kind == "push"]
     invite = events.index(("ask", "invite"))
     assert pushes and pushes[0] < invite, events
-    # Select the roster graph, not a second attachment for the team's speaker.
-    # Expansion carries its definitions so arrival can compute what to refuse.
-    assert events[pushes[0]][1] == {"agents": [], "teams": ["lopdev"]}, events
+    # A team selector would expand to roles even with an empty agent selector.
+    assert events[pushes[0]][1] == {"agents": [], "teams": []}, events
     assert (server_b.root / "system_prompt.md").read_text(encoding="utf-8") == rules
-    mirrored = TeamRegistry(server_b.root).get_team_by_name("lopdev")
-    assert mirrored is not None
-    # A clean refresh adds nothing to the receipt.
-    assert "definitions_notice" not in (result.get("carry") or {}), result
+    assert TeamRegistry(server_b.root).get_team_by_name("lopdev") is None
+    assert AgentRegistry(server_b.root).get_agent_by_name(manager) is None
+    assert result["ok"] is False and result["code"] == "team_definitions_pending", result
+    assert result["message"] == (
+        "lopdev: team definition is not available yet; retry after definitions sync"
+    ), result
+    assert result["phase_reached"] == "prepared" and result["changed"] is False, result
+    assert session_dir.is_dir()
+    assert not (server_b.root / "sessions" / SESSION).exists()
+    print("Before definitions sync:", result["code"], result["message"])
+
+    # Independently run the same reconciliation used by the background cadence.
+    synced = real_push(server_a, server_b.identity.device_id)
+    assert synced["ok"] and "lopdev" in synced["teams"], synced
+    retry = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    assert retry["ok"] is True, retry
+    arrived = read_stamp(server_b.root, SESSION)
+    assert arrived is not None and arrived.home_device == server_b.identity.device_id
+    assert not session_dir.exists()
+    assert "definitions_notice" not in (retry.get("carry") or {}), retry
+    print("After definitions sync: retry succeeded and destination owns the session")
 
 
 @pytest.mark.asyncio
-async def test_preinvite_team_definitions_do_not_bind_the_arriving_session(
-    pair: Devices, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("destination_tool", ["read", "edit"])
+async def test_unbound_destination_declaration_requires_recorded_team_identity(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, destination_tool: str
 ) -> None:
     from local_operator.agents import AgentEditFields, AgentRegistry
     from local_operator.network import move_team
@@ -1779,30 +1793,43 @@ async def test_preinvite_team_definitions_do_not_bind_the_arriving_session(
     source = _owned_session(owner)
     manager = "offload-manager"
     team = "offload-team"
-    AgentRegistry(owner.root).create_agent(AgentEditFields(name=manager, tags=["role"]))
-    TeamRegistry(owner.root).create_team(TeamEditFields(name=team, manager=manager))
+    for root, tool in ((owner.root, "read"), (receiver.root, destination_tool)):
+        AgentRegistry(root).create_agent(
+            AgentEditFields(name=manager, tags=["role", f"tools:{tool}"])
+        )
+        TeamRegistry(root).create_team(TeamEditFields(name=team, manager=manager))
     _authorize_source(owner.root, source, team)
-    assert AgentRegistry(receiver.root).get_agent_by_name(manager) is None
+    assert move_team.source_offer(owner.root, source, supported=True) is not None
 
     destination = receiver.root / "sessions" / SESSION
     real_ask = mobility.LinkTransport.ask
     checked = False
 
-    def ask(self: Any, frame: dict[str, Any]) -> dict[str, Any]:
+    def ask(self: Any, frame: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         nonlocal checked
         if frame.get("phase") == "invite":
-            # Registry rows describe the ceiling, but are not an authority record.
+            # An existing declaration cannot bind the arriving session. The
+            # invite transports no declaration; the pull carries the ceiling.
+            assert move_team.KEY not in frame
             assert AgentRegistry(receiver.root).get_agent_by_name(manager) is not None
             assert TeamRegistry(receiver.root).get_team_by_name(team) is not None
             assert not destination.exists()
             with pytest.raises(move_team.TeamIdentityRefused, match=team):
                 move_team.check_arrival(receiver.root, source, None)
             checked = True
-        return real_ask(self, frame)
+        # The rollback and refusal report pass explicit timeouts; the spy must
+        # relay those unchanged or a real refusal looks like a move deadline.
+        return real_ask(self, frame, **kwargs)
 
     monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
     result = _move(owner, SESSION, to=receiver.identity.device_id, monkeypatch=monkeypatch)
     assert checked
+    if destination_tool == "edit":
+        assert result["ok"] is False and result["code"] == move_team.CODE, result
+        assert result["message"] == f"{team}: would grant tool pins: edit", result
+        assert source.is_dir() and not destination.exists()
+        print("Recorded ceiling refusal:", result["code"], result["message"])
+        return
     assert result["ok"] is True, result
     arrived = _open_team_session(receiver.root, destination)
     try:
@@ -1911,7 +1938,12 @@ async def test_recall_requires_the_source_team_definition(
             assert attachment(existing, existing_goal) == before
         else:
             assert observed[0] is False, observed
-            assert result["code"] == "team_definition_unavailable", result
+            expected_code = (
+                "team_definitions_pending"
+                if destination == "missing"
+                else "team_definition_unavailable"
+            )
+            assert result["code"] == expected_code, result
             assert "identity-test" in str(observed[1]), observed
             if destination == "wider-manager":
                 assert "would grant tool pins: edit" in str(observed[1]), observed
@@ -2030,13 +2062,16 @@ def test_team_identity_refuses_until_the_destination_definition_is_loaded(
     _authorize_source(author, author, "identity-test")
     offer = source_offer(author, author, supported=True)
     assert offer is not None
-    with pytest.raises(TeamIdentityRefused, match="identity-test: team definition is unavailable"):
+    pending = "identity-test: team definition is not available yet; retry after definitions sync"
+    with pytest.raises(TeamIdentityRefused, match=pending) as missing:
         check_arrival(peer, peer, offer)
+    assert missing.value.code == "team_definitions_pending"
     TeamRegistry(peer).save_team(team)
     with monkeypatch.context() as unloaded:
         unloaded.setattr(TeamRegistry, "_load_briefs", lambda self, row: row)
-        with pytest.raises(TeamIdentityRefused, match="identity-test: team definition is unavailable"):
+        with pytest.raises(TeamIdentityRefused, match=pending) as not_loaded:
             check_arrival(peer, peer, offer)
+        assert not_loaded.value.code == "team_definitions_pending"
     assert check_arrival(peer, peer, offer) is not None
     with pytest.raises(TeamIdentityRefused, match="recorded authority is unavailable"):
         check_arrival(peer, peer, {key: value for key, value in offer.items() if key != "delegation"})

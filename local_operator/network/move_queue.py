@@ -875,17 +875,14 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
             writer="relay",
         )
         return QUEUE_PHASE_FAILED
-    # THE TEAM/AGENT BRIEF GOES FIRST, as on the immediate move
-    # (``mobility._push_move_definitions``): the queued path sent the invite with no
-    # definitions reconcile at all, so a session attached to a team the destination
-    # had never been sent restored unattached there (2026-11-13: the lopdev brief was
-    # missing from the moved session's prompt). Non-fatal by the same contract; the
-    # destination's promote names a team it still cannot resolve (``carry.team``).
+    # As with an immediate move, refresh standing instructions without installing
+    # any team or role declarations. The queued invite is not authority to install
+    # what it will use, and arrival independently checks the recorded ceiling.
     try:
         mobility._push_move_definitions(  # noqa: SLF001
             server, session_id, target_device, target_name or target_device
         )
-    except Exception:  # noqa: BLE001 — a brief that could not be refreshed never blocks
+    except Exception:  # noqa: BLE001 — a standing-instructions refresh never blocks
         logger.warning("move queue: definitions push before %s failed", session_id, exc_info=True)
     try:
         accepted = mobility.LinkTransport(server, link, session_id).ask(

@@ -32,11 +32,33 @@ _UNREADABLE_STAMP = object()
 
 
 class TeamIdentityRefused(ValueError):
+    code = CODE
+
     def __init__(self, name: str, authority: str = "") -> None:
         # The expected definition was not found under this name. This is also
         # true of a conflict; the name alone is not a candidate for attachment.
         message = render_resolved(keys.team_missing(role=name))
         super().__init__(f"{name}: {authority}" if authority else message)
+
+
+class _DefinitionNotLoaded(TeamIdentityRefused):
+    def __init__(self, team: str, subject: str) -> None:
+        super().__init__(team, f"{subject} is unavailable")
+        self.team = team
+        self.subject = subject
+
+
+class TeamDefinitionsPending(TeamIdentityRefused):
+    """Independent reconciliation can supply a missing destination definition."""
+
+    code = "team_definitions_pending"
+
+    def __init__(self, missing: _DefinitionNotLoaded) -> None:
+        super().__init__(
+            missing.team,
+            # i18n: ignore technical diagnostic carried verbatim by the relay protocol
+            f"{missing.subject} is not available yet; retry after definitions sync",
+        )
 
 
 class UnboundAttachmentUnreadable(TeamIdentityRefused):
@@ -62,9 +84,9 @@ def _resolve(registry: TeamRegistry, name: str) -> Team | None:
         team = registry.get_team_by_name(name, require_loaded=True)
     except Exception as error:  # noqa: BLE001 — an unreadable registry cannot authorize a team
         raise TeamIdentityRefused(name, "team definition is unavailable") from error
-    return (
-        team if team is not None and team.name.casefold() == name.casefold() else None
-    )
+    if team is not None and team.name.casefold() != name.casefold():
+        raise TeamIdentityRefused(name, "a team alias does not establish identity")
+    return team
 
 
 def _local_binding(directory: Path) -> Any:
@@ -196,17 +218,16 @@ def read_local_attachment(directory: Path) -> SessionAttachment | None:
 
 
 def _verify_name(name: str, expected: Any, team: Team | None) -> Team:
-    if team is None:
-        raise TeamIdentityRefused(name, "team definition is unavailable")
     if not isinstance(expected, dict) or "delegation" not in expected:
         raise TeamIdentityRefused(
             name, "recorded authority is unavailable; re-attach via /team"
         )
-    if (
-        team.name.casefold() != name.casefold()
-        or not isinstance(expected_name := expected.get("name"), str)
-        or expected_name.casefold() != name.casefold()
-    ):
+    expected_name = expected.get("name")
+    if not isinstance(expected_name, str) or expected_name.casefold() != name.casefold():
+        raise TeamIdentityRefused(name)
+    if team is None:
+        raise _DefinitionNotLoaded(name, "team definition")
+    if team.name.casefold() != name.casefold():
         raise TeamIdentityRefused(name)
     return team
 
@@ -260,9 +281,7 @@ def _role_authority(
         raise TeamIdentityRefused(team_name) from error
     if kind is None:
         subject = "delegated role" if delegated else "manager"
-        raise TeamIdentityRefused(
-            team_name, f"{subject} definition {role!r} is unavailable"
-        )
+        raise _DefinitionNotLoaded(team_name, f"{subject} definition {role!r}")
     # A seed's identity is its packaged name; a specialist/role's identity
     # comes from the very lookup that produced its applied prompt or pins.
     # Hash the authored profile, not any machine-local delivery pointer.
@@ -391,9 +410,7 @@ def _snapshot(
                 check_size(len(resolved) + len(roles))  # +new team, -root team
                 nested = _resolve(teams, slot.role) if teams is not None else None
                 if nested is None:
-                    raise TeamIdentityRefused(
-                        team.name, f"delegated team {slot.role!r} is unavailable"
-                    )
+                    raise _DefinitionNotLoaded(team.name, f"delegated team {slot.role!r}")
                 resolved[child_key] = nested.model_copy(deep=True)
             height = max(height, 1 + visit(resolved[child_key], (*ancestors, key)))
         heights[key] = height
@@ -522,7 +539,13 @@ def source_offer(
 
 
 def check_arrival(root: Path, directory: Path, expected: Any) -> dict[str, Any] | None:
-    return _check_destination(root, directory, expected, promoting=False)
+    try:
+        return _check_destination(root, directory, expected, promoting=False)
+    except _DefinitionNotLoaded as missing:
+        # Only arrival depends on the destination's background reconciliation.
+        # Explicit read failures and rejected authority comparisons keep their
+        # own refusal; waiting for another definitions tick is not their remedy.
+        raise TeamDefinitionsPending(missing) from missing
 
 
 def _check_destination(
