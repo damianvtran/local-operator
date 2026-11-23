@@ -431,18 +431,20 @@ async def test_the_header_hints_follow_the_view():
     dead-end affordance, inverted against the rows it sat over.
     """
     settled = AskQueueList(ask_rows([_row("a1", status="declined")]))
-    assert settled.header_hints() == ("esc collapse",)
+    # `y copy id` is live over a settled row: it reads the row's handle, it does
+    # not act on the row (design §3).
+    assert settled.header_hints() == ("y copy id", "esc collapse")
     assert "enter answer" not in settled.header_text(200)
     assert "d decline" not in settled.header_text(200)
     assert "esc collapse" in settled.header_text(200)
     # An EMPTY HALF advertises nothing either — the middle half can hold only
     # delivering rows, which are pending but not answerable.
     delivering = AskQueueList(ask_rows([_row("a1", status="answered", delivered=False)]))
-    assert delivering.header_hints() == ("esc collapse",)
+    assert delivering.header_hints() == ("y copy id", "esc collapse")
     # A LAPSED row is read-only (D10): `x dismiss` is the one key it honours.
     lapsed = AskQueueList(ask_rows([_row("a1", status="timed_out")]))
     # `enter view` opens its read-only card (#2481 UX U1).
-    assert lapsed.header_hints() == ("x dismiss", "enter view", "esc collapse")
+    assert lapsed.header_hints() == ("x dismiss", "enter view", "y copy id", "esc collapse")
     # An OPEN row can be dismissed since R5 (SA-D4 removed the live refusal), so
     # `x dismiss` is advertised over it as well — it opens the two-choice reason
     # card rather than dismissing at once.
@@ -452,6 +454,7 @@ async def test_the_header_hints_follow_the_view():
         "enter answer",
         "d decline",
         "x dismiss",
+        "y copy id",
         "esc collapse",
     )
 

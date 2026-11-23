@@ -9,5 +9,7 @@
   "tui.asks.dismiss.notice_answered_in_chat": "Đã bỏ qua — đã trả lời trong cuộc trò chuyện",
   "tui.asks.dismiss.notice_moot": "Đã bỏ qua — không còn cần nữa",
   "tui.asks.dismiss.notice_no_reply": "Đã bỏ qua — không gửi câu trả lời",
-  "tui.asks.dismiss.title": "Bỏ qua câu hỏi này"
+  "tui.asks.dismiss.title": "Bỏ qua câu hỏi này",
+  "tui.asks.list.copied_id": "Đã sao chép {ask_id}",
+  "tui.asks.list.copy_id_hint": "y sao chép id"
 }

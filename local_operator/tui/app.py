@@ -31092,6 +31092,23 @@ class OperatorApp(App[None]):
         # ask and unset for a lapsed one; both end in the same door.
         self._dismiss_ask(message.ask_id, reason=message.reason)
 
+    def on_ask_queue_list_copied(self, message: AskQueueList.Copied) -> None:
+        """`y` on a list row: the id goes to the clipboard, with its receipt.
+
+        ``copy_to_clipboard`` directly rather than ``_put_on_clipboard``: that
+        helper's receipt reports the SHAPE of a selection (characters, lines),
+        and here the payload is one id the reader asked for by name — the
+        receipt that helps is the id itself, which is also what a locale
+        translates. One write either way: the same OSC 52 call every copy
+        gesture in this app shares.
+        """
+        message.stop()
+        self.copy_to_clipboard(message.ask_id)
+        self.query_one(Toast).show(
+            _t_asks(_ask_keys.list_copied_id(ask_id=message.ask_id)),
+            yield_to_actionable=True,
+        )
+
     def _notify_mobile_title(self, name: str) -> None:
         """Push a title (generated, renamed, or provisional) to the phone.
 

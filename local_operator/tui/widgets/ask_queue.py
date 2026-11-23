@@ -292,6 +292,32 @@ DELIVERING_MARK = "▸"
 #: forbids. It exists so the row cannot be fired twice.
 IN_FLIGHT_MARK = "…"
 
+#: The cells an ask id takes on a list row: ``a-`` plus four hex, which is what
+#: ``asks/store.py`` mints. FIXED, and never truncated — a cut id is a different
+#: id, and the whole point of the column is that the id an agent quoted in its
+#: prose can be matched to the row here by eye (T-1).
+ASK_ID_CELLS = 6
+
+#: The gap between the id column and the question. Two cells, not one, so the id
+#: reads as a FIELD beside the row rather than as the first word of the question
+#: — the same separation the tail already puts before its status chip.
+ASK_ID_GAP = 2
+
+#: The id column and its gap together: what the question gives up on every row
+#: that paints an id, so the column sits in the same place at every width.
+ASK_ID_COLUMN = ASK_ID_CELLS + ASK_ID_GAP
+
+#: The fewest cells a row's QUESTION keeps before the id column gives way for
+#: every row but the cursor's (design §3). Below this a question is not a
+#: question any more, and the row that has the caret is the one the reader is
+#: on, so its id is the one worth spending the cells on.
+ASK_QUESTION_MIN_CELLS = 16
+
+#: The hint that names the copy key. A token rather than the painted copy: this
+#: is the string the live set carries and ``HEADER_HINTS`` orders, and the
+#: catalogue holds the words a locale reads (see :func:`_hint_label`).
+COPY_HINT = "y copy id"
+
 
 #: The dismiss chooser's two reasons, in the order the chooser offers them, each
 #: with the keys that NAME it and EXPLAIN it. The first element is the queue's
@@ -325,6 +351,21 @@ CONTEXT_CUE = "└ "
 #: primary key would become ambiguous) and `esc collapse` to `esc` would collide
 #: with the chooser's `esc cancel`.
 KEY_ONLY_HINTS = {"x dismiss": "x"}
+
+
+def _hint_label(hint: str) -> str:
+    """The copy a live header hint PAINTS.
+
+    ``HEADER_HINTS`` holds tokens: the string the live set is built from, the
+    string ``KEY_ONLY_HINTS`` is keyed by, and the string the sacrifice order is
+    written in. Only the copy hint has been extracted so far (design §6), so it
+    is the one whose painted words come from the catalogue; the rest are the
+    keycap phrases this surface has always painted and are translated in their
+    own round rather than half-translated here.
+    """
+    if hint == COPY_HINT:
+        return _a(_asks.list_copy_id_hint())
+    return hint
 
 
 @dataclass(frozen=True)
@@ -1074,6 +1115,19 @@ class AskQueueList(Widget):
             super().__init__()
             self.ask_id = ask_id
 
+    class Copied(Message):
+        """`y` on a row: the user asked for that ask's id on the clipboard.
+
+        A message rather than a direct write, because the receipt is a toast and
+        the app owns the one clipboard write every copy gesture shares
+        (``_put_on_clipboard``'s neighbours). The widget knows WHICH id is under
+        the cursor; the app owns what saying so looks like.
+        """
+
+        def __init__(self, ask_id: str) -> None:
+            super().__init__()
+            self.ask_id = ask_id
+
     class Dismiss(Message):
         """The user dismissed one ask from the view.
 
@@ -1098,6 +1152,10 @@ class AskQueueList(Widget):
         Binding("j", "move(1)", "Down", show=False),
         Binding("d", "decline", "Decline", show=False),
         Binding("x", "dismiss", "Dismiss", show=False),
+        # `y` copies a handle, never a change: it is the key the file viewer and
+        # the projects page already use for "take this" (design §5.3), and none
+        # of the keys above claims it.
+        Binding("y", "copy_id", "Copy ask id", show=False),
         # The filter's own keys (design §4). None of `1/2/3`, `[`/`]` collide
         # with the bindings above (verified against this list), and the segments
         # are also press targets — the mouse path A9 requires.
@@ -1136,6 +1194,13 @@ class AskQueueList(Widget):
         "x dismiss",
         "enter view",
         PASSIVE_TAB_HINT,
+        # THE COPY HINT gives way FIRST (§3): the id is already painted on the
+        # row under the cursor, so `y` is the hint the header can lose without
+        # leaving a gesture undiscoverable. It is PAINTED here — before the exit
+        # hint, where design §3's frames place it — and removed first by the
+        # ladder below, so its position and its priority are decided separately
+        # rather than by where it sits in this tuple.
+        COPY_HINT,
         "esc collapse",
         # THE CHOOSER'S OWN TWO (R5), last because they are live only while it is
         # up: `header_hints` filters by what the CURRENT view can honour, so the
@@ -1490,6 +1555,23 @@ class AskQueueList(Widget):
             self._cancel_dismiss_reason()
             return
         self.post_message(self.Collapse())
+
+    def action_copy_id(self) -> None:
+        """`y`: put the cursor row's id on the clipboard.
+
+        Silent while the dismiss chooser is up: that mode owns the keyboard and
+        paints its own two keys, and a copy under a card asking WHY would answer
+        a question the user was never asked.
+
+        The id and not the question: a question can be 900 characters and is
+        already on screen, and the id is the handle an agent quotes in its prose
+        and the one a person needs to paste into a report.
+        """
+        if self.choosing:
+            return
+        row = self.current()
+        if row is not None:
+            self.post_message(self.Copied(row.ask_id))
 
     def action_decline(self) -> None:
         if self.choosing:
@@ -1852,6 +1934,10 @@ class AskQueueList(Widget):
         # answer keys and `x dismiss` (R5). A row in flight takes nothing until
         # its reply lands.
         row = self.current()
+        if row is not None:
+            # Copying an id is a READ of the row, so it needs no answerable row
+            # and no quiet one: a row in flight still has an id to quote.
+            live.add(COPY_HINT)
         if row is not None and row.ask_id not in self._in_flight:
             if row.answerable:
                 live |= {"enter answer", "d decline", "x dismiss"}
@@ -1938,7 +2024,12 @@ class AskQueueList(Widget):
         # dock prints the same sentence in full one line away, so the clause is
         # the thing that goes; the hints are what the ladder exists to keep.
         hints = self.header_hints()
-        live_hints = [HeaderAtom("  ·  " + hint, "muted") for hint in hints]
+        # THE COPY HINT IS WEIGHED OUT of the clause's own bargain (§3): it is the
+        # hint that gives way first, so it must not be what pushes the drawer's
+        # sentence off a header that could carry it plus every key a reader
+        # needs. The ladder below still paints it when there is room.
+        clause_hints = tuple(hint for hint in hints if hint != COPY_HINT)
+        live_hints = [HeaderAtom("  ·  " + _hint_label(hint), "muted") for hint in clause_hints]
         if clause:
             with_clause = [HeaderAtom(subject, "fg")] if subject else []
             with_clause.append(HeaderAtom(f"{' · ' if subject else ''}{clause}", "fg"))
@@ -1951,8 +2042,10 @@ class AskQueueList(Widget):
         atoms.extend(head)
         atoms.extend(_seg_block(bool(head)))
 
-        def shed(prefix: str, *, key_fallback: bool = False) -> list[HeaderAtom]:
-            """As many hints as fit, in order, from the left.
+        def shed(
+            prefix: str, order: tuple[str, ...], *, key_fallback: bool = False
+        ) -> list[HeaderAtom]:
+            """As many of ``order``'s hints as fit, in order, from the left.
 
             ``key_fallback`` spends the hint that would otherwise BREAK the row as
             its key alone — the rung design round 2's D7 asked for. The counts are
@@ -1963,8 +2056,8 @@ class AskQueueList(Widget):
             earlier one keeps its verb, and nothing is abbreviated to prettify.
             """
             kept: list[HeaderAtom] = []
-            for hint in hints:
-                candidate = HeaderAtom(prefix + hint, "muted")
+            for hint in order:
+                candidate = HeaderAtom(prefix + _hint_label(hint), "muted")
                 if _atoms_width([*atoms, *kept, candidate]) > width:
                     short = KEY_ONLY_HINTS.get(hint) if key_fallback else None
                     if short is None:
@@ -1987,15 +2080,29 @@ class AskQueueList(Widget):
         # full set keeps two, but it costs the verb, so it only wins when it wins a
         # hint — `max` takes the first of equal-length candidates, which keeps the
         # spelled-out form on a tie.
-        kept = max(
-            (
-                shed("  ·  "),
-                shed(" · "),
-                shed("  ·  ", key_fallback=True),
-                shed(" · ", key_fallback=True),
-            ),
-            key=len,
-        )
+        def ladder(order: tuple[str, ...]) -> list[HeaderAtom]:
+            """The best-fitting of the four rungs, over ``order``."""
+            return max(
+                (
+                    shed("  ·  ", order),
+                    shed(" · ", order),
+                    shed("  ·  ", order, key_fallback=True),
+                    shed(" · ", order, key_fallback=True),
+                ),
+                key=len,
+            )
+
+        kept = ladder(hints)
+        if COPY_HINT in hints and len(kept) < len(hints):
+            # THE COPY HINT GOES FIRST (design §3), and it is the one hint whose
+            # sacrifice is not its position: it is painted before the exit hint
+            # and lost before every other one, because the id it copies is
+            # already on the row under the cursor. Dropping it is only worth
+            # doing when it BUYS a hint — on a tie the painted order stands.
+            without = tuple(hint for hint in hints if hint != COPY_HINT)
+            alternate = ladder(without)
+            if len(alternate) >= len(kept):
+                kept = alternate
         atoms.extend(kept)
         if _atoms_width(atoms) > width:
             # The floor: not even the control fits. CUT rather than wrap — a
@@ -2181,7 +2288,29 @@ class AskQueueList(Widget):
                 # for `handle · deadline`, so the status lands in the register the
                 # row already has.
                 tail = f"  · {chip[0]}"
-            fixed = 4 + cell_len(tail)  # two marker cells, two state-glyph cells
+            # THE ID COLUMN, right after the state glyph and before the question
+            # (T-1/design §3): an agent's prose names an ask BY ID, and a row
+            # that carried no id made "a-745e is withdrawn" unmatchable — two
+            # rows here can begin with the same words. Six cells for the id and
+            # two of gap, at the SAME position at every width, so the column is a
+            # field rather than the question's first word.
+            #
+            # The QUESTION gives way first. Below `ASK_QUESTION_MIN_CELLS` the id
+            # is painted on the cursor row only: the list is a scan surface, and
+            # the row the reader is on is the one whose id they are after. The
+            # cells stay reserved on the other rows so the questions keep one
+            # column and a moved cursor does not re-cut them.
+            question_room = width - (4 + ASK_ID_COLUMN + cell_len(tail))
+            show_id = selected or question_room >= ASK_QUESTION_MIN_CELLS
+            if show_id:
+                # `muted`, never `dim` and never bold: the panel's ground is
+                # `overlay`, where `dim` measures 3.43:1 dark / 2.72:1 light —
+                # under the 4.5 this surface owes a LEGIBLE field (design §3).
+                painted_id = _clip_cells(row.ask_id, ASK_ID_CELLS)
+                line.append(painted_id + " " * (ASK_ID_COLUMN - cell_len(painted_id)), style=muted)
+            else:
+                line.append(" " * ASK_ID_COLUMN, style=muted)
+            fixed = 4 + ASK_ID_COLUMN + cell_len(tail)  # marker, glyph, id column, tail
             question = _clip_cells(
                 row.head_question or f"(ask {row.ask_id})",
                 max(1, width - fixed),

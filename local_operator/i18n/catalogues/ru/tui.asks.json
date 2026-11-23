@@ -9,5 +9,7 @@
   "tui.asks.dismiss.notice_answered_in_chat": "Убрано — ответ дан в чате",
   "tui.asks.dismiss.notice_moot": "Убрано — больше не нужно",
   "tui.asks.dismiss.notice_no_reply": "Убрано — ответ не отправлен",
-  "tui.asks.dismiss.title": "Убрать этот вопрос"
+  "tui.asks.dismiss.title": "Убрать этот вопрос",
+  "tui.asks.list.copied_id": "{ask_id} скопирован",
+  "tui.asks.list.copy_id_hint": "y копировать id"
 }

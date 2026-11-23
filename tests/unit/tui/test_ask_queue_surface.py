@@ -2155,3 +2155,275 @@ async def test_the_ask_marker_paints_the_derived_ink_not_the_raw_accent(enabled)
         resolved = colour if isinstance(colour, Color) else Color.parse(str(colour))
         painted = resolved.get_truecolor()
         assert painted == Color.parse(derived).get_truecolor(), (painted, derived)
+
+
+# -- the ask id column (ask-id work, step 1: T-1) ----------------------------
+#
+# The agent's prose names an ask BY ID ("a-745e is withdrawn"), and the list —
+# the one surface where every queued ask is visible at once — carried no id, so
+# two rows beginning with the same words were indistinguishable (T-1). These
+# tests pin the column's POSITION, its give-way rule and its ink: the three
+# properties the design decided, none of which a still can prove.
+
+
+#: Two questions that begin with the same words: the fixture that makes the id
+#: column a claim about matching rather than decoration.
+_TWIN_QUESTIONS = (
+    "Ship the relay fix as 0.71.2 to us-east, or wait for the window?",
+    "Ship the relay fix tonight?",
+)
+
+
+async def test_the_id_column_is_a_fixed_six_cells_after_the_state_glyph():
+    """§3: six cells of id plus a two-cell gap, at the SAME position everywhere.
+
+    Painted through the real app so the width is the one the frame really gets
+    (the sidebar and the content padding are part of it), and asserted on the
+    cells rather than on a substring: "the id is somewhere in the line" is true
+    of the pre-fix list too, which printed it only when the question was missing.
+    """
+    from local_operator.tui.widgets.ask_queue import ASK_ID_CELLS
+
+    rows = [
+        _row("a-e53b", _TWIN_QUESTIONS[0]),
+        _row("a-9f20", "Rotate the relay token now?"),
+        _row("a-745e", _TWIN_QUESTIONS[1], status="withdrawn"),
+        _row("a-1c09", "Run the relay smoke first?", status="answered"),
+    ]
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(ask_rows(rows))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        content = listing.content_size.width
+        painted = listing.render().plain.splitlines()[1:]
+        assert len(painted) == len(rows), painted
+        for line, row in zip(painted, listing.visible_rows):
+            assert cell_len(line) <= content, (line, content)
+            # Two marker cells, two state-glyph cells, then the id.
+            assert line[4 : 4 + ASK_ID_CELLS] == row.ask_id, (line, row.ask_id)
+            assert line[4 + ASK_ID_CELLS : 4 + ASK_ID_CELLS + 2] == "  ", line
+            # ...and the question starts in the column the id left it.
+            question = row.head_question or ""
+            assert line[4 + ASK_ID_CELLS + 2 :].lstrip().startswith(question[:12].rstrip("…")), (
+                line,
+                question,
+            )
+        # The two questions that begin alike are distinguishable by id alone.
+        assert painted[0][4:10] != painted[2][4:10]
+
+
+async def test_the_id_keeps_its_cells_and_the_question_gives_way():
+    """§3: never truncate the column, and the TAIL keeps its priority.
+
+    At 80 columns the question is what gets the ellipsis — the expiry word and
+    the id stay whole, which is the inverse of the pre-fix row where the id was
+    the first thing cut.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a-e53b", _TWIN_QUESTIONS[0], expires_at=1_000_000 + 3_600_000),
+                    _row("a-9f20", "Rotate the relay token now?"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        painted = listing.render().plain.splitlines()[1:]
+        assert all(cell_len(line) <= listing.content_size.width for line in painted)
+        first = painted[0]
+        assert first[4:10] == "a-e53b", first
+        assert "…" in first, first
+        # The tail survives the cut: the per-row urgency word is not the casualty.
+        assert "expir" in first, first
+
+
+async def test_a_narrow_list_paints_the_id_on_the_cursor_row_only():
+    """§3's floor: below ~16 cells of question, only the row the reader is on.
+
+    The cells stay RESERVED on the other rows, so the questions keep one column
+    and moving the cursor does not re-cut the list.
+    """
+    from local_operator.tui.widgets.ask_queue import ASK_ID_COLUMN
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(44, 20)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a-e53b", _TWIN_QUESTIONS[0]), _row("a-9f20", "Rotate it?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        # The list is narrow enough that the rule is live: without the reserved
+        # column these questions would each keep more than the floor.
+        assert listing.content_size.width - (4 + ASK_ID_COLUMN) < 40
+        painted = listing.render().plain.splitlines()[1:]
+        assert painted[0][4:10] == "a-e53b", painted[0]
+        assert painted[1][4 : 4 + ASK_ID_COLUMN] == " " * ASK_ID_COLUMN, painted[1]
+
+
+async def test_the_id_paints_muted_and_never_dim_or_bold():
+    """§3's ink decision, on the panel's own ground.
+
+    `dim` is this repo's micro-label rung and on the list's `overlay` ground it
+    measures 3.43:1 dark / 2.72:1 light — under the 4.5 a legible field owes.
+    `muted` measures ~6.5/5.18. A still cannot carry the contrast, so the test
+    names the TOKEN that was painted, on the light ramp where dim and muted
+    differ.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a-e53b", _TWIN_QUESTIONS[0]), _row("a-9f20", "Rotate it?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app._apply_theme("light")
+        await _settle(pilot)
+        muted = theme_mod.semantic_color("muted")
+        dim = theme_mod.semantic_color("dim")
+        assert muted != dim
+        listing = app.query_one(AskQueueList)
+        text = listing.render()
+        # The row's id on the second painted line (the header is first).
+        second_line_start = text.plain.index("\n") + 1
+        id_at = second_line_start + 4
+        span = next((span for span in text.spans if span.start <= id_at < span.end), None)
+        assert span is not None, "the id is painted with no style at all"
+        assert not (isinstance(span.style, Style) and span.style.bold)
+        colour = span.style.color if isinstance(span.style, Style) else None
+        assert colour is not None
+        resolved = colour if isinstance(colour, Color) else Color.parse(str(colour))
+        assert resolved.get_truecolor() == Color.parse(muted).get_truecolor(), (
+            resolved,
+            muted,
+        )
+        assert resolved.get_truecolor() != Color.parse(dim).get_truecolor()
+
+
+async def test_a_cjk_question_is_clipped_to_cells_beside_the_id():
+    """The column is CELLS, not characters: a CJK question is 2 cells a glyph."""
+    cjk = "哪個區域要部署？" * 6
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(ask_rows([_row("a-1c09", cjk), _row("a-9f20", "Rotate it?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        painted = listing.render().plain.splitlines()[1:]
+        assert painted[0][4:10] == "a-1c09", painted[0]
+        assert all(cell_len(line) <= listing.content_size.width for line in painted)
+        assert "…" in painted[0], painted[0]
+
+
+async def test_y_copies_the_cursor_rows_id_with_a_receipt(enabled):
+    """§5: `y` copies the id of the row under the cursor, and says so.
+
+    Driven from the keyboard through the real app: `y` is the file viewer's and
+    the projects page's copy key, and here the payload is the handle an agent's
+    prose names — the thing a reader pastes into a report.
+    """
+    from local_operator.i18n.keys import tui_asks as ask_keys
+    from local_operator.i18n.text import tr
+    from local_operator.tui.widgets.toast import Toast
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._clipboard = ""
+        app._sync_ask_surface(
+            ask_rows([_row("a-e53b", _TWIN_QUESTIONS[0]), _row("a-9f20", "Rotate it?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        # The cursor opens on the first ANSWERABLE row (U3) — a-e53b here.
+        assert listing.current() is not None
+        expected = listing.current().ask_id
+        await pilot.press("down")
+        await _settle(pilot)
+        expected = listing.current().ask_id
+        await pilot.press("y")
+        await _settle(pilot)
+        assert app._clipboard == expected, (app._clipboard, expected)
+        receipt = tr("tui.asks")(ask_keys.list_copied_id(ask_id=expected))
+        assert str(app.query_one(Toast)._message) == receipt
+        # Copying is a read: it moves nothing and dismisses nothing.
+        assert listing.current().ask_id == expected
+        assert session.dismissed == [] and session.declined == []
+
+
+async def test_y_is_silent_while_the_dismiss_chooser_is_open(enabled):
+    """The chooser owns the keyboard: a copy under a card asking WHY would be a
+    gesture the user was never offered."""
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._clipboard = ""
+        app._sync_ask_surface(
+            ask_rows([_row("a-e53b", _TWIN_QUESTIONS[0]), _row("a-9f20", "Rotate it?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        await pilot.press("x")  # an OPEN ask asks its reason first
+        await _settle(pilot)
+        assert listing.choosing
+        await pilot.press("y")
+        await _settle(pilot)
+        assert app._clipboard == "", "y wrote the clipboard from under the chooser"
+        assert listing.choosing
+
+
+async def test_the_copy_hint_is_painted_before_the_exit_hint_and_dropped_first(enabled):
+    """§3: `y copy id` sits before `esc collapse` and is the FIRST to give way.
+
+    Two properties, one test, because they are the same decision read twice: the
+    header's paint order is the design's, and its sacrifice order is not — the
+    id is already on the row, so the hint that names it can be the one lost.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a-e53b", _TWIN_QUESTIONS[0]), _row("a-9f20", "Rotate it?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        wide = listing.header_text(140)
+        assert "y copy id" in wide, wide
+        assert wide.index("y copy id") < wide.index("esc collapse"), wide
+        narrow = listing.header_text(70)
+        assert "y copy id" not in narrow, narrow
+        # Dropping it BUYS a hint — the exit key survives at a width where the
+        # full set cannot fit.
+        assert "esc collapse" in narrow or "enter answer" in narrow, narrow
