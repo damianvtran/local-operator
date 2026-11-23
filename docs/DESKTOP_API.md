@@ -3869,9 +3869,9 @@ client supplied: it re-resolves every source itself.
   unchanged, and the `voice` capability stays `2`.
 - **`spoken_source`** is `"summary"` when `text` is the agent's own `Spoken:`
   paragraph and `"reply"` when it is the whole reply (today's behaviour, and the
-  fallback). While the voice slot is held, a dictated prompt carries a model-facing
-  note asking the agent to end with a short paragraph opening with the label
-  `Spoken:`; the server selects the LAST such paragraph of a MESSAGE source (case
+  fallback). While the voice slot is held, the request for a dictated prompt carries
+  a model-facing note (sent to the model, never stored in the row) asking the agent
+  to end with a short paragraph opening with the label `Spoken:`; the server selects the LAST such paragraph of a MESSAGE source (case
   and `**bold**` tolerant, paragraph start only, never inside a code fence), with
   the label removed, then cleans and caps it like any reply. No paragraph, an
   empty one or an unfinished streaming message falls back to the whole reply; a

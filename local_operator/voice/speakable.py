@@ -145,11 +145,47 @@ def normalise_max_chars(value: object) -> int:
 #: start of a paragraph. Models bold or italicise labels, so ``**Spoken:**``,
 #: ``**Spoken**:`` and ``_Spoken:_`` all count; group 1 is the opening emphasis so
 #: a ``**Spoken: …**`` that wraps the whole paragraph can drop its closing marker.
-_SPOKEN_LABEL = re.compile(r"\s*(\*\*|__|\*|_)?spoken(?:\1)?[ \t]*:(?:\1)?[ \t]*", re.IGNORECASE)
+#: At most three spaces of indent, as in Markdown: four spaces or a tab make an
+#: indented CODE block, which may quote the protocol but is never the marker. A
+#: ``>`` quote prefix is not whitespace, so a quoted ``> Spoken:`` is not one either.
+_SPOKEN_LABEL = re.compile(
+    r"(?:[ \t\r]*\n)*[ ]{0,3}(\*\*|__|\*|_)?spoken(?:\1)?[ \t]*:(?:\1)?[ \t]*", re.IGNORECASE
+)
 #: A blank line, however many follow: the end of a paragraph.
 _PARAGRAPH_BREAK = re.compile(r"\n[ \t\r]*\n(?:[ \t\r]*\n)*")
 #: Private-use filler that hides a code fence's bytes from the paragraph scan.
 _FENCE_MASK = "\ue002"
+
+
+def _scan_spoken(text: str) -> tuple[str | None, tuple[int, int] | None]:
+    """``(body, span)`` of the last ``Spoken:`` paragraph; ``(None, None)`` for none.
+
+    ``span`` is the paragraph's ``(start, stop)`` in ``text``. See
+    :func:`select_spoken` for the rules.
+    """
+    masked = _DISPLAY_FENCE.sub(lambda match: _FENCE_MASK * len(match.group(0)), text)
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for stop in (*(match.start() for match in _PARAGRAPH_BREAK.finditer(masked)), len(text)):
+        spans.append((start, stop))
+        if stop < len(text):
+            start = _PARAGRAPH_BREAK.match(masked, stop).end()  # type: ignore[union-attr]
+    found: str | None = None
+    where: tuple[int, int] | None = None
+    for index, (start, stop) in enumerate(spans):
+        label = _SPOKEN_LABEL.match(masked, start, stop)
+        if label is None:
+            continue
+        body = text[label.end() : stop].strip()
+        # ``**Spoken: …**`` wraps the whole paragraph: its closer has no opener left.
+        opener = label.group(1)
+        if opener and label.group(0).count(opener) % 2 == 1 and body.endswith(opener):
+            body = body[: -len(opener)].rstrip()
+        if not body and index + 1 < len(spans):
+            # The label alone on its line, the summary in the paragraph after it.
+            body = text[spans[index + 1][0] : spans[index + 1][1]].strip()
+        found, where = body, (start, stop)
+    return found, where
 
 
 def select_spoken(text: str) -> str | None:
@@ -163,26 +199,16 @@ def select_spoken(text: str) -> str | None:
     twice means the later one. A paragraph runs to the next blank line. A code
     fence is masked first, so ``Spoken:`` quoted inside one (an example of this
     very protocol) is not a marker and a blank line inside one does not end a
-    paragraph. A trailing partial message simply has no marker yet.
+    paragraph; an indented code block or a ``>`` quote is not one either (see
+    ``_SPOKEN_LABEL``). A trailing partial message simply has no marker yet.
+
+    A paragraph that is the label alone takes the paragraph right after it as the
+    summary: the label is machinery and is never itself the thing spoken.
 
     Returns ``""`` for a marker with nothing after it; the caller reads that as
     "fall back to the reply", never as silence.
     """
-    masked = _DISPLAY_FENCE.sub(lambda match: _FENCE_MASK * len(match.group(0)), text)
-    found: str | None = None
-    start = 0
-    for stop in (*(match.start() for match in _PARAGRAPH_BREAK.finditer(masked)), len(text)):
-        label = _SPOKEN_LABEL.match(masked, start, stop)
-        if label is not None:
-            body = text[label.end() : stop].strip()
-            # ``**Spoken: …**`` wraps the whole paragraph: its closer has no opener left.
-            opener = label.group(1)
-            if opener and label.group(0).count(opener) % 2 == 1 and body.endswith(opener):
-                body = body[: -len(opener)].rstrip()
-            found = body
-        if stop < len(text):
-            start = _PARAGRAPH_BREAK.match(masked, stop).end()  # type: ignore[union-attr]
-    return found
+    return _scan_spoken(text)[0]
 
 
 def clean(text: str, *, code_omitted: str = CODE_PLACEHOLDER, link: str = LINK_WORD) -> str:
@@ -388,7 +414,8 @@ def speakable(
     The agent's ``Spoken:`` paragraph is spoken when it wrote one that survives
     ``clean`` (``source="summary"``); a missing, empty or cleaned-away paragraph
     falls back to the whole reply, byte-for-byte what shipped before selection
-    existed. Either way the same ``clean`` and the same cap apply, so
+    existed (an empty final marker is dropped from it first: the label is never
+    spoken). Either way the same ``clean`` and the same cap apply, so
     ``max_chars`` guards a six-sentence summary exactly as it guards a reply.
 
     ``summary=False`` skips selection. A pending approval card's text can quote
@@ -397,9 +424,12 @@ def speakable(
     gate must stay the whole card.
     """
     limit = normalise_max_chars(max_chars)
-    chosen = select_spoken(text) if summary else None
+    chosen, marker = _scan_spoken(text) if summary else (None, None)
     if chosen:
         cleaned = clean(chosen, code_omitted=code_omitted, link=link)
         if cleaned:
             return replace(cap(cleaned, limit, tail=tail), source="summary")
+    if chosen == "" and marker is not None:
+        # An empty final marker: speak the reply, but never the label itself.
+        text = text[: marker[0]] + text[marker[1] :]
     return cap(clean(text, code_omitted=code_omitted, link=link), limit, tail=tail)

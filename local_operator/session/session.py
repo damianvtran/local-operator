@@ -5399,6 +5399,10 @@ class Session:
         # when ``_open_pending_body_turn`` actually won a reservation, so a
         # session with nothing pending never pays for the per-call gate.
         self._pending_body_turn: Any | None = None
+        #: Id of the dictated user message whose next provider calls carry the
+        #: spoken-summary note (``_compose_transform_context``). In memory only:
+        #: a resumed session has none, so a resumed turn simply gets no note.
+        self._voice_note_for: str | None = None
         #: Team Bridge card excerpt decisions, frozen at each card's first render
         #: in this process (``card_projection.attach_history_excerpts``): keeps
         #: already-cached card bytes stable. Cleared whenever standing fails and
@@ -11072,6 +11076,7 @@ class Session:
             # row (goal loop, serving chrome) is not the operator's words,
             # so it must not park a wake either.
             self._operator_turn_open = not harness_injected
+        voice_note_armed = False
         try:
             # A USER TURN IS A REPLY (R34): retire every pending patience row
             # before anything else in this turn. Over-cancel is deliberate —
@@ -11135,19 +11140,19 @@ class Session:
             # SPOKEN-SUMMARY NOTE (docs/design/voice-spoken-summary.md): only a
             # voice-DICTATED prompt, and only while this session holds the voice
             # slot. A typed prompt, a wake, a monitor and a subagent's turn reach
-            # no listener, so none is asked for a spoken paragraph. The note rides
-            # the NEWEST message (the cached prefix is untouched) and
-            # ``user_row_text`` hides it from every rendered row. One small slot
-            # read, so it is off the session loop and costs nothing for a prompt
-            # that was not dictated.
+            # no listener, so none is asked for a spoken paragraph. The text is
+            # NOT touched: the stored row is exactly what the person said, and
+            # the note is appended per provider call to a request-local copy
+            # (``_compose_transform_context``), keyed by this message's id. One
+            # small slot read, so it is off the session loop and costs nothing
+            # for a prompt that was not dictated.
+            wants_voice_note = False
             if input_mode == "dictated" and not harness_injected:
                 from local_operator.voice import slot as voice_slot
-                from local_operator.voice.summary_note import with_note
 
-                if await asyncio.to_thread(
+                wants_voice_note = await asyncio.to_thread(
                     voice_slot.is_voice_session, self._config_dir, self._session_id
-                ):
-                    text = with_note(text)
+                )
             if audio:
                 # The audio door is DAEMON-DERIVED, never client-asserted (the
                 # vocabulary's own rule): the blocks are on the message this
@@ -11158,6 +11163,9 @@ class Session:
             elif input_path is not None:
                 extra["input_path"] = input_path
             user = Message.user(text, images, audio=audio, documents=documents, **extra)
+            # Every other prompt disarms: only this message id is asked to carry it.
+            self._voice_note_for = user.id if wants_voice_note else None
+            voice_note_armed = wants_voice_note
             if not harness_injected:
                 self._file_owner().bind(user.id, _file_capture)
                 if producer_command_id:
@@ -11239,6 +11247,11 @@ class Session:
                 carried_prompt=True,
             )
         finally:
+            # The note belongs to THIS prompt's turn: a wake, monitor or steer
+            # that opens the next turn must not inherit it, because none of
+            # them add a user message that would displace the id.
+            if voice_note_armed:
+                self._voice_note_for = None
             # A body this person's turn left pending is served by its own turn.
             self._rearm_pending_body_followup()
             # The operator turn is CLOSED: wake-defer now measures the quiet
@@ -23259,16 +23272,42 @@ class Session:
             return messages
 
     def _compose_transform_context(self) -> Any:
-        """The loop's one ``transform_context``: excerpts first, then the live frame."""
+        """The loop's one ``transform_context``: excerpts, the live frame, then the voice note."""
         frame = self._pending_body_turn
-        if getattr(self, "bridge_runtime", None) is None:
-            return frame.transform if frame is not None else None
+        bridge = getattr(self, "bridge_runtime", None) is not None
 
         def transform(messages: list[Any]) -> list[Any]:
-            shaped = self._bridge_history_transform(messages)
-            return frame.transform(shaped) if frame is not None else shaped
+            shaped = self._bridge_history_transform(messages) if bridge else messages
+            if frame is not None:
+                shaped = frame.transform(shaped)
+            return self._with_voice_note(shaped)
 
         return transform
+
+    def _with_voice_note(self, messages: list[Any]) -> list[Any]:
+        """``messages`` plus the spoken-summary note, when the newest user turn earns it.
+
+        Request-local and never stored (docs/design/voice-spoken-summary.md): the
+        loop applies this to a copy before every provider call, so the row, the
+        replay, the preview and compaction never see the note. It is the LAST
+        message and flagged ``_ephemeral``, so the prompt-cache breakpoint stays
+        on the persistent message before it and the cached prefix is identical
+        with and without the note. A newer user message (a steer, an injected
+        prompt) displaces the dictated one and the note with it.
+        """
+        armed = self._voice_note_for
+        if armed is None:
+            return messages
+        newest = next(
+            (m for m in reversed(messages) if isinstance(m, Message) and m.role == "user"), None
+        )
+        if newest is None or newest.id != armed:
+            return messages
+        from local_operator.voice.summary_note import VOICE_SUMMARY_NOTE
+
+        note = Message.user(VOICE_SUMMARY_NOTE)
+        note._ephemeral = True
+        return [*messages, note]
 
     async def _open_pending_body_turn(
         self,

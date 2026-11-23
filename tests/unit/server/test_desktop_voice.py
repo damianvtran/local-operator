@@ -1993,10 +1993,8 @@ async def test_a_spoken_paragraph_is_what_text_and_every_speech_segment_say(
     result = (await _text(rig, SESSION_A, source)).json()["result"]
     assert result["spoken_source"] == "summary"
     assert result["text"] == "First point. Second point." and result["truncated"] is False
-    assert (
-        result["segments"] == ["First point.", " Second point."]
-        or "".join(result["segments"]) == result["text"]
-    )
+    assert "".join(result["segments"]) == result["text"]
+    assert result["segments"] == ["First point. ", "Second point."]
     # The screen text is still the whole reply, label included: the transcript is not edited.
     assert "Here is the long report." in result["full_text"] and "Spoken:" in result["full_text"]
     for index, expected in enumerate(result["segments"]):

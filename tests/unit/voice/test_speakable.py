@@ -314,6 +314,8 @@ def test_an_empty_marker_falls_back_to_the_whole_reply_not_silence() -> None:
         spoken = sp.speakable(text)
         assert spoken.source == "reply" and spoken.text
         assert "Here is the long report" in spoken.text
+        # The label is machinery: the reply is spoken, the word "Spoken" never is.
+        assert "spoken" not in spoken.text.lower(), text
 
 
 def test_a_marker_that_cleans_to_nothing_falls_back_too() -> None:
@@ -371,3 +373,74 @@ def test_summary_false_never_selects() -> None:
 def test_selection_is_a_pure_function_of_the_text() -> None:
     text = f"{REPLY}\n\nSpoken: Same every time."
     assert {sp.speakable(text) for _ in range(5)} == {sp.speakable(text)}
+
+
+@pytest.mark.parametrize(
+    "marker", ["    Spoken:", "\tSpoken:", "  \tSpoken:", "     **Spoken:**", "\t_Spoken:_"]
+)
+def test_an_indented_code_block_opening_with_the_label_is_not_a_marker(marker: str) -> None:
+    """Four spaces or a tab make a code block, which may quote the protocol (m1)."""
+    text = f"{REPLY}\n\n{marker} do not say this"
+    assert sp.select_spoken(text) is None
+    spoken = sp.speakable(text)
+    assert spoken.source == "reply" and "do not say this" not in spoken.text.split("Second")[0]
+    # ...also as the very first paragraph, where the scan starts at offset 0.
+    assert sp.select_spoken(f"{marker} first and only") is None
+
+
+@pytest.mark.parametrize("indent", ["", " ", "  ", "   "])
+def test_up_to_three_spaces_of_indent_still_open_a_marker(indent: str) -> None:
+    assert sp.select_spoken(f"{REPLY}\n\n{indent}Spoken: Fine.") == "Fine."
+    assert sp.select_spoken(f"{indent}Spoken: Fine.") == "Fine."
+
+
+def test_a_quoted_block_is_not_a_marker() -> None:
+    """A ``>`` prefix is a quote of someone else's words, so ``> Spoken:`` is not the
+    agent's own summary (decided, m4): the quote marker is not whitespace."""
+    assert sp.select_spoken("Quote follows.\n\n> Spoken: not mine.") is None
+    assert sp.select_spoken("Quote follows.\n\n> Spoken: not mine.\n\nSpoken: Mine.") == "Mine."
+
+
+def test_crlf_line_endings_select_the_same_paragraph() -> None:
+    text = "Long answer.\r\n\r\nSpoken: First line.\r\nSecond line.\r\n\r\nAfter."
+    assert sp.select_spoken(text) == "First line.\r\nSecond line."
+    assert sp.speakable(text).text == "First line. Second line."
+    assert sp.speakable("Long.\r\n\r\n**Spoken:** Done.\r\n").text == "Done."
+    # A label alone, CRLF, summary after the blank line.
+    assert sp.speakable("Long.\r\n\r\n**Spoken:**\r\n\r\nDone.").text == "Done."
+
+
+def test_unicode_summaries_are_spoken_whole() -> None:
+    for summary in ("完了しました。二つ変わりました。", "Listo: ñandú, café ☕.", "Готово 👍"):
+        spoken = sp.speakable(f"Longer.\n\nSpoken: {summary}")
+        assert spoken.source == "summary" and spoken.text == summary
+    # The label is ASCII protocol, case-folded; a lookalike is plain prose.
+    assert sp.select_spoken("Reply.\n\nSpoken：fullwidth colon") is None
+    assert sp.select_spoken("Reply.\n\nSρoken: lookalike") is None
+
+
+def test_a_label_alone_takes_the_next_paragraph_as_the_summary() -> None:
+    """Q3 (a): the label is never the thing spoken; its summary is the paragraph after."""
+    for label in ("**Spoken:**", "Spoken:", "_Spoken:_", "**Spoken**:"):
+        spoken = sp.speakable(f"{REPLY}\n\n{label}\n\nDone. Two things changed.")
+        assert spoken.text == "Done. Two things changed." and spoken.source == "summary"
+    # More than one blank line between them, and trailing paragraphs after the summary.
+    text = f"{REPLY}\n\n**Spoken:**\n\n\n\nDone.\n\nAfter."
+    assert sp.select_spoken(text) == "Done."
+
+
+def test_a_later_marker_still_wins_over_a_label_alone() -> None:
+    text = "Long.\n\n**Spoken:**\n\nTaken from the next paragraph.\n\nSpoken: But this is later."
+    assert sp.select_spoken(text) == "But this is later."
+
+
+def test_a_trailing_label_alone_falls_back_to_the_reply_without_the_label() -> None:
+    """Q3 (b): nothing follows the label, so the reply is spoken and the label dropped."""
+    for text in (f"{REPLY}\n\n**Spoken:**", f"{REPLY}\n\n**Spoken:**\n\n", "**Spoken:**"):
+        spoken = sp.speakable(text)
+        assert spoken.source == "reply"
+        assert "spoken" not in spoken.text.lower()
+    assert sp.speakable(f"{REPLY}\n\nSpoken:").text == sp.speakable(REPLY).text
+    # ...and the label dropped is only the empty FINAL one, never an earlier paragraph.
+    kept = sp.speakable("Spoken: Early body.\n\nMore.\n\nSpoken:")
+    assert kept.source == "reply" and "Early body." in kept.text and "More." in kept.text

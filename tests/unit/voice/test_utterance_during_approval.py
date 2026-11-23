@@ -33,7 +33,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.harness.rows import user_row_text
 from local_operator.harness.types import ChatRequest
 from local_operator.providers.clients import MockClient
 from local_operator.server.dependencies import get_provider_auth_store
@@ -45,7 +44,6 @@ from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import build_bash_tool
 from local_operator.voice import slot as voice_slot
-from local_operator.voice.summary_note import with_note
 from tests.e2e.harness import TEST_MODEL
 from tests.unit.session.test_remote import _never_take_over
 
@@ -61,9 +59,7 @@ async def _until(predicate) -> None:
             await asyncio.sleep(0.01)
 
 
-def _user_rows(directory: Path, *, raw: bool = False) -> list[str]:
-    """The stored user rows; ``raw=False`` is what a surface paints, which hides the
-    spoken-summary note a dictated turn in the voice session carries."""
+def _user_rows(directory: Path) -> list[str]:
     path = directory / "transcript.jsonl"
     if not path.exists():
         return []
@@ -72,8 +68,7 @@ def _user_rows(directory: Path, *, raw: bool = False) -> list[str]:
         payload = json.loads(line).get("payload") or {}
         if payload.get("role") == "user":
             # A text block is stored WITHOUT its ``type`` (``exclude_defaults``).
-            text = "".join(block.get("text", "") for block in payload.get("content", []))
-            rows.append(text if raw else user_row_text(text))
+            rows.append("".join(block.get("text", "") for block in payload.get("content", [])))
     return rows
 
 
@@ -132,6 +127,14 @@ async def _parked_bash_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     mock = MockClient()
 
     async def stream(request: ChatRequest, signal: object = None):
+        # The dictated turn's request ends with the spoken-summary note, an
+        # ephemeral user message. MockClient keys its markers off the NEWEST user
+        # message, so it must not take the note for the user's instruction.
+        request = request.model_copy(
+            update={
+                "messages": [m for m in request.messages if not getattr(m, "_ephemeral", False)]
+            }
+        )
         async for event in mock.stream(request, None):
             yield event
 
@@ -199,8 +202,6 @@ async def _parked_bash_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             await _until(lambda: remote.pending_gate is not None)
             rows_before = _user_rows(directory)
             assert rows_before == ["[bash:1] list files"]
-            # The dictated turn in the voice session carries the spoken-summary note.
-            assert _user_rows(directory, raw=True) == [with_note("[bash:1] list files")]
 
             yield SimpleNamespace(
                 client=client,
