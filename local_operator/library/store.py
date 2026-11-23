@@ -38,7 +38,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Final, Protocol
 
@@ -2063,6 +2063,7 @@ class LibraryStore:
         cache_dir = self.config_dir / "cache" / "library" / "thumbs"
         key = _thumb_key(path, width)
         target = cache_dir / f"{key}.webp"
+        temp: Path | None = None
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
             with Image.open(path) as image:
@@ -2072,13 +2073,28 @@ class LibraryStore:
                     image = image.resize((width, height), Image.Resampling.LANCZOS)
                 if image.mode not in ("RGB", "RGBA"):
                     image = image.convert("RGBA")
-                # Atomic: a reader must never see a half-written WebP.
-                temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+                # Atomic: a reader must never see a half-written WebP. The temp
+                # name must be unique PER WRITE, not per process: the indexer's
+                # ``library-thumbs`` thread and an on-demand caller in the same
+                # process share a pid, so a ``<pid>.tmp`` name let both write one
+                # file and the second ``os.replace`` found it already consumed.
+                temp = target.with_name(
+                    f"{target.name}.{os.getpid()}.{threading.get_ident()}.{os.urandom(4).hex()}.tmp"
+                )
                 image.save(temp, "WEBP", quality=quality)
                 os.replace(temp, target)
+                temp = None
         except Exception:  # noqa: BLE001 - a thumbnail is cosmetic; the row still works
-            logger.debug("library: thumbnail failed for %s", asset_id, exc_info=True)
-            return None
+            if temp is not None:
+                # Never strand a partial temp in the cache: nothing else reaps it.
+                with suppress(OSError):
+                    temp.unlink(missing_ok=True)
+            # The name is the source CONTENT hash plus the width, so a target a
+            # concurrent writer already published is the very file this call was
+            # making. Losing that race is success, not "no thumbnail".
+            if not key or not target.is_file():
+                logger.debug("library: thumbnail failed for %s", asset_id, exc_info=True)
+                return None
         row = self._thumb_row(asset_id)
         stamp = self._source_stamp(path, row["digest"] if row is not None else None)
         with self.write() as connection:

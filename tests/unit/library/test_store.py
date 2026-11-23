@@ -518,6 +518,105 @@ def test_two_widths_are_cached_and_served_separately(tmp_path, monkeypatch) -> N
     assert service.thumbnail(root, asset_id, 240).content_type == "image/webp"
 
 
+def _thumb_asset(tmp_path, monkeypatch) -> tuple[Path, str, LibraryStore]:
+    """One indexed PNG with NO background indexer, so a test owns every writer.
+
+    ``list_assets`` would otherwise start the real ``library-thumbs`` worker,
+    whose startup sweep generates the 480 width on its own schedule — the
+    nondeterminism these tests replace with an explicit interleave.
+    """
+    pytest.importorskip("PIL")
+    monkeypatch.setattr(service, "ensure_started", lambda _root: None)
+    root = config_root(monkeypatch, tmp_path)
+    image = root.parent / "photo.png"
+    image.write_bytes(png())
+    session(root, SESSION, write_rows("w1", 1.0, image))
+    indexer.rebuild_now(root)
+    asset_id = service.list_assets(root, service.Query())["rows"][0]["id"]
+    return root, asset_id, LibraryStore(root)
+
+
+def test_two_threads_writing_one_width_both_get_the_thumbnail(tmp_path, monkeypatch) -> None:
+    """Two threads of ONE process share a pid, so a pid-only temp name collided.
+
+    The flake: the test thread and the ``library-thumbs`` worker both wrote
+    ``<key>.webp.<pid>.tmp``; the first ``os.replace`` consumed it and the
+    second raised FileNotFoundError, which ``ensure_thumbnail`` swallowed into
+    ``None``. The barrier forces that exact interleave: both writers have saved
+    their temp before either replaces.
+    """
+    import threading
+
+    root, asset_id, store = _thumb_asset(tmp_path, monkeypatch)
+    barrier = threading.Barrier(2, timeout=10)
+    real_replace = os.replace
+    temps: list[str] = []
+
+    def gated_replace(src, dst, *args, **kwargs):
+        if str(dst).endswith(".webp"):
+            temps.append(str(src))
+            barrier.wait()
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(store_module.os, "replace", gated_replace)
+    results: dict[str, str | None] = {}
+
+    def generate(name: str) -> None:
+        results[name] = LibraryStore(root).ensure_thumbnail(asset_id, width=480, quality=82)
+
+    workers = [threading.Thread(target=generate, args=(name,)) for name in ("a", "b")]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=20)
+
+    assert results["a"] and results["a"] == results["b"], results
+    assert len(set(temps)) == 2, f"writers shared a temp file: {temps}"
+    assert Path(results["a"]).is_file()
+    assert store.thumb_is_live(asset_id, 480) == Path(results["a"])
+    thumbs = root / "cache" / "library" / "thumbs"
+    assert not list(thumbs.glob("*.tmp")), "a temp file leaked"
+
+
+def test_a_peer_that_already_wrote_the_target_counts_as_success(tmp_path, monkeypatch) -> None:
+    """A lost replace race over the SAME content key is not a failure.
+
+    The target name is the source content hash plus the width, so a file a
+    peer already put there is exactly the thumbnail this call was making.
+    """
+    root, asset_id, store = _thumb_asset(tmp_path, monkeypatch)
+    real_replace = os.replace
+
+    def peer_wins(src, dst, *args, **kwargs):
+        if str(dst).endswith(".webp"):
+            Path(dst).write_bytes(Path(src).read_bytes())
+            Path(src).unlink()
+            raise FileNotFoundError(src)
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(store_module.os, "replace", peer_wins)
+    result = store.ensure_thumbnail(asset_id, width=480, quality=82)
+    assert result and Path(result).is_file()
+    assert store.thumb_is_live(asset_id, 480) == Path(result)
+
+
+def test_a_failed_thumbnail_write_leaves_no_temp_file(tmp_path, monkeypatch) -> None:
+    """A real failure still returns None, and never strands a ``.tmp`` in the cache."""
+    root, asset_id, store = _thumb_asset(tmp_path, monkeypatch)
+    real_replace = os.replace
+
+    def disk_full(src, dst, *args, **kwargs):
+        if str(dst).endswith(".webp"):
+            raise OSError(28, "No space left on device")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(store_module.os, "replace", disk_full)
+    assert store.ensure_thumbnail(asset_id, width=480, quality=82) is None
+    thumbs = root / "cache" / "library" / "thumbs"
+    assert not list(thumbs.iterdir())
+    assert store.thumb_is_live(asset_id, 480) is None
+
+
 def test_a_path_token_is_searchable(tmp_path, monkeypatch) -> None:
     """``CameraRoll`` is a folder name: the old haystack matched the display path."""
     root = config_root(monkeypatch, tmp_path)
