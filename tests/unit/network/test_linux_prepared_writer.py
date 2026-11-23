@@ -174,9 +174,9 @@ def high_descriptor(writer, attribute):
             # value is in the message: a bare range told the next reader nothing
             # about the process it ran in.
             leased = getattr(writer, attribute)
-            assert leased.fileno() == fd, (
-                f"writer {attribute} still holds fd {leased.fileno()}, not the leased {fd}"
-            )
+            assert (
+                leased.fileno() == fd
+            ), f"writer {attribute} still holds fd {leased.fileno()}, not the leased {fd}"
             low.close()
             yield fd
         finally:
