@@ -36,6 +36,7 @@ from local_operator.config import ConfigManager
 from local_operator.mobile.attach_client import AttachClient, OwnerAckTimeout
 from local_operator.model import configure
 from local_operator.server.routes import desktop_sessions
+from local_operator.session.attached import _PublicationWaiter
 
 TOKEN = "desktop-model-slash-admission-token"
 SESSION = "synthetic-desktop-owner"
@@ -105,7 +106,12 @@ def _facade(*, version: str, native: list[str] | None = None) -> Any:
             # raised (CI's fork e2e, round 1).
             raise KeyError(f"{name!r} is not a copy-free state field")
 
-        async def bind_runtime(self, *, deadline: float | None = None) -> None:
+        async def bind_runtime(
+            self,
+            *,
+            deadline: float | None = None,
+            wait_for_publication: _PublicationWaiter | None = None,
+        ) -> None:
             # The route's explicit _ensure_bound; this shell is already bound.
             return None
 
