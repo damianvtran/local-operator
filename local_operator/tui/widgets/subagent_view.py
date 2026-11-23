@@ -2835,15 +2835,16 @@ class SubagentView(Vertical):
         # so a refresh can land in that gap and read a file that exists and
         # holds nothing. Concluding "empty, and nothing more" there would drop
         # the note AND latch ``_history_exhausted`` below, and the row written
-        # a moment later would never be looked for. Leaving both untouched
-        # keeps the note true (there is nothing to show yet) and leaves the
-        # change-driven re-look armed: it fires only once the file exists, so
-        # it costs one read per refresh until the first row lands.
+        # a moment later would never be looked for. So that page is read as
+        # "nothing to show yet": the note is RAISED, not merely left alone (a
+        # page opened over a directory starts with the flag clear, and the
+        # change-driven re-look only runs while it is set), and the exhausted
+        # latch below stays open. The re-look fires only once the file exists,
+        # so it costs one read per refresh until the first row lands.
         first_page_still_empty = (
             not page.entries and not page.has_more and (self._history_cursor is None)
         )
-        if not first_page_still_empty:
-            self._history_unavailable = False
+        self._history_unavailable = first_page_still_empty
         rows = list(page.entries)
         if page.reconciled:
             # Replacement is a new canonical window, not an additive page.
