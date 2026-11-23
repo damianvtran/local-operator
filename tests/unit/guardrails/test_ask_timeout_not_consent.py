@@ -206,6 +206,26 @@ async def test_timed_out_ask_naming_the_paths_is_refused_before_any_judge(home: 
     assert (home / "qa-3506").is_dir() and (home / "qa-bridge-home").is_dir()
 
 
+@pytest.mark.asyncio
+async def test_typed_operator_turn_after_a_timeout_still_reaches_the_judge(home: Path) -> None:
+    """PR #4493 kept guide://guardrails exception 2: a turn the operator typed
+    that names the action reaches the judge, which reads it. Only an ASK
+    answer is ordered against the refusing ask (it has a timestamp); a typed
+    turn here has none, so it keeps the pre-#4493 judge route."""
+    _ask_log(home, answer=None, expired=True)
+    command = "rm -rf ~/qa-3506 ~/qa-bridge-home"
+    ctx = _ctx(home, command)
+    ctx.operator.words.insert(
+        0, prov.OperatorWords("operator, direct", "Yes, rm -rf ~/qa-3506 ~/qa-bridge-home now")
+    )
+    judge = _Judge("BLOCK: control")
+    outcome = await check_tool_call(
+        "bash", {"command": command}, ctx, judge=judge, settings=GuardSettings(), forked_judge=judge
+    )
+    assert outcome is not None and outcome.blocked
+    assert len(judge.prompts) == 1  # the judge ran: the refusal was not deterministic
+
+
 def test_preview_names_the_timed_out_ask_as_not_consent(home: Path) -> None:
     _ask_log(home, answer=None, expired=True)
     report = preview_tool_call(
@@ -1014,25 +1034,84 @@ async def test_later_exact_approval_supersedes_only_the_earlier_timeout(deep: Pa
     """Real store, two separate asks: timeout is silence, not a permanent veto."""
     _deep_ask(deep, expired=True, age_ms=120_000)
     _answered_ask(
-        deep, "a-new", "Delete ~/hyperplane-cpp/build?", [{"label": "Approve"}, {"label": "Keep"}],
+        deep,
+        "a-new",
+        "Delete ~/hyperplane-cpp/build?",
+        [{"label": "Approve"}, {"label": "Keep"}],
         answer="Approve",
     )
     from local_operator.guardrails.check import _ask_block
 
     path = str(deep / "hyperplane-cpp/build")
-    assert _ask_block(prov.unanswered_asks(S), path, home=str(deep), cwd=str(deep),
-                      stop=(), escalating=True, session_id=S, env=_env(deep)) is None
+    assert (
+        _ask_block(
+            prov.unanswered_asks(S),
+            path,
+            home=str(deep),
+            cwd=str(deep),
+            stop=(),
+            escalating=True,
+            session_id=S,
+            env=_env(deep),
+        )
+        is None
+    )
     judge = _Judge("BLOCK")
     result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
     assert result is None or not result.blocked, result and result.text
     assert not judge.prompts
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Keep ~/hyperplane-cpp/build instead of deleting it?",
+        "Back up ~/hyperplane-cpp/build before deleting?",
+        "Delete ~/hyperplane-cpp/build after backing it up?",
+    ],
+)
+async def test_preservation_yes_cannot_supersede_timeout_at_checkpoint_and_preview(
+    deep: Path, question: str
+) -> None:
+    from local_operator.guardrails.check import CallContext, GuardSettings
+    from local_operator.guardrails.preview import preview_tool_call
+
+    _deep_ask(deep, expired=True, age_ms=120_000)
+    _answered_ask(deep, "a-feed", question, [{"label": "Yes"}, {"label": "No"}], answer="Yes")
+    judge = _Judge("ALLOW ask=a-feed")
+    command = "rm -rf ~/hyperplane-cpp/build"
+    ctx = CallContext(cwd=str(deep), env=_env(deep), scratchpad=_pad(deep), session_id=S)
+    preview = preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+    result = await _check(deep, command, judge)
+    assert result is not None and result.blocked
+    assert preview.builtin_effect != "pass"
+    assert not judge.prompts
+    assert (deep / "hyperplane-cpp/build").is_dir()
+
+
 @pytest.mark.parametrize(
     "mode",
-    ["earlier", "same-ask-revision", "glob", "ancestor", "typed", "remote", "declined",
-     "pending", "expired-answer", "sibling", "brace", "revision-veto", "revision-approval",
-     "description", "unpicked"],
+    [
+        "earlier",
+        "same-ask-revision",
+        "glob",
+        "ancestor",
+        "typed",
+        "remote",
+        "declined",
+        "pending",
+        "expired-answer",
+        "sibling",
+        "brace",
+        "revision-veto",
+        "revision-approval",
+        "description",
+        "unpicked",
+        "keep-yes",
+        "backup-yes",
+        "conditional-yes",
+    ],
 )
 def test_lapsed_supersession_requires_exact_later_trusted_answer(deep: Path, mode: str) -> None:
     from local_operator.guardrails.check import _ask_block
@@ -1045,10 +1124,30 @@ def test_lapsed_supersession_requires_exact_later_trusted_answer(deep: Path, mod
         question = "Delete ~/hyperplane-cpp?"
     elif mode == "brace":
         question = "Delete ~/hyperplane-cpp/{build,other}?"
+    elif mode == "keep-yes":
+        question = "Keep ~/hyperplane-cpp/build instead of deleting it?"
+    elif mode == "backup-yes":
+        question = "Back up ~/hyperplane-cpp/build before deleting?"
+    elif mode == "conditional-yes":
+        question = "Delete ~/hyperplane-cpp/build after backing it up?"
     surface = "remote" if mode == "remote" else "desktop"
-    _answered_ask(deep, "a-feed", question, [{"label": "Approve"}, {"label": "Keep"}],
-                  answer="All" if mode == "typed" else "Keep" if mode == "revision-approval" else "Approve",
-                  surface=surface)
+    options = (
+        [{"label": "Yes"}, {"label": "No"}]
+        if mode.endswith("-yes")
+        else [{"label": "Approve"}, {"label": "Keep"}]
+    )
+    _answered_ask(
+        deep,
+        "a-feed",
+        question,
+        options,
+        answer=(
+            "Yes"
+            if mode.endswith("-yes")
+            else "All" if mode == "typed" else "Keep" if mode == "revision-approval" else "Approve"
+        ),
+        surface=surface,
+    )
     log = deep / ".local-operator" / "sessions" / S / "asks.jsonl"
     rows = [json.loads(line) for line in log.read_text().splitlines()]
     now = int(time.time() * 1000)
@@ -1056,8 +1155,16 @@ def test_lapsed_supersession_requires_exact_later_trusted_answer(deep: Path, mod
         rows[-2]["at"] = now - 500_000
         rows[-1]["at"] = now - 450_000
     elif mode == "pending":
-        rows.append({"v": 1, "kind": "queued", "ask_id": "a-1234", "at": now - 500,
-                     "expires_at": now + 60000, "questions": rows[-2]["questions"]})
+        rows.append(
+            {
+                "v": 1,
+                "kind": "queued",
+                "ask_id": "a-1234",
+                "at": now - 500,
+                "expires_at": now + 60000,
+                "questions": rows[-2]["questions"],
+            }
+        )
     elif mode == "declined":
         rows[-1]["answers"] = {"q": ["Keep"]}
     elif mode in ("description", "unpicked"):
@@ -1071,31 +1178,72 @@ def test_lapsed_supersession_requires_exact_later_trusted_answer(deep: Path, mod
     elif mode == "expired-answer":
         rows[0]["expires_at"] = now - 9 * 24 * 3600 * 1000
         rows[0]["at"] = rows[0]["expires_at"] - 3600000
-        rows.insert(1, {"v": 1, "kind": "answered", "ask_id": DEEP_ASK,
-                        "at": now - 8 * 24 * 3600 * 1000, "by": {"surface": "desktop"},
-                        "answers": {"deep_cleanup": ["Keep everything"]}})
+        rows.insert(
+            1,
+            {
+                "v": 1,
+                "kind": "answered",
+                "ask_id": DEEP_ASK,
+                "at": now - 8 * 24 * 3600 * 1000,
+                "by": {"surface": "desktop"},
+                "answers": {"deep_cleanup": ["Keep everything"]},
+            },
+        )
     elif mode in ("revision-veto", "revision-approval"):
-        rows.append({"v": 1, "kind": "revised", "ask_id": "a-feed", "at": now - 100,
-                     "by": {"surface": "desktop"},
-                     "answers": {"q": ["Keep" if mode == "revision-veto" else "Approve"]}})
+        rows.append(
+            {
+                "v": 1,
+                "kind": "revised",
+                "ask_id": "a-feed",
+                "at": now - 100,
+                "by": {"surface": "desktop"},
+                "answers": {"q": ["Keep" if mode == "revision-veto" else "Approve"]},
+            }
+        )
     elif mode == "same-ask-revision":
-        rows = [rows[0], {"v": 1, "kind": "answered", "ask_id": DEEP_ASK,
-                          "at": now - 200_000, "by": {"surface": "desktop"},
-                          "answers": {"deep_cleanup": ["Keep everything"]}},
-                {"v": 1, "kind": "revised", "ask_id": DEEP_ASK, "at": now - 100,
-                 "by": {"surface": "desktop"}, "answers": {"deep_cleanup": [DEEP_LABEL]}}]
+        rows = [
+            rows[0],
+            {
+                "v": 1,
+                "kind": "answered",
+                "ask_id": DEEP_ASK,
+                "at": now - 200_000,
+                "by": {"surface": "desktop"},
+                "answers": {"deep_cleanup": ["Keep everything"]},
+            },
+            {
+                "v": 1,
+                "kind": "revised",
+                "ask_id": DEEP_ASK,
+                "at": now - 100,
+                "by": {"surface": "desktop"},
+                "answers": {"deep_cleanup": [DEEP_LABEL]},
+            },
+        ]
     if mode == "sibling":
         other = "feed00000001"
-        prov.record_lineage(S, origin="subagent", parent=PARENT, state_root=deep / ".local-operator")
-        prov.record_lineage(other, origin="subagent", parent=PARENT, state_root=deep / ".local-operator")
+        prov.record_lineage(
+            S, origin="subagent", parent=PARENT, state_root=deep / ".local-operator"
+        )
+        prov.record_lineage(
+            other, origin="subagent", parent=PARENT, state_root=deep / ".local-operator"
+        )
         other_log = deep / ".local-operator" / "sessions" / other / "asks.jsonl"
         other_log.parent.mkdir(parents=True)
         other_log.write_text("".join(json.dumps(row) + "\n" for row in rows[1:]))
         rows = rows[:1]
     log.write_text("".join(json.dumps(row) + "\n" for row in rows))
     path = str(deep / "hyperplane-cpp/build")
-    hit = _ask_block(prov.unanswered_asks(S), path, home=str(deep), cwd=str(deep),
-                     stop=(), escalating=False, session_id=S, env=_env(deep))
+    hit = _ask_block(
+        prov.unanswered_asks(S),
+        path,
+        home=str(deep),
+        cwd=str(deep),
+        stop=(),
+        escalating=False,
+        session_id=S,
+        env=_env(deep),
+    )
     if mode in ("brace", "revision-approval", "same-ask-revision"):
         assert hit is None
     else:
@@ -1107,24 +1255,46 @@ def test_lapsed_supersession_requires_exact_later_trusted_answer(deep: Path, mod
 async def test_later_contrary_ask_beats_older_approval_in_check_and_preview(
     deep: Path, newer: str
 ) -> None:
-    _answered_ask(deep, "a-feed", "Delete ~/hyperplane-cpp/build?",
-                  [{"label": "Approve"}, {"label": "Keep"}], answer="Approve")
+    _answered_ask(
+        deep,
+        "a-feed",
+        "Delete ~/hyperplane-cpp/build?",
+        [{"label": "Approve"}, {"label": "Keep"}],
+        answer="Approve",
+    )
     log = deep / ".local-operator" / "sessions" / S / "asks.jsonl"
     rows = [json.loads(line) for line in log.read_text().splitlines()]
     now = int(time.time() * 1000)
-    rows.append({"v": 1, "kind": "queued", "ask_id": "a-1234", "at": now,
-                 "expires_at": now + 60000, "questions": rows[0]["questions"]})
+    rows.append(
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": "a-1234",
+            "at": now,
+            "expires_at": now + 60000,
+            "questions": rows[0]["questions"],
+        }
+    )
     if newer == "declined":
-        rows.append({"v": 1, "kind": "answered", "ask_id": "a-1234", "at": now + 1,
-                     "by": {"surface": "desktop"}, "answers": {"q": ["Keep"]}})
+        rows.append(
+            {
+                "v": 1,
+                "kind": "answered",
+                "ask_id": "a-1234",
+                "at": now + 1,
+                "by": {"surface": "desktop"},
+                "answers": {"q": ["Keep"]},
+            }
+        )
     log.write_text("".join(json.dumps(row) + "\n" for row in rows))
     command = "rm -rf ~/hyperplane-cpp/build"
     judge = _Judge("ALLOW ask=a-feed")
     result = await _check(deep, command, judge)
     assert result is not None and result.blocked
     assert not judge.prompts
-    preview = preview_tool_call("bash", {"command": command}, _ctx(deep, command),
-                                settings=GuardSettings())
+    preview = preview_tool_call(
+        "bash", {"command": command}, _ctx(deep, command), settings=GuardSettings()
+    )
     assert preview.builtin_effect == "refuse-lapsed-ask", preview.render()
 
 

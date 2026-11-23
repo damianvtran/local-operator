@@ -264,9 +264,13 @@ def test_plain_exact_own_checkout_accepts_shared_link_witness(home: Path, repo: 
     command = f"git -C {repo} worktree remove -- {wt}"
     assert _rank(home, command).risk is Risk.LOW
 
+    # A lockfile mismatch breaks the shared-link witness, but this is the
+    # session's OWN tree: its ``node_modules`` is regenerable output it made
+    # (PR #4493), and removing a link deletes no bytes. Sibling and foreign
+    # trees still need the witness (test_family_delete_ownership).
     (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '8.0'\n")
     ranked = _rank(home, command)
-    assert ranked.risk is Risk.HIGH and ranked.targets[0].cleanup_hold, ranked.reasons
+    assert ranked.risk is Risk.LOW, ranked.reasons
 
 
 @pytest.mark.asyncio

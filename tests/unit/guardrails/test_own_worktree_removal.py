@@ -237,13 +237,46 @@ async def test_own_finished_worktrees_settle_without_the_judge(
 
 
 @pytest.mark.asyncio
-async def test_own_plain_compound_cleanup_holds_unwitnessed_ignored_payload(
+async def test_own_plain_compound_cleanup_sheds_regenerable_ignored_output(
     home: Path, mobile: Path
 ) -> None:
+    """The operator's 2026-11-11 escalation, restored (PR #4493).
+
+    #4240 held these own, finished trees for their ignored ``.expo`` /
+    ``.pnpm-store`` / ``node_modules`` "regardless of creator", reversing the
+    OWN FIRST settlement. Regenerable output in a tree this session made is
+    the creator's own build product: no ask, no judge.
+    """
+    judge = _Judge("BLOCK: should not be asked")
+    outcome = await _check(home, COMMAND_1, judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_own_plain_cleanup_still_holds_hand_made_ignored_data(
+    home: Path, mobile: Path
+) -> None:
+    """Ownership is not a witness for an ignored file off the regenerable list:
+    a ``.env`` may be the only copy of local data, so it keeps the hold."""
+    tree = mobile / ".worktrees" / "refused-connect"
+    # Ignore it via the repository's info/exclude: editing the tracked
+    # .gitignore would itself be a change Git refuses.
+    exclude = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(exclude).parent.mkdir(parents=True, exist_ok=True)
+    with open(exclude, "a") as fh:
+        fh.write(".env\n")
+    (tree / ".env").write_text("LOCAL_ONLY=1\n")
     judge = _Judge("ALLOW ledger")
     outcome = await _check(home, COMMAND_1, judge)
     assert outcome is not None and outcome.blocked
-    assert "3 ignored entries the guard cannot prove regenerable" in outcome.text
+    assert "1 ignored entry the guard cannot prove regenerable" in outcome.text
     assert judge.prompts == []
 
 
@@ -574,3 +607,34 @@ async def test_allow_ledger_for_a_link_checks_the_link_row_not_the_pointee(
     assert outcome is not None, "the checker returned no verdict"
     assert outcome.blocked, outcome.text
     assert "ledger: no row for this session" in judge.prompts[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "names",
+    [(".DS_Store", "sub/.DS_Store"), ("._App.tsx",), ("Thumbs.db", "desktop.ini")],
+    ids=["finder", "appledouble", "windows"],
+)
+async def test_own_plain_cleanup_sheds_os_folder_metadata(
+    home: Path, mobile: Path, names: tuple[str, ...]
+) -> None:
+    """PR #4493 field case: Finder recreates an ignored ``.DS_Store`` in any
+    worktree opened in it, so an own clean tree must not be held for it."""
+    tree = mobile / ".worktrees" / "refused-connect"
+    exclude = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(exclude).parent.mkdir(parents=True, exist_ok=True)
+    with open(exclude, "a") as fh:
+        fh.write("".join(f"{os.path.basename(n)}\n" for n in names))
+    for name in names:
+        (tree / name).parent.mkdir(parents=True, exist_ok=True)
+        (tree / name).write_bytes(b"\0meta")
+    judge = _Judge("BLOCK: should not be asked")
+    outcome = await _check(home, COMMAND_1, judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []

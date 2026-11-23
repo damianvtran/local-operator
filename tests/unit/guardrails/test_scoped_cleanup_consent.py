@@ -157,6 +157,81 @@ def fixture(tmp_path, monkeypatch):
     return home, repo, wt
 
 
+@pytest.mark.asyncio
+async def test_ignored_waiver_with_real_ledger_registry_and_ask_store(fixture, monkeypatch):
+    """The stricter waiver works without a mocked owner attribution or registry."""
+    import time
+
+    from local_operator.guardrails.preview import preview_tool_call
+
+    home, repo, wt = fixture
+    (wt / "private").mkdir()
+    (wt / "private" / "payload").write_text("preserve")
+    monkeypatch.setattr(prov, "cwd_holders", lambda *args, **kwargs: ())
+    now = int(time.time() * 1000)
+    ask_path = home / ".local-operator" / "sessions" / "aaaaaaaaaaaa" / "asks.jsonl"
+    rows = [
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": "a-cafe",
+            "at": now - 2000,
+            "expires_at": now + 60000,
+            "questions": [
+                {
+                    "id": "q",
+                    "question": f"Delete {wt}?",
+                    "options": [{"label": "Approve"}, {"label": "Keep"}],
+                    "multi": False,
+                }
+            ],
+        },
+        {
+            "v": 1,
+            "kind": "answered",
+            "ask_id": "a-cafe",
+            "at": now - 1000,
+            "by": {"surface": "desktop"},
+            "answers": {"q": ["Approve"]},
+        },
+    ]
+    ask_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert not prov._running_owners(str(wt), "aaaaaaaaaaaa", strict=True)
+    ctx = CallContext(
+        cwd=str(repo), env={"HOME": str(home)}, scratchpad=None, session_id="aaaaaaaaaaaa"
+    )
+    command = f"git worktree remove {wt}"
+    calls = []
+
+    async def judge(system, prompt):
+        calls.append(prompt)
+        return "BLOCK"
+
+    preview = preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+    result = await check_tool_call(
+        "bash", {"command": command}, ctx, settings=GuardSettings(), judge=judge
+    )
+    assert preview.builtin_effect == "pass", preview.render()
+    assert result is not None and not result.blocked
+    assert not calls
+    original_creators = prov.worktree_creators
+
+    def unreadable_creators(real, *, strict=True):
+        if strict:
+            raise OSError("ledger unreadable")
+        return original_creators(real, strict=False)
+
+    monkeypatch.setattr(prov, "worktree_creators", unreadable_creators)
+    blocked_preview = preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+    blocked = await check_tool_call(
+        "bash", {"command": command}, ctx, settings=GuardSettings(), judge=judge
+    )
+    assert blocked_preview.builtin_effect == "hold-cleanup", blocked_preview.render()
+    assert blocked is not None and blocked.blocked
+    assert not calls
+    assert (wt / "private" / "payload").read_text() == "preserve"
+
+
 async def guard(
     fixture,
     answer="ALLOW scope=o1",

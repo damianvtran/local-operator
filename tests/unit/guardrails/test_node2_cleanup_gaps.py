@@ -548,7 +548,56 @@ def test_3_merged_plain_cleanup_requires_preserved_payload(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["exact", "brace", "ancestor", "glob", "remote", "pending", "dirty", "busy", "compound", "compound-unapproved", "owned", "owned-no-ask"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "exact",
+        "brace",
+        "ancestor",
+        "glob",
+        "remote",
+        "pending",
+        "dirty",
+        "busy",
+        "compound",
+        "compound-unapproved",
+        "owned",
+        "owned-no-ask",
+        "keep",
+        "backup",
+        "conditional",
+        "field-shape",
+        "unverified",
+        "unknown-forge",
+        "git-fallback",
+        "open-forge",
+        "owner",
+        "unreadable-owner",
+        "late-holder",
+        "late-forge",
+        "late-revision",
+        "late-pending",
+        "label-keep",
+        "label-wrong-verb",
+        "label-condition",
+        "typed",
+        "field-brace",
+        "mixed-question",
+        "field-conditional",
+        "field-after",
+        "field-reversed",
+        "newer-keep-yes",
+        "newer-backup-yes",
+        "ambiguous-safe",
+        "early-holder",
+        "early-revision",
+        "hidden-holder",
+        "fresh-holder",
+        "late-fresh-holder",
+        "reworded",
+        "excluding",
+    ],
+)
 async def test_ignored_cleanup_approval_at_real_checkpoint(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
@@ -556,9 +605,19 @@ async def test_ignored_cleanup_approval_at_real_checkpoint(
     import json
     import time
 
-    from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
+    from local_operator.guardrails.check import (
+        CallContext,
+        GuardSettings,
+        check_tool_call,
+    )
     from local_operator.guardrails.preview import preview_tool_call
 
+    monkeypatch.setattr(prov, "_running_owners", lambda real, sid, **kwargs: ())
+    monkeypatch.setattr(prov, "cwd_holders", lambda *a, **kw: ())
+    if mode in ("hidden-holder", "fresh-holder"):
+        monkeypatch.setattr(
+            prov, "cwd_holders", lambda *a, **kw: None if mode == "hidden-holder" else (object(),)
+        )
     wt = repo / ".worktrees" / "consent"
     if mode.startswith("owned"):
         _run_recorded(home, f"git -C {repo} worktree add -qb consent {wt}")
@@ -568,53 +627,311 @@ async def test_ignored_cleanup_approval_at_real_checkpoint(
     (wt / "dist-ssr" / "payload").write_text("preserve")
     if mode == "dirty":
         (wt / "untracked").write_text("work")
-    if mode.startswith("compound"):
+    if mode.startswith("compound") or mode in ("field-brace", "mixed-question"):
         _git("worktree", "add", "-qb", "other", ".worktrees/other", cwd=repo)
         (wt.parent / "other" / "dist-ssr").mkdir()
         (wt.parent / "other" / "dist-ssr" / "payload").write_text("preserve")
     if mode == "busy":
         monkeypatch.setattr(prov, "_live_cwd_inside", lambda *a, **kw: True)
+    if mode in ("unknown-forge", "git-fallback", "open-forge", "owner"):
+        activity = prov.worktree_activity
+
+        def override_activity(path, sid=""):
+            from dataclasses import replace
+
+            result = activity(path, sid)
+            if mode == "unknown-forge":
+                return replace(result, pr_state="unknown")
+            if mode == "git-fallback":
+                return replace(result, pr_state="none", git_merged="old local refs")
+            if mode == "open-forge":
+                return replace(result, pr_state="open", pr_number=1)
+            return replace(result, owners_running=("other-session",))
+
+        monkeypatch.setattr(prov, "worktree_activity", override_activity)
+    if mode == "unreadable-owner":
+
+        def unreadable(real, sid, **kwargs):
+            if kwargs.get("strict"):
+                raise OSError("registry unreadable")
+            return ()
+
+        monkeypatch.setattr(prov, "_running_owners", unreadable)
     named = str(wt)
-    if mode in ("brace", "compound"):
+    if mode in ("brace", "compound", "field-brace"):
         named = str(wt.parent / "{consent,other}")
     elif mode == "ancestor":
         named = str(wt.parent)
     elif mode == "glob":
         named = str(wt.parent / "consent*")
     now = int(time.time() * 1000)
-    rows = [{"v": 1, "kind": "queued", "ask_id": "a-cafe", "at": now - 2000,
-             "expires_at": now + 60000, "timeout_s": 60,
-             "questions": [{"id": "q", "question": f"Delete {named}?",
-                            "options": [{"label": "Approve"}, {"label": "Keep"}],
-                            "multi": False, "question_id": ""}]}]
+    rows = [
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": "a-cafe",
+            "at": now - 2000,
+            "expires_at": now + 60000,
+            "timeout_s": 60,
+            "questions": [
+                {
+                    "id": "q",
+                    "question": f"Delete {named}?",
+                    "options": [{"label": "Approve"}, {"label": "Keep"}],
+                    "multi": False,
+                    "question_id": "",
+                }
+            ],
+        }
+    ]
+    question = rows[0]["questions"][0]
+    if mode == "ambiguous-safe":
+        question["question"] = f"Delete {named} when safe?"
+    if mode in ("keep", "backup", "conditional"):
+        question["question"] = {
+            "keep": f"Keep {named} instead of deleting it?",
+            "backup": f"Back up {named} before deleting?",
+            "conditional": f"Delete {named} after backing it up?",
+        }[mode]
+        question["options"] = [{"label": "Yes"}, {"label": "No"}]
+    if mode in (
+        "field-shape",
+        "field-brace",
+        "mixed-question",
+        "field-conditional",
+        "field-after",
+        "field-reversed",
+    ):
+        question["question"] = (
+            f"Approve removing 33 clean merged/closed worktrees with ignored files "
+            f"(re-verified for 0 live holders before removal): {named}?"
+        )
+        if mode == "field-conditional":
+            question["question"] = f"Approve removing {named} if safe?"
+        elif mode == "field-after":
+            question["question"] = f"Approve removing {named} after backing up?"
+        elif mode == "field-reversed":
+            question["question"] = f"Approve removing the backup of {named}?"
+        question["options"] = [
+            {"label": "Approve removing all 33 clean merged/closed worktrees (~17.3 GiB)"},
+            {"label": "Keep everything"},
+        ]
+        # Independent questions must never borrow each other's deletion picks.
+        rows[0]["questions"].extend(
+            [
+                {
+                    "id": "q2",
+                    "question": f"Keep {wt.parent / 'other'}?",
+                    "options": [{"label": "Yes"}, {"label": "No"}],
+                    "multi": False,
+                },
+                {
+                    "id": "q3",
+                    "question": "Approve deleting old clones?",
+                    "options": [
+                        {"label": "Approve deleting all old clones"},
+                        {"label": "Keep everything"},
+                    ],
+                    "multi": False,
+                },
+            ]
+        )
+    # Review round 2: approval is a rule on the pick, not a vocabulary tuned to
+    # one field ask. An unqualified ask in other words must pass; a list that
+    # spares a path (the field Q3 shape, "excluding ~/x") must fail closed.
+    if mode in ("reworded", "excluding"):
+        question["question"] = (
+            f"OK to clear out these finished worktrees now: {named}?"
+            if mode == "reworded"
+            else f"Approve deleting old trees, excluding {wt.parent / 'other'}: {named}?"
+        )
+        question["options"] = [{"label": "Remove them"}, {"label": "Leave them"}]
+    if mode in ("label-keep", "label-wrong-verb", "label-condition", "typed"):
+        question["question"] = (
+            f"Keep {named}?"
+            if mode == "label-keep"
+            else f"Back up {named}?" if mode == "label-wrong-verb" else f"Delete {named}?"
+        )
+        question["options"] = [
+            {"label": "Delete after it is safe" if mode == "label-condition" else "Delete"},
+            {"label": "Keep"},
+        ]
     if mode != "pending":
-        rows.append({"v": 1, "kind": "answered", "ask_id": "a-cafe", "at": now - 1000,
-                     "by": {"surface": "remote" if mode == "remote" else "desktop"},
-                     "answers": {"q": ["Approve"]}})
+        picked = (
+            "Yes"
+            if mode in ("keep", "backup", "conditional", "typed")
+            else (
+                "Delete"
+                if mode in ("label-keep", "label-wrong-verb")
+                else (
+                    "Delete after it is safe"
+                    if mode == "label-condition"
+                    else (
+                        "Remove them"
+                        if mode in ("reworded", "excluding")
+                        else (
+                            "Approve removing all 33 clean merged/closed worktrees (~17.3 GiB)"
+                            if mode.startswith("field-") or mode == "mixed-question"
+                            else "Approve"
+                        )
+                    )
+                )
+            )
+        )
+        answer = {"q": [picked]}
+        if mode.startswith("field-") or mode == "mixed-question":
+            answer.update({"q2": ["Yes"], "q3": ["Approve deleting all old clones"]})
+        rows.append(
+            {
+                "v": 1,
+                "kind": "answered",
+                "ask_id": "a-cafe",
+                "at": now - 1000,
+                "by": {
+                    "surface": (
+                        "remote"
+                        if mode == "remote"
+                        else "unverified" if mode == "unverified" else "desktop"
+                    )
+                },
+                "answers": answer,
+            }
+        )
+    if mode in ("newer-keep-yes", "newer-backup-yes"):
+        contrary = (
+            f"Keep {wt} instead of deleting it?"
+            if mode == "newer-keep-yes"
+            else f"Back up {wt} before deleting?"
+        )
+        rows.extend(
+            [
+                {
+                    "v": 1,
+                    "kind": "queued",
+                    "ask_id": "a-beef",
+                    "at": now - 500,
+                    "expires_at": now + 60000,
+                    "questions": [
+                        {
+                            "id": "q",
+                            "question": contrary,
+                            "options": [{"label": "Yes"}, {"label": "No"}],
+                            "multi": False,
+                        }
+                    ],
+                },
+                {
+                    "v": 1,
+                    "kind": "answered",
+                    "ask_id": "a-beef",
+                    "at": now - 100,
+                    "by": {"surface": "desktop"},
+                    "answers": {"q": ["Yes"]},
+                },
+            ]
+        )
     path = home / ".local-operator" / "sessions" / S / "asks.jsonl"
-    path.write_text("" if mode == "owned-no-ask" else "".join(json.dumps(row) + "\n" for row in rows))
+    path.write_text(
+        "" if mode == "owned-no-ask" else "".join(json.dumps(row) + "\n" for row in rows)
+    )
     command = f"git -C {repo} worktree remove -- {wt}"
-    if mode.startswith("compound"):
+    if mode.startswith("compound") or mode in ("field-brace", "mixed-question"):
         command += f" && git -C {repo} worktree remove -- {wt.parent / 'other'}"
     ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=S)
     settings = GuardSettings()
     calls = []
+    if mode.startswith("late-"):
+        from local_operator.guardrails.check import DeleteCase
+
+        monkeypatch.setattr(DeleteCase, "evidence_basis", lambda self, *args: "")
 
     async def judge(system: str, prompt: str) -> str:
         calls.append(prompt)
-        return "BLOCK: live holder"
+        if mode == "late-holder":
+            monkeypatch.setattr(prov, "_live_cwd_inside", lambda *a, **kw: True)
+        elif mode == "late-fresh-holder":
+            monkeypatch.setattr(prov, "cwd_holders", lambda *a, **kw: (object(),))
+        elif mode == "late-forge":
+            monkeypatch.setattr(
+                prov,
+                "worktree_activity",
+                lambda *a, **kw: prov.WorktreeActivity("consent", "unknown"),
+            )
+        elif mode == "late-revision":
+            with path.open("a") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "kind": "revised",
+                            "ask_id": "a-cafe",
+                            "at": now + 100,
+                            "by": {"surface": "desktop"},
+                            "answers": {"q": ["Keep"]},
+                        }
+                    )
+                    + "\n"
+                )
+        elif mode == "late-pending":
+            with path.open("a") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "kind": "queued",
+                            "ask_id": "a-beef",
+                            "at": now + 100,
+                            "expires_at": now + 60000,
+                            "questions": rows[0]["questions"],
+                        }
+                    )
+                    + "\n"
+                )
+        return "ALLOW ask=a-cafe"
 
+    if mode.startswith("early-"):
+        from local_operator.guardrails import check as check_module
+
+        real_build = check_module.build_delete_case
+
+        def build_then_mutate(verdict, context):
+            case = real_build(verdict, context)
+            if mode == "early-holder":
+                monkeypatch.setattr(prov, "_live_cwd_inside", lambda *a, **kw: True)
+            else:
+                with path.open("a") as fh:
+                    fh.write(
+                        json.dumps(
+                            {
+                                "v": 1,
+                                "kind": "revised",
+                                "ask_id": "a-cafe",
+                                "at": now + 100,
+                                "by": {"surface": "desktop"},
+                                "answers": {"q": ["Keep"]},
+                            }
+                        )
+                        + "\n"
+                    )
+            return case
+
+        monkeypatch.setattr(check_module, "build_delete_case", build_then_mutate)
     preview = preview_tool_call("bash", {"command": command}, ctx, settings=settings)
-    result = await check_tool_call("bash", {"command": command}, ctx, settings=settings, judge=judge)
-    if mode in ("exact", "brace", "compound", "owned"):
+    result = await check_tool_call(
+        "bash", {"command": command}, ctx, settings=settings, judge=judge
+    )
+    if mode.startswith("early-"):
+        assert preview.builtin_effect == "pass", preview.render()
+        assert result is not None and result.blocked and not calls
+    elif mode in ("exact", "brace", "compound", "owned", "field-shape", "field-brace", "reworded"):
         assert preview.builtin_effect == "pass", preview.render()
         assert result is not None and not result.blocked, result and result.text
         assert not calls
-    elif mode == "busy":
+    elif mode.startswith("late-"):
         assert preview.builtin_effect == "judge", preview.render()
         assert result is not None and result.blocked and calls
     else:
-        assert preview.builtin_effect == "hold-cleanup", preview.render()
+        assert preview.builtin_effect in ("hold-cleanup", "refuse-critical"), preview.render()
         assert result is not None and result.blocked and not calls
     assert (wt / "dist-ssr" / "payload").read_text() == "preserve"
 
@@ -719,3 +1036,48 @@ def test_q4_dangling_head_fact_is_in_the_agent_visible_reason(home: Path, repo: 
     )
     assert risk is Risk.HIGH  # never loosened: the commit would be lost
     assert "reachable from NO ref" in reason, reason
+
+
+# -- PR #4493: cache cleanup inside a worktree, spelled find | xargs rm --------------
+
+#: The field command (session ed88c11e4952, backlog-gates, 2026-11-23), refused
+#: on guard 0.112.5 as an opaque delete of the whole worktree.
+FIELD_XARGS = "find . -maxdepth 4 -name '__pycache__' -type d -prune -print0 | xargs -0 rm -rf"
+
+
+@pytest.mark.parametrize(
+    ("command", "risk"),
+    [
+        (FIELD_XARGS, Risk.LOW),
+        # The spelling S2-3 already ranked LOW: both must agree.
+        ("find . -name __pycache__ -type d -prune -exec rm -rf {} +", Risk.LOW),
+        # No selecting predicate: every entry goes, so it removes the tree.
+        ("find . -print0 | xargs -0 rm -rf", Risk.HIGH),
+        # A filter between the stages can rewrite paths: stays opaque.
+        ("find . -name __pycache__ | sed s/x/y/ | xargs rm -rf", Risk.HIGH),
+        # The find stage itself runs a program: its output is not find's list.
+        ("find . -name a -exec echo {} + | xargs rm -rf", Risk.HIGH),
+    ],
+    ids=["field-xargs", "find-exec", "no-predicate", "filtered", "find-runs-exec"],
+)
+def test_find_fed_xargs_delete_ranks_like_find(
+    home: Path, repo: Path, command: str, risk: Risk
+) -> None:
+    _git("worktree", "add", "-q", "-b", "feat/caches", ".worktrees/backlog-gates", cwd=repo)
+    wt = repo / ".worktrees" / "backlog-gates"
+    (wt / "__pycache__").mkdir()
+    (wt / "__pycache__" / "a.pyc").write_text("x")
+    verdict = classify_bash(
+        f"cd {wt} && {command}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S
+    )
+    assert verdict.risk is risk, verdict.reasons
+    if risk is Risk.LOW:
+        assert all(not t.target.opaque for t in verdict.targets), verdict.reasons
+
+
+def test_find_fed_xargs_never_lowers_the_state_root(home: Path) -> None:
+    """The selecting-find rule never covers a state root, whichever spelling."""
+    state = home / ".local-operator"
+    command = f"find {state} -name '*.json' -print0 | xargs -0 rm -f"
+    verdict = classify_bash(command, cwd=str(home), env=_env(home), scratchpad=None, session_id=S)
+    assert verdict.risk is Risk.CRITICAL, verdict.reasons

@@ -1478,7 +1478,12 @@ def _rank(
                     cleanup_hold=True,
                 )
             if plain_payload is not None:
-                inventory = plain_cleanup_ignored_inventory(path)
+                # Own trees (this session, its descendants, or an ancestor that
+                # delegated the cleanup: ``owned_record``'s family) may shed
+                # regenerable build output; a sibling's ``kin`` tree may not.
+                inventory = plain_cleanup_ignored_inventory(
+                    path, own_regenerable=own is not None and relation != "kin"
+                )
                 if inventory is None:
                     return RankedTarget(
                         target,

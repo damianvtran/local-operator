@@ -5105,7 +5105,7 @@ class _Walker:
         if name in DELETE_PROGRAMS:
             flags_with_value = _SHRED_VALUE_FLAGS if name == "shred" else _RM_VALUE_FLAGS
             operands, _flags = _operands(args, flags_with_value)
-            if stdin_fed:
+            if stdin_fed and not self._add_found_stdin(name, feed):
                 self._add_stdin(name)
             for w in operands:
                 self._add(w, "delete", name)
@@ -7176,6 +7176,58 @@ class _Walker:
                 landed = os.path.join(path, name)
                 self._add(Expanded(text=landed), "append", program)
                 self._carry_link(landed, state)
+
+    def _add_found_stdin(self, program: str, feed: _Feed | None) -> bool:
+        """``find <roots> <selecting test> -print0 | xargs -0 rm -rf``: rank as find.
+
+        WHY (PR #4493, disk-reclamation field report 2026-11-23, session
+        ed88c11e4952): ``find . -name __pycache__ -type d -prune -print0 |
+        xargs -0 rm -rf`` inside a worktree was refused as an opaque delete of
+        the whole tree, while the same removal spelled ``find . -name
+        __pycache__ -exec rm -rf {} +`` already ranks LOW (S2-3, the
+        selecting-find cleanup shape). The two delete exactly the same set:
+        what ``find`` prints is what ``xargs`` hands ``rm``. So when the
+        IMMEDIATELY upstream stage is a plain ``find`` whose output reaches
+        ``rm`` unfiltered, add the targets ``find -delete`` would have, with
+        the same ``selected`` bit; ``classify`` then applies the one existing
+        rule (selecting predicate, never under a state root) to both spellings.
+
+        Fails closed (``False``: the caller keeps the opaque stdin target) on
+        anything that breaks that equivalence: no upstream stage, a heredoc
+        or herestring feeding the pipe, a stage that is not ``find`` (a
+        ``grep``/``sed`` between them can rewrite paths), a redirect on the
+        find stage, a ``find`` that itself runs ``-exec``/``-delete``, or an
+        opaque word anywhere in the find stage.
+        """
+        if feed is None or not feed.stages or feed.bodies:
+            return False
+        stage = _strip_grouping(feed.stages[-1])
+        raw_words, redirects = scan(stage)
+        if redirects:
+            return False
+        st = self.state
+        words: list[Expanded] = []
+        for raw in raw_words:
+            words.extend(expand_all(raw, st.env, st.home))
+        if not words or any(w.opaque or w.substitutions for w in words):
+            return False
+        if os.path.basename(words[0].text) not in ("find", "gfind"):
+            return False
+        args = words[1:]
+        roots: list[Expanded] = []
+        i = 0
+        while i < len(args) and not (
+            args[i].text.startswith("-") or args[i].text in ("(", "!", "\\(")
+        ):
+            roots.append(args[i])
+            i += 1
+        texts = [w.text for w in args[i:]]
+        if "-delete" in texts or any(t in _FIND_EXEC for t in texts):
+            return False
+        selected = any(t in _FIND_SELECTING for t in texts)
+        for w in roots or [Expanded(text=".")]:
+            self._add(w, "delete", f"find | xargs {program}", selected=selected)
+        return True
 
     def _add_stdin(self, program: str, op: str = "delete") -> None:
         self.result.targets.append(

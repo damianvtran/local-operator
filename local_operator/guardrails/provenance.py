@@ -1496,6 +1496,11 @@ _REGENERABLE = frozenset(
         # create-vite ``.gitignore`` beside ``dist``. Its ignored ``dist-ssr/``
         # alone made that merged, change-free tree read ``dirty``.
         "dist-ssr",
+        # Added 2026-11-23 (PR #4493, CI lane's own native-scope worktree):
+        # the Windows counterparts of ``.DS_Store``, folder metadata Explorer
+        # rewrites on its own (thumbnail cache, per-folder view settings).
+        "Thumbs.db",
+        "desktop.ini",
     }
 )
 #: Basename patterns with the same standing as :data:`_REGENERABLE`:
@@ -2489,8 +2494,27 @@ class IgnoredInventory:
     changes: int
 
 
-def plain_cleanup_ignored_inventory(real: str) -> IgnoredInventory | None:
-    """Count unverified ignored entries and other changes; ``None`` = unreadable."""
+def plain_cleanup_ignored_inventory(
+    real: str, *, own_regenerable: bool = False
+) -> IgnoredInventory | None:
+    """Count unverified ignored entries and other changes; ``None`` = unreadable.
+
+    ``own_regenerable`` (PR #4493): the caller proved, through the creation
+    ledger, that the removing session or its family (descendants, or an ancestor
+    that delegated the cleanup; never a sibling) made
+    this tree. Then an ignored entry whose basename is on :data:`_REGENERABLE`
+    (``.venv``, ``__pycache__``, ``.pytest_cache``, ``node_modules`` …) and that
+    holds no nested repository is build output the creator produced, and Git
+    may take it. WHY: the operator's escalation of 2026-11-11 (finished own
+    trees refused for ignored ``.expo``/``.pnpm-store``) was settled by the
+    "OWN FIRST" rule in ``classify``; this inventory, added in #4240, then
+    held every ignored entry "regardless of creator" and silently reversed
+    it (disk-reclamation field reports 2026-11-23: three owners refused on
+    their own merged trees holding only ``.venv``/``__pycache__``). A name is
+    NOT a witness for anyone else's tree (#4240's point stands there), and
+    any ignored entry off the list (``.env``, ``.terraform``) stays held even
+    in an own tree: it may be the only copy of hand-made local data.
+    """
     status = _strict_cleanup_status(real)
     if status is None:
         return None
@@ -2505,8 +2529,15 @@ def plain_cleanup_ignored_inventory(real: str) -> IgnoredInventory | None:
         entry = _cleanup_status_path(row)
         if entry is None:
             return None
-        if not _shared_dependencies_link(real, entry):
-            unverified += 1
+        if _shared_dependencies_link(real, entry):
+            continue
+        if (
+            own_regenerable
+            and _regenerable(os.path.basename(entry))
+            and not _holds_git(os.path.join(real, entry))
+        ):
+            continue
+        unverified += 1
     return IgnoredInventory(unverified, changes)
 
 

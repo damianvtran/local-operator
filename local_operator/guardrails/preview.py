@@ -54,7 +54,7 @@ from local_operator.guardrails.check import (
     apply_cleanup_consent,
     build_delete_case,
     builtin_branch,
-    cleanup_consent_safe,
+    cleanup_consent_fresh,
     cleanup_hold_text,
     credential_path_masks,
     credential_refusal_text,
@@ -371,6 +371,7 @@ def preview_tool_call(
                 )
                 # Same ranking the checkpoint applies (unanswered asks lift LOW).
                 verdict = escalate_asked_targets(verdict, context)
+                before_consent = verdict
                 verdict = apply_cleanup_consent(verdict, context)
                 effect = builtin_branch(verdict, critical_override=live.critical_override)
                 if effect == BUILTIN_REFUSE_CRITICAL:
@@ -379,13 +380,30 @@ def preview_tool_call(
                     builtin_text = credential_refusal_text(command)
                 elif effect == BUILTIN_HOLD_CLEANUP:
                     builtin_text = cleanup_hold_text(verdict)
+                elif effect == BUILTIN_JUDGE and not cleanup_consent_fresh(
+                    before_consent, verdict, context
+                ):
+                    effect = BUILTIN_HOLD_CLEANUP
+                    builtin_text = cleanup_hold_text(verdict)
                 elif effect == BUILTIN_JUDGE:
                     case = build_delete_case(verdict, context)
                     builtin_facts = (*case.facts, *case.evidence.describe())
                     if case.excluded:
                         builtin_facts += (f"excluded as untrusted: {case.excluded}",)
-                    proven = case.evidence_basis() if cleanup_consent_safe(verdict, context) else ""
-                    if proven:
+                    consent_paths = frozenset(
+                        r.target.path
+                        for r in verdict.targets
+                        if r.cleanup_consent and r.target.path
+                    )
+                    proven = (
+                        case.evidence_basis(consent_paths)
+                        if consent_paths
+                        else case.evidence_basis()
+                    )
+                    if proven and not cleanup_consent_fresh(before_consent, verdict, context):
+                        effect = BUILTIN_HOLD_CLEANUP
+                        builtin_text = cleanup_hold_text(verdict)
+                    elif proven:
                         # The checkpoint allows this without the judge
                         # (``DeleteCase.evidence_basis``); report that branch.
                         effect = BUILTIN_PASS

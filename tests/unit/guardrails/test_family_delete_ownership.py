@@ -452,6 +452,35 @@ async def test_family_removes_clean_tree_with_zero_judge_calls(
     assert judge.prompts == []
 
 
+@pytest.mark.parametrize(
+    ("creator", "remover", "held"),
+    [(P, C, False), (C, P, False), (K, C, True), (U, C, True)],
+    ids=["child-removes-parent", "parent-removes-child", "sibling", "unrelated"],
+)
+def test_regenerable_ignored_output_is_shed_only_by_the_owning_family(
+    home: Path, infra: Path, creator: str, remover: str, held: bool
+) -> None:
+    """PR #4493: ``node_modules/`` is the creator family's build output.
+
+    Ancestors and descendants share ownership (``owned_record``), so their
+    plain removal settles. A sibling's (``kin``) or unrelated tree keeps
+    #4240's rule: a regenerable-looking name is no witness for someone
+    else's bytes.
+    """
+    wt = _add_tree(home, infra / "services", creator)
+    (wt / "node_modules" / "pkg").mkdir(parents=True)
+    (wt / "node_modules" / "pkg" / "index.js").write_text("module.exports = 1\n")
+    _restamp(wt)
+    verdict = _rank(home, _remove(wt), remover)
+    target = verdict.targets[0]
+    if held:
+        assert target.cleanup_hold, verdict.reasons
+        assert "ignored entry the guard cannot prove regenerable" in target.reason
+    else:
+        assert not target.cleanup_hold, verdict.reasons
+        assert verdict.risk is Risk.LOW, verdict.reasons
+
+
 def test_child_cannot_remove_parents_tree_with_unverified_ignored_files(
     home: Path, infra: Path
 ) -> None:
