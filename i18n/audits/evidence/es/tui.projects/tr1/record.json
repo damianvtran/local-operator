@@ -1,0 +1,16 @@
+{
+  "auditor": {"agent": "i18n-auditor (lopdev team, audit-es)", "session": "77131db44fa7", "model": "anthropic/claude-opus-5-5 (no fallback observed)", "date": "2026-11-23", "independent_from_translator": true},
+  "repo": {"worktree": "~/local-operator/.worktrees/i18n-model-persist-notice", "head": "c3ba6a516c6a"},
+  "audited_input": "~/.local-operator/sessions/17b81fee8ed1/scratchpad/i18n-settings-residual/translations/es.json (sha256 5ea25f5af3b484af0025d7968e95ded02c673570575a86f11a3e2fdfe6477122; byte-identical copy audited-input.es.json beside this record). Briefed path under session eac1855834c5 did not exist; located via the briefed ls fallback.",
+  "source_sha256": {
+    "local_operator/i18n/catalogues/en/tui.app.json": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+    "local_operator/i18n/catalogues/en/tui.projects.json": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2"
+  },
+  "execution": "probe.py (this dir) run with ~/local-operator/.venv python against worktree sources: scripts/i18n/check.py _arguments_problem + _check_plural_categories, local_operator.i18n.runtime.render_message at counts 0,1,2,5,21,100,1000,1000000,1500000; output in audit.log. Full check_catalogues() not run (values not yet applied to a catalogue).",
+  "per_namespace": {
+    "tui.app": {"result": "clean", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [],
+      "notes": "member_count: args (count plural, shown simple) identical to EN; selectors one/many/other = full es CLDR set; renders '0 miembros','1 miembro','2/5/21/100 miembros' (<=12 cells of maxCells 14). many arm '{shown} de miembros' matches existing es led_by and tui.small.network_panel.member_count and style guide ('1.000.000 de sesiones'); only 10^6 renders 19 cells, EN equivalent also overflows (15) — not a fit finding. 'miembro(s)' matches led_by, tui.team_authoring.members. team_aliases 'alias: {aliases}': alias is invariant sg/pl in Spanish and matches tui.team_authoring.aliases; lowercase as source; {aliases} untouched. team_no_description 'sin descripción' 15/30 cells, consistent with tui.projects.detail.no_description 'aún sin descripción' (EN 'no description yet'). team_fallback_facts 'equipo' per glossary row team."},
+    "tui.projects": {"result": "clean", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [],
+      "notes": "start.team_detail: args (manager, count plural, shown) identical and in EN order; ' · ' kept; {manager} untranslated. 'rol/roles' matches tui.authoring.* and cli.teams_help.create_member ('rol o rol:cantidad'). Renders 'manager · 1 rol' / 'manager · 21 roles' (15-18 cells; no maxCells, column droppable). many arm 'de roles' consistent with repo convention."}
+  }
+}

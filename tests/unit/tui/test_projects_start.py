@@ -150,6 +150,34 @@ def test_team_detail_is_one_icu_plural_message(monkeypatch: pytest.MonkeyPatch) 
     assert keyed.detail == "<tui.projects.start.team_detail:{'manager': 'lead', 'count': 2, 'shown': '2'}>"
 
 
+@pytest.mark.parametrize(
+    ("locale", "counts", "detail"),
+    [
+        ("zh-CN", (3, 3), "manager · 6个角色"),
+        ("fr", (1,), "manager · 1 rôle"),
+        ("fr", (3, 3), "manager · 6 rôles"),
+        ("ru", (2,), "manager · 2 роли"),
+        ("ru", (3, 2), "manager · 5 ролей"),
+    ],
+)
+def test_team_detail_renders_each_locales_plural(locale: str, counts: tuple[int, ...], detail: str) -> None:
+    """The start picker's team row carries the shipped translation and plural arm.
+
+    The echo-resolver test above proves the message is keyed; this proves the
+    locales actually carry it (a missing key falls back to English silently).
+    The manager id is an identifier and stays verbatim in every locale.
+    """
+    from local_operator.i18n import text
+
+    previous = text.active_locale()
+    try:
+        text.set_active_locale(locale)
+        row = start_targets(teams=[_team("a", counts=counts)], agents=[])[1]
+    finally:
+        text.set_active_locale(previous)
+    assert row.detail == detail
+
+
 def test_an_empty_registry_still_offers_a_plain_session() -> None:
     """D7: the feature has to work on a fresh install with nothing registered."""
     rows = start_targets(teams=[], agents=[])

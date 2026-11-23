@@ -6012,6 +6012,62 @@ async def test_settings_team_rows_route_every_word_through_keys(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locale", "counts", "facts", "summary"),
+    [
+        # zh-CN is the reported locale: `名` classifier, no digit/CJK space,
+        # full-width colon straight onto the Latin alias list.
+        ("zh-CN", (3, 3), "6名成员 · 别名：s1, s2", "暂无描述"),
+        # fr pins both plural arms that real rosters reach (one / other) and the
+        # NNBSP (U+202F) the fr catalogue puts before a colon.
+        ("fr", (1,), "1 membre · alias\u202f: s1, s2", "aucune description"),
+        ("fr", (3, 3), "6 membres · alias\u202f: s1, s2", "aucune description"),
+    ],
+)
+async def test_settings_team_rows_render_translated_facts(
+    tmp_path: Path, locale: str, counts: tuple[int, ...], facts: str, summary: str
+) -> None:
+    """The keyed team facts resolve to the shipped translations, not English.
+
+    Regression for the 2026-11-23 zh-CN frames that painted `6 members · alias:
+    lop` / `no description`: the keys alone (pinned above with an echo
+    resolver) do not prove a locale carries the copy — a key missing from the
+    locale's catalogue silently falls back to English. This reads the real
+    catalogues through the live `/language` path.
+    """
+    from local_operator.i18n import text
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(
+        TeamEditFields(
+            name="solo",
+            description="",
+            manager="manager",
+            aliases=["s1", "s2"],
+            members=[TeamMember(role=f"r{i}", count=c) for i, c in enumerate(counts)],
+        )
+    )
+    session.team_registry = registry
+
+    previous = text.active_locale()
+    app = OperatorApp(lambda: _factory(session))
+    try:
+        async with app.run_test(size=(120, 32)) as pilot:
+            assert await _settle(pilot, lambda: app._session is session), "session never bound"
+            # After boot: on_mount resolves the config language and would
+            # overwrite an earlier switch with English.
+            text.set_active_locale(locale)
+            assert text.active_locale() == locale
+            rows = app._settings_team_rows()
+    finally:
+        text.set_active_locale(previous)
+
+    assert rows == [("solo", facts, summary)]
+
+
+@pytest.mark.asyncio
 async def test_the_two_cleanup_classes_are_two_titled_groups_with_their_own_scope_tag(
     tmp_path: Path,
 ) -> None:
