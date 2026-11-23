@@ -93,6 +93,94 @@ def test_the_owner_refuses_bad_frames_by_name(
     assert caught.value.code == code and words in caught.value.sentence
 
 
+def test_query_counts_matches_beyond_its_window_and_anchors_at_first(tmp_path: Path) -> None:
+    _journal(tmp_path, rows=140)
+    answer = net_peek.serve(
+        tmp_path,
+        {"session_id": SESSION, "query": r"\brow (3|70|140)\b", "regex": True, "steps": 5},
+        own_label="b",
+    )
+    window = answer["window"]
+    assert window["match_id"] == f"{3:032x}"
+    assert [step["body"] for step in window["steps"]] == [f"row {i}" for i in range(1, 6)]
+    assert "match count: 3 (whole transcript)" in window["note"]
+    assert "up to 2 before and 2 after" in window["note"]
+    print(window["note"])
+
+
+def test_head_and_digest_stay_small_and_oversize_names_a_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _journal(tmp_path, rows=140) / "transcript.jsonl"
+    rows = path.read_text().splitlines()
+    # Use the real cap for the source journal; a smaller test cap lets us
+    # exercise the reply refusal without weakening production's body clipping.
+    pad = "x" * net_peek.SESSION_PEEK_REPLY_BUDGET_BYTES
+    for i in range(len(rows) - 8, len(rows)):
+        row = json.loads(rows[i])
+        row["payload"]["content"][0]["text"] = pad if i == len(rows) - 1 else pad[:1_000]
+        rows[i] = json.dumps(row)
+    for role, extra in (
+        ("assistant", {"tool_calls": [{"name": "edit", "arguments": {"path": "src/main.py"}}]}),
+        ("tool", {"tool_name": "edit", "is_error": True}),
+    ):
+        row = json.loads(rows[-3 if role == "assistant" else -2])
+        row["payload"].update(
+            role=role, content=[{"text": "refused; commit deadbeef, PR #24"}], **extra
+        )
+        rows[-3 if role == "assistant" else -2] = json.dumps(row)
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    assert path.stat().st_size > net_peek.SESSION_PEEK_REPLY_BUDGET_BYTES
+    base = {"session_id": SESSION}
+    head = net_peek.serve(tmp_path, {**base, "head": 2}, own_label="b")
+    assert [step["body"] for step in head["window"]["steps"]] == ["row 1", "row 2"]
+    print("head:", [step["body"] for step in head["window"]["steps"]])
+    digest = net_peek.serve(tmp_path, {**base, "digest": True}, own_label="b")
+    fold = digest["digest"]["text"]
+    assert "digest fold (not the full transcript)" in fold
+    assert "tools: edit; file paths: src/main.py; commits/PRs: commit deadbeef, PR #24" in fold
+    assert "refusals/errors:" in fold
+    assert len(fold.splitlines()) <= 10
+    budget = 3_000
+    assert len(json.dumps(head).encode()) < budget
+    assert len(json.dumps(digest).encode()) < budget
+    print(fold)
+    tail = net_peek.serve(tmp_path, base, own_label="b")
+    size = len(json.dumps(tail).encode())
+    assert size > budget
+    monkeypatch.setattr(net_peek, "SESSION_PEEK_REPLY_BUDGET_BYTES", budget)
+    with pytest.raises(MeshRefusal) as caught:
+        net_peek.serve(tmp_path, base, own_label="b")
+    assert caught.value.code == "reply_too_large"
+    assert caught.value.sentence == (
+        f"This peek reply is {size:,} bytes; the send limit is {budget:,} bytes. "
+        "Try `head=1` (opening step), `digest` (compact fold), or fewer `steps` for this window."
+    )
+    print(caught.value.sentence)
+    for shape in ({"head": 1}, {"digest": True}):
+        assert net_peek.serve(tmp_path, {**base, **shape}, own_label="b")["mode"] in shape
+
+
+def test_a_bounded_query_reports_only_a_lower_bound_and_ignores_hidden_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.session import peek
+
+    path = _journal(tmp_path) / "transcript.jsonl"
+    lines = path.read_bytes().splitlines(keepends=True)
+    hidden = json.loads(lines[1])
+    hidden["payload"].update(kind="custom", custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE)
+    lines[1] = json.dumps(hidden).encode() + b"\n"
+    path.write_bytes(b"".join(lines))
+    monkeypatch.setattr(peek, "_PEEK_SCAN_BYTES", sum(map(len, lines[:2])) + 2)
+    answer = net_peek.serve(tmp_path, {"session_id": SESSION, "query": "row"}, own_label="b")
+    window = answer["window"]
+    assert window["match_count"] == 1 and window["match_count_complete"] is False
+    assert "count is a lower bound" in window["note"]
+    assert [step["body"] for step in window["steps"]] == ["row 1"]
+
+
 def test_a_session_with_no_transcript_is_a_named_refusal(tmp_path: Path) -> None:
     (tmp_path / "sessions" / SESSION).mkdir(parents=True)
     with pytest.raises(MeshRefusal) as caught:
@@ -463,12 +551,14 @@ def test_a_peek_that_outlasts_its_deadline_says_the_owner_ran_out_of_time(
     assert "ran out of time" in caught.value.sentence
 
 
-def test_a_quick_transport_failure_stays_unreachable() -> None:
+@pytest.mark.parametrize("shape", [{"head": 1}, {"query": "row", "regex": True}, {"digest": True}])
+def test_a_quick_transport_failure_stays_unreachable(shape: dict[str, Any]) -> None:
     """Failing before the deadline is a reachability fact, kept verbatim."""
     handler = net_peek.local_handler(_silent_server([]))
     with pytest.raises(MeshRefusal) as caught:
-        handler({"peer": "d_raw", "session_id": SESSION, "head": 1})
+        handler({"peer": "d_raw", "session_id": SESSION, **shape})
     assert caught.value.code == "peer_unreachable"
+    assert caught.value.sentence == "d_raw stopped answering before it replied"
 
 
 @pytest.mark.parametrize(

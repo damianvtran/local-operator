@@ -148,10 +148,17 @@ async def test_a_size_verdict_names_the_size_and_never_the_build(
     message = str(raised.value)
     assert "too old" not in message, message
     assert "update" not in message, message
-    assert "too large" in message and "device that holds it" in message, message
+    assert message.splitlines() == [
+        "this session's newest history is too large to send here; "
+        "open the conversation on the device that holds it",
+        "display_history(max_wire_bytes=524288, max_messages=120) / runtime socket line",
+        "lop network sessions --peer peer-device --peek s1 --head=20",
+        "lop network sessions --peer peer-device --peek s1 --digest",
+    ]
     # THE LANE BUDGET (design review round 1, D1): 110 cells is the transcript
-    # lane at 120 columns, and a sentence over it orphans its closing clause.
-    assert len(message) <= 110, f"{len(message)} chars: {message}"
+    # lane at 120 columns, so keep the commands on independent lines.
+    assert all(len(line) <= 110 for line in message.splitlines()), message
+    print(message)
 
     # The log line is the after-the-fact record of WHY the page was refused:
     # nothing on the wire carries the reason, so this is where size is told

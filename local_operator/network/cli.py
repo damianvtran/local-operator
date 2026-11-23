@@ -708,7 +708,7 @@ def add_parser(
         "--around-id", default=None, metavar="ID", help="with --peek: the steps around that entry"
     )
     net_sessions.add_argument(
-        "--query", default=None, metavar="TEXT", help="with --peek: window around the newest match"
+        "--query", default=None, metavar="TEXT", help="with --peek: window and count for a search"
     )
     net_sessions.add_argument(
         "--regex", action="store_true", default=None, help="with --peek --query: match as a regex"

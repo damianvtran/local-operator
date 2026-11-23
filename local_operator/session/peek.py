@@ -7,8 +7,8 @@ coordinator peeking a session on a mesh peer therefore got a degraded tail of
 the synced display window and was refused ``head``/``query``/``regex``/
 ``digest`` outright — it could not see a remote session's original request or
 search its history. The owner device now answers ``net_session_peek``
-(``network/peek.py``) with THESE functions, so a remote peek and a local one
-run the same code under the same budgets, and the rows cannot drift apart.
+(``network/peek.py``) with THESE functions. Plain windows share readers;
+counted search and turn digest are peer-specific views under the same budgets.
 
 CONSTRAINTS. Everything here is synchronous file I/O meant to run in a worker
 thread (the tool's ``asyncio.to_thread``; the relay's slow lane). Nothing here
@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -150,8 +151,8 @@ _PEEK_DEFAULT_STEPS = 12
 _PEEK_MAX_PAGES = 4
 
 
-#: Byte depth the backward needle search may scan before it returns the honest
-#: miss (design §8.1). It is the SAME 16 MiB window the reader gives its cursor
+#: Byte depth for the local backward needle search and the owner's forward
+#: counted search. It is the SAME 16 MiB window the reader gives its cursor
 #: locator (``transcript._PAGE_LOCATE_WINDOW_BYTES``), so "deep" means one
 #: thing in the reader and in the search that rides it; a test pins the two
 #: numbers equal so they cannot drift apart silently.
@@ -199,6 +200,8 @@ class _PeekWindow(NamedTuple):
     match_step: int | None = None
     miss: str = ""
     note: str = ""
+    match_count: int | None = None
+    match_count_complete: bool | None = None
 
 
 class _PeekDigest(NamedTuple):
@@ -394,29 +397,35 @@ def _peek_head(directory: Path, *, need: int) -> _PeekWindow:
         raise FileNotFoundError(f"{directory} holds no transcript")
     entries: list[TranscriptEntry] = []
     scanned = 0
-    capped = False
+    shown = 0
+    has_newer = False
+    from local_operator.harness.comms import is_peek_step_entry
+
     with path.open("rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        end_of_file = handle.tell()
-        walker = _iter_complete_lines_forward(handle, 0, end_of_file=end_of_file)
-        for raw in walker:
-            scanned += len(raw) + 1
+        file_size = handle.seek(0, os.SEEK_END)
+        end_of_file = min(file_size, _PEEK_SCAN_BYTES)
+        bounded = end_of_file < file_size
+        for raw in _iter_complete_lines_forward(handle, 0, end_of_file=end_of_file):
+            # A lookahead must not pull a huge newest row across the scan bound.
+            if bounded and scanned + len(raw) + 1 > end_of_file:
+                scanned = end_of_file
+                break
+            scanned = min(end_of_file, scanned + len(raw) + 1)
+            if shown >= need:
+                if raw.strip():
+                    has_newer = True
+                    break
+                continue
             entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
             if entry is not None:
                 entries.append(entry)
-            if len(_peek_message_entries(entries)) >= need:
-                break
-            if scanned >= _PEEK_SCAN_BYTES:
-                capped = True
-                break
-        # One lookahead beyond the window answers ``has_newer``; blank lines are
-        # not rows, so skip them rather than counting a torn journal's noise.
-        has_newer = any(raw.strip() for raw in walker)
+                shown += int(is_peek_step_entry(entry))
+        capped = bounded and shown < need
     return _peek_window(
         entries,
         need=need,
         has_older=False,  # the walk began at byte zero; nothing precedes it
-        has_newer=has_newer,
+        has_newer=True if has_newer else None if bounded else False,
         scanned_bytes=scanned,
         note=(
             f"the read stopped at the {_PEEK_SCAN_BYTES >> 20} MiB scan bound before "
@@ -563,6 +572,91 @@ def _peek_search(
     return window._replace(scanned_bytes=scanned)
 
 
+def _peer_peek_search(
+    directory: Path, *, needle: str, pattern: RowMatcher | None, need: int
+) -> _PeekWindow:
+    """Count eligible steps on the owner and retain only the first hit's window.
+
+    The local search still walks newest-first and stops at one hit. A peer asks
+    for the first chronological hit and a count, so retain its neighbours as
+    we walk forward; re-locating by id would price a second read from the tail.
+    """
+    from local_operator.harness.comms import is_peek_step_entry
+    from local_operator.session import compression
+    from local_operator.session.transcript import (
+        TranscriptEntry,
+        _iter_complete_lines_forward,
+    )
+
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
+    before = need // 2
+    after = need - before - 1
+    preceding: deque[TranscriptEntry] = deque(maxlen=before)
+    selected: list[TranscriptEntry] = []
+    hit_id = ""
+    count = 0
+    older = newer = False
+    eligible = 0
+    consumed = 0
+    with path.open("rb") as handle:
+        file_size = handle.seek(0, os.SEEK_END)
+        scanned = min(file_size, _PEEK_SCAN_BYTES)
+        complete = scanned == file_size
+        for raw in _iter_complete_lines_forward(handle, 0, end_of_file=scanned):
+            consumed += len(raw) + 1
+            if not complete and consumed > scanned:
+                # The byte bound may bisect a row. Never count its prefix.
+                break
+            text = raw.decode("utf-8", errors="replace")
+            entry = TranscriptEntry.from_json(text)
+            if entry is None or not is_peek_step_entry(entry):
+                continue
+            if hit_id:
+                if len(selected) < need and after:
+                    selected.append(entry)
+                    after -= 1
+                else:
+                    newer = True
+            found = pattern.search(text) is not None if pattern is not None else needle in text
+            if found:
+                count += 1
+                if not hit_id:
+                    hit_id = entry.id
+                    older = eligible > len(preceding)
+                    selected = [*preceding, entry]
+            if not hit_id:
+                preceding.append(entry)
+            eligible += 1
+
+    # This is model-facing tool-result metadata. A bounded scan can prove a
+    # lower bound, never the number of matches beyond the bytes it examined.
+    scope = "whole transcript" if complete else f"first {scanned:,} bytes; count is a lower bound"
+    note = f"match count: {count} ({scope})"
+    if not hit_id:
+        return _PeekWindow(
+            steps=[],
+            scanned_bytes=scanned,
+            match_count=count,
+            match_count_complete=complete,
+            miss=f"no match for {needle!r}: {note}.",
+        )
+    window = _peek_window(
+        selected,
+        need=need,
+        has_older=older,
+        has_newer=True if newer else False if complete else None,
+        match_id=hit_id,
+    )
+    return window._replace(
+        scanned_bytes=scanned,
+        match_count=count,
+        match_count_complete=complete,
+        note=f"{note}; first match, up to {before} before and {need - before - 1} after",
+    )
+
+
 def _peek_live_state(record: Any) -> str:
     """``stored``, or ``live`` plus the record's own busy/pending words.
 
@@ -659,6 +753,89 @@ def _peek_digest(directory: Path, *, live_state: str) -> _PeekDigest:
     )
 
 
+# A fold is a receipt of references, not a filesystem or Git audit. Recognize
+# only explicit commit/PR markers in already-rendered step text; arbitrary hex
+# in a log isn't evidence of a commit.
+_DIGEST_REFERENCE = re.compile(
+    r"https://[^\s)\]>]+/(?:pull|merge_requests)/\d+|"
+    r"\b(?:PR|MR)\s*#\d+|\b(?:commit|git show)\s+[0-9a-f]{7,40}\b|"
+    r"^\[[^\]\n]+ [0-9a-f]{7,40}\]",
+    re.IGNORECASE | re.MULTILINE,
+)
+_DIGEST_REFUSAL = re.compile(
+    r"\b(?:refus(?:al|ed)|denied|not authorized|not permitted|blocked|cannot|can't)\b",
+    re.IGNORECASE,
+)
+
+
+def _peer_peek_digest(directory: Path, *, live_state: str) -> _PeekDigest:
+    """Fold eligible tail entries into recent turns without shipping their prose.
+
+    Derive names and paths from recorded calls, and references from the same
+    clipped text a step can show. Don't turn arbitrary tool arguments or
+    hidden journal rows into a second transcript surface.
+    """
+    from local_operator.harness.comms import PEEK_STEP_CHARS, _render_transcript_steps
+    from local_operator.session.transcript import read_transcript_page
+
+    page = read_transcript_page(directory, limit=_PEEK_DIGEST_ROWS)
+    entries = _peek_message_entries(page.entries)
+    steps = _render_transcript_steps(entries)
+    turns: list[dict[str, list[str]]] = []
+    starts_mid_turn = False
+    for entry, step in zip(entries, steps, strict=True):
+        payload = entry.payload or {}
+        if step.kind == "user" or not turns:
+            if not turns and step.kind != "user" and page.has_more:
+                starts_mid_turn = True
+            turns.append({"tools": [], "file paths": [], "commits/PRs": [], "refusals/errors": []})
+        turn = turns[-1]
+        if step.kind == "assistant":
+            for call in payload.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                name = call.get("name")
+                if isinstance(name, str):
+                    turn["tools"].append(name[:PEEK_STEP_CHARS])
+                args = call.get("arguments")
+                if isinstance(args, dict) and isinstance(args.get("path"), str):
+                    turn["file paths"].append(args["path"][:PEEK_STEP_CHARS])
+        elif step.kind == "tool":
+            name = str(payload.get("tool_name") or "tool")[:PEEK_STEP_CHARS]
+            turn["tools"].append(name)
+            if payload.get("is_error") or _DIGEST_REFUSAL.search(step.body):
+                turn["refusals/errors"].append(f"{name}: {_fold_line(step.body, 60)}")
+        if step.kind == "assistant" and _DIGEST_REFUSAL.search(step.body):
+            turn["refusals/errors"].append(f"assistant: {_fold_line(step.body, 60)}")
+        turn["commits/PRs"].extend(match[0] for match in _DIGEST_REFERENCE.finditer(step.body))
+
+    # Reuse the existing digest's ten-line and tail-row budgets. Even the
+    # longest identifiers fit a step-sized line; an ellipsis marks omitted
+    # references, and older turns are named but never transferred.
+    first = max(0, len(turns) - 9)
+    scope = "older rows or turns omitted" if page.has_more or first else "no older rows"
+    lines = [
+        f"digest fold (not the full transcript): {len(steps)} steps in the newest "
+        f"{_PEEK_DIGEST_ROWS} rows; showing {len(turns) - first} turn(s) — {live_state}; {scope}"
+    ]
+    for i, turn in enumerate(turns[first:], first):
+        fields = [
+            f"{label}: {_fold_line(', '.join(dict.fromkeys(values)), 120)}"
+            for label, values in turn.items()
+            if values
+        ]
+        label = "partial turn" if i == 0 and starts_mid_turn else f"turn {i + 1}"
+        lines.append(
+            _fold_line(f"{label}: {'; '.join(fields) or 'no recorded references'}", PEEK_STEP_CHARS)
+        )
+    return _PeekDigest(
+        text="\n".join(lines),
+        steps_seen=len(steps),
+        tool_calls=sum(step.kind == "tool" for step in steps),
+        has_older=bool(page.has_more),
+    )
+
+
 def _peek_body(
     name: str,
     session_id: str,
@@ -687,7 +864,8 @@ def _peek_body(
     if not window.steps:
         if mode == "tail":
             return f'"{name}" ({session_id}) — no steps yet: the transcript has no ' "message rows."
-        return f'"{name}" ({session_id}) — no steps {phrase}.'
+        empty = f'"{name}" ({session_id}) — no steps {phrase}.'
+        return f"{empty}\n({window.note})" if window.note else empty
     lines = [f'"{name}" ({session_id}) — {len(window.steps)} step(s) {phrase}:']
     for step in window.steps:
         marker = "  ← match" if step.index == window.match_step else ""
@@ -947,11 +1125,24 @@ def peek_need(params: PeekRequest) -> int:
 
 
 def window_to_wire(window: _PeekWindow) -> dict[str, Any]:
-    """A window as JSON — every field, so the viewer re-renders it byte-for-byte."""
+    """Project bounded fields on the owner, never on the receiving device."""
+    from local_operator.harness.comms import PEEK_STEP_CHARS
+
+    def heading_for_wire(heading: str) -> str:
+        # Body elision is already marked by the renderer; unusual tool lists
+        # and custom headings must not defeat the character budget either.
+        if len(heading) <= PEEK_STEP_CHARS:
+            return heading
+        return heading[:PEEK_STEP_CHARS] + f" [… {len(heading) - PEEK_STEP_CHARS} chars elided …]"
 
     out = window._asdict()
     out["steps"] = [
-        {"index": step.index, "kind": step.kind, "heading": step.heading, "body": step.body}
+        {
+            "index": step.index,
+            "kind": step.kind,
+            "heading": heading_for_wire(step.heading),
+            "body": step.body,
+        }
         for step in window.steps
     ]
     return out
@@ -1006,9 +1197,17 @@ def serve_peek(
     if isinstance(pattern, str):
         return {"refusal": pattern}
     if params.digest:
-        digest = _peek_digest(directory, live_state=live_state)
+        digest = _peer_peek_digest(directory, live_state=live_state)
         return {"mode": "digest", "digest": digest._asdict()}
-    window, mode = _peek_read(directory, params, need=peek_need(params), pattern=pattern)
+    need = peek_need(params)
+    query = str(params.query or "").strip()
+    if query:
+        window, mode = (
+            _peer_peek_search(directory, needle=query, pattern=pattern, need=need),
+            "search",
+        )
+    else:
+        window, mode = _peek_read(directory, params, need=need, pattern=pattern)
     if isinstance(window, str):
         return {"refusal": window, "mode": mode}
     return {"mode": mode, "window": window_to_wire(window)}

@@ -20899,6 +20899,10 @@ def _sessions_peek_mesh_journal(
             details["scanned_bytes"] = window.scanned_bytes
         if window.match_id:
             details["match_id"] = window.match_id
+        if window.match_count is not None:
+            details.update(
+                match_count=window.match_count, match_count_complete=window.match_count_complete
+            )
         # A miss is this harness's own sentence about an empty window; any
         # step the owner returned is transcript content.
         peeked = bool(window.steps)

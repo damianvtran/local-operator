@@ -23,6 +23,7 @@ import contextlib
 import inspect
 import logging
 import math
+import shlex
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -135,7 +136,11 @@ from local_operator.session.frontend_state import (
     effective_identity_for,
     freeze_new_store_state,
 )
-from local_operator.session.history_window import DisplayHistoryWindow
+from local_operator.session.history_window import (
+    DISPLAY_HISTORY_BYTES,
+    DISPLAY_HISTORY_MESSAGES,
+    DisplayHistoryWindow,
+)
 from local_operator.session.model_selection import (
     SelectionReading,
     StoredModelSelection,
@@ -6369,8 +6374,9 @@ class AttachedSession:
             # substitute when the attach push frame or the ``frontend_sync``
             # reply exceeds ``server._MAX_LINE_BYTES``. Reading that as "update
             # the peer" sent the operator to a remedy that cannot exist: the
-            # peer is on the same build, and the only fix is arriving on the
-            # device that holds the conversation. ``reset`` is neither — a
+            # peer is on the same build. Exact display replay still requires
+            # the owning device, but a bounded journal peek is independent of
+            # this display bind. ``reset`` is neither — a
             # cursor that stopped resolving — so it is answered by the re-sync
             # verdict in its own arm below, never by size and never by version.
             #
@@ -6404,9 +6410,27 @@ class AttachedSession:
                 # actually has, because a viewer on another device cannot paper
                 # over either of them with a local replay.
                 if window is not None and window.status == "full_required":
+                    # The legacy envelope cannot distinguish page admission
+                    # from the socket fallback. Name the possible bounds, not
+                    # a made-up exact size, and give non-binding owner reads.
+                    peek = shlex.join(
+                        [
+                            "lop",
+                            "network",
+                            "sessions",
+                            "--peer",
+                            self._owner.placement.home_device,
+                            "--peek",
+                            window.conversation_id,
+                        ]
+                    )
                     raise ConnectionError(
                         "this session's newest history is too large to send here; "
-                        "open the conversation on the device that holds it"
+                        "open the conversation on the device that holds it\n"
+                        # i18n: ignore protocol limits and literal CLI commands
+                        f"display_history(max_wire_bytes={DISPLAY_HISTORY_BYTES}, "
+                        f"max_messages={DISPLAY_HISTORY_MESSAGES}) / runtime socket line\n"
+                        f"{peek} --head=20\n{peek} --digest"
                     )
                 if window is not None and window.status == "reset":
                     # A CURSOR THAT STOPPED RESOLVING, not an old peer. The

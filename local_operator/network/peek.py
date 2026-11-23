@@ -272,10 +272,15 @@ def serve(root: Path, frame: dict[str, Any], *, own_label: str) -> dict[str, Any
     answer["request"] = peek.wire_request(request, request.given)
     live_name = getattr(record, "conversation_name", "") if record is not _UNRESOLVED else ""
     answer["name"] = live_name or session_name(directory) or f"session {session_id}"
-    if len(json.dumps(answer).encode("utf-8")) > SESSION_PEEK_REPLY_BUDGET_BYTES:
+    reply_bytes = len(json.dumps(answer).encode("utf-8"))
+    if reply_bytes > SESSION_PEEK_REPLY_BUDGET_BYTES:
+        # Report the serialized window we refused, not the size of the journal.
+        # This is a protocol diagnostic for coordinators; keep selectors literal.
         raise MeshRefusal(
             "reply_too_large",
-            "that window is too large to send in one reply; ask for fewer `steps`.",
+            f"This peek reply is {reply_bytes:,} bytes; the send limit is "
+            f"{SESSION_PEEK_REPLY_BUDGET_BYTES:,} bytes. Try `head=1` (opening step), "
+            "`digest` (compact fold), or fewer `steps` for this window.",
         )
     return answer
 
