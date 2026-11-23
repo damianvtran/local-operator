@@ -12,8 +12,18 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     TextContent,
 )
+from local_operator.harness.wire import AGENT_END_FRAME_BUDGET_BYTES, _frame_bytes
 from local_operator.session.frontend_state import FrontendStateStore
-from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
+from local_operator.session.runtime.inline_ui_egress import (
+    InlineUiEvents,
+    bound_event_with_inline_ui,
+    without_inline_ui,
+)
+from local_operator.session.runtime.server import (
+    _MAX_LINE_BYTES,
+    _frame_line_bytes,
+    fit_frame_for_wire,
+)
 from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.unit.session.test_frontend_state import _state
 
@@ -95,3 +105,47 @@ def test_authoritative_final_retracts_a_provisional_widget() -> None:
     final = projector.dump(MessageEndEvent(message=message))
     assert final["inline_ui"] == {"version": 1, "messages": {message.id: None}}
     assert '"type":"bar"' not in str(final)
+
+
+def test_oversized_continuation_retracts_overlay_without_dropping_prose() -> None:
+    msg = Message.assistant("")
+    msg._inline_ui_source_version = 1
+    events = InlineUiEvents(sidecars=True)
+    first = events.dump(
+        MessageUpdateEvent(
+            message=msg,
+            delta='Lead.\n\n```lop-ui\n{"type":"bar","title":"First","data":[["A",1]]}\n```\n',
+        )
+    )
+    assert first["inline_ui"]["messages"][msg.id]["widgets"]
+    tail = "Next paragraph. " * 3300
+    second = events.dump(MessageUpdateEvent(message=msg, delta=tail))
+    assert second["delta"] == tail
+    assert second["inline_ui"] == {"version": 1, "messages": {msg.id: None}}
+
+
+def test_widget_budget_never_changes_base_event_or_agent_end_transcript() -> None:
+    source = Message.assistant(
+        'Summary.\n\n```lop-ui\n{"type":"bar","title":"One","data":[["A",1]]}\n```\n'
+    )
+    source._inline_ui_source_version = 1
+    events = InlineUiEvents(sidecars=True)
+    end = events.dump(MessageEndEvent(message=source))
+    event = {"op": "event", "data": {**end, "other": ""}}
+    base = {"op": "event", "data": without_inline_ui(event["data"])}
+    base["data"]["other"] = "p" * (_MAX_LINE_BYTES - _frame_line_bytes(base) - 8)
+    event["data"]["other"] = base["data"]["other"]
+    assert _frame_line_bytes(base) == _MAX_LINE_BYTES - 8 < _frame_line_bytes(event)
+    assert _frame_line_bytes(event) > _MAX_LINE_BYTES
+    assert fit_frame_for_wire(event, _MAX_LINE_BYTES) == base
+
+    finished = events.dump(AgentEndEvent(messages=[source]))
+    finished["messages"][0]["content"].append({"type": "text", "text": ""})
+    plain = without_inline_ui(finished)
+    padding = finished["messages"][0]["content"][-1]
+    padding["text"] = "p" * (AGENT_END_FRAME_BUDGET_BYTES - _frame_bytes(plain) - 8)
+    assert _frame_bytes(plain) == AGENT_END_FRAME_BUDGET_BYTES - 8
+    assert _frame_bytes(finished) > AGENT_END_FRAME_BUDGET_BYTES
+    fitted = bound_event_with_inline_ui(finished)
+    assert without_inline_ui(fitted) == plain
+    assert fitted["inline_ui"] == {"version": 1, "messages": {source.id: None}}

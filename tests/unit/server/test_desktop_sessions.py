@@ -544,6 +544,37 @@ async def test_receipts_survive_adapter_restart_and_reject_changed_body(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("original", [None, False, True])
+async def test_prompt_receipt_retry_keeps_first_presentation_authority(tmp_path, original):
+    body = {"text": "the user's send"}
+    previous = body if original is None else {**body, "inline_ui": original}
+
+    async def lost_ack():
+        raise ConnectionError("ack lost after claim")
+
+    journal = DesktopReceipts(tmp_path)
+    with pytest.raises(ConnectionError):
+        await journal.run("s:id", previous, lost_ack, retry_safe=True)
+
+    behaviors = []
+
+    async def deliver(inline_ui: bool):
+        behaviors.append(inline_ui)
+        return {"status": "queued"}
+
+    restarted = DesktopReceipts(tmp_path)
+    retry = {**body, "inline_ui": original is not True}
+    assert await restarted.run_prompt("s:id", retry, deliver) == {"status": "queued"}
+    assert await journal.run_prompt("s:id", previous, deliver) == {
+        "status": "queued",
+        "replayed": True,
+    }
+    assert behaviors == [original is True]
+    with pytest.raises(ReceiptConflict):
+        await journal.run_prompt("s:id", {**retry, "text": "different send"}, deliver)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sigil", ["?", "#"])
 async def test_the_read_only_probe_never_clips_the_truncated_path(tmp_path, sigil):
     """A config root is arbitrary user data, and ``?``/``#`` must stay DATA (R11).

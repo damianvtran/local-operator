@@ -50,7 +50,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
 
 from local_operator.asks.surfaces import UNVERIFIED as UNVERIFIED_SURFACE
-from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import (
@@ -561,7 +560,10 @@ class TuiSessionHandle(SessionHandle):
         only schedules onto its own loop), so this preserves producer order
         without moving pydantic objects across threads.
         """
-        from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
+        from local_operator.session.runtime.inline_ui_egress import (
+            InlineUiEvents,
+            bound_event_with_inline_ui,
+        )
 
         self._on_event = on_event
         self._inline_ui_sidecars = inline_ui_sidecars
@@ -580,7 +582,7 @@ class TuiSessionHandle(SessionHandle):
                 # turn, so leaving it unbounded here would leave the bound
                 # bypassable by whichever host happens to own the session.
                 on_event(
-                    bound_agent_end_for_wire(
+                    bound_event_with_inline_ui(
                         projection.dump(event),
                         session_id=getattr(self._session(), "session_id", None),
                     )

@@ -612,13 +612,17 @@ class SessionEntry:
 
     async def seed_inline_ui(self) -> None:
         """Restore completed overlays when a rich viewer joins an existing dial."""
-        from local_operator.mobile.projection import durable_inline_ui, read_live_inline_ui
+        from local_operator.mobile.projection import (
+            durable_inline_ui,
+            read_live_inline_ui,
+        )
 
         projection = self.projection
         if self._inline_ui_seeded or projection is None:
             return
         needed = {
-            row.id for row in projection.transcript
+            row.id
+            for row in projection.transcript
             if row.kind == "assistant" and row.final and row.id not in self._live_inline_ui
         }
         if not needed:
@@ -629,9 +633,11 @@ class SessionEntry:
             durable = _durable_projection(self.record.session_id)
             if durable is None:
                 return {}
-            return read_live_inline_ui(durable_inline_ui(
-                row for row in durable.transcript if row.id in needed
-            ).get("inline_ui"))
+            return read_live_inline_ui(
+                durable_inline_ui(row for row in durable.transcript if row.id in needed).get(
+                    "inline_ui"
+                )
+            )
 
         messages = await asyncio.to_thread(recover)
         if self.writer is not writer or self.ended:
@@ -639,10 +645,13 @@ class SessionEntry:
         # This fold ran off-loop. A newer live event (including a tombstone)
         # beats the journal snapshot, so only fill still-unknown ids.
         self._inline_ui_seeded = True
-        self.remember_inline_ui({
-            row_id: envelope for row_id, envelope in messages.items()
-            if row_id not in self._live_inline_ui
-        })
+        self.remember_inline_ui(
+            {
+                row_id: envelope
+                for row_id, envelope in messages.items()
+                if row_id not in self._live_inline_ui
+            }
+        )
 
     def next_req(self) -> int:
         self._req_seq += 1
@@ -3375,7 +3384,18 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                 daemon.table.notify_list_changed()
                 _fan_out(entry, daemon)
             elif op == "inline_ui" and inline_ui and entry.ready.is_set():
-                if entry.remember_inline_ui(read_live_inline_ui(frame.get("data"))):
+                data = frame.get("data")
+                reset = (
+                    isinstance(data, dict)
+                    and data.get("version") == 1
+                    and data.get("reset") is True
+                )
+                changed = False
+                if reset:
+                    changed = bool(entry._live_inline_ui)
+                    entry._live_inline_ui.clear()
+                    entry._inline_ui_seeded = False
+                if entry.remember_inline_ui(read_live_inline_ui(data)) or changed:
                     # The row may already be on the phone; no repaint is owed
                     # to a legacy viewer when only its optional overlay changed.
                     _fan_out(entry, daemon, inline_ui_only=True)
@@ -4469,6 +4489,10 @@ def _inline_ui_frame(frame: dict[str, Any], entry: SessionEntry) -> dict[str, An
     for row in reversed(frame["transcript"]):
         row_id = row["id"]
         if row["kind"] != "assistant" or row_id not in messages:
+            continue
+        # The subscriber may still hold an older queued projection. Don't
+        # join an overlay to a different revision of the same prose row.
+        if row["text"].strip() != messages[row_id]["text"].strip():
             continue
         size = len(json.dumps({row_id: messages[row_id]}, separators=(",", ":"))) - 2
         size += bool(visible)  # comma between entries
@@ -7969,12 +7993,16 @@ def build_app(daemon: MobileDaemon):
                         if live is not None and live.projection is projection:
                             frame = _inline_ui_frame(frame, live)
                         else:
-                            from local_operator.mobile.projection import durable_inline_ui
+                            from local_operator.mobile.projection import (
+                                durable_inline_ui,
+                            )
 
                             visible = {row["id"] for row in frame["transcript"]}
-                            frame.update(durable_inline_ui(
-                                row for row in projection.transcript if row.id in visible
-                            ))
+                            frame.update(
+                                durable_inline_ui(
+                                    row for row in projection.transcript if row.id in visible
+                                )
+                            )
                     yield _projection_seed_event(client_frame(stamp_temporary(frame)), have)
                     sent_at = loop.time()
                 while True:
@@ -9137,9 +9165,11 @@ def build_app(daemon: MobileDaemon):
                 {"error": "history cursor not found", "reset": True, "reason": reset},
                 status_code=409,
             )
-        return JSONResponse(_history_response(
-            page, has_more, inline_ui=request.query_params.get("inline_ui") == "1"
-        ))
+        return JSONResponse(
+            _history_response(
+                page, has_more, inline_ui=request.query_params.get("inline_ui") == "1"
+            )
+        )
 
     async def api_session_checkpoints(request: Request) -> Response:
         """The checkpoint manifest for one conversation: the rail's ticks.

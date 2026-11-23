@@ -7,9 +7,11 @@ import math
 import re
 import unicodedata
 from collections.abc import Iterator, Sequence
+from decimal import Decimal, DecimalException
 from typing import Any, Literal, NotRequired, TypedDict, TypeGuard
 
 from markdown_it import MarkdownIt
+from rich.cells import cell_len
 
 # Match the paired renderer's display budget; never silently slice a dataset.
 _MAX_SOURCE = 16 * 1024
@@ -17,6 +19,11 @@ _MAX_ROWS = 32
 _MAX_COLUMNS = 8
 _MAX_TEXT = 256
 _MAX_SERIES = 4
+_MAX_SAFE_INTEGER = (1 << 53) - 1
+# 60 terminal cells less the transcript gutter, row inset and scrollbar.
+# Fit with natural column widths or use wrapping field/value rows instead of
+# handing Rich a table that will ellipsize the very digits users asked for.
+_NARROW_TABLE_CELLS = 50
 _TAG = "lop-ui"
 _MARKDOWN = MarkdownIt().enable("table")
 _LINE_END = re.compile(r"\r\n|\r|\n")
@@ -39,14 +46,29 @@ def _label(value: object) -> TypeGuard[str]:
 
 
 def _number(value: object) -> TypeGuard[int | float]:
-    # JSON booleans are not numbers, nor are integers outside the renderer's
-    # finite floating-point range.
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
+    # Unsafe integral coordinates would plot a different value in JS. Also
+    # exclude Decimal: the JSON decoder keeps one only when binary64 changed
+    # the value's canonical decimal round trip (including under/overflow).
+    if isinstance(value, bool):
         return False
-    try:
-        return math.isfinite(value)
-    except OverflowError:
-        return False
+    if isinstance(value, int):
+        return abs(value) <= _MAX_SAFE_INTEGER
+    return isinstance(value, float) and math.isfinite(value) and abs(value) <= _MAX_SAFE_INTEGER
+
+
+def _decimal_json(token: str) -> float | Decimal:
+    exact = Decimal(token)
+    nearest = float(exact)
+    return nearest if _number(nearest) and Decimal(str(nearest)) == exact else exact
+
+
+def _exact_cell(value: int | Decimal) -> str:
+    if isinstance(value, Decimal) and 0 <= value.adjusted() < _MAX_TEXT - 1:
+        # Spell ordinary large integer counts without an exponent, but never
+        # allocate a string sized by an untrusted scientific exponent.
+        if value == value.to_integral_value():
+            return str(int(value))
+    return str(value)
 
 
 def _safe(value: object) -> str:
@@ -68,10 +90,23 @@ def _table(title: str, columns: Sequence[object], rows: Sequence[Sequence[object
     def row(values: Sequence[object]) -> str:
         return "| " + " | ".join(_safe(cell) for cell in values) + " |"
 
+    heading = f"**{_safe(title)}**"
+    widths = [
+        max(3, *(cell_len(str(cell)) for cell in cells if cell is not None))
+        for cells in zip(columns, *rows, strict=True)
+    ]
+    if sum(widths) + 3 * len(columns) + 1 > _NARROW_TABLE_CELLS and rows:
+        # Paragraphs and lists wrap at the available width; cells in the
+        # Markdown table truncate. Keep each value beside its actual column
+        # label, and give each logical row its own visual group.
+        out = [heading]
+        for values in rows:
+            first, *other = zip(columns, values, strict=True)
+            out.extend(["", f"**{_safe(first[0])}:** {_safe(first[1])}", ""])
+            out.extend(f"- **{_safe(label)}:** {_safe(cell)}" for label, cell in other)
+        return "\n".join(out)
     rule = "| " + " | ".join(["---"] * len(columns)) + " |"
-    return "\n".join(
-        [f"**{_safe(title)}**", "", row(columns), rule, *(row(values) for values in rows)]
-    )
+    return "\n".join([heading, "", row(columns), rule, *(row(values) for values in rows)])
 
 
 def _series(value: dict[str, Any]) -> tuple[list[str], list[list[object]]] | None:
@@ -115,8 +150,12 @@ def _series(value: dict[str, Any]) -> tuple[list[str], list[list[object]]] | Non
             return None
         # Scale first so finite inputs cannot overflow while being summed.
         scaled = [[cell / max(row) for cell in row] for row in numeric_rows]
-        rows = [[f"{cell / sum(row):.1%}" for cell in row] for row in scaled]
-    elif mode != "dual" and value.get("unit"):
+        rows = [
+            [f"{raw} ({part / total:.1%})" for raw, part in zip(raw_row, row, strict=True)]
+            for raw_row, row in zip(numeric_rows, scaled, strict=True)
+            for total in [sum(row)]
+        ]
+    if mode != "dual" and value.get("unit"):
         headers = [f"{header} ({value['unit']})" for header in headers]
     return ["x", *headers], [[label, *row] for label, row in zip(labels, rows, strict=True)]
 
@@ -134,8 +173,8 @@ def _decode(source: str) -> _Widget | None:
     if len(source) > _MAX_SOURCE or _utf16_length(source) > _MAX_SOURCE:
         return None
     try:
-        value = json.loads(source, parse_constant=_invalid_constant)
-    except (ValueError, RecursionError):
+        value = json.loads(source, parse_constant=_invalid_constant, parse_float=_decimal_json)
+    except (ValueError, RecursionError, DecimalException, OverflowError):
         return None
     return _validate_widget(value)
 
@@ -189,14 +228,21 @@ def _validate_widget(value: object) -> _Widget | None:
         or len(rows) > _MAX_ROWS
     ):
         return None
+    exact_rows = []
     for row in rows:
         if not isinstance(row, list) or len(row) != len(columns):
             return None
+        exact_row = []
         for cell in row:
-            if _number(cell) or (kind != "heatmap" and _text(cell)):
-                continue
-            if cell is not None or kind == "table":
-                return None
+            if kind != "heatmap" and (
+                isinstance(cell, Decimal) or (type(cell) is int and not _number(cell))
+            ):
+                cell = _exact_cell(cell)
+            if not (_number(cell) or (kind != "heatmap" and _text(cell))):
+                if cell is not None or kind == "table":
+                    return None
+            exact_row.append(cell)
+        exact_rows.append(exact_row)
     if kind == "heatmap":
         labels = value.get("rowLabels")
         if not isinstance(labels, list) or len(labels) != len(rows) or not all(map(_label, labels)):
@@ -204,7 +250,7 @@ def _validate_widget(value: object) -> _Widget | None:
         columns = [unit or "#", *columns]
         rows = [[label, *row] for label, row in zip(labels, rows, strict=True)]
         return _widget(value, columns, rows, "columns", "rows", "rowLabels", "unit")
-    return _widget(value, columns, rows, "columns", "rows")
+    return _widget({**value, "rows": exact_rows}, columns, exact_rows, "columns", "rows")
 
 
 def _widget(

@@ -63,8 +63,11 @@ describe("mobile transcript inline UI", () => {
 		const table = screen.getByRole("table", { name: "Preview" });
 		expect(within(table).getByRole("cell", { name: expected })).toBeTruthy();
 		expect(container.querySelector("img")).toBeNull();
-		if (type === "dual") expect(within(table).getByRole("columnheader", { name: "Mass (kg)" })).toBeTruthy();
-		if (["line", "scatter", "pie", "grouped", "stacked", "percent", "dual"].includes(type)) {
+		if (type === "dual") {
+			expect(within(table).getByRole("columnheader", { name: "Mass (kg)" })).toBeTruthy();
+			expect(container.querySelector("[data-inline-plot]")).toBeNull();
+		}
+		if (["line", "scatter", "pie", "grouped", "stacked", "percent"].includes(type)) {
 			const graphic = container.querySelector(`[data-inline-plot="${type}"]`);
 			expect(graphic?.childElementCount).toBeGreaterThan(0);
 			expect(graphic?.outerHTML).not.toMatch(/NaN|Infinity/);
@@ -74,6 +77,16 @@ describe("mobile transcript inline UI", () => {
 			expect(table.querySelectorAll("td [aria-hidden]")).toHaveLength(1);
 			expect(within(table).getByRole("row", { name: /Night/ }).lastElementChild?.textContent).toBe("");
 		}
+	});
+
+	it("keeps an exact unsafe count as decimal text and rejects an unsafe wire coordinate", () => {
+		const count = JSON.parse('{"type":"table","title":"Exact","columns":["Count"],"rows":[["9007199254740993"]]}');
+		const unsafe = JSON.parse('{"type":"bar","title":"Unsafe","data":[["A",9007199254740993]]}');
+		const { rerender } = render(transcript("Legacy prose", undefined, overlay([{ offset: 0, payload: count }])));
+		expect(screen.getByRole("cell", { name: "9007199254740993" })).toBeTruthy();
+		rerender(transcript("Legacy prose", undefined, overlay([{ offset: 0, payload: unsafe }])));
+		expect(screen.queryByRole("table")).toBeNull();
+		expect(screen.getByText("Legacy prose")).toBeTruthy();
 	});
 
 	it("does not extract widgets from standalone or nested legacy literal fences", () => {

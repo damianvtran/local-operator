@@ -3204,7 +3204,9 @@ Feed: the `approvals` frame ORs open pairing cards into `pending` and adds
 
 When `GET /v1/capabilities` reports `features.inline_ui: 1`, a capable client may
 send the exact JSON boolean `inline_ui: true` on `/messages` (including steer)
-and query `inline_ui=1` on `/sessions/{id}`, `/history`, and `/events`. These
+and query `inline_ui=1` on `/sessions/{id}`, `/history`, and `/events`.
+A retry of the same send may change only this presentation declaration without
+conflicting; the first receipt still owns its original authoring choice. These
 fields negotiate presentation; they do not grant permission to read or send.
 
 Ordinary text is the same for both readers. A capable viewer may also receive
@@ -3215,7 +3217,9 @@ ordinary event's `payload.inline_ui`; live seed events are at
 `payload.frontend.snapshot.live_events` in snapshot/replace frames. History
 carries the same envelope at `result.inline_ui` (or `payload.history.inline_ui`
 inside a snapshot). An update can carry a widget with an empty text delta; a
-`null` row in an authoritative final event retracts an earlier placement.
+reconnect seed can carry `widgets: []` with authoritative cumulative text
+before the first fence closes; an ordinary delta never uses that shape. A
+`null` row retracts an earlier placement and restores the current base prose.
 Unknown versions, absent overlays, and peers opened through the separate mesh
 owner proxy are prose-only. Do not parse or expect widget source fences in any
 wire text.

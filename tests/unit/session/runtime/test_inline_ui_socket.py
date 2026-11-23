@@ -195,12 +195,18 @@ async def test_warm_mobile_prompt_negotiates_inline_ui_per_request(
             await prompt(malformed, "truthy hello", inline_ui=True)
         async with _attach(server, client="daemon", inline_ui=True) as nonmobile:
             await prompt(nonmobile, "origin in op only", inline_ui=True, origin="mobile")
-        async with _attach(server) as tui:
-            await _read(tui[0], "frontend_sync")
-            await prompt(tui, "local TUI default", enabled=True)
+        await session.prompt("local in-process TUI default")
+        check_request("local in-process TUI default", enabled=True)
         async with _attach(server, surface="desktop") as old_desktop:
             await _read(old_desktop[0], "frontend_sync")
             await prompt(old_desktop, "legacy desktop", inline_ui=True)
+        async with _attach(server) as old_terminal:
+            await _read(old_terminal[0], "frontend_sync")
+            await prompt(old_terminal, "legacy terminal", inline_ui=True)
+        async with _attach(server, inline_ui=True) as terminal:
+            await _read(terminal[0], "frontend_sync")
+            await prompt(terminal, "terminal opted in only at hello")
+            await prompt(terminal, "negotiated terminal", inline_ui=True, enabled=True)
         async with _attach(server, surface="desktop", inline_ui=True) as desktop:
             await _read(desktop[0], "frontend_sync")
             await prompt(desktop, "negotiated desktop", inline_ui=True, enabled=True)
@@ -257,6 +263,40 @@ async def test_mobile_steer_carries_inline_ui_to_the_next_provider_call(tmp_path
         release.set()
         server.close()
         await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_prose_seed_is_exact_before_an_inline_fence_closes() -> None:
+    handle = _InlineHandle()
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    try:
+        message = Message(role="assistant")
+        message._inline_ui_source_version = 1
+        handle._frontend._fold_live_event(MessageStartEvent(message=message))
+        for delta in ("Exact ", "prose.\n\n```lop-ui\n{broken so far"):
+            event = MessageUpdateEvent(message=message, delta=delta)
+            handle._frontend._fold_live_event(event)
+        async with _attach(server) as legacy, _attach(server, inline_ui=True) as modern:
+            for (reader, _), rich in ((legacy, False), (modern, True)):
+                payload = (await _read(reader, "frontend_sync"))["data"]
+                seed = payload["snapshot"]["live_events"][-1]
+                assert seed["delta"] == "Exact prose.\n\n\n"
+                if rich:
+                    assert seed["inline_ui"] == {
+                        "version": 1,
+                        "messages": {
+                            message.id: {
+                                "version": 1,
+                                "text": "Exact prose.\n\n\n",
+                                "widgets": [],
+                            }
+                        },
+                    }
+                else:
+                    assert "inline_ui" not in seed
+    finally:
+        server.close()
 
 
 @pytest.mark.asyncio

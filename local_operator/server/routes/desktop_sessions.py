@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import functools
 import json
 import logging
 import pathlib
@@ -158,6 +157,7 @@ from local_operator.session.frontend_state import (
     sync_wire_payload,
 )
 from local_operator.session.index_prewarm import start_session_warm
+from local_operator.session.inline_ui import inline_ui_opt_in
 from local_operator.session.remote_open import PeerSessionUnresolved
 from local_operator.session.row_clip import (
     ROW_RANGE_MAX_BYTES,
@@ -2184,7 +2184,7 @@ async def _queue_or_refuse(
         raise error
     line = InboxLine(
         text=body.text,
-        sender={},
+        sender={"input_surface": "desktop"},
         mode="steer" if body.mode == "steer" else "mailbox",
         written_at=time.time(),
         # ``wake`` + ``SOURCE_USER`` is what makes ``append_for_successor``
@@ -2194,6 +2194,7 @@ async def _queue_or_refuse(
         wake=True,
         source=SOURCE_USER,
         command_id=body.request_id,
+        inline_ui=body.inline_ui,
     )
     try:
         written = await await_spool_write(
@@ -3824,7 +3825,7 @@ async def snapshot(
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
         frame = await bridge.snapshot(
-            **({"inline_ui": True} if inline_ui else {}),
+            **inline_ui_opt_in(inline_ui),
             entry_times=bool(entry_ts),
             open_frame=bool(open_frame),
             **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
@@ -3952,7 +3953,7 @@ async def history(
     ):
         return reply(
             await bridge.history(
-                **({"inline_ui": True} if inline_ui else {}),
+                **inline_ui_opt_in(inline_ui),
                 before_id=before_id,
                 around_id=around_id,
                 before=before,
@@ -4769,7 +4770,7 @@ async def prompt(session_id: str, body: Prompt, request: Request):
             try:
                 async with host(request).session(session_id) as bridge:
 
-                    async def admit():
+                    async def admit(inline_ui: bool):
                         nonlocal admitted
                         assert bridge.remote is not None
                         # A PEER'S CONVERSATION KEEPS ITS PICTURES VISIBLE HERE: the
@@ -4807,7 +4808,7 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                             # owner from before the carriage never sees the keys.
                             input_mode=body.input_mode,
                             input_path=body.input_path,
-                            **({"inline_ui": True} if body.inline_ui else {}),
+                            **inline_ui_opt_in(inline_ui),
                         )
                         admitted = True
                         # Admission can bind a cold viewer while an event
@@ -4822,11 +4823,10 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                         }
 
                     return reply(
-                        await receipts(request).run(
+                        await receipts(request).run_prompt(
                             session_id + ":" + body.request_id,
                             body.model_dump(),
                             admit,
-                            retry_safe=True,
                         )
                     )
             except ConnectionError as error:
@@ -4840,11 +4840,14 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                 # when queueing is honest and why it is at-most-once.
                 if not _owner_busy(error):
                     raise
-                queued = await receipts(request).run(
-                    session_id + ":" + body.request_id,
-                    body.model_dump(),
-                    functools.partial(_queue_or_refuse, request, session_id, body, error),
-                    retry_safe=True,
+
+                async def spool(inline_ui: bool) -> dict[str, Any]:
+                    return await _queue_or_refuse(
+                        request, session_id, body.model_copy(update={"inline_ui": inline_ui}), error
+                    )
+
+                queued = await receipts(request).run_prompt(
+                    session_id + ":" + body.request_id, body.model_dump(), spool
                 )
                 # A queued message is the owner's from here, exactly like an
                 # admitted one: publishing ``admission.failed`` would tell every
@@ -6915,7 +6918,7 @@ async def events(
                     entry_times=bool(entry_ts),
                     open_frame=bool(open_frame),
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
-                    **({"inline_ui": True} if inline_ui else {}),
+                    **inline_ui_opt_in(inline_ui),
                     peer_journal_source=bool(peer_journal_source),
                 )
             ) as frames:

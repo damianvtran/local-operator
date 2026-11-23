@@ -51,7 +51,8 @@ const isText = (value: unknown): value is string =>
 const isLabel = (value: unknown): value is string =>
 	isText(value) && value.trim().length > 0;
 const isNumber = (value: unknown): value is number =>
-	typeof value === "number" && Number.isFinite(value);
+	typeof value === "number" && Number.isFinite(value) &&
+	Math.abs(value) <= Number.MAX_SAFE_INTEGER;
 
 function decodePayload(value: unknown): InlineUi | null {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return null;

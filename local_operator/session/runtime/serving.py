@@ -78,9 +78,11 @@ from local_operator.harness.types import (
     SubagentEndEvent,
     SubagentStartEvent,
 )
-from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.profile_actions import ProfileActionReply
-from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
+from local_operator.session.runtime.inline_ui_egress import (
+    InlineUiEvents,
+    bound_event_with_inline_ui,
+)
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 
 if TYPE_CHECKING:
@@ -3452,6 +3454,7 @@ class ServingSessionHandle(SessionHandle):
         source: str = SOURCE_PEER,
         command_id: str = "",
         harness_injected: bool = False,
+        inline_ui: bool = False,
         mesh_origin: Mapping[str, Any] | None = None,
         message_id: str = "",
         custom_type: str = "",
@@ -3543,6 +3546,7 @@ class ServingSessionHandle(SessionHandle):
                     source=source,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    inline_ui=source == SOURCE_USER and inline_ui is True,
                     # OWNER rows only (M-2): a peer row is the sender's to shape,
                     # so it never carries a stamp, whatever a caller passed.
                     mesh_origin=(
@@ -4233,7 +4237,7 @@ class ServingSessionHandle(SessionHandle):
                 # would not have caught it — the 104-message / 50-tool-row
                 # fixture measures a 531,082-byte payload, and
                 # ``fit_frame_for_wire`` returns it byte-identical.
-                payload = bound_agent_end_for_wire(
+                payload = bound_event_with_inline_ui(
                     _notice_text_for_viewer(inline_ui.dump(event)),
                     session_id=getattr(self._session, "session_id", None),
                 )
@@ -4706,6 +4710,7 @@ class ServingSessionHandle(SessionHandle):
                     mode="mailbox",
                     wake=True,
                     sender=_owner_sender(owner_typed, input_surface),
+                    inline_ui=inline_ui,
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -4761,6 +4766,7 @@ class ServingSessionHandle(SessionHandle):
                         mode="mailbox",
                         wake=True,
                         sender=_owner_sender(owner_typed, input_surface),
+                        inline_ui=inline_ui,
                         source=SOURCE_USER,
                         command_id=command_id,
                         harness_injected=harness_injected,
@@ -5806,8 +5812,10 @@ class ServingSessionHandle(SessionHandle):
                         fields["mesh_origin"] = command.mesh_origin
                     if "input_surface" in parameters and command.input_surface is not None:
                         fields["input_surface"] = command.input_surface
-                    if command.inline_ui and "inline_ui" in parameters:
-                        fields["inline_ui"] = True
+                    if "inline_ui" in parameters and (
+                        command.inline_ui or command.input_surface == "tui"
+                    ):
+                        fields["inline_ui"] = command.inline_ui
                     if "input_mode" in parameters:
                         fields["input_mode"] = command.input_mode
                     if "input_path" in parameters:
@@ -6113,6 +6121,7 @@ class ServingSessionHandle(SessionHandle):
                     mode="mailbox",
                     wake=True,
                     sender=_owner_sender(owner_typed, input_surface),
+                    inline_ui=inline_ui,
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -6158,6 +6167,7 @@ class ServingSessionHandle(SessionHandle):
                     mode="mailbox",
                     wake=True,
                     sender=_owner_sender(owner_typed, input_surface),
+                    inline_ui=inline_ui,
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -6213,8 +6223,8 @@ class ServingSessionHandle(SessionHandle):
         if "input_surface" in parameters and input_surface is not None:
             fields["input_surface"] = input_surface
         try:
-            if inline_ui and "inline_ui" in parameters:
-                fields["inline_ui"] = True
+            if "inline_ui" in parameters and (inline_ui or input_surface == "tui"):
+                fields["inline_ui"] = inline_ui
             self._session.steer(text, blocks, **fields)
         except Exception:
             # No queue insertion means no durable acceptance exists; the same

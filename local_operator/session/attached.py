@@ -11453,9 +11453,9 @@ class AttachedSession:
             raise ConnectionError("owner connection lost")
         images_wire = [_image_to_wire(image) for image in (images or [])]
         command = (
-            ContinuationCommand(message_id, self._session_id, text, images_wire)
+            ContinuationCommand(message_id, self._session_id, text, images_wire, inline_ui=True)
             if message_id
-            else ContinuationCommand.create(self._session_id, text, images_wire)
+            else ContinuationCommand.create(self._session_id, text, images_wire, inline_ui=True)
         )
         # `self.epoch` is the copy-free read of the same field; this is the
         # captured baseline the observer below compares each event against.
@@ -11633,9 +11633,10 @@ class AttachedSession:
                 session_id=self._session_id,
                 text=text,
                 images=images_wire,
+                inline_ui=True,
             )
             if message_id
-            else ContinuationCommand.create(self._session_id, text, images_wire)
+            else ContinuationCommand.create(self._session_id, text, images_wire, inline_ui=True)
         )
         return await client.send_command(command, streaming=self._streaming)
 
@@ -11713,6 +11714,7 @@ class AttachedSession:
             command_id=message.id,
             session_id=self._session_id,
             text=message.text,
+            inline_ui=True,
             images=[
                 _image_to_wire(block)
                 for block in message.content

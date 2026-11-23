@@ -436,7 +436,12 @@ jobs:
     # test/coverage path. Three complete attempt-bound CI runs supply per-file
     # p75 weights; their LPT test-time sums are NOT wall-time margin evidence.
     # See docs/ci-test-durations.md for provenance and post-change limits.
-    timeout-minutes: 38
+    # #4472's seven new test files take the existing 30.724s fallback each.
+    # The six-shard model in CI now projects 2228.12s including shard zero's
+    # 420s serial lane; at 38m, 60s of setup leaves 2220s. Provision the next
+    # whole minute (2280s; 51.88s of modelled margin), not a smaller suite,
+    # synthetic timing weights, changed workers or relaxed step watchdogs.
+    timeout-minutes: 39
     # Pass-through only, for `coverage-report` (whose `needs` must stay
     # `test`). Every leg carries the same value from `changes`, so the
     # last-leg-wins rule for matrix outputs cannot pick a different base.

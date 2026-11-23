@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 # Request-only discovery pointer. Store schemas and examples in the packaged
 # guide so adding a component doesn't expand the provider prompt.
 INSTRUCTIONS = (
@@ -12,7 +14,16 @@ INSTRUCTIONS = (
 
 
 def instructions_for(surface: str | None, *, viewer_capable: bool = False) -> str | None:
-    """A local TUI can always render; attached desktop and mobile must negotiate."""
-    if surface == "tui" or (surface in {"desktop", "mobile"} and viewer_capable):
+    """The in-process terminal stamps its default at admission; others negotiate."""
+    if surface in {"tui", "desktop", "mobile"} and viewer_capable:
         return INSTRUCTIONS
     return None
+
+
+class InlineUiOptIn(TypedDict, total=False):
+    inline_ui: bool
+
+
+def inline_ui_opt_in(enabled: bool | int) -> InlineUiOptIn:
+    """Omit the key on legacy-compatible internal calls, without an untyped splat."""
+    return {"inline_ui": True} if enabled else {}

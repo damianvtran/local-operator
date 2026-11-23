@@ -16,6 +16,7 @@ from local_operator.harness.types import (
 from local_operator.session.inline_ui_text import (
     INLINE_UI_V1,
     InlineUiProjection,
+    InlineWidgetPlacement,
     project_inline_ui,
 )
 
@@ -38,33 +39,54 @@ def _attach(
     projection: InlineUiProjection,
     *,
     include_text: bool = False,
-) -> None:
+    reconnect_seed: bool = False,
+) -> bool:
     envelope = projection.get("inline_ui")
-    if not envelope:
-        return
+    if not envelope and not reconnect_seed:
+        return False
     # Agent-end can repeat a whole run. Bound the optional augmentation, not
     # the prose frame. Preserve a prefix of complete widgets and their offsets.
     previous = data.get("inline_ui", {}).get("messages", {})
-    widgets = []
+    widgets: list[InlineWidgetPlacement] = []
     # Live phone rows use a different text path. The history caller already
     # has the exact basis in the projected row and must not duplicate it.
     basis = {"text": projection["text"]} if include_text else {}
-    for widget in envelope["widgets"]:
-        candidate = {
+
+    def candidate_with(widgets: list[InlineWidgetPlacement]) -> dict[str, Any]:
+        return {
             "version": 1,
             "messages": {
                 **previous,
-                message_id: {
-                    "version": 1,
-                    **basis,
-                    "widgets": [*widgets, widget],
-                },
+                message_id: {"version": 1, **basis, "widgets": widgets},
             },
         }
+
+    attached = False
+    if reconnect_seed:
+        # Empty widgets are meaningful ONLY in a seed: the exact cumulative
+        # text is authoritative even before any marked fence has closed.
+        candidate = candidate_with([])
+        if len(json.dumps(candidate, separators=(",", ":"))) <= _MAX_SIDECAR_BYTES:
+            data["inline_ui"] = candidate
+            attached = True
+    for widget in envelope["widgets"] if envelope else ():
+        candidate = candidate_with([*widgets, widget])
         if len(json.dumps(candidate, separators=(",", ":"))) > _MAX_SIDECAR_BYTES:
             break
         widgets.append(widget)
         data["inline_ui"] = candidate
+        attached = True
+    return attached
+
+
+def inline_ui_retractions(envelope: dict[str, Any]) -> dict[str, Any]:
+    """When exact overlays don't fit, evict them rather than keeping old text."""
+    return {"version": 1, "messages": dict.fromkeys(envelope["messages"])}
+
+
+def _retract(data: dict[str, Any], message_id: str) -> None:
+    envelope = data.setdefault("inline_ui", {"version": 1, "messages": {}})
+    envelope["messages"].setdefault(message_id, None)
 
 
 def _marked(message: object) -> bool:
@@ -116,15 +138,22 @@ class InlineUiEvents:
         data = event.model_dump(mode="json")
         message = getattr(event, "message", None)
         if isinstance(message, Message) and _marked(message):
-            streaming = isinstance(event, MessageUpdateEvent)
-            projection = _project(message.text, streaming=streaming, sidecars=self._sidecars)
-            replace_text_content(data["message"], projection["text"])
             if isinstance(event, MessageUpdateEvent):
                 if self._message_id != message.id:
                     self._reset()
                     self._message_id = message.id
                 self._source += event.delta
                 projection = _project(self._source, streaming=True, sidecars=self._sidecars)
+                # The provider may send a bare message shell or a cumulative
+                # copy. Reuse the streaming projection for the common latter
+                # path rather than scanning the same buffer twice per update.
+                message_text = message.text
+                basis = (
+                    projection["text"]
+                    if message_text == self._source
+                    else _project(message_text, streaming=True, sidecars=False)["text"]
+                )
+                replace_text_content(data["message"], basis)
                 visible = projection["text"]
                 delta = ""
                 if visible.startswith(self._visible):
@@ -133,12 +162,28 @@ class InlineUiEvents:
                 # A reconnect seed retains only the latest update. It must be
                 # self-contained; an ordinary subscriber still gets only deltas.
                 data["delta"] = self._visible if reconnect_seed else delta
-                if visible == self._visible:
-                    _attach(data, message.id, projection, include_text=True)
-                    if "inline_ui" in data:
-                        self._published.add(message.id)
-            elif event.type == "message_end":
-                self._finish(data, message.id, projection)
+                if (
+                    self._sidecars
+                    and visible == self._visible
+                    and _attach(
+                        data,
+                        message.id,
+                        projection,
+                        include_text=True,
+                        reconnect_seed=reconnect_seed and bool(visible),
+                    )
+                ):
+                    self._published.add(message.id)
+                elif message.id in self._published:
+                    # The continuation may exceed the sidecar budget even
+                    # though its prose is still safe to send as ordinary deltas.
+                    _retract(data, message.id)
+                    self._published.discard(message.id)
+            else:
+                projection = _project(message.text, streaming=False, sidecars=self._sidecars)
+                replace_text_content(data["message"], projection["text"])
+                if event.type == "message_end":
+                    self._finish(data, message.id, projection)
         elif isinstance(message, Message) and event.type == "message_end":
             # Recovery providers can finalize with a replacement Message that
             # has lost its source marker. Retire the prior provisional widget.
@@ -177,12 +222,12 @@ class InlineUiEvents:
     def _finish(
         self, data: dict[str, Any], message_id: str, projection: InlineUiProjection
     ) -> None:
-        _attach(data, message_id, projection, include_text=True)
+        attached = _attach(data, message_id, projection, include_text=True)
         if message_id in self._published:
-            envelope = data.setdefault("inline_ui", {"version": 1, "messages": {}})
             # A prior complete widget is provisional until the provider's
-            # authoritative message seals it. Empty is an explicit deletion.
-            envelope["messages"].setdefault(message_id, None)
+            # authoritative message seals it. Null is an explicit deletion.
+            if not attached:
+                _retract(data, message_id)
             self._published.discard(message_id)
 
     def _reset(self) -> None:
@@ -227,6 +272,28 @@ def without_inline_ui(payload: dict[str, Any]) -> dict[str, Any]:
     if "inline_ui" not in payload:
         return payload
     return {key: value for key, value in payload.items() if key != "inline_ui"}
+
+
+def bound_event_with_inline_ui(
+    payload: dict[str, Any], *, session_id: str | None = None
+) -> dict[str, Any]:
+    """A widget never spends the prose transcript's shared agent-end budget."""
+    from local_operator.harness.wire import (
+        AGENT_END_FRAME_BUDGET_BYTES,
+        _frame_bytes,
+        bound_agent_end_for_wire,
+    )
+
+    sidecar = payload.get("inline_ui")
+    if payload.get("type") != "agent_end" or not isinstance(sidecar, dict):
+        return bound_agent_end_for_wire(payload, session_id=session_id)
+    base = without_inline_ui(payload)
+    bounded = bound_agent_end_for_wire(base, session_id=session_id)
+    if bounded is base and _frame_bytes(payload) <= AGENT_END_FRAME_BUDGET_BYTES:
+        return payload
+    # An elided transcript doesn't establish the exact basis for an overlay.
+    # Keep only retractions, control metadata the socket fitter can drop last.
+    return {**bounded, "inline_ui": inline_ui_retractions(sidecar)}
 
 
 def without_live_inline_ui(state: dict[str, Any]) -> dict[str, Any]:

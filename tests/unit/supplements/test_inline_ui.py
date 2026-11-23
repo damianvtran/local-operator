@@ -13,6 +13,7 @@ from local_operator.guides.discovery import (
     make_guide_resolver,
 )
 from local_operator.harness.types import (
+    Message,
     MessageUpdateEvent,
     StreamEndEvent,
     StreamTextDelta,
@@ -77,7 +78,9 @@ async def test_inline_ui_replaces_decoration_but_keeps_file_highlights(
     session.subscribe(events.append)
     try:
         await session.prompt(
-            "chart traffic and write a file", input_surface=surface, inline_ui=viewer_capable
+            "chart traffic and write a file",
+            input_surface=surface,
+            inline_ui=None if surface == "tui" else viewer_capable,
         )
         row = await _await_row(session.transcript)
         if inline_enabled:
@@ -101,7 +104,8 @@ async def test_inline_ui_replaces_decoration_but_keeps_file_highlights(
         assert anchor.inline_ui_source_version == expected_version
         assert "inline_ui_source_version" not in anchor.payload
         assert all(
-            event.message._inline_ui_source_version == expected_version
+            isinstance(event.message, Message)
+            and event.message._inline_ui_source_version == expected_version
             for event in events
             if isinstance(event, MessageUpdateEvent) and event.delta
         )
@@ -110,7 +114,8 @@ async def test_inline_ui_replaces_decoration_but_keeps_file_highlights(
 
 
 def test_tui_is_default_and_attached_viewers_negotiate() -> None:
-    assert instructions_for("tui") == INSTRUCTIONS
+    assert instructions_for("tui") is None
+    assert instructions_for("tui", viewer_capable=True) == INSTRUCTIONS
     for surface in ("desktop", "mobile"):
         assert instructions_for(surface) is None
         assert instructions_for(surface, viewer_capable=True) == INSTRUCTIONS

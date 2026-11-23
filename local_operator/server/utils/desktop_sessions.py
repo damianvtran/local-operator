@@ -132,6 +132,7 @@ from local_operator.session.frontend_state import (
     job_trajectory_wire_value,
     sync_wire_payload,
 )
+from local_operator.session.inline_ui import inline_ui_opt_in
 from local_operator.session.last_user import last_user_at
 from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.session.open_frame import (
@@ -4385,7 +4386,7 @@ class DesktopSessionBridge:
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
                 # why the renderer's own paint time is the reason for it.
                 deadline=started + OPEN_FRAME_SNAPSHOT_BUDGET_S,
-                **({"inline_ui": True} if inline_ui else {}),
+                **inline_ui_opt_in(inline_ui),
             )
             if open_trace.enabled():
                 open_trace.mark(
@@ -4674,7 +4675,7 @@ class DesktopSessionBridge:
                     limit=limit,
                     entry_times=entry_times,
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
-                    **({"inline_ui": True} if inline_ui else {}),
+                    **inline_ui_opt_in(inline_ui),
                 )
                 return {**page, "runs": [], "runs_state": "unsupported", "head_cut": False}
             return await self._open_frame_history(
@@ -7609,7 +7610,7 @@ class DesktopSessionBridge:
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                     peer_journal_source=peer_journal_source,
                     **supplement_read_options(sub.supplements),
-                    **({"inline_ui": True} if inline_ui else {}),
+                    **inline_ui_opt_in(inline_ui),
                     **cast(
                         "DiffBindingReadOptions",
                         {"diff_bindings": True} if sub.diff_bindings else {},

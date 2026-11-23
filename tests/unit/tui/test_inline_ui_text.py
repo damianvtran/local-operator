@@ -67,11 +67,34 @@ def test_series_preserves_categories_and_units(mode) -> None:
     text = flatten(_markdown(visible), 80).plain
     assert all(label in text for label in ("Early", "Red", "Blue"))
     if mode == "percent":
-        assert "25.0%" in text and "75.0%" in text
+        assert "1 (25.0%)" in text and "3 (75.0%)" in text and "Items" in text
     elif mode == "dual":
         assert "Red (Items)" in text and "Blue (Dollars)" in text
     else:
         assert "Red (Items)" in text and "Blue (Items)" in text
+
+
+def test_wide_layout_and_percent_keep_exact_data_at_60_columns() -> None:
+    wide = _widget(
+        "spreadsheet",
+        columns=[f"Revenue {i}" for i in range(8)],
+        rows=[[1234567 + i for i in range(8)]],
+    )
+    percent = _widget(
+        "series",
+        mode="percent",
+        labels=["Q1", "Q2"],
+        unit="Requests",
+        series=[{"label": "Red", "values": [4, 4000]}, {"label": "Blue", "values": [9, 9000]}],
+    )
+    for source, expected in (
+        (wide, [f"Revenue {i}: {1234567 + i}" for i in range(8)]),
+        (percent, ["4 (30.8%)", "9 (69.2%)", "4000 (30.8%)", "9000 (69.2%)", "Requests"]),
+    ):
+        projected = terminal_inline_ui(source, streaming=False)
+        text = flatten(_markdown(projected), 52).plain
+        assert all(token in text for token in expected), text
+        assert "…" not in text
 
 
 @pytest.mark.parametrize(

@@ -143,7 +143,11 @@ from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_RUNNING,
     ACTIVITY_PHASE_THINKING,
 )
-from local_operator.session.inline_ui_text import INLINE_UI_V1, InlineUiEnvelope, project_inline_ui
+from local_operator.session.inline_ui_text import (
+    INLINE_UI_V1,
+    InlineUiEnvelope,
+    project_inline_ui,
+)
 from local_operator.team_bridge.display_receipt import projected_display_receipt
 
 if TYPE_CHECKING:
@@ -448,15 +452,18 @@ def project_live_inline_ui(
 ) -> dict[str, LiveInlineUiEnvelope]:
     """Associate sidecars with visible assistant rows without mutating wire rows.
 
-    Offsets are relative to the runtime's inline-ui prose projection, not the
-    legacy mobile row text. The envelope carries that prose basis unchanged.
+    Offsets stay relative to the unchanged runtime basis. Legacy replay can
+    strip edge whitespace, but if the actual prose changed then the current
+    base row wins immediately, even before a queued retraction arrives.
     """
     if not messages:
         return {}
     return {
         row.id: envelope
         for row in projection.transcript
-        if row.kind == "assistant" and (envelope := messages.get(row.id)) is not None
+        if row.kind == "assistant"
+        and (envelope := messages.get(row.id)) is not None
+        and row.text.strip() == envelope["text"].strip()
     }
 
 

@@ -36082,7 +36082,10 @@ class OperatorApp(App[None]):
             # contents by identity to know which transcript blocks the user
             # took back (`_recall_queued_steers`), so the app and the queue
             # must share one Message rather than each building their own.
+            from local_operator.session.session import stamp_tui_composer_steer
+
             steer_message = Message.user(sent, images)
+            stamp_tui_composer_steer(steer_message)
             session.steer_message(steer_message)
             # "boundary" is engine vocabulary the UI never defines, and this is
             # the line answering "did my text just get thrown away?" — so it says

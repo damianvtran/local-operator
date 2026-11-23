@@ -26,7 +26,7 @@ For `series`, specify `mode`, `labels` (category labels), and `series` (up to fo
 - `grouped`: side-by-side comparisons in the same unit.
 - `stacked`: show both total and contributions. Negative and positive contributions accumulate separately. Use only additive measures in a common unit.
 - `percent`: show changing composition. Use nonnegative values with a positive total in every category; values are normalized within each category.
-- `dual`: two independently scaled lines only when distinct units are necessary. Set `unit` for the left axis and `rightUnit` for the right axis; set each series' `axis` to `left` or `right` and use both. Prefer separate charts if relative magnitudes or visual crossings could mislead.
+- `dual`: compare measurements with distinct units (some viewers show an exact, unit-labeled table). Set `unit` for the left axis and `rightUnit` for the right axis; set each series' `axis` to `left` or `right` and use both. Prefer separate charts if relative magnitudes or visual crossings could mislead.
 
 Example:
 
@@ -34,4 +34,4 @@ Example:
 {"type":"heatmap","title":"Requests by shift","columns":["Early","Late"],"rowLabels":["Mon","Tue"],"rows":[[18,50],[12,null]],"unit":"requests"}
 ```
 
-All numbers must be finite. The schema is data-only; there is no custom CSS, arbitrary resource URL or action. If no component fits, use prose or a file deliverable instead of inventing a type.
+Plot numbers must be finite and within the safe numeric range (absolute value at most 9,007,199,254,740,991). Put larger exact counts or decimals needing extra precision in a table as quoted values. The schema is data-only; there is no custom CSS, arbitrary resource URL or action. If no component fits, use prose or a file deliverable instead of inventing a type.

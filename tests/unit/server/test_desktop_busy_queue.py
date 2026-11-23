@@ -75,7 +75,10 @@ def _publish(root: Path, owner: _FakeOwner, session_id: str, *, live_inbox: bool
 
 
 @pytest.mark.asyncio
-async def test_a_busy_owner_that_drains_live_gets_the_message_queued(tmp_path: Path) -> None:
+@pytest.mark.parametrize("inline_ui", [False, True])
+async def test_a_busy_owner_that_drains_live_gets_the_message_queued(
+    tmp_path: Path, inline_ui: bool
+) -> None:
     """503 runtime_busy before the fix; a durable queued receipt after it."""
     park = asyncio.Event()  # never set: the owner takes the frame and never acks
     async with _Harness(tmp_path) as harness:
@@ -90,8 +93,14 @@ async def test_a_busy_owner_that_drains_live_gets_the_message_queued(tmp_path: P
         _publish(tmp_path, owner, harness.session_id, live_inbox=True)
         try:
             request_id = str(uuid.uuid4())
+            assert harness.client is not None
+            url = f"/v1/desktop/sessions/{harness.session_id}/messages"
+            body = {"request_id": request_id, "text": "are you there?"}
             response = await asyncio.wait_for(
-                _post(harness, "are you there?", request_id=request_id), DEADLOCK_GUARD_S
+                harness.client.post(
+                    url, json={**body, **({"inline_ui": True} if inline_ui else {})}
+                ),
+                DEADLOCK_GUARD_S,
             )
             assert response.status_code == 200, response.text
             result = response.json()["result"]
@@ -106,8 +115,11 @@ async def test_a_busy_owner_that_drains_live_gets_the_message_queued(tmp_path: P
 
             # A RETRY OF THE SAME REQUEST REPLAYS THE RECEIPT, it does not spool
             # a second row (the receipt journal keys on the request id).
+            assert rows[0].inline_ui is inline_ui
+            assert rows[0].sender["input_surface"] == "desktop"
             again = await asyncio.wait_for(
-                _post(harness, "are you there?", request_id=request_id), DEADLOCK_GUARD_S
+                harness.client.post(url, json={**body, "inline_ui": not inline_ui}),
+                DEADLOCK_GUARD_S,
             )
             assert again.status_code == 200, again.text
             assert again.json()["result"]["status"] == "queued"
@@ -166,7 +178,12 @@ async def test_a_steer_to_a_busy_owner_is_queued_as_a_steer(tmp_path: Path) -> N
             response = await asyncio.wait_for(
                 harness.client.post(
                     f"/v1/desktop/sessions/{harness.session_id}/messages",
-                    json={"request_id": request_id, "text": "also check X", "mode": "steer"},
+                    json={
+                        "request_id": request_id,
+                        "text": "also check X",
+                        "mode": "steer",
+                        "inline_ui": True,
+                    },
                 ),
                 DEADLOCK_GUARD_S,
             )
@@ -174,6 +191,7 @@ async def test_a_steer_to_a_busy_owner_is_queued_as_a_steer(tmp_path: Path) -> N
             assert response.json()["result"]["status"] == "queued"
             raw = inbox_path(tmp_path / "sessions" / harness.session_id).read_text()
             assert json.loads(raw.splitlines()[0])["mode"] == "steer"
+            assert peek_inbox(tmp_path / "sessions" / harness.session_id)[0].inline_ui is True
         finally:
             park.set()
             await owner.stop()

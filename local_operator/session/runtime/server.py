@@ -96,7 +96,7 @@ from local_operator.harness.approval import (
     signature_target,
 )
 from local_operator.mobile.projection import ProjectionFold
-from local_operator.mobile.types import SessionProjection
+from local_operator.mobile.types import PROJECTION_TRANSCRIPT_LIMIT, SessionProjection
 from local_operator.network import origin as mesh_origin
 from local_operator.operator import report_operator_authority
 from local_operator.operator import verify as operator_verify
@@ -118,6 +118,7 @@ from local_operator.session.frontend_state import FRONTEND_CAPABILITY
 from local_operator.session.inline_ui_text import INLINE_UI_V1
 from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.inline_ui_egress import (
+    inline_ui_retractions,
     without_inline_ui,
     without_live_inline_ui,
 )
@@ -885,6 +886,28 @@ def fit_frame_for_wire(frame: dict[str, Any], cap_bytes: int) -> dict[str, Any]:
     if original <= cap_bytes:
         return frame
     op = frame.get("op", "frame")
+    data = frame.get("data")
+    if isinstance(data, dict):
+        if op == "event" and isinstance(sidecar := data.get("inline_ui"), dict):
+            # Exact text and widget offsets are all-or-nothing. Try the base
+            # frame before externalizing attachments or degrading an event.
+            # Prefer tiny explicit retractions if there is even that much room.
+            base = {**frame, "data": without_inline_ui(data)}
+            retracted = {
+                **base,
+                "data": {**base["data"], "inline_ui": inline_ui_retractions(sidecar)},
+            }
+            if _frame_line_bytes(retracted) <= cap_bytes:
+                return retracted
+            frame = base
+            if _frame_line_bytes(frame) <= cap_bytes:
+                return frame
+        elif op == "frontend_update" and isinstance(changes := data.get("changes"), dict):
+            clean = without_live_inline_ui(changes)
+            if clean is not changes:
+                frame = {**frame, "data": {**data, "changes": clean}}
+                if _frame_line_bytes(frame) <= cap_bytes:
+                    return frame
     referenced, moved = _reference_image_payloads(
         frame, AttachmentStore(), key=ATTACHMENT_KEY, floor=_ATTACHMENT_FLOOR_BYTES
     )
@@ -2680,6 +2703,10 @@ class _ClientConn:
     input_metadata: bool = False
     #: This socket opted into live inline widgets; absence keeps the legacy shape.
     inline_ui: bool = False
+    # Optional daemon sidecars are latest-by-row, not append-only events. Keep
+    # tombstones here too: filling the base FIFO cannot strand a stale card.
+    pending_inline_ui: dict[str, Any] = field(default_factory=dict)
+    pending_inline_ui_reset: bool = False
     #: This viewer negotiated ``supplements-v1`` (``contract.negotiated``): the owner
     #: advertised it AND the viewer declared ``supplements`` on its auth frame. Only
     #: then may the runtime send it ``supplement_progress`` events or project
@@ -9494,15 +9521,14 @@ class RuntimeServer:
                 # connection, probed like ``owner_typed``; a handle without the
                 # keyword keeps its exact old call shape.
                 fields["input_surface"] = authority.input_surface
-            # A viewer can render widgets without requesting them on every send.
-            # Accept the opt-in only on this authenticated mobile prompt.
-            if (
-                authority.inline_ui
-                and authority.input_surface in {"desktop", "mobile"}
-                and frame.get("inline_ui") is True
-                and "inline_ui" in parameters
-            ):
-                fields["inline_ui"] = True
+            # A terminal behind a socket isn't the in-process TUI. Pass an
+            # explicit False for a legacy attach to suppress the local default.
+            if "inline_ui" in parameters and authority.input_surface in {
+                "desktop",
+                "mobile",
+                "tui",
+            }:
+                fields["inline_ui"] = authority.inline_ui and frame.get("inline_ui") is True
             receipt = await h.prompt(frame["text"], **fields)
             if not honours_wait:
                 return receipt
@@ -9556,13 +9582,12 @@ class RuntimeServer:
                 # Same rule as the prompt op above: a phone steer into a
                 # desk-started run makes that run mobile-origin.
                 fields["input_surface"] = authority.input_surface
-            if (
-                authority.inline_ui
-                and authority.input_surface in {"desktop", "mobile"}
-                and frame.get("inline_ui") is True
-                and "inline_ui" in parameters
-            ):
-                fields["inline_ui"] = True
+            if "inline_ui" in parameters and authority.input_surface in {
+                "desktop",
+                "mobile",
+                "tui",
+            }:
+                fields["inline_ui"] = authority.inline_ui and frame.get("inline_ui") is True
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()
@@ -10932,11 +10957,7 @@ class RuntimeServer:
         if isinstance(sidecar := data.get("inline_ui"), dict):
             for conn in clients:
                 if conn.kind == "daemon" and conn.inline_ui and conn.events_ready:
-                    # Don't evict the established projection stream for an
-                    # optional widget frame during a provider delta burst.
-                    self._enqueue_client_frame(
-                        conn, {"op": "inline_ui", "data": sidecar}, drop_on_overflow=False
-                    )
+                    self._enqueue_inline_ui(conn, sidecar["messages"])
         recipients = [
             conn
             for conn in clients
@@ -11197,13 +11218,60 @@ class RuntimeServer:
             conn.event_queue.put_nowait(frame)
         return len(compacted) < len(frames)
 
+    def _enqueue_inline_ui(self, conn: _ClientConn, messages: dict[str, Any]) -> None:
+        pending = conn.pending_inline_ui
+        for message_id, row in messages.items():
+            pending.pop(message_id, None)
+            pending[message_id] = row
+        # Bound the side state to the daemon's display window plus one row.
+        # A catch-up event can touch older rows out of order, so eviction is
+        # not proof an old tombstone is irrelevant. In that extreme case reset
+        # the receiving overlay cache, then restore the retained latest rows.
+        while len(pending) > PROJECTION_TRANSCRIPT_LIMIT + 1:
+            pending.pop(next(iter(pending)))
+            conn.pending_inline_ui_reset = True
+        if conn.event_queue.empty():
+            # Only a wake signal, never a wire frame. If the FIFO isn't empty,
+            # its existing work already guarantees the writer a wakeup.
+            self._enqueue_client_frame(conn, {"op": "inline_ui_tick"})
+
+    async def _flush_inline_ui(self, conn: _ClientConn) -> None:
+        pending, conn.pending_inline_ui = conn.pending_inline_ui, {}
+        if conn.pending_inline_ui_reset:
+            conn.pending_inline_ui_reset = False
+            await self._send_to(
+                conn,
+                {
+                    "op": "inline_ui",
+                    "data": {"version": 1, "messages": {}, "reset": True},
+                },
+            )
+        # Each admitted row was already bounded to the sidecar budget. Send
+        # rows separately rather than building an unbounded combined frame if
+        # a busy provider has completed several since the last socket drain.
+        for message_id, row in pending.items():
+            if id(conn.writer) not in self._clients:
+                return
+            if message_id in conn.pending_inline_ui:
+                continue  # A newer revision arrived during a previous socket await.
+            await self._send_to(
+                conn,
+                {
+                    "op": "inline_ui",
+                    "data": {"version": 1, "messages": {message_id: row}},
+                },
+            )
+
     async def _drain_event_queue(self, conn: _ClientConn) -> None:
         """Drain one follower's raw event FIFO until it is dropped."""
         try:
             while id(conn.writer) in self._clients and not self._closed.is_set():
                 frame = await conn.event_queue.get()
                 try:
-                    await self._send_to(conn, frame)
+                    if frame.get("op") != "inline_ui_tick":
+                        await self._send_to(conn, frame)
+                    if conn.pending_inline_ui:
+                        await self._flush_inline_ui(conn)
                 finally:
                     conn.event_queue.task_done()
                 if id(conn.writer) not in self._clients:

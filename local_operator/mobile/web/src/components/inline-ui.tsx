@@ -26,7 +26,7 @@ function Preview({ title, unit, columns, rows, rowLabels, decorate, plot, keyBy 
 			</div>
 			{plot && <div className="px-2 pb-1">{plot}</div>}
 			{/* Wide data grids scroll inside the transcript, including by keyboard. */}
-			<div className="overflow-x-auto rounded-md focus-visible:outline-accent" {...(wide ? {
+			<div className={wide ? "overflow-x-auto rounded-md focus-visible:outline-accent" : undefined} {...(wide ? {
 				role: "region", "aria-labelledby": captionId, tabIndex: 0,
 			} : {})}>
 				<table aria-labelledby={captionId} className="w-full table-fixed border-collapse" style={wide ? { minWidth: `${columnCount * 5}rem` } : undefined}>
@@ -112,7 +112,8 @@ function InlineUiPreview({ value }: { value: InlineUi }) {
 				columns={value.series.map(({ label, axis }) => value.mode === "dual"
 					? `${label} (${axis === "right" ? value.rightUnit : value.unit})` : label)}
 				rows={value.labels.map((_, i) => value.series.map(({ values }) => values[i]))}
-				plot={<SeriesPlot value={value} />} keyBy="column" />;
+				plot={value.mode === "dual" ? undefined : <SeriesPlot value={value} />}
+				keyBy={value.mode === "dual" ? undefined : "column"} />;
 		case "table":
 		case "spreadsheet":
 			return <Preview title={title} columns={value.columns} rows={value.rows} />;

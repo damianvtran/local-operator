@@ -31,11 +31,12 @@ from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
 from local_operator.mobile.daemon import MobileDaemon, SessionEntry, _dial, build_app
 from local_operator.mobile.projection import ProjectionFold, read_live_inline_ui
 from local_operator.mobile.tui_handle import TuiSessionHandle
+from local_operator.mobile.types import PROJECTION_TRANSCRIPT_LIMIT
 from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
 from local_operator.session.inline_ui import INSTRUCTIONS
 from local_operator.session.inline_ui_text import INLINE_UI_V1
 from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
-from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.server import _EVENT_QUEUE_MAX, RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.transcript import Transcript
 from tests.e2e.harness import build_session, text_turn
@@ -184,13 +185,36 @@ async def test_live_inline_ui_reaches_daemon_without_changing_legacy_projection(
                     print("modern SSE overlay:", json.dumps(modern_seed["inline_ui"]))
                     # A marked final event can supersede a previously valid
                     # live widget. Its private tombstone is never a public row.
-                    event["inline_ui"] = {"version": 1, "messages": {message.id: None}}
-                    handle.raw_event(event)
+                    conn = next(iter(server._clients.values()))
+                    for _ in range(_EVENT_QUEUE_MAX):
+                        server._enqueue_client_frame(conn, {"op": "test_fence"})
+                    for _ in range(_EVENT_QUEUE_MAX):
+                        server._relay_on_loop(event)
+                    assert len(conn.pending_inline_ui) == 1
+                    assert conn.event_queue.full()
+                    tombstone = {"version": 1, "messages": {message.id: None}}
+                    server._relay_on_loop({"type": "message_end", "inline_ui": tombstone})
+                    assert conn.pending_inline_ui == tombstone["messages"]
                     while True:
                         _, reset = await _next_projection(modern_view)
                         if "inline_ui" not in reset:
                             break
                     assert entry.live_inline_ui() == {}
+
+                    # A wide catch-up may touch old rows out of order. Evicting
+                    # any pending id now instructs the daemon to fall back to
+                    # base prose, even when the current prose has not changed.
+                    server._relay_on_loop(event)
+                    _, rich_again = await _next_projection(modern_view)
+                    assert rich_again.get("inline_ui") == event["inline_ui"]
+                    server._enqueue_inline_ui(
+                        conn,
+                        {f"catch-up-{i}": None for i in range(PROJECTION_TRANSCRIPT_LIMIT + 2)},
+                    )
+                    assert conn.pending_inline_ui_reset
+                    assert len(conn.pending_inline_ui) == PROJECTION_TRANSCRIPT_LIMIT + 1
+                    _, reset = await _next_projection(modern_view)
+                    assert "inline_ui" not in reset and entry.live_inline_ui() == {}
         finally:
             if entry.writer is not None:
                 entry.writer.close()
@@ -254,10 +278,15 @@ async def test_http_continuation_negotiates_inline_ui_per_send(capable: bool) ->
                 async with httpx.AsyncClient(
                     transport=transport, base_url="http://fixture"
                 ) as anon:
-                    denied = await anon.post(url, json={
-                        "op": "prompt", "command_id": str(uuid4()),
-                        "text": "denied", "inline_ui": True,
-                    })
+                    denied = await anon.post(
+                        url,
+                        json={
+                            "op": "prompt",
+                            "command_id": str(uuid4()),
+                            "text": "denied",
+                            "inline_ui": True,
+                        },
+                    )
                     assert denied.status_code == 401, denied.text
                 for suffix, fields, channel in (
                     ("rich", {"inline_ui": True}, "prompt"),
@@ -266,10 +295,15 @@ async def test_http_continuation_negotiates_inline_ui_per_send(capable: bool) ->
                     ("busy", {"inline_ui": True}, "steer"),
                     ("steer", {"inline_ui": True}, "steer"),
                 ):
-                    reply = await client.post(url, json={
-                        "op": "steer" if suffix == "steer" else "prompt",
-                        "command_id": ids[suffix], "text": suffix, **fields,
-                    })
+                    reply = await client.post(
+                        url,
+                        json={
+                            "op": "steer" if suffix == "steer" else "prompt",
+                            "command_id": ids[suffix],
+                            "text": suffix,
+                            **fields,
+                        },
+                    )
                     assert reply.status_code == 200, (suffix, reply.text)
                     assert reply.json()["delivered_as"] == channel, (suffix, reply.text)
         assert [item for item in handle.calls if item[0] in {"prompt", "steer"}] == [
@@ -289,7 +323,9 @@ async def test_http_continuation_negotiates_inline_ui_per_send(capable: bool) ->
 @pytest.mark.asyncio
 @pytest.mark.parametrize("capable", [True, False], ids=["v1-winner", "legacy-winner"])
 async def test_cold_prompt_is_gated_by_selected_owner(
-    capable: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capable: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from local_operator.session.runtime import launch
 
@@ -328,10 +364,15 @@ async def test_cold_prompt_is_gated_by_selected_owner(
             base_url="http://fixture",
             cookies={COOKIE_NAME: sign_cookie("pw")},
         ) as client:
-            response = await client.post(f"/api/sessions/{session_id}/command", json={
-                "op": "prompt", "command_id": command_id,
-                "text": "Resume with a plot", "inline_ui": True,
-            })
+            response = await client.post(
+                f"/api/sessions/{session_id}/command",
+                json={
+                    "op": "prompt",
+                    "command_id": command_id,
+                    "text": "Resume with a plot",
+                    "inline_ui": True,
+                },
+            )
             assert response.status_code == 200, response.text
             assert response.json()["ok"] is True
         assert [call for call in handle.calls if call[0] == "prompt"] == [
@@ -346,9 +387,16 @@ def test_runtime_overlay_offsets_and_tombstones() -> None:
     payload = {"type": "bar", "title": "Counts", "data": [["A", 1]]}
     row = {"version": 1, "text": "📈 prose", "widgets": [{"offset": 2, "payload": payload}]}
     invalid = {**row, "widgets": [{"offset": 1, "payload": payload}]}
-    assert read_live_inline_ui({"version": 1, "messages": {
-        "valid": row, "split_surrogate": invalid, "cleared": None,
-    }}) == {"valid": row, "cleared": None}
+    assert read_live_inline_ui(
+        {
+            "version": 1,
+            "messages": {
+                "valid": row,
+                "split_surrogate": invalid,
+                "cleared": None,
+            },
+        }
+    ) == {"valid": row, "cleared": None}
     assert not read_live_inline_ui({"version": True, "messages": {"valid": row}})
 
 

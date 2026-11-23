@@ -137,13 +137,18 @@ class ContinuationCommand:
 
     @staticmethod
     def create(
-        session_id: str, text: str, images: list[dict[str, str]] | None = None
+        session_id: str,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        *,
+        inline_ui: bool = False,
     ) -> "ContinuationCommand":
         return ContinuationCommand(
             command_id=str(uuid.uuid4()),
             session_id=session_id,
             text=text,
             images=list(images or []),
+            inline_ui=inline_ui,
         )
 
     def to_json(self) -> dict[str, Any]:

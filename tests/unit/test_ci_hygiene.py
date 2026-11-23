@@ -1590,12 +1590,11 @@ def test_a_third_or_misnamed_pytest_step_is_rejected(monkeypatch: pytest.MonkeyP
 
 
 def test_the_serial_budget_is_accounted_in_full_and_fits_the_unchanged_job_ceiling() -> None:
-    """Shard 0's modelled wall is its weight/4 PLUS the whole 420 s, within today's 32 min.
+    """Shard 0 must fit its weight/4 PLUS the whole 420 s in the unit job.
 
     The serial step is not divided by four (it runs ``-n0``) and nothing is subtracted
-    for the six deselected tests. The job ceiling is NOT raised to make this pass: if
-    the merge ref outgrows it, the answer is to rebalance or propose a change, so this
-    reads the ceiling that exists. Every other shard is judged by the existing rule.
+    for the six deselected tests. Read the declared job ceiling rather than
+    inferring one from observed runtimes. Every other shard uses the existing rule.
     """
     assert _serial_step_ceiling_seconds() == 420
     tree, total = _shard_plan("test")

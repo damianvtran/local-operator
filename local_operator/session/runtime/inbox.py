@@ -257,6 +257,9 @@ class InboxLine:
     source: str = SOURCE_PEER
     command_id: str = ""
     harness_injected: bool = False
+    # Pending owner admission only. Peers control sender metadata: neither it
+    # nor historical transcript rows can opt a command into a presentation mode.
+    inline_ui: bool = False
     #: The PEER sender's minted message identity (``peer-<32hex>``), carried so
     #: the successor's delivery is idempotent against a row that reached the
     #: spool twice (a crash between the write and the ack). Additive and
@@ -330,6 +333,7 @@ class InboxLine:
             wake_id=str(payload.get("wake_id", "") or ""),
             wake_fires=_fire_count(payload.get("wake_fires", 1)),
             mesh_origin=_owner_mesh_origin(payload),
+            inline_ui=(payload.get("source") == SOURCE_USER and payload.get("inline_ui") is True),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -347,6 +351,9 @@ class InboxLine:
             "bridge_meta": self.bridge_meta,
             "wake_id": self.wake_id,
             "wake_fires": self.wake_fires,
+            **(
+                {"inline_ui": True} if self.source == SOURCE_USER and self.inline_ui is True else {}
+            ),
             # ABSENT, never null, when there is no stamp: every peer and local row
             # keeps the exact bytes older builds wrote.
             **({"mesh_origin": self.mesh_origin} if self.mesh_origin is not None else {}),

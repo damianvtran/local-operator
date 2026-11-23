@@ -75,44 +75,38 @@ export function ProportionPlot({ value }: { value: CategoryChart }) {
 
 export function SeriesPlot({ value }: { value: InlineSeries }) {
 	const { series, mode, labels } = value;
-	const grouped = mode === "grouped" || mode === "dual";
-	const domain = (side: "left" | "right") => series.filter(({ axis }) => mode !== "dual" || axis === side).flatMap(({ values }) => values);
-	const left = domain("left");
-	const right = mode === "dual" ? domain("right") : left;
+	// Two independently normalized scales cannot share an unlabeled plot. The
+	// enclosing preview shows both series as an exact, unit-labeled table.
+	if (mode === "dual") return null;
+	const grouped = mode === "grouped";
 	const magnitude = (values: number[]) => Math.max(...values.map(Math.abs)) || 1;
-	const leftScale = magnitude(left);
-	const rightScale = magnitude(right);
+	const scale = magnitude(series.flatMap(({ values }) => values));
 	const offsets = labels.map((_, i) => {
-		const base = mode === "percent" ? magnitude(series.map(({ values }) => values[i])) : leftScale;
-		const points = series.map(({ values, axis }) => values[i] / (mode === "dual" && axis === "right" ? rightScale : base));
+		const base = mode === "percent" ? magnitude(series.map(({ values }) => values[i])) : scale;
+		const points = series.map(({ values }) => values[i] / base);
 		const total = mode === "percent" ? points.reduce((sum, n) => sum + n, 0) : 1;
 		let positive = 0;
 		let negative = 0;
-		return points.map((point, j) => {
+		return points.map((point) => {
 			const end = point / total;
 			const start = grouped ? 0 : end < 0 ? negative : positive;
 			if (!grouped && end < 0) negative += end;
 			if (!grouped && end >= 0) positive += end;
-			return { start, end: start + end, side: mode === "dual" && series[j].axis === "right" ? "right" : "left" };
+			return { start, end: start + end };
 		});
 	});
-	const vertical = (side: string) => {
-		const ends = [0, ...offsets.flatMap((points) => points.filter((point) => point.side === side).map(({ end }) => end))];
-		return axis(ends);
-	};
-	const yLeft = vertical("left");
-	const yRight = vertical("right");
+	const y = axis([0, ...offsets.flatMap((points) => points.map(({ end }) => end))]);
 	const step = PLOT_WIDTH / labels.length;
 	const barWidth = step * 0.78 / (grouped ? series.length : 1);
 	return <Plot type={mode}>
-		<path d={`M ${PAD} ${yLeft(0)} H ${WIDTH - PAD}`} className="fill-none stroke-control" />
-		{mode === "dual" && yRight(0) !== yLeft(0) && <path d={`M ${PAD} ${yRight(0)} H ${WIDTH - PAD}`}
-			className="fill-none stroke-control" strokeDasharray="2 3" />}
-		{offsets.flatMap((points, i) => points.map(({ side, start, end }, j) => {
-			const y = side === "right" ? yRight : yLeft;
+		<path d={`M ${PAD} ${y(0)} H ${WIDTH - PAD}`} className="fill-none stroke-control" />
+		{offsets.flatMap((points, i) => points.map(({ start, end }, j) => {
+			if (start === end) return null;
 			const top = Math.min(y(start), y(end));
 			return <rect key={`${i}-${j}`} x={PAD + step * (i + 0.11) + (grouped ? j * barWidth : 0)}
-				y={top} width={barWidth} height={Math.abs(y(end) - y(start))} className={INKS[j]} />;
+				y={top} width={barWidth} height={Math.abs(y(end) - y(start))}
+				className={grouped ? INKS[j] : `${INKS[j]} stroke-surface`}
+				vectorEffect={grouped ? undefined : "non-scaling-stroke"} />;
 		}))}
 	</Plot>;
 }

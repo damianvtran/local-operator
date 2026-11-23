@@ -484,6 +484,12 @@ def _stamp_input_surface(message: Any, surface: str) -> None:
     message.provider_payload = payload
 
 
+def stamp_tui_composer_steer(message: Message) -> None:
+    """Only the actual local composer can give Message-shaped steering this default."""
+    _stamp_input_surface(message, "tui")
+    message._inline_ui_viewer_capable = True
+
+
 def spooled_input_surface(line: Any) -> str:
     """The surface a SPOOLED owner line carries (``serving._owner_sender``).
 
@@ -494,6 +500,13 @@ def spooled_input_surface(line: Any) -> str:
     sender = getattr(line, "sender", None)
     value = sender.get("input_surface") if isinstance(sender, Mapping) else None
     return _input_surface(value, default="unknown")
+
+
+def spooled_inline_ui(line: Any) -> bool:
+    """Restore only the exact declaration on a pending owner admission."""
+    from local_operator.session.runtime.inbox import SOURCE_USER
+
+    return getattr(line, "source", None) == SOURCE_USER and getattr(line, "inline_ui", None) is True
 
 
 def _noop_answer_surface_undo() -> None:
@@ -10893,7 +10906,7 @@ class Session:
         mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
-        inline_ui: bool = False,
+        inline_ui: bool | None = None,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -11137,7 +11150,7 @@ class Session:
             # the run inherits the conversation's last driver.
             if not harness_injected:
                 _stamp_input_surface(user, input_surface)
-                if input_surface in {"desktop", "mobile"} and inline_ui is True:
+                if inline_ui is True or (inline_ui is None and input_surface == "tui"):
                     user._inline_ui_viewer_capable = True
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
@@ -11260,7 +11273,7 @@ class Session:
         mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
-        inline_ui: bool = False,
+        inline_ui: bool | None = None,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -11342,7 +11355,7 @@ class Session:
         # phone steer into a desk-started run makes that run mobile-origin).
         if not harness_injected:
             _stamp_input_surface(message, input_surface)
-            if input_surface in {"desktop", "mobile"} and inline_ui is True:
+            if inline_ui is True or (inline_ui is None and input_surface == "tui"):
                 message._inline_ui_viewer_capable = True
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
@@ -12267,6 +12280,7 @@ class Session:
             owner_typed=not bool((getattr(line, "sender", None) or {}).get("remote_origin")),
             _file_capture=self._take_file_continuation(command_id),
             input_surface=spooled_input_surface(line),
+            inline_ui=spooled_inline_ui(line),
         )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
@@ -12291,7 +12305,7 @@ class Session:
         if stamped is not None and getattr(message, "role", None) == "user":
             self._run_input_surface = stamped
             self._run_inline_ui_viewer_capable = (
-                stamped in {"desktop", "mobile"}
+                stamped in {"desktop", "mobile", "tui"}
                 and getattr(message, "_inline_ui_viewer_capable", False) is True
             )
             return

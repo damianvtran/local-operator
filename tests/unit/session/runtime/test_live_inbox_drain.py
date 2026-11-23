@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from local_operator.session.inline_ui import INSTRUCTIONS
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime.inbox import (
     SOURCE_PEER,
@@ -248,13 +250,21 @@ async def test_the_live_drain_keeps_a_queued_steers_insurance_row(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_a_queued_steer_joins_the_turn_in_flight(tmp_path: Path) -> None:
+@pytest.mark.parametrize("inline_ui", [False, True])
+async def test_a_queued_steer_joins_the_turn_in_flight(tmp_path: Path, inline_ui: bool) -> None:
     """A row the user sent as a STEER joins the running turn, once."""
     session, handle, stream = await _deliver_a_job_result_and_hold_it(tmp_path)
     try:
-        append_inbox(tmp_path / "sess", _owner_row("steer me", "s-1", mode="steer"))
+        row = replace(
+            _owner_row("steer me", "s-1", mode="steer"),
+            sender={"input_surface": "desktop", "inline_ui": not inline_ui},
+            inline_ui=inline_ui,
+        )
+        append_inbox(tmp_path / "sess", row)
         assert await asyncio.wait_for(child_mod._drain_inbox_into(handle, live=True), 5) == 1
-        assert [getattr(m, "id", None) for m in session.queued_steering()] == ["s-1"]
+        [steer] = session.queued_steering()
+        assert steer.id == "s-1"
+        assert getattr(steer, "_inline_ui_viewer_capable", False) is inline_ui
         # The same steer again (a retried sender): answered as already admitted.
         append_inbox(tmp_path / "sess", _owner_row("steer me", "s-1", mode="steer"))
         await asyncio.wait_for(child_mod._drain_inbox_into(handle, live=True), 5)
@@ -607,3 +617,30 @@ def test_owner_row_removal_waits_out_an_open_read_batch(tmp_path: Path) -> None:
     append_inbox(tmp_path, _owner_row("third", "row-3"))
     assert remove_owner_row(tmp_path, "row-3") is True
     assert peek_inbox(tmp_path) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inline_ui", [False, True])
+async def test_successor_replays_the_persisted_owner_opt_in(
+    tmp_path: Path, inline_ui: bool
+) -> None:
+    directory = tmp_path / "sess"
+    stream = ScriptedStream([text_turn("settled") for _ in range(4)])
+    session = build_session(directory, stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        row = replace(
+            _owner_row("replay after restart", "successor-id"),
+            sender={"input_surface": "tui", "inline_ui": not inline_ui},
+            inline_ui=inline_ui,
+        )
+        assert append_inbox(directory, row)
+        assert await asyncio.wait_for(child_mod._drain_inbox_into(handle), 10) == 1
+        await asyncio.wait_for(_idle(session, handle), 10)
+        assert _user_rows(directory, row.text) == 1
+        assert peek_inbox(directory) == []
+        [turn] = [request for request in stream.requests if request.purpose == "turn"]
+        assert (INSTRUCTIONS in turn.system_blocks) is inline_ui
+        assert turn._inline_ui_source_version == (1 if inline_ui else None)
+    finally:
+        await handle.dispose()

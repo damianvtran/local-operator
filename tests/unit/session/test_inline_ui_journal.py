@@ -50,16 +50,18 @@ async def test_journal_reopen_preserves_provenance_outside_strict_message_payloa
         assert message._inline_ui_source_version == version
         assert message.model_dump() == original.model_dump()
         assert "inline_ui_source_version" not in message.model_dump_json()
+    marked_replay, literal_replay = history[marked.id], history[literal.id]
+    assert isinstance(marked_replay, Message) and isinstance(literal_replay, Message)
     assert project_inline_ui(
         _SOURCE,
         streaming=False,
-        source_version=history[marked.id]._inline_ui_source_version,
+        source_version=marked_replay._inline_ui_source_version,
         capabilities=frozenset(),
     ) == {"text": "Summary.\n\n\n"}
     rich = project_inline_ui(
         _SOURCE,
         streaming=False,
-        source_version=history[literal.id]._inline_ui_source_version,
+        source_version=literal_replay._inline_ui_source_version,
         capabilities=frozenset({INLINE_UI_V1}),
     )
     assert rich == {"text": _SOURCE}
