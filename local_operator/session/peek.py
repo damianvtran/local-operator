@@ -572,6 +572,36 @@ def _peek_search(
     return window._replace(scanned_bytes=scanned)
 
 
+def _peer_search_row_renderable(payload: Mapping[str, Any]) -> bool:
+    """Check the nested JSON shapes that the shared step renderer traverses.
+
+    The transcript decoder validates the row envelope, not these fields. Keep
+    this check at the counted-search boundary: scanning past the returned
+    window must not turn corrupt journal data into a failed request.
+    """
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+
+    if payload.get("kind") == "custom":
+        details = payload.get("details")
+        if details is None:
+            return True
+        if not isinstance(details, dict):
+            return False
+        sender = details.get("sender")
+        return (
+            payload.get("custom_type") != PEER_MESSAGE_MESSAGE_TYPE
+            or sender is None
+            or isinstance(sender, dict)
+        )
+    content = payload.get("content")
+    if content is not None and not isinstance(content, list):
+        return False
+    if payload.get("role") != "assistant":
+        return True
+    calls = payload.get("tool_calls")
+    return calls is None or (isinstance(calls, list) and all(isinstance(c, dict) for c in calls))
+
+
 def _peer_peek_search(
     directory: Path, *, needle: str, pattern: RowMatcher | None, need: int
 ) -> _PeekWindow:
@@ -596,7 +626,7 @@ def _peer_peek_search(
     preceding: deque[TranscriptEntry] = deque(maxlen=before)
     selected: list[TranscriptEntry] = []
     hit_id = ""
-    count = 0
+    count = skipped = 0
     older = newer = False
     eligible = 0
     consumed = 0
@@ -610,7 +640,13 @@ def _peer_peek_search(
                 # The byte bound may bisect a row. Never count its prefix.
                 break
             entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
-            if entry is None or not is_peek_step_entry(entry):
+            if entry is None:
+                skipped += 1
+                continue
+            if not is_peek_step_entry(entry):
+                continue
+            if not _peer_search_row_renderable(entry.payload):
+                skipped += 1
                 continue
             if hit_id:
                 if len(selected) < need and after:
@@ -634,16 +670,21 @@ def _peer_peek_search(
                 preceding.append(entry)
             eligible += 1
 
-    # This is model-facing tool-result metadata. A bounded scan can prove a
-    # lower bound, never the number of matches beyond the bytes it examined.
-    scope = "whole transcript" if complete else f"first {scanned:,} bytes; count is a lower bound"
-    note = f"match count: {count} ({scope})"
+    # This is model-facing tool-result metadata. Rows beyond the byte bound
+    # or skipped for invalid shape could contain matches; neither is a miss.
+    count_complete = complete and skipped == 0
+    scope = ["whole transcript" if complete else f"first {scanned:,} bytes"]
+    if skipped:
+        scope.append(f"{skipped} unrenderable {'row' if skipped == 1 else 'rows'} skipped")
+    if not count_complete:
+        scope.append("count is a lower bound")
+    note = f"match count: {count} ({'; '.join(scope)})"
     if not hit_id:
         return _PeekWindow(
             steps=[],
             scanned_bytes=scanned,
             match_count=count,
-            match_count_complete=complete,
+            match_count_complete=count_complete,
             miss=f"no match for {needle!r}: {note}.",
         )
     window = _peek_window(
@@ -656,7 +697,7 @@ def _peer_peek_search(
     return window._replace(
         scanned_bytes=scanned,
         match_count=count,
-        match_count_complete=complete,
+        match_count_complete=count_complete,
         note=f"{note}; first match, up to {before} before and {need - before - 1} after",
     )
 
@@ -1151,6 +1192,23 @@ def window_to_wire(window: _PeekWindow) -> dict[str, Any]:
     return out
 
 
+# Version 1 is the per-turn fold with failure markers from tool results only.
+# A pre-versioned owner can still supply useful text, but must not be credited
+# with these semantics just because it sent a digest.
+_PEER_DIGEST_FOLD_VERSION = 1
+
+
+def digest_receipt(raw: object) -> tuple[dict[str, Any], str]:
+    """Normalize owner provenance for JSON and both coordinator renderers."""
+    digest: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+    version = digest.get("fold_version")
+    known = type(version) is int and version == _PEER_DIGEST_FOLD_VERSION
+    note = "" if known else "digest format unverified: the owner may be running an older build"
+    digest.update(fold_version=version if known else None, note=note)
+    text = str(digest.get("text") or "")
+    return digest, "\n".join(part for part in (note, text) if part)
+
+
 def window_from_wire(raw: Mapping[str, Any], *, mode: str = "") -> _PeekWindow:
     """Decode a peer window without upgrading an old search to a counted one."""
 
@@ -1216,7 +1274,10 @@ def serve_peek(
         return {"refusal": pattern}
     if params.digest:
         digest = _peer_peek_digest(directory, live_state=live_state)
-        return {"mode": "digest", "digest": digest._asdict()}
+        return {
+            "mode": "digest",
+            "digest": dict(digest._asdict(), fold_version=_PEER_DIGEST_FOLD_VERSION),
+        }
     need = peek_need(params)
     query = str(params.query or "").strip()
     if query:

@@ -131,7 +131,7 @@ def test_head_and_digest_stay_small_and_oversize_names_a_route(
         rows[-3 if role == "assistant" else -2] = json.dumps(row)
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
     assert path.stat().st_size > net_peek.SESSION_PEEK_REPLY_BUDGET_BYTES
-    base = {"session_id": SESSION}
+    base = {"op": "net_session_peek", "req": 314159, "session_id": SESSION}
     head = net_peek.serve(tmp_path, {**base, "head": 2}, own_label="b")
     assert [step["body"] for step in head["window"]["steps"]] == ["row 1", "row 2"]
     print("head:", [step["body"] for step in head["window"]["steps"]])
@@ -145,24 +145,49 @@ def test_head_and_digest_stay_small_and_oversize_names_a_route(
     assert len(json.dumps(head).encode()) < budget
     assert len(json.dumps(digest).encode()) < budget
     print(fold)
-    tail = net_peek.serve(tmp_path, base, own_label="b")
-    # Uncompressed authenticated records add a four-byte length and a 16-byte
-    # GCM tag. Measure the sender's actual encoding independently of the guard.
-    keys = wire.LinkKeys(b"l" * 16, b"k" * 32, b"j" * 32, b"i" * 4, b"h" * 4)
-    size = len(wire.LinkCrypto(keys, role="dialer").seal(tail)) - 4 - 16
-    assert size > budget
-    assert len(json.dumps(tail).encode()) != size
-    monkeypatch.setattr(net_peek, "SESSION_PEEK_REPLY_BUDGET_BYTES", budget)
-    with pytest.raises(MeshRefusal) as caught:
-        net_peek.serve(tmp_path, base, own_label="b")
-    assert caught.value.code == "reply_too_large"
-    assert caught.value.sentence == (
-        f"This peek reply is {size:,} bytes; the send limit is {budget:,} bytes. "
-        "Try `head=1` (opening step), `digest` (compact fold), or fewer `steps` for this window."
-    )
-    print(caught.value.sentence)
-    for shape in ({"head": 1}, {"digest": True}):
-        assert net_peek.serve(tmp_path, {**base, **shape}, own_label="b")["mode"] in shape
+    server = _peek_server(tmp_path)
+    monkeypatch.setattr(server, "_own_label", lambda: "b")
+    link = _PeekLink("device-a")
+
+    def ask(**shape: Any) -> dict[str, Any]:
+        return server._run_handler(  # noqa: SLF001
+            link,  # type: ignore[arg-type]
+            {**base, **shape},
+            net_peek.make_handler(server),
+            types.Granted(action="net_session_peek"),
+        )
+
+    try:
+        ack = ask()
+        assert ack["op"] == "ack" and ack["req"] == base["req"]
+        # Seal the relay's actual ACK and strip only record overhead: the four
+        # byte length and 16-byte GCM tag, not any part of the JSON envelope.
+        keys = wire.LinkKeys(b"l" * 16, b"k" * 32, b"j" * 32, b"i" * 4, b"h" * 4)
+        codec = wire.LinkCrypto(keys, role="dialer", compression=False)
+        ack_size = len(codec.seal(ack)) - 4 - 16
+        detail_size = len(codec.seal(ack["detail"])) - 4 - 16
+        assert ack_size > detail_size > budget
+        assert len(json.dumps(ack, ensure_ascii=True).encode()) != ack_size
+
+        monkeypatch.setattr(net_peek, "SESSION_PEEK_REPLY_BUDGET_BYTES", budget)
+        refusal = ask()
+        assert refusal["code"] == "reply_too_large"
+        assert refusal["message"] == (
+            f"This uncompressed peek ACK is {ack_size:,} bytes; "
+            f"the peek ACK limit is {budget:,} bytes. Try `head=1` (opening step), "
+            "`digest` (compact fold), or fewer `steps` for this window."
+        )
+        print(refusal["message"])
+        for shape in ({"head": 1}, {"digest": True}):
+            assert ask(**shape)["detail"]["mode"] in shape
+
+        # The detail alone fits at this limit, but the ACK does not.
+        monkeypatch.setattr(net_peek, "SESSION_PEEK_REPLY_BUDGET_BYTES", ack_size - 1)
+        assert ask()["code"] == "reply_too_large"
+        monkeypatch.setattr(net_peek, "SESSION_PEEK_REPLY_BUDGET_BYTES", ack_size)
+        assert ask() == ack
+    finally:
+        server.stop()
 
 
 def test_a_bounded_query_reports_only_a_lower_bound_and_ignores_hidden_rows(
@@ -208,6 +233,27 @@ def test_peer_query_counts_a_match_before_display_elision(tmp_path: Path) -> Non
     assert "你好" not in reply["window"]["steps"][-1]["body"]
 
 
+@pytest.mark.parametrize("bad_index", [0, 2])
+def test_peer_query_keeps_a_good_hit_with_an_unrenderable_neighbor(
+    tmp_path: Path, bad_index: int
+) -> None:
+    path = _journal(tmp_path, rows=3) / "transcript.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[bad_index]["payload"].update(role="assistant", tool_calls=["not-a-tool-call"])
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
+
+    answer = net_peek.serve(
+        tmp_path, {"session_id": SESSION, "query": "row 2", "steps": 1}, own_label="b"
+    )
+    window = answer["window"]
+    assert [step["body"] for step in window["steps"]] == ["row 2"]
+    assert window["match_count"] == 1
+    assert window["match_count_complete"] is False
+    assert "1 unrenderable row skipped" in window["note"]
+    assert "count is a lower bound" in window["note"]
+    print(f"{window['steps'][0]['body']}: {window['note']}")
+
+
 def test_peer_query_receipt_discloses_a_legacy_owner_without_count(tmp_path: Path) -> None:
     from local_operator.network.cli import _peek_journal_receipt
     from local_operator.session.peek import _peek_search, window_to_wire
@@ -236,6 +282,28 @@ def test_peer_query_receipt_discloses_a_legacy_owner_without_count(tmp_path: Pat
     tool = _sessions_peek_mesh_journal("peek", payload, SESSION, "b", None)
     assert not tool.is_error and tool.text.count(diagnostic) == 1
     assert tool.details["match_count"] is None and tool.details["match_count_complete"] is False
+
+
+def test_peer_digest_receipt_discloses_a_legacy_owner(tmp_path: Path) -> None:
+    from local_operator.network.cli import _peek_journal_receipt
+    from local_operator.tools.builtin import _sessions_peek_mesh_journal
+
+    _journal(tmp_path)
+    current = net_peek.serve(tmp_path, {"session_id": SESSION, "digest": True}, own_label="b")
+    diagnostic = "digest format unverified: the owner may be running an older build"
+    legacy = dict(current, digest=dict(current["digest"]))
+    legacy["digest"].pop("fold_version", None)
+
+    for answer, version in ((legacy, None), (current, 1)):
+        payload, lines = _peek_journal_receipt(answer, SESSION, "b")
+        text = "\n".join(lines)
+        assert "digest fold (not the full transcript)" in text
+        assert payload["digest"]["fold_version"] == version
+        assert text.count(diagnostic) == (1 if version is None else 0)
+
+        tool = _sessions_peek_mesh_journal("peek", payload, SESSION, "b", None)
+        assert not tool.is_error and tool.details["fold_version"] == version
+        assert tool.text.count(diagnostic) == (1 if version is None else 0)
 
 
 def test_peer_digest_uses_only_structural_failures(tmp_path: Path) -> None:

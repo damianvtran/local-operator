@@ -3915,6 +3915,25 @@ def test_peer_peek_shapes_over_a_real_link(
             row["state"] for row in owner.local_session_rows() if row["session_id"] == SESSION
         ] == ["stored"]
         print(f"read-only relay: head={texts[:2]!r}; {window['note']}; {fold.splitlines()[0]}")
+
+        # A row beyond the one-step window must not replace the answer with a
+        # handler error. Keep it on the owner, just as a damaged journal is.
+        journal = owner.root / "sessions" / SESSION / "transcript.jsonl"
+        bad_row = {
+            "id": "malformed-neighbor",
+            "ts": 1_700_001_000,
+            "type": "message",
+            "payload": {"kind": "message", "role": "assistant", "tool_calls": ["not-a-tool-call"]},
+        }
+        with journal.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(bad_row) + "\n")
+        window = ask("--query=opening brief", "--steps=1")["window"]
+        assert [step["body"] for step in window["steps"]] == ["opening brief"]
+        assert (window["match_count"], window["match_count_complete"]) == (1, False)
+        assert "1 unrenderable row skipped; count is a lower bound" in window["note"]
+        print(
+            f"read-only relay, malformed neighbor: {window['steps'][0]['body']}; {window['note']}"
+        )
     finally:
         link.close("test")
 

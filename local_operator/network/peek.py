@@ -104,10 +104,10 @@ PEER_REGEX_REPLY_RESERVE_S = 2.0
 #: the owner's named refusal reaches the viewer first.
 PEER_REGEX_BUDGET_S = 4.0
 
-#: Encoded ceiling for one reply. Steps are already clipped by the renderer
-#: (``comms.PEEK_STEP_CHARS``) and capped at ``PEEK_MAX_STEPS``, so a real
-#: window is tens of KB; the bound exists so a pathological one is a refusal
-#: rather than a record ``wire.LinkCrypto.seal`` rejects (which closes the link).
+#: Encoded ceiling for one full peek ACK before compression and framing.
+#: Steps are clipped (``comms.PEEK_STEP_CHARS``) and capped (``PEEK_MAX_STEPS``).
+#: The bound makes a pathological window a refusal, rather than letting the
+#: larger link record ceiling fail in ``wire.LinkCrypto.seal`` and close the link.
 SESSION_PEEK_REPLY_BUDGET_BYTES = 2 * 1024 * 1024
 
 #: The refusal codes from THIS device's relay that mean "this relay predates the
@@ -214,7 +214,6 @@ def serve(root: Path, frame: dict[str, Any], *, own_label: str) -> dict[str, Any
     the relay answers in the family's shape.
     """
     from local_operator.network.store import safe_component
-    from local_operator.network.wire import encode_peer_payload
     from local_operator.session import peek
 
     session_id = str(frame.get("session_id") or "")
@@ -271,15 +270,15 @@ def serve(root: Path, frame: dict[str, Any], *, own_label: str) -> dict[str, Any
     answer["request"] = peek.wire_request(request, request.given)
     live_name = getattr(record, "conversation_name", "") if record is not _UNRESOLVED else ""
     answer["name"] = live_name or session_name(directory) or f"session {session_id}"
-    # Budget the actual encoded payload, before the relay adds its envelope
-    # and optional compression. Escaping multilingual text inflates an estimate.
-    reply_bytes = len(encode_peer_payload(answer))
-    if reply_bytes > SESSION_PEEK_REPLY_BUDGET_BYTES:
-        # Report the serialized window we refused, not the size of the journal.
-        # This is a protocol diagnostic for coordinators; keep selectors literal.
+    # Cap the same ACK the relay would send, including the actual request ID.
+    # Like LinkCrypto's separate record ceiling, this is on uncompressed JSON,
+    # not the compressed/encrypted record: a peer's codec must not change which
+    # windows fit. The shared envelope keeps measurement and send in lockstep.
+    ack_bytes = len(wire.encode_peer_payload(wire.peer_ack(frame.get("req"), answer)))
+    if ack_bytes > SESSION_PEEK_REPLY_BUDGET_BYTES:
         raise MeshRefusal(
             "reply_too_large",
-            f"This peek reply is {reply_bytes:,} bytes; the send limit is "
+            f"This uncompressed peek ACK is {ack_bytes:,} bytes; the peek ACK limit is "
             f"{SESSION_PEEK_REPLY_BUDGET_BYTES:,} bytes. Try `head=1` (opening step), "
             "`digest` (compact fold), or fewer `steps` for this window.",
         )
