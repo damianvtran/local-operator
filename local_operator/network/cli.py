@@ -9958,7 +9958,14 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             # that the receiver selected locally or pinned a selection.
             status = "unconfirmed"
         detail["skill_selection"] = skill_transfer_receipt(status)
-        lines.append(detail["skill_selection"]["message"])
+        # WRAPPED AT A FIXED 80 COLUMNS, word-wise with the shared hanging indent:
+        # every line of this receipt must fit an 80-column terminal (D4 on #3547,
+        # pinned by ``test_the_still_running_receipt_fits_80_columns``), and this
+        # sentence is catalogue copy — 93-152 characters in en/es/fr — so no wording
+        # can hold that for every locale. Fixed width, not the terminal's, so a pipe
+        # reads the same rows the test pins; prose only, never a command line. The
+        # ``--json`` payload keeps the message whole.
+        lines.extend(_wrap_lines([detail["skill_selection"]["message"]], width=80))
         if create_unconfirmed and not prompt:
             # THE CREATE'S OWN REPLY WAS NOT THE ANSWER: either it was lost and the
             # owner confirmed the id by key, or this was a retry the owner matched
