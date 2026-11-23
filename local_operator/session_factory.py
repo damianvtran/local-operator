@@ -55,7 +55,11 @@ from local_operator.ecosystem_instructions import (
     read_ecosystem_instructions,
 )
 from local_operator.harness.approval import ApprovalUnavailableError
-from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
+from local_operator.harness.rows import (
+    is_harness_chrome,
+    is_harness_injection,
+    is_harness_notice_row,
+)
 from local_operator.harness.types import AgentMessage, Message
 
 # Imported as an alias: ``config_dir`` is a parameter/local name in other
@@ -1185,7 +1189,20 @@ def _payload_user_text(payload: dict[str, Any]) -> str:
 
 
 def _is_routing_chrome(payload: dict[str, Any], text: str) -> bool:
-    # A pre-stamp continuation still isn't a human query or a new task owner.
+    # Session owns the durable ingress stamp; import lazily like the other
+    # Session-only helpers so loading this factory does not pull in the runtime.
+    from local_operator.session.session import INPUT_SURFACE_KEY, INPUT_SURFACES
+
+    provider_payload = payload.get("provider_payload")
+    surface = (
+        provider_payload.get(INPUT_SURFACE_KEY) if isinstance(provider_payload, Mapping) else None
+    )
+    if isinstance(surface, str) and surface != "unknown" and surface in INPUT_SURFACES:
+        # A known human surface can quote legacy chrome verbatim. Only an
+        # explicit injection stamp overrides that provenance; never the wording.
+        return is_harness_injection(payload)
+    # Missing or unknown provenance still needs to recognize older notices and
+    # continuations, so replay doesn't hand the harness its own text to route.
     return is_harness_notice_row(payload) or is_harness_chrome(text)
 
 
@@ -1266,8 +1283,9 @@ def _latest_user_query(transcript: Any) -> str:
     prose would search the skills index for "[model switch] You are now
     running as …" and freeze the result against it as the block's task id.
     The same holds for a CHROME prompt that lost its stamp — a goal
-    continuation a pre-stamp build spooled reads as a plain user row — so the
-    scan also applies the shared :func:`is_harness_chrome` recogniser.
+    continuation a pre-stamp build spooled reads as a plain user row — but
+    not for a known human input surface quoting that same wording. Query and
+    task ownership use the same provenance check before legacy text matching.
     """
     try:
         # Production transcripts index these at durable append time. Keep the
@@ -1974,7 +1992,8 @@ DEFAULT_CLASSIFICATION_MAX_CANDIDATES = 12
 #: (:func:`_classification_wait_s`), so a wait budget configured larger than the
 #: call could ever take does not spend itself on nothing. It is NOT a deadline
 #: around the call: killing a call the turn has stopped waiting for would throw away
-#: an answer the next message could have used. Same pinning as above.
+#: advice the same task could still use (legacy unknown ownership also carries),
+#: or prevent the result from filling the service memo. Same pinning as above.
 DEFAULT_CLASSIFICATION_TIMEOUT_MS = 1500
 
 #: ``values.classification.waitMs`` — how long a TURN waits for a recommendation
@@ -3782,10 +3801,10 @@ def _classification_block(
     noise that costs context and teaches nothing.
 
     ``already`` is the SAME test one step further out: resources an earlier
-    section of THIS prompt already carries. One turn can deliver two answers (the
-    one a previous message harvested, then this message's own), and a shared
-    ``limit`` — the per-message cap minus what has already been spent — is what
-    keeps the pair inside ``maxRecommendations`` instead of doubling it.
+    section of THIS prompt already carries. A render can combine earlier advice
+    for this task (or legacy unknown ownership) with newly arrived advice. The
+    shared ``limit`` — the cap minus what has already been spent — keeps the
+    combined output inside ``maxRecommendations`` instead of doubling it.
 
     ``rendered_urls`` comes back through an OUT-LIST rather than a tuple return, and
     the reason is outside this module: ``tests/unit/classification/test_block_parity.py``

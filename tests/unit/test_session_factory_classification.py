@@ -1585,11 +1585,14 @@ async def test_a_harvested_answer_cannot_cross_tasks_after_render_failure() -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stamped", [True, False])
-async def test_transcript_chrome_keeps_its_active_task_owner(tmp_path: Path, stamped: bool) -> None:
+@pytest.mark.parametrize("provenance", ["injected", "conflicting", "legacy", "unknown"])
+async def test_transcript_chrome_keeps_its_active_task_owner(
+    tmp_path: Path, provenance: str
+) -> None:
     from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
     from local_operator.harness.types import AgentTool, ImageContent, Message
     from local_operator.session.goal_judge import goal_continuation_prompt
+    from local_operator.session.session import INPUT_SURFACE_KEY
     from local_operator.session.transcript import Transcript
 
     classifier = _slow_classifier(_slack_recommendation())
@@ -1605,12 +1608,17 @@ async def test_transcript_chrome_keeps_its_active_task_owner(tmp_path: Path, sta
     provider = session_factory._make_system_blocks_provider(tools, transcript, hooks)
 
     async def continuation() -> None:
-        if stamped:
-            message = Message.user(
-                "Synthetic harness continuation", provider_payload={RENDERED_INJECTION_KEY: True}
-            )
-        else:
-            message = Message.user(goal_continuation_prompt("Finish the archive"))
+        provider_payload: dict[str, Any] = {}
+        text = goal_continuation_prompt("Finish the archive")
+        if provenance == "unknown":
+            provider_payload[INPUT_SURFACE_KEY] = "unknown"
+        elif provenance == "conflicting":
+            provider_payload[INPUT_SURFACE_KEY] = "tui"
+        if provenance in {"injected", "conflicting"}:
+            # This wording cannot bias the check toward treating the row as chrome.
+            text = "Synthetic harness continuation"
+            provider_payload[RENDERED_INJECTION_KEY] = True
+        message = Message.user(text, provider_payload=provider_payload or None)
         await transcript.append_message(message)
         # Check the exact mismatch: the raw transcript index advances to chrome.
         raw_user = transcript.latest_user_entry()
@@ -1648,7 +1656,7 @@ async def test_transcript_chrome_keeps_its_active_task_owner(tmp_path: Path, sta
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ["wait", "wake", "steer"])
+@pytest.mark.parametrize("boundary", ["wait", "wake", "steer", "steer-legacy-text", "steer-notice"])
 async def test_session_delivers_late_advice_only_to_its_owner(
     tmp_path: Path, boundary: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1664,7 +1672,8 @@ async def test_session_delivers_late_advice_only_to_its_owner(
         ToolResult,
     )
     from local_operator.harness.wake_types import DueWake, WakeSchedule
-    from local_operator.session.session import Session
+    from local_operator.session.goal_judge import goal_continuation_prompt
+    from local_operator.session.session import INPUT_SURFACE_KEY, Session
     from local_operator.session.transcript import Transcript
 
     # The tool boundary is real; analytics is unrelated to this assertion and
@@ -1674,6 +1683,14 @@ async def test_session_delivers_late_advice_only_to_its_owner(
     job_finish = asyncio.Event()
     requests: list[str] = []
     job_id = ""
+    is_steer = boundary.startswith("steer")
+    steer_text = "Corrected Notion scope"
+    if boundary == "steer-legacy-text":
+        # A real operator can paste an exact goal continuation. The live
+        # ingress stamp, not the wording, decides who owns the next request.
+        steer_text = goal_continuation_prompt(steer_text)
+    elif boundary == "steer-notice":
+        steer_text = f"[model switch] {steer_text}"
 
     class Classifier(_FakeClassifier):
         async def recommend_resources(self, request: Any) -> _Recommendation:
@@ -1681,7 +1698,7 @@ async def test_session_delivers_late_advice_only_to_its_owner(
             if request.user_message == "Inspect Slack archive":
                 await release.wait()
                 return _slack_recommendation()
-            if request.user_message == "Corrected Notion scope":
+            if request.user_message == steer_text:
                 return _Recommendation(
                     resources=(_Candidate("mcp", "notion", "Pages.", "mcp://notion"),),
                 )
@@ -1704,8 +1721,8 @@ async def test_session_delivers_late_advice_only_to_its_owner(
             if len(requests) == 2 and boundary != "wake":
                 release.set()
                 await hooks.classification_outstanding[0].task
-                if boundary == "steer":
-                    session.steer("Corrected Notion scope", message_id="synthetic-steer")
+                if is_steer:
+                    session.steer(steer_text, message_id="synthetic-steer")
                 job_finish.set()
                 yield StreamToolCallDelta(
                     index=0,
@@ -1764,9 +1781,15 @@ async def test_session_delivers_late_advice_only_to_its_owner(
                 assert "Wake fixture" in requests[2]
             if boundary == "wait":
                 assert "synthetic job finished" in requests[2]
-            if boundary == "steer":
-                assert "Corrected Notion scope" in requests[2]
-                assert "mcp://notion" in requests[2] and "mcp://slack" not in requests[2]
+            if is_steer:
+                raw = transcript.latest_user_entry()
+                assert raw is not None and raw.id == "synthetic-steer"
+                assert raw.payload["provider_payload"][INPUT_SURFACE_KEY] == "tui"
+                assert steer_text in requests[2]
+                assert [url for url in ("mcp://slack", "mcp://notion") if url in requests[2]] == [
+                    "mcp://notion"
+                ]
+                assert classifier.requests[-1].user_message == steer_text
             else:
                 assert "mcp://slack" in requests[2]
                 assert [r.user_message for r in classifier.requests] == [
