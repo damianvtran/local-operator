@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.ask_receipts",
-  "history_sha256": "ca7d7fdf9a15e9fc35d761c6c3870152c6852f9426860618c3cfd038bf65965d",
+  "history_sha256": "d986ef3c2b5761df48d785cf6b58b21453e2c739b50e0e848c263e01feb10398",
   "entries": [
     {
       "locale": "vi",
@@ -33,6 +33,36 @@
       },
       "status": "passed",
       "note": "Independent audit 2026-11-23 of all 6 keys of wire.ask_receipts in vi against en source 1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507 and sidecar 48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa; target 74f9a90c50d6452569c6ee1f8542d9a42be1822a85924fadca4c9a709371615b recomputed from the file after the audit edits. Method: read docs/I18N.md, glossary, the locale style guide and the sidecar; compared with the shipped relay.ask / relay.asks sibling renderings of the same states; rendered every key with local_operator.i18n.messages.render for surface remote/tui/chat/desktop/other x reason answered_in_chat/moot/absent/unknown and waited 45s/3h/42m; checked placeholder and ICU select arm parity, NFC, no manual bidi controls, no English word inside a translated sentence, and cell widths against maxCells. No catalogue edits. Findings: [minor, open/deferred] response.dismissed worst case 66/64 cells (desktop + answered_in_chat; chat + answered_in_chat 65); every other key is within its sidecar maxCells. Advisory budget (check.py does not enforce it for locales); the line wraps rather than clips. No shorter rendering keeps the shipped relay.ask/relay.asks vocabulary. Recorded here rather than in the style guide so no guide hash changes. | [nit, open/deferred] `secret question` label calques the English, which in vi is also the idiom for a password-recovery security question; the source sidecar asks for 'a question that asks for a secret'. Inherited from the English label and matched by the shipped relay.asks vocabulary, so kept; context sidecar and the card name the real meaning beside it. `terminal` and `ứng dụng desktop` stay as shipped vi vocabulary (59 / 9 uses). Evidence is this auditor's own command output in the lane session, not an external report."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.ask_receipts",
+      "source_sha256": "ba2d2d97a57ec5f9decce90958168099fc1c81ae0882e75cab46f93af6262ad9",
+      "context_sha256": "88e59cd44fc0809d7737c6cabc4fc7b22a4c0d9d9a41bd9e976b03837ca82464",
+      "target_sha256": "0628e29fddfb6d0ba3d3c7e00bd21e6acfe1cdf0eda4bccb3cf109497426bf2c",
+      "translator": {
+        "agent": "coding agent (translator role, lane feat/ask-withdrawn-row); session id not supplied in the audit brief, not independently verified",
+        "model": "radient/auto (as stated in the brief; underlying served model not disclosed)",
+        "fallback": "none (as stated in the brief; not independently verified)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev task subagent, lane ask-withdrawn-row); not the translator, did not author these keys",
+        "session": "543775e3bdf9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none",
+        "date": "2026-11-23",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of every key of the namespace (delta for the six unchanged keys, fresh audit of wire.ask_receipts.withdrawn.by_agent)"
+      },
+      "status": "passed",
+      "note": "Independent audit 2026-11-23 of all 7 keys of wire.ask_receipts in vi against en source ba2d2d97a57ec5f9decce90958168099fc1c81ae0882e75cab46f93af6262ad9 and sidecar 88e59cd44fc0809d7737c6cabc4fc7b22a4c0d9d9a41bd9e976b03837ca82464; target 0628e29fddfb6d0ba3d3c7e00bd21e6acfe1cdf0eda4bccb3cf109497426bf2c recomputed from the file bytes. Delta: the six earlier keys (name.secret_question, response.answered/declined/dismissed/late, timeout.timed_out) are byte-identical in copy to the rows audited in fa01d5672 (compared with git show origin/main: no earlier-key string changed in any locale); their prior verdict stands and is re-attested here at the new source/sidecar hashes, which changed only by the added key. Findings carried from that audit (e.g. the advisory dismissed width budget) are unchanged and not re-opened. New key wire.ask_receipts.withdrawn.by_agent = 'Tác nhân đã rút lại': meaning checked against the sidecar (the agent retracted the ask and no longer needs an answer; the agent is the actor; not 'deleted', not 'cancelled by you'); consistency checked against the shipped relay.asks.status.withdrawn and this namespace's other state phrases: rút lại = relay.asks.status.withdrawn 'Đã rút lại'; tác nhân per glossary/response.declined; agent-as-subject mirrors the sibling dismissal 'Bạn đã bỏ qua', so who acted is unambiguous. Method: read docs/I18N.md, glossary, the vi style guide and the sidecar; rendered the key with local_operator.i18n.messages.render (no params) and composed the receipt row 'a-745e · “Settings layout” — <phrase>' together with the other keys (answered, declined, late, timed_out waited=42m, dismissed remote/other); checked key/placeholder parity with en (no ICU arguments in the new key), NFC, no manual bidi controls, no English word in the phrase, and cell width against the sidecar maxCells 40 (well within). No catalogue edits. No findings.  Evidence is this auditor's own command output in the lane session, not an external report."
     }
   ]
 }
