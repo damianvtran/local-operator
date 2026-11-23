@@ -529,6 +529,13 @@ def source_offer(
     name = stored.team
     if not supported:
         raise TeamIdentityRefused(name)
+    if prior is None:
+        # Nothing on this device attests to the named team (a legacy sidecar, or
+        # a team this device never held), so there is no authority to offer. The
+        # name still travels in the sidecar and the destination reports it as
+        # unresolved — refusing the MOVE here would let a missing or absent
+        # definition block moving the conversation itself (R5-3).
+        return None
     registry = TeamRegistry(root)
     team = _verify_name(name, prior, _resolve(registry, name))
     record = _snapshot_at_root(root, team, registry, prior).record()
@@ -561,6 +568,12 @@ def _check_destination(
             )
             raise TeamIdentityRefused(name)
         return None
+    if expected is None:
+        # The source offered NO record (it could not attest the name). A name is
+        # not authority: install nothing and record no team binding, so the
+        # arrival carries the hint and the receipt says it is unresolved. Only an
+        # attested record can be verified, and only that can ever attach.
+        return None
     registry = TeamRegistry(root)
     team = _verify_name(stored.team, expected, _resolve(registry, stored.team))
     record = _snapshot_at_root(root, team, registry, expected).record()
@@ -582,6 +595,19 @@ def restore_bound(directory: Path, name: str, registry: TeamRegistry | None) -> 
     expected = _local_binding(directory)
     team = _resolve(registry, name) if registry is not None else None
     return _verify_name(name, expected, team)
+
+
+def is_pending_definition(error: BaseException) -> bool:
+    """Whether a refusal ONLY says a definition has not reached this device yet.
+
+    WHY (review r5 Q-R5-1): a definition sync is independent of a move, so its
+    absence is a WAIT. The caller keeps the recorded team and retries on the next
+    turn, instead of treating an in-flight row exactly like a rejected record —
+    which lost the recorded team and, on the raise path, made the conversation
+    unopenable. A RECORD that does not match stays a refusal and this returns
+    False for it, so no authority follows from waiting.
+    """
+    return isinstance(error, _DefinitionNotLoaded)
 
 
 def authorize_named_team(root: Path, directory: Path, name: str) -> str:

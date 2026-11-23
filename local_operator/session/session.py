@@ -9548,7 +9548,8 @@ class Session:
         # per slot, wherever the two slots are mutually exclusive.
         if stored.team and not live_agent and (not live_team or live_team == stored.team):
             from local_operator.network.move_team import (
-                TeamIdentityRefused, restore_bound, was_authorized_locally,
+                TeamIdentityRefused, is_pending_definition, restore_bound,
+                was_authorized_locally,
             )
 
             # No name-only recovery: an interrupted copy, old local journal
@@ -9558,6 +9559,19 @@ class Session:
                 team = restore_bound(directory, stored.team, self.team_registry)
                 self.attach_team(team, _verified_bound=True)
             except TeamIdentityRefused as refusal:
+                if is_pending_definition(refusal):
+                    # THE RECORD IS INTACT; ONLY THE DEFINITION IS IN FLIGHT
+                    # (Q-R5-1). Definitions reconciliation runs independently of a
+                    # move, so a missing row is a WAIT: keep the recorded name (the
+                    # next turn re-resolves it and attaches once the row lands) and
+                    # report it — but never raise, which lost the recorded team and,
+                    # on the moved shape, made the conversation unopenable. The
+                    # recorded team is what the retry attaches UNDER, so waiting
+                    # grants nothing; a RECORD that does not match still raises
+                    # below, exactly as before.
+                    self._unresolved_team = stored.team
+                    self.attachment_restore_notice = f"{refusal}; re-attach via /team"
+                    return
                 if not was_authorized_locally(directory):
                     raise
                 self._unresolved_team = stored.team

@@ -1840,8 +1840,16 @@ async def test_unbound_destination_declaration_requires_recorded_team_identity(
             assert AgentRegistry(receiver.root).get_agent_by_name(manager) is not None
             assert TeamRegistry(receiver.root).get_team_by_name(team) is not None
             assert not destination.exists()
-            with pytest.raises(move_team.TeamIdentityRefused, match=team):
-                move_team.check_arrival(receiver.root, source, None)
+            # THE INVARIANT, not the mechanism (review r5 R5-3): an existing
+            # local declaration still cannot bind the arriving session. A pull
+            # carrying no record is accepted as carrying NOTHING — no team identity
+            # comes back and no binding is written — which is exactly what keeps a
+            # NAME from being authority. (It used to refuse the whole move here;
+            # a name that cannot be attested is now reported as unresolved on the
+            # receipt instead of blocking the conversation from moving.)
+            assert move_team.check_arrival(receiver.root, source, None) is None
+            # The destination is untouched: no team identity and no directory.
+            assert not destination.exists()
             checked = True
         # The rollback and refusal report pass explicit timeouts; the spy must
         # relay those unchanged or a real refusal looks like a move deadline.
