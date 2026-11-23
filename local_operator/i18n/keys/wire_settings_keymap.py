@@ -9,12 +9,76 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def aside_help() -> Msg:
+    return Msg("wire.settings.keymap.aside.help", {})
+
+
+def aside_label() -> Msg:
+    return Msg("wire.settings.keymap.aside.label", {})
+
+
+def clear_transcript_help() -> Msg:
+    return Msg("wire.settings.keymap.clear_transcript.help", {})
+
+
+def clear_transcript_label() -> Msg:
+    return Msg("wire.settings.keymap.clear_transcript.label", {})
+
+
+def command_palette_help() -> Msg:
+    return Msg("wire.settings.keymap.command_palette.help", {})
+
+
+def command_palette_label() -> Msg:
+    return Msg("wire.settings.keymap.command_palette.label", {})
+
+
+def cycle_effort_help() -> Msg:
+    return Msg("wire.settings.keymap.cycle_effort.help", {})
+
+
+def cycle_effort_label() -> Msg:
+    return Msg("wire.settings.keymap.cycle_effort.label", {})
+
+
+def focus_sidebar_help() -> Msg:
+    return Msg("wire.settings.keymap.focus_sidebar.help", {})
+
+
+def focus_sidebar_label() -> Msg:
+    return Msg("wire.settings.keymap.focus_sidebar.label", {})
+
+
+def fork_aside_help() -> Msg:
+    return Msg("wire.settings.keymap.fork_aside.help", {})
+
+
+def fork_aside_label() -> Msg:
+    return Msg("wire.settings.keymap.fork_aside.label", {})
+
+
 def new_session_help() -> Msg:
     return Msg("wire.settings.keymap.new_session.help", {})
 
 
 def new_session_label() -> Msg:
     return Msg("wire.settings.keymap.new_session.label", {})
+
+
+def next_session_help() -> Msg:
+    return Msg("wire.settings.keymap.next_session.help", {})
+
+
+def next_session_label() -> Msg:
+    return Msg("wire.settings.keymap.next_session.label", {})
+
+
+def prev_session_help() -> Msg:
+    return Msg("wire.settings.keymap.prev_session.help", {})
+
+
+def prev_session_label() -> Msg:
+    return Msg("wire.settings.keymap.prev_session.label", {})
 
 
 def push_to_talk_help() -> Msg:
@@ -47,6 +111,46 @@ def start_recording_help() -> Msg:
 
 def start_recording_label() -> Msg:
     return Msg("wire.settings.keymap.start_recording.label", {})
+
+
+def toggle_asks_help() -> Msg:
+    return Msg("wire.settings.keymap.toggle_asks.help", {})
+
+
+def toggle_asks_label() -> Msg:
+    return Msg("wire.settings.keymap.toggle_asks.label", {})
+
+
+def toggle_pin_help() -> Msg:
+    return Msg("wire.settings.keymap.toggle_pin.help", {})
+
+
+def toggle_pin_label() -> Msg:
+    return Msg("wire.settings.keymap.toggle_pin.label", {})
+
+
+def toggle_sidebar_help() -> Msg:
+    return Msg("wire.settings.keymap.toggle_sidebar.help", {})
+
+
+def toggle_sidebar_label() -> Msg:
+    return Msg("wire.settings.keymap.toggle_sidebar.label", {})
+
+
+def toggle_subagents_help() -> Msg:
+    return Msg("wire.settings.keymap.toggle_subagents.help", {})
+
+
+def toggle_subagents_label() -> Msg:
+    return Msg("wire.settings.keymap.toggle_subagents.label", {})
+
+
+def toggle_todos_help() -> Msg:
+    return Msg("wire.settings.keymap.toggle_todos.help", {})
+
+
+def toggle_todos_label() -> Msg:
+    return Msg("wire.settings.keymap.toggle_todos.label", {})
 
 
 def transcript_down_help() -> Msg:

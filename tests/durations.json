@@ -3650,6 +3650,7 @@
   "tests/unit/network/test_excluded_row_cascade.py": 9.189,
   "tests/unit/network/test_file_device_approval.py": 20.23,
   "tests/unit/network/test_file_device_approval_process.py": 9.251,
+  "tests/unit/network/test_file_release_coordinator.py": 6.834,
   "tests/unit/network/test_finite_journal.py": 5.719,
   "tests/unit/network/test_finite_share.py": 2.663,
   "tests/unit/network/test_github_borrow_timeout_note.py": 29.319,

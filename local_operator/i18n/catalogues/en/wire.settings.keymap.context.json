@@ -49,6 +49,136 @@
     "tone": "plain, one sentence",
     "note": "EN-only context sidecar. No ICU arguments."
   },
+  "wire.settings.keymap.command_palette.label": {
+    "role": "Settings row label for the command-palette hotkey",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. The palette is the app's own search surface over slash commands, settings and conversations. No ICU arguments."
+  },
+  "wire.settings.keymap.command_palette.help": {
+    "role": "Settings row help for the command-palette hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. Names no key (the value column shows it). No ICU arguments."
+  },
+  "wire.settings.keymap.toggle_sidebar.label": {
+    "role": "Settings row label for the sidebar toggle hotkey",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. The row toggles the sessions list panel. No ICU arguments."
+  },
+  "wire.settings.keymap.toggle_sidebar.help": {
+    "role": "Settings row help for the sidebar toggle hotkey",
+    "tone": "plain, one sentence; ends with a slash command",
+    "note": "EN-only context sidecar. `/sidebar` is a literal command and stays untranslated and unspaced. No ICU arguments."
+  },
+  "wire.settings.keymap.focus_sidebar.label": {
+    "role": "Settings row label for the hotkey that moves focus into the sessions list",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. 'Focus' is keyboard focus, not the app's conversation focus. No ICU arguments."
+  },
+  "wire.settings.keymap.focus_sidebar.help": {
+    "role": "Settings row help for the focus-sessions hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. 'esc' is a keycap identifier; keep it verbatim. No ICU arguments."
+  },
+  "wire.settings.keymap.aside.label": {
+    "role": "Settings row label for the aside hotkey",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. An aside is a side question that does not join the conversation unless forked. No ICU arguments."
+  },
+  "wire.settings.keymap.aside.help": {
+    "role": "Settings row help for the aside hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. 'Draft' is the unsent composer text, which the aside preserves. No ICU arguments."
+  },
+  "wire.settings.keymap.fork_aside.label": {
+    "role": "Settings row label for the hotkey that promotes an aside into the conversation",
+    "tone": "concise verb phrase, sentence case",
+    "note": "EN-only context sidecar. 'Fork' is the product's verb for appending the aside exchange to the transcript. No ICU arguments."
+  },
+  "wire.settings.keymap.fork_aside.help": {
+    "role": "Settings row help for the fork-aside hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. No ICU arguments."
+  },
+  "wire.settings.keymap.toggle_todos.label": {
+    "role": "Settings row label for the todo-panel toggle hotkey",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. The todo panel is the dock's task list. No ICU arguments."
+  },
+  "wire.settings.keymap.toggle_todos.help": {
+    "role": "Settings row help for the todo-panel toggle hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. No ICU arguments."
+  },
+  "wire.settings.keymap.toggle_subagents.label": {
+    "role": "Settings row label for the subagent-panel density hotkey",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. The panel has three densities: full, summary, hidden. No ICU arguments."
+  },
+  "wire.settings.keymap.toggle_subagents.help": {
+    "role": "Settings row help for the subagent-panel density hotkey",
+    "tone": "plain, one sentence; colon-separated list",
+    "note": "EN-only context sidecar. Keep `full`, `summary`, `hidden` as the three density names the panel itself paints. No ICU arguments."
+  },
+  "wire.settings.keymap.toggle_pin.label": {
+    "role": "Settings row label for the pin/unpin hotkey",
+    "tone": "concise verb phrase, sentence case",
+    "note": "EN-only context sidecar. 'Pin' is the product's verb for keeping a session at the top of the list. No ICU arguments."
+  },
+  "wire.settings.keymap.toggle_pin.help": {
+    "role": "Settings row help for the pin/unpin hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. The target is the row under the pointer, else the sidebar cursor when the list has the keys. No ICU arguments."
+  },
+  "wire.settings.keymap.toggle_asks.label": {
+    "role": "Settings row label for the queued-asks hotkey",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. 'Asks' is the app's word for questions waiting on the user. No ICU arguments."
+  },
+  "wire.settings.keymap.toggle_asks.help": {
+    "role": "Settings row help for the queued-asks hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. No ICU arguments."
+  },
+  "wire.settings.keymap.prev_session.label": {
+    "role": "Settings row label for the previous-session hotkey",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. 'Session' is a conversation in this product's vocabulary. No ICU arguments."
+  },
+  "wire.settings.keymap.prev_session.help": {
+    "role": "Settings row help for the previous-session hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. The order is the sidebar's order. No ICU arguments."
+  },
+  "wire.settings.keymap.next_session.label": {
+    "role": "Settings row label for the next-session hotkey",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. No ICU arguments."
+  },
+  "wire.settings.keymap.next_session.help": {
+    "role": "Settings row help for the next-session hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. No ICU arguments."
+  },
+  "wire.settings.keymap.cycle_effort.label": {
+    "role": "Settings row label for the effort-cycling hotkey",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. 'Reasoning effort' is the model's thinking budget. No ICU arguments."
+  },
+  "wire.settings.keymap.cycle_effort.help": {
+    "role": "Settings row help for the effort-cycling hotkey",
+    "tone": "plain, one sentence; ends with a slash command",
+    "note": "EN-only context sidecar. `/effort` is a literal command and stays untranslated and unspaced. No ICU arguments."
+  },
+  "wire.settings.keymap.clear_transcript.label": {
+    "role": "Settings row label for the clear-transcript hotkey",
+    "tone": "concise verb phrase, sentence case",
+    "note": "EN-only context sidecar. 'Transcript' is the conversation view on screen; clearing it does not delete stored history. No ICU arguments."
+  },
+  "wire.settings.keymap.clear_transcript.help": {
+    "role": "Settings row help for the clear-transcript hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. The reassurance ('the stored history stays') is the point of the sentence: the gesture looks destructive. No ICU arguments."
+  },
   "wire.settings.keymap.transcript_up.label": {
     "role": "Hotkey settings row label for a transcript scrolling action",
     "tone": "title case, noun phrase",

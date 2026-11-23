@@ -342,6 +342,12 @@ Enumerated by walking every `Widget`/`Screen`/`App` subclass in
 (the last four are REMAPPABLE rows, see E.4b; `alt+g`/`alt+shift+g` ride the
 fixed top/end bindings and are not configurable)
 
+**Read the list above with §L.1.** Thirteen of these are now remappable
+`keymap.*` defaults (`ctrl+p` `ctrl+b` `f9` `f8` `ctrl+f` `ctrl+t` `ctrl+g`
+`f10` `f4` `ctrl+shift+up` `ctrl+shift+down` `shift+tab` `ctrl+l`), so they are
+"taken" only until a user re-keys them; the rest of the list is fixed, and
+§L.3 says why each one is.
+
 **Composer (`Editor.BINDINGS`, `editor.py:1377-1425` + inherited `TextArea`):**
 `alt+left` `alt+right` `alt+shift+left` `alt+shift+right` `alt+b` `alt+f`
 `ctrl+v` `super+v` `ctrl+o` — and from `TextArea`:
@@ -1291,3 +1297,144 @@ conflicts against NON-remappable app bindings (warn-and-allow, `_app_binding_vic
 composer keys (warn-and-allow, `COMPOSER_KEYS`), and the reserved set (refused
 separately by `validate_key`). This check is only about two `keymap.*` actions
 colliding with each other.
+
+## L. Exposing the app-level chords (2026-11-22)
+
+This section records the second slice: the app-level chords that were literal
+`Binding`s became `KEY_ACTIONS` rows, so `/settings` → Hotkeys and `lop config
+edit` can re-key them.
+
+### L.1 The rows
+
+| id | shipped default | derived action | priority |
+|---|---|---|---|
+| `keymap.command_palette` | `ctrl+p` | `command_palette` | **yes** |
+| `keymap.toggle_sidebar` | `ctrl+b` | `toggle_sidebar` | no |
+| `keymap.focus_sidebar` | `f9` | `focus_sidebar` | no |
+| `keymap.aside` | `f8` | `aside` | no |
+| `keymap.fork_aside` | `ctrl+f` | `fork_aside` | no |
+| `keymap.toggle_todos` | `ctrl+t` | `toggle_todos` | no |
+| `keymap.toggle_subagents` | `ctrl+g` | `toggle_subagents` | no |
+| `keymap.toggle_pin` | `f10` | `toggle_pin` | no |
+| `keymap.toggle_asks` | `f4` | `toggle_asks` | no |
+| `keymap.prev_session` | `ctrl+shift+up` | `switch_session(-1)` | **yes** |
+| `keymap.next_session` | `ctrl+shift+down` | `switch_session(1)` | **yes** |
+| `keymap.cycle_effort` | `shift+tab` | `cycle_effort` | **yes** |
+| `keymap.clear_transcript` | `ctrl+l` | `clear_transcript` | no |
+
+Every default is the key its `Binding` shipped with, so exposing a row changes
+no shipped behaviour; `test_keymap.py::test_the_exposed_rows_ship_the_keys_the_bindings_had`
+pins the table above.
+
+`priority` is a **row field**, not a literal in `app.py`. `App.set_keymap`
+replaces keys and never flags, so a flag declared at the binding site would be
+lost (or wrongly kept) by the first remap. `conflict_note` inverts its warning
+for a priority row: a composer key is then not "the hotkey will not fire while
+you are typing" but "a priority hotkey would take it away from typing" —
+the same warn-and-allow with the opposite victim.
+
+### L.2 `ctrl+p` was the exception, and why it no longer is
+
+§E.4 clause 5 and §E.4a recorded that an app binding on `ctrl+p` can never
+fire: Textual's `App.__init__` injects its own
+`Binding(COMMAND_PALETTE_BINDING, "command_palette", priority=True)` — and
+`COMMAND_PALETTE_BINDING` is `ctrl+p` on 8.2.8 — **unless** a binding in the
+app's own map already carries that action. That condition is the lever: the
+app now declares `Binding("ctrl+p", "command_palette", …, priority=True,
+id="keymap.command_palette")`, the injection is skipped, and `set_keymap`
+re-keys OUR binding. `action_command_palette` already overrides the framework
+action with the keyed palette screen, so only the binding moved.
+
+The pilots assert both halves: after remapping `keymap.command_palette` the
+palette opens on the new key and `ctrl+p` no longer opens it; and the runtime
+binding map holds exactly one `command_palette` binding (a second would mean
+the injection happened anyway).
+
+Consequence for the reserved set in §C.1: `ctrl+p` is no longer "taken by the
+framework". It is a remappable default. `ctrl+q`, `ctrl+c`, `escape` and the
+composer keys keep their status.
+
+### L.3 What deliberately stays un-remappable, and why
+
+- **`escape`, `ctrl+c`, `ctrl+d`, `ctrl+q`** — the exit ladder and Textual's
+  priority quit. `RESERVED_KEYS` refuses them with their job named.
+- **Bare printables** (`p c r [ ]`, `?`) — `validate_key` refuses a single
+  printable on purpose: it is text. The subagent navigation keys and the `?`
+  legend are conditional gestures with no destructive potential, and a
+  printable global binding would make the composer unusable.
+- **`ctrl+l`** is exposed (`keymap.clear_transcript`): the brief's test was
+  "plain app action with no confirmation", and `action_clear_transcript` is
+  exactly that — it closes every floating surface first, so a remap cannot wipe
+  a transcript the user cannot see.
+- **`ctrl+home`/`ctrl+end`** — transcript scroll extremes. Another open lane
+  owns the transcript scroll keys (`keymap.transcript_up/down/half_up/
+  half_down`); two slices editing the same surface in one window is how a
+  conflict table goes stale. Not touched here.
+- **Transaction sub-gestures** — todo scroll (`ctrl+up`/`ctrl+down`), aside
+  scroll (`ctrl+pageup`/`ctrl+pagedown`) and `ctrl+r` copy-aside. They are
+  context-scoped follow-ons with no stand-alone meaning, and the aside's exist
+  precisely because the card cannot take focus.
+- **Widget, picker and modal bindings** — `enter`, arrows, `k`/`j`, and each
+  form's own `tab`/`shift+tab`. A picker owns the keyboard while it is open;
+  re-keying its chords from a global settings row would make every modal
+  inherit a user's list-navigation preference, which is not what the row says.
+- **Composer editing keys** (`TextArea` plus `Editor`) — text editing basics.
+- **Desktop rows** stay `scope="desktop"` and declare no `Binding`; the
+  descriptor for `keymap.quick_send` / `push_to_talk` / `start_recording` is
+  unchanged.
+
+One ride-along correction: `ctrl+f` was listed in `COMPOSER_KEYS` and is NOT
+a `TextArea` 8.2.8 binding (measured from the venv's `TextArea.BINDINGS`;
+`Editor` adds none). It was a soft-conflict guess, and keeping it would both
+warn wrongly and reject `keymap.fork_aside`'s shipped default. Removed.
+
+### L.4 Copy that names a chord is re-keyed at paint
+
+Surfaces that printed the literal default — the keys-legend rows and its
+session heading, `/help`'s key column, the ask bar's tail, the subagent dock's
+header/affordance, the todo panel's footer chip, the sidebar's `f9 focus ·
+ctrl+b hide` chip, the notifications hint, and the `display.dock` help line —
+now resolve the LIVE key.
+
+Two mechanisms, chosen per surface by what the copy is:
+
+1. **Key columns and single-token fields** use `keymap.painted_key` (the
+   app's applied `_keymap`, else the default). `/help` keeps its shipped
+   spelling while a row is at its default (`F8`, `ctrl+shift+↑/↓`) so the
+   default frame is byte-identical.
+2. **Translated sentences** that mention a chord are re-keyed by
+   `keymap.substitute_keys` at paint: token-bounded, longest default first,
+   app scope only. Retyping them as ICU templates would stale every audited
+   ledger row of three more namespaces (`tui.small`, `tui.app`,
+   `wire.settings`) in seven locales for one token. The shipped chord is a
+   technical token, not prose.
+
+The desktop settings projection (`GET /v1/settings`) applies the same
+substitution from the resolved config values, so the Electron page cannot keep
+naming `ctrl+g` after a remap.
+
+### L.5 Known scope limits
+
+- A remapped chord longer than the shipped literal can wrap a `/help` row: the
+  74-cell budget is measured against the defaults. A wrapped hint is still
+  true; the alternative is a hint naming a key that no longer works.
+- `super+b` (darwin) stays a fixed alternate for `toggle_sidebar`; the registry
+  stores one value per action, so it cannot be remapped and is not advertised
+  as one.
+- **Two actions on one key at LOAD time is not reported.** `lop config edit`
+  and the settings page refuse a shared key (`group_conflict`), but a config
+  written by hand — or saved by a build that predates a row — can put two
+  actions on one chord, and `resolved_keymap` applies it silently: both
+  bindings then answer the key (measured for the registry rows, review round
+  1). Not fixed here because the resolver is the wrong layer for a notice (it
+  is pure and called on every apply); the startup route would have to carry a
+  second channel beside `rejected`. Recorded rather than half-built.
+- **`lop config edit` warns but the desktop PATCH route does not.
+  The CLI now prints `keymap.conflict_note` after accepting a hotkey that lands
+  on a composer or fixed-app chord (Q8); `PATCH /v1/settings` returns the row's
+  own warning field, which no surface renders yet. The refusal path
+  (`group_conflict`) is shared by both writers, so a hard conflict is refused
+  everywhere.
+- The i18n obligation is per-namespace: the 26 `wire.settings.keymap` keys are
+  translated and audited in all seven carried locales (separate commits on this
+  branch: catalogue rows, context sidecar, ledger receipts, shipped set).

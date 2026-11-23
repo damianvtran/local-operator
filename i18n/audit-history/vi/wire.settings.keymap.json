@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings.keymap",
-  "history_sha256": "dadf2956b580704e654f5adc7ad6f52ccada801b2c6f96adeb503d55d24307ee",
+  "history_sha256": "11d222c684dad2799b07daf1f11a917a44a92c702afe28d5e1b8c2f42b9d264f",
   "entries": [
     {
       "locale": "vi",
@@ -39,6 +39,42 @@
       },
       "status": "passed",
       "note": "Full independent audit: clean-with-findings (0 blocker, 0 major, 3 minor, 3 nit). target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "029002bb07d8a2534091ce337ce670258836aef32f49f8d6a1bd7a620f01c582",
+      "context_sha256": "4d2bdc69dc5612b0cd14bb25c37a0a8dfc92256a3ad9e0ecc5f3e8b9d2efc5fc",
+      "target_sha256": "bfdf740bb3c4dbc1d92a38a33150046b58724ec2994519232a42b2f71bee68cb",
+      "translator": {
+        "agent": "task subagent (general), translator role for 26 new keymap keys",
+        "session": "746fba72a2a4",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none reported: the subagent self-reported anthropic/claude-sonnet-5-5; no provider fallback disclosed; the lopdev manager inspected no harness route log"
+      },
+      "auditor": {
+        "agent": "reviewer subagent acting as independent i18n auditor; distinct from the translator",
+        "session": "75031f215279",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none reported: the subagent self-reported anthropic/claude-sonnet-5-5; no provider fallback disclosed; the lopdev manager inspected no harness route log",
+        "result": "clean-with-findings",
+        "findings": 5,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 4 minor, 1 nit",
+        "independent_from_translator": true,
+        "translator_session": "746fba72a2a4",
+        "scope": "the 26 new wire.settings.keymap keys (13 actions x label/help) added by feat/tui-configurable-keybinds"
+      },
+      "status": "passed",
+      "note": "Suffix receipt for 26 new keys. Auditor-suggested replacements for aside and fork_aside label+help, toggle_subagents label+help, toggle_todos.help, focus_sidebar.label and toggle_pin.help were applied verbatim by the manager after the audit; that delta was not re-audited. No dedicated i18n-translator/i18n-auditor profile was available in this session; general task and reviewer subagents were used with the repo's glossary/style-guide brief. target_sha256 is the namespace file SHA-256 at recording time. Dates are the day recorded."
     },
     {
       "locale": "vi",

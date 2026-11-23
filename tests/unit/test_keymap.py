@@ -13,6 +13,8 @@ override and restores the default under them.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator import keymap, settings_io
@@ -77,7 +79,7 @@ def test_every_binding_action_exists_on_the_app() -> None:
             row_method = action.id.removeprefix(keymap.KEYMAP_PREFIX)
             assert not hasattr(OperatorApp, f"action_{row_method}"), action.id
             continue
-        assert hasattr(OperatorApp, f"action_{action.action}"), action.action
+        assert hasattr(OperatorApp, f"action_{action.action.split('(', 1)[0]}"), action.action
 
 
 def test_keymap_settings_are_flat_dotted() -> None:
@@ -234,8 +236,8 @@ def test_write_setting_normalizes_even_when_coerce_is_bypassed(tmp_path) -> None
 
     manager = ConfigManager(tmp_path)
     setting = settings_io.BY_KEY["keymap.new_session"]
-    settings_io.write_setting(manager, setting, "ctrl+G")
-    assert settings_io.read_setting(manager, setting) == "ctrl+g"
+    settings_io.write_setting(manager, setting, "ctrl+Y")
+    assert settings_io.read_setting(manager, setting) == "ctrl+y"
 
 
 def test_reset_deletes_the_override_rather_than_writing_the_default(tmp_path) -> None:
@@ -245,7 +247,7 @@ def test_reset_deletes_the_override_rather_than_writing_the_default(tmp_path) ->
 
     manager = ConfigManager(tmp_path)
     setting = settings_io.BY_KEY["keymap.new_session"]
-    settings_io.write_setting(manager, setting, "ctrl+g")
+    settings_io.write_setting(manager, setting, "ctrl+y")
     settings_io.reset_setting(manager, setting)
     assert setting.key not in manager.get_config().values
     assert settings_io.read_setting(manager, setting) == setting.default
@@ -261,12 +263,12 @@ def test_action_holding_reads_the_persisted_key_not_the_shipped_one() -> None:
     freed key was taken, and a false negative missing the action that actually
     held the captured key.
     """
-    values = {"keymap.new_session": "ctrl+g"}
+    values = {"keymap.new_session": "ctrl+y"}
 
     # The shipped key is now FREE and must not be attributed to anyone.
     assert keymap.action_holding("ctrl+n", values) is None
     # The key it actually moved to names the action that holds it now.
-    holder = keymap.action_holding("ctrl+g", values)
+    holder = keymap.action_holding("ctrl+y", values)
     assert holder is not None and holder.id == "keymap.new_session"
     # An action sitting at its DEFAULT is still found: `resolved_keymap` omits
     # defaults (omission encodes "unset"), so an inverted resolver would miss
@@ -274,7 +276,7 @@ def test_action_holding_reads_the_persisted_key_not_the_shipped_one() -> None:
     at_default = keymap.action_holding("ctrl+s", values)
     assert at_default is not None and at_default.id == "keymap.resume"
     # A row is never its own victim.
-    assert keymap.action_holding("ctrl+g", values, excluding="keymap.new_session") is None
+    assert keymap.action_holding("ctrl+y", values, excluding="keymap.new_session") is None
 
 
 def test_two_actions_may_not_share_one_key() -> None:
@@ -285,62 +287,62 @@ def test_two_actions_may_not_share_one_key() -> None:
     the silent-disable failure this module exists to prevent, reached from the
     other direction (review round 1, M2).
     """
-    values = {"keymap.new_session": "ctrl+g"}
+    values = {"keymap.new_session": "ctrl+y"}
 
-    problem = keymap.group_conflict("keymap.resume", "ctrl+g", values)
+    problem = keymap.group_conflict("keymap.resume", "ctrl+y", values)
     # The message names the OVERLAPPING key, not "that key": with alternates
     # a submitted value can have one bad member and one good one.
-    assert problem is not None and "already uses ctrl+g" in problem
+    assert problem is not None and "already uses ctrl+y" in problem
     # Normalization is applied before comparing, so an equivalent spelling of
     # the same chord cannot slip past the check.
-    assert keymap.group_conflict("keymap.resume", "CTRL+G", values) is not None
+    assert keymap.group_conflict("keymap.resume", "CTRL+Y", values) is not None
     # A free key, and the row keeping its own key, are both allowed.
     assert keymap.group_conflict("keymap.resume", "f5", values) is None
-    assert keymap.group_conflict("keymap.new_session", "ctrl+g", values) is None
+    assert keymap.group_conflict("keymap.new_session", "ctrl+y", values) is None
 
 
 def test_a_shared_alternate_is_a_collision_even_when_the_strings_differ() -> None:
     """Key strings are comma-separated SETS, so they compare as sets.
 
-    ``"f5,ctrl+g"`` and ``"ctrl+g"`` are different strings and the same
-    binding as far as ``ctrl+g`` is concerned. The first implementation of the
+    ``"f5,ctrl+y"`` and ``"ctrl+y"`` are different strings and the same
+    binding as far as ``ctrl+y`` is concerned. The first implementation of the
     group check compared whole strings and let this through, which reopened
     M2 through the very path §H.1 recommends for a second key — measured on
-    the real app: three presses of ``ctrl+g`` fired ``new_session`` every time
+    the real app: three presses of ``ctrl+y`` fired ``new_session`` every time
     and ``resume`` answered to no key at all (review round 2, M4).
     """
     # alternate on the LEFT, whole key on the right
-    values = {"keymap.new_session": "f5,ctrl+g"}
-    assert keymap.group_conflict("keymap.resume", "ctrl+g", values) is not None
+    values = {"keymap.new_session": "f5,ctrl+y"}
+    assert keymap.group_conflict("keymap.resume", "ctrl+y", values) is not None
     # whole key on the left, alternate on the right
-    values = {"keymap.new_session": "ctrl+g"}
-    assert keymap.group_conflict("keymap.resume", "f5,ctrl+g", values) is not None
+    values = {"keymap.new_session": "ctrl+y"}
+    assert keymap.group_conflict("keymap.resume", "f5,ctrl+y", values) is not None
     # alternate on BOTH sides, overlapping in one member only
-    values = {"keymap.new_session": "f5,ctrl+g"}
-    assert keymap.group_conflict("keymap.resume", "ctrl+t,ctrl+g", values) is not None
+    values = {"keymap.new_session": "f5,ctrl+y"}
+    assert keymap.group_conflict("keymap.resume", "ctrl+u,ctrl+y", values) is not None
     # an alternate that collides with the OTHER row's shipped default, which is
     # absent from `values` entirely — the case an inverted resolver would miss.
     assert keymap.group_conflict("keymap.new_session", "f5,ctrl+s", {}) is not None
 
     # Disjoint alternates are legitimate and must still be allowed.
-    values = {"keymap.new_session": "f5,ctrl+g"}
-    assert keymap.group_conflict("keymap.resume", "f2,ctrl+t", values) is None
+    values = {"keymap.new_session": "f5,ctrl+y"}
+    assert keymap.group_conflict("keymap.resume", "f2,ctrl+u", values) is None
     # A row is never its own victim, including when it keeps its alternates.
-    assert keymap.group_conflict("keymap.new_session", "f5,ctrl+g", values) is None
+    assert keymap.group_conflict("keymap.new_session", "f5,ctrl+y", values) is None
 
 
 def test_the_refusal_names_the_overlapping_key_not_the_whole_value() -> None:
     """With alternates in play, "that key" is ambiguous.
 
-    A user who submitted ``"f5,ctrl+g"`` has one bad member and one good one;
+    A user who submitted ``"f5,ctrl+y"`` has one bad member and one good one;
     a refusal that does not say which cannot be acted on.
     """
     problem = keymap.group_conflict(
-        "keymap.resume", "ctrl+t,ctrl+g", {"keymap.new_session": "f5,ctrl+g"}
+        "keymap.resume", "ctrl+u,ctrl+y", {"keymap.new_session": "f5,ctrl+y"}
     )
     assert problem is not None
-    assert "ctrl+g" in problem
-    assert "ctrl+t" not in problem, f"named a key that does not collide: {problem}"
+    assert "ctrl+y" in problem
+    assert "ctrl+u" not in problem, f"named a key that does not collide: {problem}"
 
 
 def test_alternates_splits_and_normalizes_every_member() -> None:
@@ -825,3 +827,244 @@ def test_key_display_spells_the_punctuation_chords_as_keycaps() -> None:
     assert keymap.format_key_display("alt+k,ctrl+right_square_bracket") == "alt+k,ctrl+]"
     assert keymap.format_key_display("ctrl+backslash") == "ctrl+\\"
     assert keymap.format_key_display("ctrl+home") == "ctrl+home"
+
+
+# ---------------------------------------------------------------------------
+# The app-scope rows this slice exposed
+# ---------------------------------------------------------------------------
+
+#: ``(id, the literal key its ``Binding`` shipped with before the row owned it)``.
+#: Each default is what the app answered to at origin/main ``03b0ec3de``; a row
+#: that shipped a different key would silently change behaviour while claiming
+#: to expose it.
+SHIPPED_APP_DEFAULTS = {
+    "keymap.new_session": "ctrl+n",
+    "keymap.resume": "ctrl+s",
+    "keymap.command_palette": "ctrl+p",
+    "keymap.toggle_sidebar": "ctrl+b",
+    "keymap.focus_sidebar": "f9",
+    "keymap.aside": "f8",
+    "keymap.fork_aside": "ctrl+f",
+    "keymap.toggle_todos": "ctrl+t",
+    "keymap.toggle_subagents": "ctrl+g",
+    "keymap.toggle_pin": "f10",
+    "keymap.toggle_asks": "f4",
+    "keymap.prev_session": "ctrl+shift+up",
+    "keymap.next_session": "ctrl+shift+down",
+    "keymap.cycle_effort": "shift+tab",
+    "keymap.clear_transcript": "ctrl+l",
+}
+
+
+def test_the_exposed_rows_ship_the_keys_the_bindings_had() -> None:
+    for action_id, key in SHIPPED_APP_DEFAULTS.items():
+        assert keymap.BY_ID[action_id].default == key, action_id
+
+
+def test_every_exposed_row_is_app_scope_and_has_an_action_method() -> None:
+    for action_id in SHIPPED_APP_DEFAULTS:
+        assert keymap.BY_ID[action_id].scope == "app", action_id
+
+
+def test_priority_lives_on_the_row_and_reaches_the_binding() -> None:
+    """The flag is registry DATA, because a remap re-keys the Binding only.
+
+    ``App.set_keymap`` replaces keys, never flags, so the precedence a row
+    needs must be declared where the Binding is derived from — otherwise the
+    shipped default would be priority and every remap of it would silently
+    stop being priority (or the other way round).
+    """
+    from local_operator.tui.app import OperatorApp
+
+    priority_ids = {
+        "keymap.command_palette",
+        "keymap.prev_session",
+        "keymap.next_session",
+        "keymap.cycle_effort",
+    }
+    assert {action.id for action in keymap.KEY_ACTIONS if action.priority} == priority_ids
+
+    bindings = {
+        str(getattr(binding, "id", "") or ""): binding
+        for binding in OperatorApp.BINDINGS
+        if str(getattr(binding, "id", "") or "").startswith(keymap.KEYMAP_PREFIX)
+    }
+    for action in keymap.KEY_ACTIONS:
+        if action.scope != "app":
+            continue
+        # `BINDINGS` is typed as admitting bare tuple spellings, so read the
+        # flag the way the anti-drift test reads the id.
+        assert bool(getattr(bindings[action.id], "priority", False)) is action.priority, action.id
+
+
+def test_the_palette_action_owns_a_binding_so_textual_does_not_inject_one() -> None:
+    """Textual injects its own priority ctrl+p UNLESS a binding carries it.
+
+    That injection is why ctrl+p was previously the one app chord nobody could
+    remap; the app must keep declaring the action for the palette to stay ours.
+    """
+    from local_operator.tui.app import OperatorApp
+
+    assert any(
+        getattr(binding, "action", "") == "command_palette" for binding in OperatorApp.BINDINGS
+    )
+
+
+def test_a_painted_hint_names_the_live_remap_and_never_breaks_a_paint() -> None:
+    assert keymap.painted_key("keymap.aside") == "f8"
+    assert keymap.painted_key("keymap.aside", {"keymap.aside": "f12"}) == "f12"
+    # An empty stored value is not a key: the default is the honest answer.
+    assert keymap.painted_key("keymap.aside", {"keymap.aside": ""}) == "f8"
+    # A paint must not raise because a test double or an unset attribute is
+    # not a mapping.
+    assert keymap.painted_key("keymap.aside", object()) == "f8"  # type: ignore[arg-type]
+    assert keymap.painted_key("keymap.not_a_row") == ""
+
+
+def test_substitute_keys_rewrites_whole_tokens_only() -> None:
+    """The copy that names a chord is translated and audited; it is re-keyed
+    at paint rather than retyped as a template."""
+    live = {"keymap.toggle_sidebar": "ctrl+o", "keymap.focus_sidebar": "f12"}
+    assert keymap.substitute_keys("ctrl+b hide", live) == "ctrl+o hide"
+    assert keymap.substitute_keys("f9 focus · ctrl+b hide", live) == "f12 focus · ctrl+o hide"
+    # Token-bounded: a default that is a prefix of a composer key stays put.
+    assert keymap.substitute_keys("ctrl+backspace", {"keymap.toggle_sidebar": "ctrl+o"}) == (
+        "ctrl+backspace"
+    )
+    # No keymap, an empty one, or a non-mapping: byte-identical copy.
+    for absent in (None, {}, object()):
+        assert (
+            keymap.substitute_keys("ctrl+b hide", absent) == "ctrl+b hide"  # type: ignore[arg-type]
+        )
+    # Desktop rows are not terminal chords and never substitute.
+    assert (
+        keymap.substitute_keys("alt-right-hold", {"keymap.push_to_talk": "alt-left-hold"})
+        == "alt-right-hold"
+    )
+
+
+def test_a_priority_row_inverts_the_composer_warning() -> None:
+    """Same warn-and-allow, opposite victim: text, not a dead hotkey."""
+    priority_note = keymap.conflict_note("keymap.cycle_effort", "ctrl+u")
+    assert "priority" in priority_note and "typing" in priority_note
+    plain_note = keymap.conflict_note("keymap.new_session", "ctrl+u")
+    assert "will not fire" in plain_note
+    assert keymap.conflict_note("keymap.command_palette", "f5") == ""
+
+
+def test_an_app_row_cannot_be_cleared_to_none() -> None:
+    """`none` is the desktop dictation rows' opt-in; a terminal key has no
+    cleared state, so the grammar refuses it everywhere else."""
+    for action_id in ("keymap.command_palette", "keymap.aside", "keymap.cycle_effort"):
+        assert keymap.validate_key("none", action_id=action_id) is not None, action_id
+
+
+def test_substitute_keys_is_single_pass_so_swaps_and_chains_cannot_corrupt() -> None:
+    """A per-key `re.sub` loop rewrote its own output (R3/Q2).
+
+    Two shapes broke it, both reproduced against the loop this test replaced: a
+    SWAP (A->B and B->A) turned every A back into an A, and a remap whose live
+    value contained another shipped chord was rewritten again by that chord's
+    iteration. One alternation, one lookup, no second look at its own output.
+    """
+    swap = {"keymap.toggle_sidebar": "f9", "keymap.focus_sidebar": "ctrl+b"}
+    assert keymap.substitute_keys("ctrl+b hide · f9 focus", swap) == "f9 hide · ctrl+b focus"
+
+    chain = {"keymap.toggle_sidebar": "ctrl+t", "keymap.toggle_todos": "f12"}
+    assert keymap.substitute_keys("ctrl+b hide · ctrl+t todos", chain) == (
+        "ctrl+t hide · f12 todos"
+    )
+
+    # Case-insensitive: copy spells `F8` and the shipped chord is `f8`.
+    assert keymap.substitute_keys("F8 opens one", {"keymap.aside": "f12"}) == "f12 opens one"
+    # Token-bounded still holds with a swap in play.
+    assert keymap.substitute_keys("ctrl+backspace", swap) == "ctrl+backspace"
+
+
+def test_fixed_app_keys_are_the_app_bindings_that_are_not_rows() -> None:
+    """The soft-warn table must not drift from `OperatorApp.BINDINGS` (R4).
+
+    `keymap.py` cannot import the app, so the table is spelled here and this
+    test derives the expected set from the live bindings: every app-level key
+    that is NOT a registry row, not a reserved key and not a bare printable.
+
+    `super+b` is the one entry the BINDINGS cannot supply everywhere: the app
+    declares that alternate ONLY on darwin (Textual decodes Kitty's Super
+    modifier; terminals that intercept Cmd+B never deliver it). The table is
+    static, so it lists the key on every platform — which made the derivation
+    fail the Linux CI merge gate with `Left contains 1 more item: 'super+b'`
+    while it passed on macOS. The derivation therefore adds the documented
+    darwin-only extras explicitly, and the linux shape is exercised on EVERY
+    platform by removing that binding from a copy of the live list.
+    """
+    from textual.keys import key_to_character
+
+    from local_operator.tui.app import OperatorApp
+
+    def _is_printable(part: str) -> bool:
+        char = key_to_character(part)
+        return char is not None and char.isprintable()
+
+    # The documented platform-conditional extras: key -> the job `BINDINGS`
+    # names on darwin. Asserted separately below so the static table cannot drop
+    # one silently.
+    DARWIN_ONLY = {"super+b": "Sessions"}
+
+    # EVERY PART of a row's default, not just the whole string: a row may carry
+    # a mnemonic alternate on one action (`alt+k,ctrl+right_square_bracket`),
+    # and each part is still that row's key, not a fixed app binding.
+    row_keys = {
+        part
+        for action in keymap.KEY_ACTIONS
+        if action.scope == "app"
+        for part in action.default.split(",")
+        if part
+    }
+
+    def _derive(bindings: Any) -> dict[str, str]:
+        derived: dict[str, str] = {}
+        for binding in bindings:
+            raw = str(getattr(binding, "key", "") or "")
+            for part in raw.split(","):
+                if not part or part in row_keys or part in keymap.RESERVED_KEYS:
+                    continue
+                # A bare printable (and every spelling of one: `p`, `question`,
+                # `left_square_bracket`) is TEXT, refused by `validate_key`, so
+                # it is not a binding a remap can land on.
+                if _is_printable(part) or part in {"question", "question_mark"}:
+                    continue
+                # The DESCRIPTION travels with the key (M3): the warning names
+                # what the fixed binding does, and there is no other setting to
+                # point at.
+                derived[part] = str(getattr(binding, "description", ""))
+        return derived
+
+    expected = _derive(OperatorApp.BINDINGS)
+    if "super+b" not in expected:
+        expected.update(DARWIN_ONLY)
+    assert dict(keymap.FIXED_APP_KEYS) == expected
+
+    # The Linux merge gate's shape, run on every platform: the same bindings
+    # WITHOUT the darwin-only entry must land on the same table.
+    without_darwin = [
+        binding
+        for binding in OperatorApp.BINDINGS
+        if str(getattr(binding, "key", "") or "") != "super+b"
+    ]
+    linux_expected = _derive(without_darwin)
+    linux_expected.update(DARWIN_ONLY)
+    assert dict(keymap.FIXED_APP_KEYS) == linux_expected
+
+    # And the static table carries the extras with the jobs they do.
+    assert {key: keymap.FIXED_APP_KEYS[key] for key in DARWIN_ONLY} == DARWIN_ONLY
+
+
+def test_conflict_note_warns_about_a_fixed_app_chord() -> None:
+    """A remap onto a fixed app binding is warn-and-allow, like the composer set."""
+    note = keymap.conflict_note("keymap.aside", "ctrl+home")
+    assert "ctrl+home is fixed for Transcript top" in note, note
+    assert "pick another key" in note
+    assert keymap.conflict_note("keymap.aside", "f5") == ""
+    # f6/f7 are still in the composer set: the one class QA asked to verify.
+    assert "f6" in keymap.COMPOSER_KEYS and "f7" in keymap.COMPOSER_KEYS
+    assert "composer" in keymap.conflict_note("keymap.aside", "f7")

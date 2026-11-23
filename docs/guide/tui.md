@@ -125,3 +125,45 @@ update leaves the current terminal and runtime running.
   `option+↓` behave as plain `↑` / `↓`. On macOS this works whichever
   option-key mode your terminal is set to. The default, "Use Option as Meta",
   and "Esc+" all behave the same, so there is nothing to configure.
+
+## Remapping keys
+
+`/settings` → **Hotkeys** (or `lop config edit keymap.<id> <key>`) re-keys
+these, live in every running pane:
+
+| id | ships as |
+|---|---|
+| `keymap.command_palette` | `ctrl+p` |
+| `keymap.toggle_sidebar` | `ctrl+b` |
+| `keymap.focus_sidebar` | `f9` |
+| `keymap.aside` | `f8` |
+| `keymap.fork_aside` | `ctrl+f` |
+| `keymap.toggle_todos` | `ctrl+t` |
+| `keymap.toggle_subagents` | `ctrl+g` |
+| `keymap.toggle_pin` | `f10` |
+| `keymap.toggle_asks` | `f4` |
+| `keymap.prev_session` | `ctrl+shift+up` |
+| `keymap.next_session` | `ctrl+shift+down` |
+| `keymap.cycle_effort` | `shift+tab` |
+| `keymap.clear_transcript` | `ctrl+l` |
+| `keymap.new_session` | `ctrl+n` |
+| `keymap.resume` | `ctrl+s` |
+
+Two rows may never share a key, and the settings page refuses that on the
+press. Remapping onto a composer key warns instead: for an ordinary row the
+hotkey silently stops firing while you type; for the four priority rows
+(`command_palette`, `prev_session`, `next_session`, `cycle_effort`) it would
+take the key away from typing, which the warning says in those words. A remap
+onto a chord the app already uses for something fixed — the transcript-scroll
+extremes, todo or aside scrolling, copy-aside — warns as well, because both
+shortcuts would then answer the key.
+
+`esc`, `ctrl+c`, `ctrl+d`, `ctrl+q`, `enter`, `tab` and the composer's own
+editing keys are not remappable — they are the exit ladder or text-editing
+basics. Bare letters are refused on purpose: they type. The transcript-scroll
+chords stay fixed, and the aside and todo scroll sub-gestures are context-only
+and likewise stay fixed.
+
+Desktop-only shortcuts (`keymap.quick_send`, `keymap.push_to_talk`,
+`keymap.start_recording`) are global OS shortcuts, edited in the same section
+or in the desktop app's settings.
