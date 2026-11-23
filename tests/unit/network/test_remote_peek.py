@@ -463,12 +463,71 @@ def test_peer_query_keeps_pid_metadata_and_skips_only_the_malformed_text(tmp_pat
     assert window["steps"][0]["body"] == "a real peer message"
 
     # Coerced metadata belongs on the preview, not in the match count.
-    pid_only = net_peek.serve(
-        tmp_path, {"session_id": SESSION, "query": "27182"}, own_label="b"
-    )["window"]
+    pid_only = net_peek.serve(tmp_path, {"session_id": SESSION, "query": "27182"}, own_label="b")[
+        "window"
+    ]
     assert pid_only["match_count"] == 0
     assert "1 unrenderable row skipped" in pid_only["miss"]
     print(f"PID-only sender: {window['steps'][0]}; {window['note']}")
+
+
+def test_peer_query_does_not_match_a_display_only_sender(tmp_path: Path) -> None:
+    path = _journal(tmp_path, rows=2) / "transcript.jsonl"
+    peer, genuine = map(json.loads, path.read_text(encoding="utf-8").splitlines())
+    peer["payload"] = {
+        "kind": "custom",
+        "custom_type": PEER_MESSAGE_MESSAGE_TYPE,
+        "details": {"sender": {"pid": 27182}, "body": "a real peer message"},
+    }
+    genuine["payload"]["content"] = [{"text": "from another session"}]
+
+    def search() -> dict[str, Any]:
+        path.write_text(f"{json.dumps(peer)}\n{json.dumps(genuine)}\n", encoding="utf-8")
+        return net_peek.serve(
+            tmp_path,
+            {"session_id": SESSION, "query": "another session", "steps": 3},
+            own_label="b",
+        )["window"]
+
+    window = search()
+    print(window["note"], window["match_id"], window["match_step"])
+    assert (window["match_count"], window["match_count_complete"]) == (1, True)
+    assert window["note"] == (
+        "match count: 1 (whole transcript); first match, up to 1 before and 1 after"
+    )
+    assert (window["match_id"], window["match_step"]) == (genuine["id"], 2)
+    assert window["steps"][0]["heading"] == "peer ← 27182"
+
+    peer["payload"]["details"]["body"] = "from another session"
+    window = search()
+    assert (window["match_count"], window["match_id"], window["match_step"]) == (2, peer["id"], 1)
+    assert window["match_count_complete"] is True
+    assert window["note"] == (
+        "match count: 2 (whole transcript); first match, up to 1 before and 1 after"
+    )
+    assert window["steps"][0]["heading"] == "peer ← 27182"
+
+
+@pytest.mark.parametrize("shape", ["missing", "null", "valid"])
+def test_peer_query_receipt_tracks_invalid_row_type(tmp_path: Path, shape: str) -> None:
+    path = _journal(tmp_path, rows=2) / "transcript.jsonl"
+    neighbor, genuine = map(json.loads, path.read_text(encoding="utf-8").splitlines())
+    if shape == "missing":
+        del neighbor["type"]
+    elif shape == "null":
+        neighbor["type"] = None
+    path.write_text(f"{json.dumps(neighbor)}\n{json.dumps(genuine)}\n", encoding="utf-8")
+    window = net_peek.serve(
+        tmp_path, {"session_id": SESSION, "query": "row 2", "steps": 3}, own_label="b"
+    )["window"]
+    print(shape, window["note"], window["match_count_complete"])
+    scope = "whole transcript"
+    if shape != "valid":
+        scope += "; 1 unrenderable row skipped; count is a lower bound"
+    assert window["note"] == f"match count: 1 ({scope}); first match, up to 1 before and 1 after"
+    assert (window["match_count"], window["match_count_complete"]) == (1, shape == "valid")
+    assert window["match_id"] == genuine["id"]
+    assert window["before_cursor"] == (neighbor["id"] if shape == "valid" else genuine["id"])
 
 
 @pytest.mark.parametrize("shape", ["timestamp", "tool-calls", "peer-sender", "unencodable-sender"])
@@ -491,9 +550,9 @@ def test_peer_query_renders_usable_text_despite_bad_metadata(tmp_path: Path, sha
         )
         heading = "peer ← another session"
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
-    window = net_peek.serve(
-        tmp_path, {"session_id": SESSION, "query": "row 1"}, own_label="b"
-    )["window"]
+    window = net_peek.serve(tmp_path, {"session_id": SESSION, "query": "row 1"}, own_label="b")[
+        "window"
+    ]
     assert window["match_count"] == 1, window
     assert window["match_count_complete"] is True
     assert "skipped" not in window["note"]

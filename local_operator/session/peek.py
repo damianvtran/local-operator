@@ -580,7 +580,10 @@ def _peer_search_has_raw_text(payload: Mapping[str, Any]) -> bool:
     Inspect only the slots the renderer uses as prose. In particular, an
     array/object in a text slot fails on its outer type; we never walk it.
     """
-    from local_operator.harness.message_types import HUB_MESSAGE_TYPE, PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.harness.message_types import (
+        HUB_MESSAGE_TYPE,
+        PEER_MESSAGE_MESSAGE_TYPE,
+    )
 
     if payload.get("kind") == "custom":
         custom_type = payload.get("custom_type")
@@ -611,10 +614,10 @@ def _peer_search_has_raw_text(payload: Mapping[str, Any]) -> bool:
 def _peer_search_display_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int | None]:
     """Give the shared formatter safe decoration without losing real text.
 
-    Valid string labels still match as before. If a peer's sender is identified
-    only by an integer PID, use the placeholder for matching and keep the PID
-    separately for display. Never stringify a container: its contents are not
-    a label, and stringifying it could recurse or expand unseen metadata.
+    Valid string labels still match as before. Keep an integer peer PID
+    separately for display: neither it nor the renderer's fallback is stored
+    searchable text. Never stringify a container: its contents are not a label,
+    and stringifying it could recurse or expand unseen metadata.
     """
     from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 
@@ -679,8 +682,13 @@ def _peer_peek_search(
         _render_message_step,
         is_peek_step_entry,
     )
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
     from local_operator.session import compression
     from local_operator.session.transcript import (
+        ENTRY_COMPACTION,
+        ENTRY_CUSTOM,
+        ENTRY_MESSAGE,
+        ENTRY_PRUNE,
         TranscriptEntry,
         _iter_complete_lines_forward,
     )
@@ -719,11 +727,14 @@ def _peer_peek_search(
                     depth_skips += 1
                     continue
                 row_type = stored.get("type")
-                # The journal discriminator controls visibility, not whether a
-                # message with usable identity and text can be displayed. A
-                # timestamp never participates in a counted query.
-                if row_type != "message":
+                # An exact count may omit only known non-steps, never a row
+                # whose eligibility, text or preview could not be established.
+                # Such omissions must increment skipped, even before matching.
+                if row_type != ENTRY_MESSAGE:
+                    if row_type not in (ENTRY_COMPACTION, ENTRY_CUSTOM, ENTRY_PRUNE):
+                        skipped += 1
                     continue
+                # A timestamp never participates in a counted query.
                 row_id = stored["id"]
                 payload = stored.get("payload", {})
                 if not isinstance(row_id, str) or not row_id or not isinstance(payload, dict):
@@ -736,23 +747,43 @@ def _peer_peek_search(
                     skipped += 1
                     continue
                 display_payload, display_pid = _peer_search_display_payload(entry.payload)
-                step = _render_message_step(0, display_payload, body_limit=None)
-                # JSON escapes can introduce unpaired surrogates. Identity and
-                # actual prose must survive the wire; decoration was already
-                # given a safe display fallback without touching the prose.
-                entry.id.encode("utf-8")
-                step.body.encode("utf-8")
-                text = f"{step.heading}\n{step.body}"
-                if display_pid is not None:
-                    details = {**display_payload["details"], "sender": {"pid": display_pid}}
-                    step = _render_message_step(0, {**display_payload, "details": details})
+                step = None
+                peer_details = (
+                    display_payload["details"]
+                    if display_payload.get("kind") == "custom"
+                    and display_payload.get("custom_type") == PEER_MESSAGE_MESSAGE_TYPE
+                    else None
+                )
+                if peer_details is not None and not any(peer_details["sender"].values()):
+                    # With no stored string label, the entire sender heading
+                    # is presentation. A fallback must not steal the cursor.
+                    text = peer_details.get("body") or peer_details.get("text") or ""
                 else:
-                    step = replace(step, body=_clip(step.body))
-                row = (entry.id, step)
+                    step = _render_message_step(0, display_payload, body_limit=None)
+                    text = f"{step.heading}\n{step.body}"
+                # JSON escapes can introduce unpaired surrogates; identity
+                # and full text must survive the wire, even beyond the clip.
+                entry.id.encode("utf-8")
+                text.encode("utf-8")
             except Exception:
                 # This guard is deliberately per row, not a list of known parser
                 # and renderer exceptions. File I/O and query-wide errors (e.g.
                 # a regex budget refusal) stay outside it and still surface.
+                skipped += 1
+                continue
+            found = pattern.search(text) is not None if pattern is not None else needle in text
+            try:
+                # Build the preview only after matching, but don't commit a hit
+                # until the row can actually occupy a slot in the result window.
+                if step is None:
+                    if display_pid is not None:
+                        details = {**display_payload["details"], "sender": {"pid": display_pid}}
+                        display_payload = {**display_payload, "details": details}
+                    step = _render_message_step(0, display_payload)
+                else:
+                    step = replace(step, body=_clip(step.body))
+                row = (entry.id, step)
+            except Exception:
                 skipped += 1
                 continue
             if hit_id:
@@ -761,9 +792,6 @@ def _peer_peek_search(
                     after -= 1
                 else:
                     newer = True
-            # Search the full decoded view, not JSON syntax, unseen metadata or
-            # the clipped preview. Only the selected previews go to the caller.
-            found = pattern.search(text) is not None if pattern is not None else needle in text
             if found:
                 count += 1
                 if not hit_id:
