@@ -1,0 +1,7 @@
+{
+  "session.remote_peek.display_too_large": {
+    "role": "error",
+    "tone": "direct, factual and actionable",
+    "note": "A remote viewer could not receive the latest display-history window. Lead with the journal peek alternatives, preserving `head=20` and `digest` as literal commands. {bytes} and {messages} are the two display-page ceilings, not a measured history size. The legacy reply can also mean the runtime socket line was oversized; it cannot distinguish the causes, so do not assert either cause as fact. Opening the conversation on the owning device is the last resort for exact history, not the answer to every refusal. Keep lines short for a 110-cell transcript lane. Copyable CLI commands follow on separate, unlocalized lines."
+  }
+}

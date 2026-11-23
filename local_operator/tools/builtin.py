@@ -20784,6 +20784,7 @@ from local_operator.session.peek import (  # noqa: E402,F401 — see the comment
     _PeekDigest,
     _PeekWindow,
     _walk_steps,
+    digest_receipt,
 )
 
 
@@ -20892,18 +20893,17 @@ def _sessions_peek_mesh_journal(
     # S-60 stamp below keys on it, as the tail renderer keys on ``rows``.
     peeked: bool
     if mode == "digest":
-        raw_digest = payload.get("digest")
-        digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
+        digest, text = digest_receipt(payload.get("digest"))
         details.update(
             steps_seen=digest.get("steps_seen"),
             tool_calls=digest.get("tool_calls"),
             has_older=digest.get("has_older"),
+            fold_version=digest["fold_version"],
         )
-        text = str(digest.get("text") or "")
         # Fail closed: only an owner's explicit "zero steps" counts as empty.
         peeked = digest.get("steps_seen") != 0
     else:
-        window = window_from_wire(payload.get("window") or {})
+        window = window_from_wire(payload.get("window") or {}, mode=mode)
         details.update(
             steps_shown=len(window.steps),
             has_older=window.has_older,
@@ -20913,6 +20913,10 @@ def _sessions_peek_mesh_journal(
             details["scanned_bytes"] = window.scanned_bytes
         if window.match_id:
             details["match_id"] = window.match_id
+        if mode == "search":
+            details.update(
+                match_count=window.match_count, match_count_complete=window.match_count_complete
+            )
         # A miss is this harness's own sentence about an empty window; any
         # step the owner returned is transcript content.
         peeked = bool(window.steps)
