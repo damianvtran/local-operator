@@ -4363,11 +4363,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     # The Library packages (backend core) write only under <config>/cache/library:
     # the derived index's atomic replace and a thumbnail cache temp file. Neither
-    # builds a path from a session id or a caller-supplied directory.
+    # builds a path from a session id or a caller-supplied directory. Each
+    # atomic writer (index, thumbnail, waveform) also unlinks its own
+    # ``unique_temp`` on failure: that name is minted per write beside the
+    # cache target, so the unlink can only ever reach that writer's temp.
     (
         "local_operator/library/index.py::_write",
         "os.replace",
         "tmp FILE -> <config>/cache/library/index.json FILE; cache-derived, never sessions/",
+    ),
+    (
+        "local_operator/library/index.py::_write",
+        "<path>.unlink",
+        "removes only its OWN failed-write temp (atomic.unique_temp, beside "
+        "<config>/cache/library/index.json); never sessions/",
     ),
     (
         "local_operator/library/indexer.py::LibraryIndexer._drop_legacy_index",
@@ -4379,6 +4388,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/library/store.py::LibraryStore.ensure_thumbnail",
         "os.replace",
         "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/thumbs; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore.ensure_thumbnail",
+        "<path>.unlink",
+        "removes only its OWN failed-encode temp (atomic.unique_temp, beside the "
+        "WebP under <config>/cache/library/thumbs); never sessions/",
     ),
     (
         "local_operator/library/store.py::LibraryStore._swap_in_database",
@@ -4408,6 +4423,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/library/service.py::waveform",
         "os.replace",
         "tmp FILE -> a peaks cache FILE under <config>/cache/library/peaks/; never sessions/",
+    ),
+    (
+        "local_operator/library/service.py::waveform",
+        "<path>.unlink",
+        "removes only its OWN failed-write temp (atomic.unique_temp, beside the "
+        "peaks JSON under <config>/cache/library/peaks/); never sessions/",
     ),
     # The Library VIEW's flagged calls are heap/Textual operations, not
     # filesystem ones: the viewport cursor is an in-memory integer, the
