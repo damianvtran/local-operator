@@ -1354,6 +1354,45 @@ def ask_timeout_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSe
     return (_ask_receipt_line(ask_id, name, state), severity)
 
 
+def ask_withdrawn_parts(
+    details: Mapping[str, Any] | None,
+) -> tuple[str, str | None, str, NoticeSeverity]:
+    """The ``ask_withdrawn`` receipt as PARTS: ``(ask_id, name, state, ink)``.
+
+    The row says the ASKER retracted the question (``ask_withdraw``, reason
+    ``moot``), which is a different fact from every answer, decline, dismissal
+    or expiry the other receipts state: nobody was told anything, because the
+    party who would have been told is the one who asked. That is why it is the
+    only ask row that never reaches the model — see
+    ``ASK_WITHDRAWN_MESSAGE_TYPE``.
+
+    ``info`` ink, not ``dim``: the id and the name are the audit content (what
+    was withdrawn, and when the operator reads back), and the withdrawal is a
+    thing that happened rather than a row to skim past.
+
+    The name is PR A's :func:`ask_name`: a secret ask keeps its generic label,
+    a bridge ask is named by id only, and an ask with no questions still
+    renders the id alone.
+    """
+    from local_operator.harness import ask_receipts_copy as _copy
+
+    details = details or {}
+    ask_id = str(details.get("ask_id") or "")
+    name = ask_name(details, secret_label=_copy.secret_ask_name())
+    return (ask_id, name, _copy.withdrawn_text(), "info")
+
+
+def ask_withdrawn_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
+    """The human one-liner for an ``ask_withdrawn`` row: ``(text, kind)``.
+
+    A thin wrapper on :func:`ask_withdrawn_parts`, for the same reason the other
+    two receipts have one: the surfaces that paint the whole sentence and the
+    ones that lay the id out in its own column must read the SAME author.
+    """
+    ask_id, name, state, severity = ask_withdrawn_parts(details)
+    return (_ask_receipt_line(ask_id, name, state), severity)
+
+
 def gate_timeout_notice(details: dict[str, Any]) -> str:
     """Say what expired, what it wanted, and that nobody chose it.
 

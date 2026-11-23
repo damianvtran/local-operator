@@ -31,3 +31,7 @@ def response_late() -> Msg:
 
 def timeout_timed_out(*, waited: str) -> Msg:
     return Msg("wire.ask_receipts.timeout.timed_out", {"waited": waited})
+
+
+def withdrawn_by_agent() -> Msg:
+    return Msg("wire.ask_receipts.withdrawn.by_agent", {})

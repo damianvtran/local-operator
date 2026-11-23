@@ -7513,12 +7513,49 @@ class AskResponseBlock(WakeBlock):
         kind: str,
         fold_width: int = 0,
     ) -> None:
-        #: ``"response"`` or ``"timeout"``. A string rather than a bool because
-        #: both branches read it and a third (a late answer is a response) would
-        #: otherwise arrive as a second boolean.
+        #: ``"response"``, ``"timeout"`` or ``"withdrawn"``. A string rather
+        #: than a bool because all three branches read it: an answer and a late
+        #: answer are responses, a deadline is its own receipt, and an ask the
+        #: AGENT took back is a third fact (nobody answered and nothing is owed).
         self._kind = kind
         self._details: dict[str, Any] = dict(details or {})
         super().__init__(str(self._details.get("text") or ""), fold_width=fold_width)
+
+    def _notice_fn(self) -> Callable[[Mapping[str, Any] | None], Any]:
+        """The shared ``(text, ink)`` author for this row's KIND.
+
+        One lookup rather than a ternary per caller: the summary, the fit and
+        the ink all resolve the same receipt, and three copies of the kind->
+        function mapping is how one of them ends up on the wrong words.
+        """
+        from local_operator.harness.rows import (
+            ask_response_notice,
+            ask_timeout_notice,
+            ask_withdrawn_notice,
+        )
+
+        return {
+            "timeout": ask_timeout_notice,
+            "withdrawn": ask_withdrawn_notice,
+        }.get(self._kind, ask_response_notice)
+
+    def _parts_fn(self) -> Callable[[Mapping[str, Any] | None], Any]:
+        """The shared ``(ask_id, name, state, ink)`` author for this KIND.
+
+        The parts form is what lets :meth:`_fit_summary` shrink the NAME and keep
+        the state whole; it is resolved beside :meth:`_notice_fn` so the two can
+        never name different receipts for one row.
+        """
+        from local_operator.harness.rows import (
+            ask_response_parts,
+            ask_timeout_parts,
+            ask_withdrawn_parts,
+        )
+
+        return {
+            "timeout": ask_timeout_parts,
+            "withdrawn": ask_withdrawn_parts,
+        }.get(self._kind, ask_response_parts)
 
     def _summary(self) -> tuple[str, str]:  # type: ignore[override]
         """``(identity, body)`` — the shared one-liner, and the envelope.
@@ -7528,12 +7565,7 @@ class AskResponseBlock(WakeBlock):
         a timeout carries no answers, and an older runtime's row may carry no
         ``questions`` at all, so the card would otherwise expand to nothing.
         """
-        from local_operator.harness.rows import ask_response_notice, ask_timeout_notice
-
-        if self._kind == "timeout":
-            identity, _ = ask_timeout_notice(self._details)
-        else:
-            identity, _ = ask_response_notice(self._details)
+        identity, _ = self._notice_fn()(self._details)
         return identity, str(self._details.get("text") or "")
 
     def _fit_summary(self, identity: str, budget: int) -> str:
@@ -7552,16 +7584,10 @@ class AskResponseBlock(WakeBlock):
         parts carry the same words, and reading them is what lets the shrinking
         land on one field.
         """
-        from local_operator.harness.rows import (
-            ASK_NAME_MIN_CELLS,
-            ask_response_parts,
-            ask_timeout_parts,
-            fit_name_cells,
-        )
+        from local_operator.harness.rows import ASK_NAME_MIN_CELLS, fit_name_cells
         from local_operator.tui.widgets.tool_card import truncate_cells
 
-        parts = ask_timeout_parts if self._kind == "timeout" else ask_response_parts
-        ask_id, name, state, _ = parts(self._details)
+        ask_id, name, state, _ = self._parts_fn()(self._details)
         id_only = f"{ask_id} — {state}"
         if not name:
             return truncate_cells(id_only, budget)
@@ -7590,10 +7616,7 @@ class AskResponseBlock(WakeBlock):
         one here rather than passed through, because ``_build_row`` hands this
         name to ``theme_mod.semantic_color``, which raises on a non-token.
         """
-        from local_operator.harness.rows import ask_response_notice, ask_timeout_notice
-
-        notice = ask_timeout_notice if self._kind == "timeout" else ask_response_notice
-        _, severity = notice(self._details)
+        _, severity = self._notice_fn()(self._details)
         return "warning" if severity == "warning" else super()._summary_ink()
 
     def _build_content(self, width: int) -> Text:  # type: ignore[override]

@@ -71,3 +71,13 @@ def timed_out_text(*, waited: str) -> str:
 def secret_ask_name() -> str:
     """What a receipt calls a SECRET ask — a label, never its question or key."""
     return _t(_k.name_secret_question())
+
+
+def withdrawn_text() -> str:
+    """The state phrase for an ask the ASKER retracted (``ask_withdraw``).
+
+    "By the agent" is load-bearing: the same row family says who acted
+    elsewhere (a dismissal says "by you"), and a reader who cannot tell the two
+    apart cannot tell a question they ignored from one the agent took back.
+    """
+    return _t(_k.withdrawn_by_agent())

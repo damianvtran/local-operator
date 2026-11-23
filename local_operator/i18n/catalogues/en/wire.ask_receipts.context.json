@@ -34,5 +34,11 @@
     "tone": "calm warning; states the consequence without blaming the reader; no full stop",
     "maxCells": 80,
     "note": "EN-only context sidecar. `{waited}` is a preformatted short span from the harness (for example 45s, 42m, 3h, 2d) — treat it as an opaque token and keep it exactly, including any Latin digits. It must say the agent proceeds WITHOUT the answer; never imply the reader can still answer (no surface offers a late answer). No plurals: the span carries its own unit."
+  },
+  "wire.ask_receipts.withdrawn.by_agent": {
+    "role": "The state phrase of an ask receipt for an ask the AGENT itself retracted (the `ask_withdraw` tool), on the same three surfaces as response.answered: `<ask id> · \"<ask name>\" — Withdrawn by the agent`",
+    "tone": "plain factual receipt; nobody is at fault and nothing is owed; no full stop",
+    "maxCells": 40,
+    "note": "EN-only context sidecar. 'by the agent' is load-bearing and must stay: the sibling dismissal phrase says the OPERATOR put the ask away, so a reader who cannot tell the two apart cannot tell a question they ignored from one the agent took back. Reuse the locale's shipped wording for a withdrawn ask (`relay.asks.status.withdrawn`) and for the agent (`relay.asks`, `wire.ask_receipts.response.declined`) rather than inventing a second vocabulary. The model is never shown this row; it is the operator's record only. No ICU arguments."
   }
 }

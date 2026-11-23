@@ -118,6 +118,7 @@ from local_operator.harness.message_types import (
     ASK_RELAY_MESSAGE_TYPE,
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
+    ASK_WITHDRAWN_MESSAGE_TYPE,
     DIVERGENCE_NOTICE_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
     PEER_DELIVERABLE_CUSTOM_TYPES,
@@ -15374,11 +15375,103 @@ class Session:
         Under the kill switch this refuses in words exactly like
         :meth:`respond_ask`: with no queue there is nothing to withdraw, and the
         caller hears that rather than a traceback or a silent success.
+
+        TWO REASONS, ONE ROW (Ben, 2026-11-23).
+
+        * ``moot`` is the agent retracting its own question, so the operator gets
+          a display-only row for it — ``a-745e · "Settings layout" — Withdrawn by
+          the agent`` (see :meth:`_record_ask_withdrawn`). The model gets nothing:
+          it asked and it took the ask back.
+        * ``answered_in_chat`` is NOT a withdrawal at all. The queue records it
+          through the ``answered`` machinery, and the standard ``ask_response``
+          row follows through ``reconcile`` — which already paints "Answered,
+          delivering" and already carries the answer to the model. A second
+          "withdrawn" row beside it would state the opposite of what happened.
         """
         queue = self.ask_queue()
         if queue is None:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
-        return queue.withdraw(ask_id, reason=reason, answers=answers, message_id=message_id, by=by)
+        # The questions are read HERE, before the withdraw, because the fold is
+        # the only source that has them: ``AskQueue.withdraw`` deliberately does
+        # not return them, since its ``details`` reach the MODEL and the row this
+        # feeds is display-only (the two audiences must not share a payload).
+        questions: list[Mapping[str, Any]] = []
+        if reason == "moot":
+            try:
+                questions = [
+                    dict(question)
+                    for record in queue.records()
+                    if str(record.get("ask_id") or "") == ask_id
+                    for question in (record.get("questions") or ())
+                    if isinstance(question, Mapping)
+                ]
+            except Exception:  # noqa: BLE001 — a receipt is never worth a failed withdraw
+                logger.debug("ask: could not read the withdrawn ask's questions", exc_info=True)
+        outcome = queue.withdraw(
+            ask_id, reason=reason, answers=answers, message_id=message_id, by=by
+        )
+        if outcome.get("ok") and reason == "moot":
+            self._record_ask_withdrawn(ask_id, questions)
+        return outcome
+
+    def _record_ask_withdrawn(self, ask_id: str, questions: Sequence[Mapping[str, Any]]) -> None:
+        """Paint the agent's retraction of an ask into the transcript.
+
+        Called SYNCHRONOUSLY from the ``ask_withdraw`` tool's own path, so the
+        durable write is handed to the session's background group the way
+        :meth:`_record_divergence_notice` does, and for the same reason: the
+        caller has a settled ask to answer for and must not wait on a journal
+        write to do it.
+
+        A MESSAGE entry carrying a ``CustomMessage`` rather than
+        ``append_custom``: ``build_llm_history`` ignores custom ENTRIES by
+        design, so a row written the other way would reach no viewer that
+        replays the history. It stays out of the MODEL's context because
+        ``ASK_WITHDRAWN_MESSAGE_TYPE`` is absent from the renderer's injection
+        tuple and from ``MODEL_VISIBLE_INJECTED_TYPES`` — a separate type, so no
+        allow-list, no response-row reader and no reconcile delivery has to
+        remember to exclude a status.
+
+        The row id is ``ask-withdrawn-<ask_id>`` and the check is
+        ``transcript.has_entry`` INSIDE the task: the id is the marker, so a
+        restart replay (which re-reads the journal but never re-plans a
+        withdrawal) and a duplicate spawn both land as one row.
+        """
+        from local_operator.asks import store as _ask_store
+        from local_operator.harness.rows import ask_withdrawn_notice
+
+        row_id = _ask_store.withdrawn_row_id(ask_id)
+        if not row_id:
+            return
+        details: dict[str, Any] = {
+            "ask_id": ask_id,
+            "status": "withdrawn",
+            "questions": [dict(question) for question in questions],
+            "by": "agent",
+            "at": int(time.time() * 1000),
+        }
+        # The sentence is composed by the shared receipt author rather than here,
+        # so the terminal row, the phone notice and the desktop row state the
+        # same fact in the same words; it is stored on the row because the
+        # surfaces that receive it as text do not re-derive it.
+        details["text"] = ask_withdrawn_notice(details)[0]
+
+        async def _append() -> None:
+            try:
+                if self._transcript.has_entry(row_id):
+                    return
+                await self._transcript.append_message(
+                    CustomMessage(
+                        custom_type=ASK_WITHDRAWN_MESSAGE_TYPE,
+                        attribution="agent",
+                        id=row_id,
+                        details=details,
+                    )
+                )
+            except Exception:  # noqa: BLE001 — a receipt must never break a turn
+                logger.debug("could not record the withdrawn ask row", exc_info=True)
+
+        self._spawn_background(_append())
 
     def site_ask_lapses(self, origin: str) -> int:
         """How many site cards for ``origin`` lapsed unanswered since the operator last spoke.
