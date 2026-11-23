@@ -1,0 +1,30 @@
+{
+  "locale": "hi",
+  "namespace": "tui.tool_card.status",
+  "source_sha256": "521c2289a94bca69288753c2ac7fbd73544ff823669c6e5422d98c8e1f7bba93",
+  "target_sha256": "029fbe5b13cda0a5950868fc391761fdf09005dd298a6e208dcad4543a4d77c6",
+  "context_sha256": "33fdaa44400ced67d6326a594e024fc38eaeb2865562d2b2b4d8dfc5b2a81bd0",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": [
+    "tui.tool_card.status.waiting"
+  ],
+  "keys_read": 18,
+  "keys_reaudited": 1,
+  "findings": [],
+  "note": "Independent round-2 audit of waiting only, with 17 unchanged neighbour keys read for composition (not recertified). स्वीकृति बाकी is idiomatic terse Hindi for approval pending, precisely matches pending-approval consumer state, and preserves glossary स्वीकृति. All 18 argument signatures checked and all 18 raw target messages rendered with runtime.render_message. Changed key has no arguments, plural branches, or markup. waiting renders 7/7 Rich cells, equal to English width. tool_card.py:5712-5728 read: cap>=cell_len retains entire word, smaller caps shed whole; cap 0/6/7/8 arithmetic gives full/empty/full/full. No native terminal shaping or rendered-frame claim. Translator identity supplied by manager; auditor model is actual, no fallback. No repo writes."
+}

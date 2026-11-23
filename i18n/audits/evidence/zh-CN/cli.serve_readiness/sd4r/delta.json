@@ -1,0 +1,22 @@
+{
+  "key": "cli.serve_readiness.not_this_daemon",
+  "before": "已有记录，但现在由其他进程占用该PID",
+  "after": "已有记录，但检测到PID复用",
+  "previous_target_sha256": "a69ce482de1902c56d7f1f9a7afb9ef372af63b243474f69d84765c563988fd0",
+  "retained_keys": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.stale",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ]
+}

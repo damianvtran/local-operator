@@ -1,0 +1,27 @@
+$ python audit_checks.py (cwd worktree @ 926c178fbadb)
+en d2eca6d6879fb63e6433032158af8ba12186fdc2be7d371a40a17ecfdbcc1c93 context debe15d1868bfb9cc48d319b1faaf09ea5edd0d908269bb4bbe1442fd739c8cf keys 5
+[parity] fr sha=92c978ab0477825ee8295c1e030edcbbb3c1b2996801ae5a1df4bb0a7c653bd7 keys=5 added=[] dropped=[] placeholder/backtick mismatches=[]
+[parity] es sha=353961c17c25f81f4ab744910c8edf86502febb4612e565cab7142caa8e94450 keys=5 added=[] dropped=[] placeholder/backtick mismatches=[]
+[source] en/context changed d40edc68..HEAD: []
+[delta] fr changed keys d40edc68..HEAD: ['cli.daemon_build.install_restart_failed']
+[delta] es changed keys d40edc68..HEAD: ['cli.daemon_build.install_restarted']
+[term] fr cli.daemon_build occurrences={'build': 5}
+[term] es cli.daemon_build occurrences={'compilaci': 5}
+[typo] fr cli.daemon_build.install_restarted: apostrophes ascii=0 U+2019=1
+[typo] fr cli.daemon_build.install_restarted_unconfirmed: apostrophes ascii=0 U+2019=2
+[typo] fr cli.daemon_build.install_restart_failed: char before ';' = U+202F
+[typo] fr cli.daemon_build.install_restart_failed: apostrophes ascii=0 U+2019=3
+[typo] fr cli.daemon_build.install_unconfirmed: char before ';' = U+202F
+[typo] fr cli.daemon_build.install_unconfirmed: apostrophes ascii=0 U+2019=3
+[typo] fr cli.daemon_build.status_stale: char before ';' = U+202F
+[typo] fr cli.daemon_build.status_stale: apostrophes ascii=0 U+2019=1
+[attach] fr keys containing 'en cours d’exécution sur': []
+[attach] es keys containing 'en ejecución con': ['cli.daemon_build.status_stale']
+[dup] fr install_restart_failed 'nouveau build' count = 1
+[git] head 926c178fbadb9d21a762be5ed8f710a5aa58ade1
+
+$ run_bounded.py --contract=command-status -- check.py --audit-base origin/main (pre-append, origin/main f08e091eff01)
+[run_bounded] memory budget 4650 MiB (inherited); sampled owned child group and escaped descendants
+check.py: ok — 232 file(s) scanned, 2692 literal(s) at or below the baseline, catalogues consistent; 103 advisory finding(s) (report-only until activated)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=d5aa1d1b5b2b4064a021bf5e7e583a2e completion=~/.local-operator/sessions/0d00e986c25e/scratchpad/run-bounded-runs/d5aa1d1b5b2b4064a021bf5e7e583a2e.completion.json
+rc=0

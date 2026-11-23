@@ -4351,7 +4351,7 @@ def test_a_recycled_pid_is_never_judged_as_the_recorded_daemon(
         assert daemon["cgroup"] is None, "a stranger's cgroup is not ours to report"
         row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
         assert row["ok"] is False and row["code"] == readiness.CODE_UNKNOWN, row
-        assert "another process now holds that pid" in row["detail"]
+        assert "PID reuse was detected" in row["detail"]
         assert "lop-serve.service" not in row["detail"]
     finally:
         stranger.kill()
@@ -4401,7 +4401,7 @@ def test_a_wedged_record_is_unknown_never_a_verdict(
         _member(), _facts(serve_daemons=readiness.serve_daemons_fact(root)), peer_label="n"
     )
     assert row["code"] == readiness.CODE_UNKNOWN
-    assert "not answering" in row["detail"]
+    assert "not responding" in row["detail"]
 
 
 def test_a_daemon_from_a_peer_without_identity_proofs_is_unproven() -> None:
@@ -4998,3 +4998,133 @@ def test_tier_pins_fact_is_collected_with_the_peer_facts(tmp_path: Path) -> None
     assert facts["subagent_tier_pins"] == {
         "unresolved": [{"tier": "hi", "roles": ["designer"], "missing": True}]
     }
+
+
+# #3075 deferred copy/evidence: unknown identity is not proof that the recorded
+# build is running, even when it differs from the install. Offer the registry's
+# guarded restart command without relabelling the live PID stale.
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_unproven_daemon_names_the_identity_limit_and_guarded_restart(platform: str) -> None:
+    fact = _serve_fact(version="0.90.1", platform=platform)
+    fact["daemons"][0].update(identity="unproven", cgroup=None)
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert row["code"] == readiness.CODE_UNKNOWN and row["ok"] is False
+    assert "no start-time stamp could be compared" in row["detail"]
+    assert "predates" not in row["detail"]
+    assert "the record says build 0.90.1; 0.90.18 is installed" in row["detail"]
+    assert any("lop services restart" in remedy for remedy in row["remedies"])
+    assert row["observed"]["daemons"][0]["identity"] == "unproven"
+    assert "serving" not in row["observed"]["daemons"][0]
+
+
+def test_unproven_current_record_does_not_invent_a_build_gap() -> None:
+    fact = _serve_fact()
+    fact["daemons"][0].update(identity="unproven", cgroup=None)
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert row["code"] == readiness.CODE_UNKNOWN and row["ok"] is False
+    assert "the record says build" not in row["detail"]
+    assert "identity cannot be proven" in row["detail"]
+    assert not any("lop services restart" in remedy for remedy in row["remedies"])
+    assert any("no action is needed" in remedy for remedy in row["remedies"])
+
+
+def test_a_strangers_pid_does_not_gain_a_build_claim_or_restart_remedy() -> None:
+    fact = _serve_fact(version="0.90.1")
+    fact["daemons"][0].update(identity="not_this_daemon", cgroup=None)
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert row["code"] == readiness.CODE_UNKNOWN and row["ok"] is False
+    assert "the record says build" not in row["detail"]
+    assert "serving" not in row["observed"]["daemons"][0]
+    assert not any("lop services restart" in remedy for remedy in row["remedies"])
+
+
+def test_unknown_daemons_bind_each_reason_to_its_pid_and_agree_in_number() -> None:
+    fact = _serve_fact()
+    fact["daemons"] = [
+        {**fact["daemons"][0], "pid": 10001, "identity": "not_this_daemon"},
+        {**fact["daemons"][0], "pid": 10002, "identity": "unproven"},
+    ]
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert "daemons on node-2" in row["detail"]
+    assert "PID 10001 — recorded, but PID reuse was detected" in row["detail"]
+    assert "PID 10002 — recorded, but process identity cannot be proven" in row["detail"]
+    assert "whether they are current" in row["detail"]
+
+
+def test_multiple_stale_daemons_name_the_sessions_they_host() -> None:
+    fact = _serve_fact(version="0.90.1")
+    fact["daemons"].append({**fact["daemons"][0], "pid": 10002})
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert "daemons on node-2" in row["detail"] and "sessions they host" in row["detail"]
+    assert "sessions it hosts" not in row["detail"]
+
+
+def test_legacy_state_is_diagnostic_not_identity_evidence() -> None:
+    fact = _serve_fact()
+    fact["daemons"][0].update(identity="unproven", state="active")
+    active = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    fact["daemons"][0]["state"] = "stale"
+    stale = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert active == stale
+    assert active["code"] == readiness.CODE_UNKNOWN
+
+
+def test_identical_unknown_reasons_are_grouped_with_bounded_keyed_pid_labels() -> None:
+    fact = _serve_fact()
+    fact["daemons"] = [
+        {**fact["daemons"][0], "pid": 10000 + i, "identity": "unproven"}
+        for i in range(readiness.SERVE_DAEMONS_RENDERED + 2)
+    ]
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert row["detail"].count("no start-time stamp could be compared") == 1
+    assert "PIDs 10000, 10001" in row["detail"]
+    assert "10007" in row["detail"] and "10008" not in row["detail"]
+    assert "and 2 more" in row["detail"]
+    assert "whether they are current" in row["detail"]
+
+
+def test_a_recorded_gap_does_not_repeat_identity_uncertainty_or_commands() -> None:
+    fact = _serve_fact(version="0.90.1")
+    fact["daemons"][0]["identity"] = "unproven"
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert "the record says build 0.90.1; 0.90.18 is installed" in row["detail"]
+    assert "(identity unproven)" not in row["detail"]
+    assert "node-2: PID" not in row["detail"]
+    assert sum(remedy.count("lop services restart") for remedy in row["remedies"]) == 1
+
+
+def test_stale_and_unproven_gap_share_one_restart_step() -> None:
+    # Independent of copy assertions: leaving the old remedy selection in place
+    # must still fail even after the translated sentences have been corrected.
+    fact = _serve_fact(version="0.90.1")
+    fact["daemons"][0]["identity"] = "unproven"
+    fact["daemons"].append({**fact["daemons"][0], "pid": 10002, "identity": "proven"})
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert sum(remedy.count("lop services restart") for remedy in row["remedies"]) == 1
+
+
+def test_grouped_reused_pids_have_a_number_neutral_diagnosis() -> None:
+    fact = _serve_fact()
+    fact["daemons"] = [
+        {**fact["daemons"][0], "pid": pid, "identity": "not_this_daemon"} for pid in (10001, 10002)
+    ]
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert "PIDs 10001, 10002 — recorded, but PID reuse was detected" in row["detail"]
+    assert row["detail"].count("PID reuse was detected") == 1
+    assert "that PID" not in row["detail"]
+    assert not any("lop services restart" in remedy for remedy in row["remedies"])
+
+
+def test_an_unreloadable_unproven_gap_never_promises_the_reload_command() -> None:
+    fact = _serve_fact(version="0.90.1", reloadable=False)
+    fact["daemons"][0]["identity"] = "unproven"
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert not any("lop services restart" in remedy for remedy in row["remedies"])
+    assert any("by hand" in remedy for remedy in row["remedies"])
+
+
+def test_other_unit_daemons_agree_in_number() -> None:
+    fact = _serve_fact(cgroup="/system.slice/sshd.service")
+    fact["daemons"].append({**fact["daemons"][0], "pid": 10002})
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert "daemons on node-2 are held by other services" in row["detail"]

@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -465,12 +466,15 @@ def test_the_shipped_default_is_on() -> None:
     assert DEFAULT_HOLD_RELEASE is True
     assert TeamBridgeSettings.from_values({}).hold_release is True
     assert TeamBridgeSettings.from_values({"team_bridge": {}}).hold_release is True
-    # Only a real ``false`` is the off switch (same rule as ``review_held``).
-    for garbled in (None, "false", 0, "off"):
+    # The off switch is whatever ``settings_io.strict_bool`` parses as false
+    # (S-1, PR #4317: the ``/settings`` row reads it the same way). Only an
+    # unparseable value falls back to the shipped default, ON.
+    for garbled in (None, "", "maybe", [], {}, 2):
         values = {"team_bridge": {"hold_release": garbled}}
         assert TeamBridgeSettings.from_values(values).hold_release is True, garbled
-    explicit_off = {"team_bridge": {"hold_release": False}}
-    assert TeamBridgeSettings.from_values(explicit_off).hold_release is False
+    for off in (False, "false", "off", "no", "0", 0, " OFF "):
+        values = {"team_bridge": {"hold_release": off}}
+        assert TeamBridgeSettings.from_values(values).hold_release is False, off
 
 
 def test_enabled_reads_on_with_no_key_and_with_no_config_file(tmp_path) -> None:
@@ -499,20 +503,31 @@ def test_enabled_reads_on_when_the_config_is_torn(tmp_path, monkeypatch) -> None
     assert hr.enabled(tmp_path) is True
 
 
-def test_a_non_boolean_value_reads_on_and_is_logged_once(tmp_path, monkeypatch, caplog) -> None:
-    """S-3: a quoted ``"false"`` is not the off switch; the operator is told once."""
+def test_an_unparseable_value_reads_on_and_is_logged_once(tmp_path, monkeypatch, caplog) -> None:
+    """S-3: a value nobody can parse reads ON; the operator is told once.
+
+    A quoted ``"false"`` is NOT in this class since S-1 (PR #4317): it parses
+    as off on both the row and the receiver, so it is neither ON nor logged.
+    """
 
     import logging
 
     monkeypatch.setattr(hr, "_non_boolean_logged", False)
-    values = {"team_bridge": {"enabled": True, "hold_release": "false"}}
+    values = {"team_bridge": {"enabled": True, "hold_release": "maybe"}}
     (tmp_path / "config.yml").write_text(json.dumps({"values": values}), encoding="utf-8")
     with caplog.at_level(logging.INFO, logger=hr.logger.name):
         assert hr.enabled(tmp_path) is True
         assert hr.enabled(tmp_path) is True
     lines = [r.getMessage() for r in caplog.records if "hold_release" in r.getMessage()]
-    assert len(lines) == 1 and "unquoted false" in lines[0]
-    assert '"false"' not in lines[0]  # the value itself is not echoed
+    assert len(lines) == 1 and "write false" in lines[0]
+    assert "maybe" not in lines[0]  # the value itself is not echoed
+    monkeypatch.setattr(hr, "_non_boolean_logged", False)
+    values = {"team_bridge": {"enabled": True, "hold_release": "false"}}
+    (tmp_path / "config.yml").write_text(json.dumps({"values": values}), encoding="utf-8")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=hr.logger.name):
+        assert hr.enabled(tmp_path) is False
+    assert not [r for r in caplog.records if "hold_release" in r.getMessage()]
     monkeypatch.setattr(hr, "_non_boolean_logged", False)
     _setting(tmp_path, False)
     caplog.clear()
@@ -1438,3 +1453,395 @@ def test_consumed_owner_release_survives_retry_before_ack_or_reservation(rig, mo
         assert hr.payload_for_row(replayed) == signed_payload
         assert replayed["signature"] == signed["signature"]
         assert hr.verify_row(replayed, hr.anchor_spki(config_dir)[0])
+
+
+# --- an expired hold whose body can no longer be loaded (operator report 2026-11-20) ---
+#
+# The operator's Approvals badge sat at 1 on a held message from 2026-11-10
+# whose Deliver window had passed and whose body the owner-audit read could no
+# longer serve ("Unknown sender", "could not load"): the list said
+# ``can_discard`` but Discard needed the hash of a body that was not on screen,
+# so the row could never settle. These run the real router over the real
+# SQLite store; the expiry is a real ``created_at`` written into that store.
+
+HOLDS = "/v1/desktop/team-bridge/holds"
+EIGHT_DAYS_S = 8 * 24 * 3600.0
+
+
+def _age_decision(config_dir: Path, seconds: float, *, message_id: str = MESSAGE_ID) -> None:
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute(
+            "UPDATE work_scope_decisions SET created_at = created_at - ? WHERE message_id = ?",
+            (seconds, message_id),
+        )
+
+
+def _listed(call) -> list[dict[str, Any]]:
+    out = call("GET", HOLDS, params={"expected_account_id": "acc_recv"})
+    assert out.status_code == 200
+    return out.json()["result"]["items"]
+
+
+def _receipt_body(receipt: str, **overrides: Any) -> dict[str, Any]:
+    body = {
+        "expected_account_id": "acc_recv",
+        "conversation_id": CONVERSATION_ID,
+        "hold_receipt": receipt,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_an_expired_unloadable_hold_discards_by_receipt_and_settles(api) -> None:
+    config_dir, _store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    (item,) = _listed(call)
+    # The stuck shape: past the window, Discard-only, counted, and now a receipt.
+    assert item["can_deliver"] is False and item["can_discard"] is True
+    assert item["actionable"] is True
+    receipt = item["discard_receipt"]
+    assert isinstance(receipt, str) and len(receipt) == 64
+    assert "body" not in json.dumps(item).replace("body_sha256", "")
+
+    discard = f"{HOLDS}/{MESSAGE_ID}/discard"
+    deliver = f"{HOLDS}/{MESSAGE_ID}/deliver"
+    # A receipt never carries a Deliver; and the body route still says expired.
+    assert call("POST", deliver, json=_receipt_body(receipt)).status_code == 422
+    expired = call("POST", deliver, json=_body())
+    assert expired.json()["detail"]["code"] == "deliver_expired"
+    # Exactly one binding; unauthenticated and wrong-account calls refused.
+    assert call("POST", discard, json={**_body(), "hold_receipt": receipt}).status_code == 422
+    neither = {"expected_account_id": "acc_recv", "conversation_id": CONVERSATION_ID}
+    assert call("POST", discard, json=neither).status_code == 422
+    assert call("POST", discard, json=_receipt_body(receipt), auth=False).status_code == 401
+    wrong = call("POST", discard, json=_receipt_body(receipt, expected_account_id="acc_other"))
+    assert wrong.json()["detail"]["code"] == "account_mismatch"
+    # A mismatched receipt or conversation never settles anything.
+    bad = call("POST", discard, json=_receipt_body("0" * 64))
+    assert bad.status_code == 409 and bad.json()["detail"]["code"] == "snapshot_stale"
+    other_conv = call("POST", discard, json=_receipt_body(receipt, conversation_id="bcv_zyxwvuts"))
+    assert other_conv.json()["detail"]["code"] == "snapshot_stale"
+    # Another message's path with this receipt: no such hold, nothing written.
+    elsewhere = call("POST", f"{HOLDS}/bcmsg_ffffffff/discard", json=_receipt_body(receipt))
+    assert elsewhere.json()["detail"]["code"] == "hold_not_releasable"
+    assert _count(config_dir, "owner_releases") == 0
+
+    ok = call("POST", discard, json=_receipt_body(receipt))
+    assert ok.status_code == 200, ok.text
+    assert _count(config_dir, "owner_releases") == 1
+    release = Store(config_dir).owner_release(owner, MESSAGE_ID)
+    assert release is not None and release["word"] == "discard"
+    # Signed exactly as a body-bound Discard: the decision's own body hash, and
+    # a signature the connector's verifier accepts.
+    assert release["body_sha256"] == hashlib.sha256(BODY.encode("utf-8")).hexdigest()
+    assert hr.verify_row(release, hr.anchor_spki(config_dir)[0])
+    # Idempotent: the same receipt again answers the same row, writes nothing.
+    assert call("POST", discard, json=_receipt_body(receipt)).json() == ok.json()
+    assert _count(config_dir, "owner_releases") == 1
+    # Already settled: the other word is refused.
+    again = call("POST", deliver, json=_body())
+    assert again.json()["detail"]["code"] == "already_decided"
+    # Settled leaves the actionable set at once, and stays out on a re-read.
+    for _ in range(2):
+        (after,) = _listed(call)
+        assert after["actionable"] is False and after["discard_receipt"] is None
+        assert after["decision"]["word"] == "discard"
+
+
+def test_a_receipt_from_before_a_re_decision_is_stale(api) -> None:
+    config_dir, _store, _owner_, call = api
+    _screen(config_dir, _owner_, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    (item,) = _listed(call)
+    old = item["discard_receipt"]
+    # The decision row is rewritten (a re-screen): the old receipt names a
+    # record that no longer exists, so it must not settle the new one.
+    _age_decision(config_dir, 60.0)
+    stale = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(old))
+    assert stale.status_code == 409 and stale.json()["detail"]["code"] == "snapshot_stale"
+    assert _count(config_dir, "owner_releases") == 0
+    (fresh,) = _listed(call)
+    assert fresh["discard_receipt"] != old
+
+
+def test_a_receipt_with_no_local_hold_row_is_refused(api) -> None:
+    config_dir, _store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    (item,) = _listed(call)
+    receipt = item["discard_receipt"]
+    # The hold row is gone (the hub hold settled elsewhere); the decision stays.
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("DELETE FROM screening_holds")
+    assert _listed(call) == []
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(receipt))
+    assert out.status_code == 409 and out.json()["detail"]["code"] == "hold_not_releasable"
+    assert _count(config_dir, "owner_releases") == 0
+
+
+def test_a_non_releasable_hold_is_listed_but_never_actionable(api) -> None:
+    config_dir, store, owner, call = api
+    store.persist_hold(owner, MESSAGE_ID, "runner_unavailable")
+    (item,) = _listed(call)
+    assert item["actionable"] is False and item["discard_receipt"] is None
+
+
+def test_holds_written_in_the_same_instant_list_in_a_stable_order(api) -> None:
+    config_dir, store, owner, call = api
+    ids = ["bcmsg_cccccccc", "bcmsg_aaaaaaaa", "bcmsg_bbbbbbbb"]
+    for message_id in ids:
+        store.persist_hold(owner, message_id, "runner_unavailable")
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("UPDATE screening_holds SET created_at = 1795000000.0")
+    for _ in range(3):
+        assert [item["message_id"] for item in _listed(call)] == sorted(ids)
+
+
+# --- the local terminal: an expired, unconfirmable Discard (follow-on to PR #4358) ---
+#
+# A receipt-bound Discard is the renderer saying the body could not be loaded,
+# i.e. the hub did not confirm the record. The connector consumes a Discard
+# only from an envelope the hub serves, so past the Deliver window that row sat
+# ``pending`` forever (reproduced on 511b08c6: outcome ``pending``, no
+# outcome_at). These pin the narrow settlement and every path it must NOT take.
+
+LOCAL_TERMINAL = "discarded_local_unconfirmed"
+
+
+def _local_terminals(config_dir: Path) -> list[dict[str, Any]]:
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(r) for r in conn.execute("SELECT * FROM owner_release_local_terminals")]
+        except sqlite3.OperationalError:
+            return []
+
+
+def test_an_expired_unconfirmable_discard_settles_locally_with_an_audit_row(
+    api, monkeypatch
+) -> None:
+    config_dir, store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None
+    (item,) = _listed(call)
+    due_calls: list[Any] = []
+    monkeypatch.setattr(Store, "make_holds_due", lambda *a, **k: due_calls.append(a) or 0)
+
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"]))
+    assert out.status_code == 200, out.text
+    result = out.json()["result"]
+    assert result["state"] == "discarded" and result["outcome"] == LOCAL_TERMINAL
+
+    release = store.owner_release(owner, MESSAGE_ID)
+    assert release is not None and release["word"] == "discard"
+    assert release["outcome"] == LOCAL_TERMINAL and release["outcome_at"] is not None
+    # Still the ordinary signed Discard: the connector's verifier accepts it.
+    assert hr.verify_row(release, hr.anchor_spki(config_dir)[0])
+    (audit,) = _local_terminals(config_dir)
+    assert audit["message_id"] == MESSAGE_ID and audit["outcome"] == LOCAL_TERMINAL
+    assert audit["reason"] == "hub_unconfirmed_after_deliver_window"
+    assert audit["conversation_id"] == CONVERSATION_ID and audit["creator_generation"] == 1
+    assert audit["key_id"] == release["key_id"] and audit["account_id"] == "acc_recv"
+    # Eligibility is the EXISTING window from the decision time, nothing new.
+    assert audit["deliver_until"] == float(decision["created_at"]) + hr.DELIVER_WINDOW_S
+    assert audit["at"] == release["outcome_at"] > audit["deliver_until"]
+    # Nothing is queued for the connector: no hold is made due.
+    assert due_calls == []
+    # The list shows it settled, never pending, and never counts it again.
+    (after,) = _listed(call)
+    assert after["actionable"] is False and after["discard_receipt"] is None
+    assert after["decision"]["outcome"] == LOCAL_TERMINAL
+    # Idempotent: the same Discard answers the same row; one audit row.
+    again = call(
+        "POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"])
+    )
+    assert again.json() == out.json()
+    assert _count(config_dir, "owner_releases") == 1 and len(_local_terminals(config_dir)) == 1
+
+
+def test_the_local_terminal_survives_connector_refusals_and_yields_only_to_a_hub_reject(
+    api,
+) -> None:
+    config_dir, store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    (item,) = _listed(call)
+    call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"]))
+    for word in ("refused:decision_changed", "pending", "admitted"):
+        store.set_owner_release_outcome(owner, MESSAGE_ID, word, now=time.time())
+        assert store.owner_release(owner, MESSAGE_ID)["outcome"] == LOCAL_TERMINAL
+    # If the hub ever serves the message again, the connector honours the same
+    # signed Discard and the hub's reject replaces "unconfirmed".
+    store.set_owner_release_outcome(owner, MESSAGE_ID, "rejected", now=time.time())
+    assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "rejected"
+
+
+def test_a_receipt_discard_inside_the_window_stays_on_the_connector_path(api) -> None:
+    config_dir, store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, 60.0)
+    (item,) = _listed(call)
+    assert item["can_deliver"] is True
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"]))
+    assert out.status_code == 200 and out.json()["result"]["outcome"] == "pending"
+    assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "pending"
+    assert _local_terminals(config_dir) == []
+
+
+def test_a_body_bound_discard_of_an_expired_hold_stays_on_the_connector_path(api) -> None:
+    config_dir, store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    # A body on screen means the hub confirmed the record: the ordinary path.
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_body())
+    assert out.status_code == 200 and out.json()["result"]["outcome"] == "pending"
+    assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "pending"
+    assert _local_terminals(config_dir) == []
+
+
+def test_a_receipt_from_another_generation_settles_nothing(api) -> None:
+    # PR #4358 R1-M2: the receipt's owner/generation binding, pinned in-repo.
+    config_dir, _store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    (item,) = _listed(call)
+    receipt = item["discard_receipt"]
+    wrong = call(
+        "POST",
+        f"{HOLDS}/{MESSAGE_ID}/discard",
+        json=_receipt_body(receipt, expected_account_id="acc_other"),
+    )
+    assert wrong.status_code == 409 and wrong.json()["detail"]["code"] == "account_mismatch"
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("UPDATE enrollments SET enrollment_generation = enrollment_generation + 1")
+    regen = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(receipt))
+    assert regen.status_code == 409
+    assert regen.json()["detail"]["code"] in ("hold_not_releasable", "snapshot_stale")
+    assert _count(config_dir, "owner_releases") == 0 and _local_terminals(config_dir) == []
+
+
+def test_a_decision_naming_another_conversation_is_never_actionable(api) -> None:
+    # PR #4358 R1-M1: ``decide`` refuses unless the decision's conversation is
+    # the posted one, so the list must not count or offer a receipt for it.
+    config_dir, store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    (before,) = _listed(call)
+    assert before["actionable"] is True
+    # The connector's composite feed ref names the hold row's conversation, so
+    # the list's conversation is the ROW's, not the decision's.
+    store.persist_hold(
+        owner,
+        f"message_available:conversation_id={CONVERSATION_ID}/{MESSAGE_ID}/1/1/human",
+        before["hold_code"],
+    )
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("UPDATE work_scope_decisions SET conversation_id = 'bcv_zyxwvuts'")
+    (item,) = _listed(call)
+    assert item["conversation_id"] == CONVERSATION_ID
+    assert item["actionable"] is False and item["discard_receipt"] is None
+    # And it is genuinely unsettleable, which is why it must not be counted.
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_body())
+    assert out.json()["detail"]["code"] == "snapshot_stale"
+
+
+# --- #4371 follow-ups: a locally settled hold is not "held" anywhere --------
+
+
+def _settle_locally(config_dir: Path, owner: OwnerSnapshot, call) -> dict[str, Any]:
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    (item,) = _listed(call)
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"]))
+    assert out.status_code == 200 and out.json()["result"]["outcome"] == LOCAL_TERMINAL
+    return item
+
+
+def test_a_locally_settled_hold_leaves_the_long_hold_count(api, monkeypatch) -> None:
+    # #4371 QA Q1: the long-hold alert rollup counted it 1 -> 1 across the
+    # local terminal. A refused notice keeps a work-scope hold in the count
+    # (``notified_at`` NULL), which is exactly the case that kept nagging.
+    from local_operator.notifications import store as nstore
+
+    def refuse(self, *a, **k):
+        raise nstore.NotifyRefused("rate_limited", "refused")
+
+    monkeypatch.setattr(nstore.NotificationStore, "notify", refuse)
+    config_dir, store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=10**12)["count"] == 1
+    (item,) = _listed(call)
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"]))
+    assert out.json()["result"]["outcome"] == LOCAL_TERMINAL
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=10**12)["count"] == 0
+
+
+def test_a_pending_discard_still_counts_as_a_long_hold(api, monkeypatch) -> None:
+    # Negative control for Q1: only the LOCAL terminal leaves the rollup; a
+    # signed-but-unconfirmed (``pending``) Discard has not settled anything.
+    from local_operator.notifications import store as nstore
+
+    def refuse(self, *a, **k):
+        raise nstore.NotifyRefused("rate_limited", "refused")
+
+    monkeypatch.setattr(nstore.NotificationStore, "notify", refuse)
+    config_dir, store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    out = call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_body())
+    assert out.json()["result"]["outcome"] == "pending"
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=10**12)["count"] == 1
+
+
+def test_the_holds_cli_neither_lists_nor_counts_a_locally_settled_hold(api) -> None:
+    # #4371 review m2: ``lop team-bridge holds`` said "1 held message(s)",
+    # ``discard=yes`` and "Deliver or discard them…" for a settled row.
+    from local_operator.team_bridge import holds_cli
+
+    config_dir, _store, owner, call = api
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _age_decision(config_dir, EIGHT_DAYS_S)
+    before = holds_cli.collect(config_dir, audit=False)
+    assert before["count"] == 1 and before["items"][0]["can_discard"] is True
+    assert "Deliver or discard them" in holds_cli.render(before)
+    (item,) = _listed(call)
+    call("POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"]))
+    # The desktop list still shows the row, with its settled outcome.
+    assert _listed(call)[0]["decision"]["outcome"] == LOCAL_TERMINAL
+    answer = holds_cli.collect(config_dir, audit=False)
+    assert answer["count"] == 0 and answer["items"] == []
+    text = holds_cli.render(answer)
+    assert text == "Nothing is held on this machine."
+    assert "Deliver or discard" not in text and MESSAGE_ID not in text
+
+
+def test_re_recording_a_local_terminal_is_a_typed_refusal_not_an_integrity_error(api) -> None:
+    # #4371 security review S-2: ``drop_review_decision`` removes the release
+    # row but never its audit row, so a second local terminal for the same
+    # message hit the audit table's primary key and raised a raw
+    # ``sqlite3.IntegrityError`` (a 500 at the route). It must be a
+    # ``StoreRefused``, roll the release row back, and keep the audit row.
+    from local_operator.team_bridge.store import StoreRefused
+
+    config_dir, store, owner, call = api
+    _settle_locally(config_dir, owner, call)
+    release = store.owner_release(owner, MESSAGE_ID)
+    (audit,) = _local_terminals(config_dir)
+    store.drop_review_decision(owner, MESSAGE_ID)
+    assert store.owner_release(owner, MESSAGE_ID) is None
+    with pytest.raises(StoreRefused) as refused:
+        store.record_owner_release_local_terminal(
+            owner,
+            release,
+            outcome=LOCAL_TERMINAL,
+            reason="hub_unconfirmed_after_deliver_window",
+            deliver_until=audit["deliver_until"],
+            now=time.time(),
+        )
+    assert refused.value.code == "state_unavailable"
+    # Atomic: no release row without its own receipt; the audit row survives.
+    assert store.owner_release(owner, MESSAGE_ID) is None
+    assert _local_terminals(config_dir) == [audit]

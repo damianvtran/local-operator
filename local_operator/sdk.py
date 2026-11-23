@@ -71,6 +71,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -91,6 +93,7 @@ from local_operator.session.spec import (
 
 if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
     from contextlib import AbstractAsyncContextManager
+    from typing import TextIO
 
     from local_operator.harness.types import AgentEvent, EventHandler
     from local_operator.harness.verifier_evidence import (
@@ -138,8 +141,10 @@ __all__ = [
     "decode_output",
     "deliver",
     "events",
+    "format_event_trace",
     "open_session",
     "spawn_session",
+    "trace_events",
     "SessionProtocol",
 ]
 
@@ -529,12 +534,31 @@ async def _auto_approve_gate(
     taint_raised: bool = False,
     bridge_latched: bool = False,
 ) -> bool:
-    """The ``auto()`` posture: every gated call is approved.
+    """The ``auto()`` posture: every gated call is approved — except a person-only gate.
 
     Accepts the Team Bridge flags so a latched session keeps the auto posture
     the embedder chose: closed for ask mode; accepted risk in auto/yolo
     (docs/security/team-bridge-egress.md, "Status").
+
+    PERSON-ONLY GATES (``harness.approval.never_auto_approved``: an account
+    profile save, a community post). ``auto()`` is the embedder's consent to
+    tool calls, not to public speech under the owner's name or a rewrite of
+    account-wide agents, and there is no person on this gate to ask — so it
+    raises the typed refusal ``refuse()`` uses rather than answering. ``--yolo``
+    fails closed the same way (``session_factory._make_request_approval``);
+    review R1-2 found this the one auto mode that did not.
     """
+    from local_operator.harness.approval import ApprovalUnavailableError
+    from local_operator.harness.bridge_egress import ApprovalGrant, session_grant_covers
+
+    # The shared predicate every auto path asks (the TUI's approve-all and
+    # desktop full-auto included), so the person-only list lives in one place.
+    if not session_grant_covers(ApprovalGrant(auto=True), title=tool_name):
+        raise ApprovalUnavailableError(
+            tool_name,
+            "ApprovalPolicy.auto() does not answer this gate: it needs a person "
+            "(use ApprovalPolicy.callback() to present it)",
+        )
     return True
 
 
@@ -779,6 +803,10 @@ async def _build_session(
         except OutputContractError as error:
             raise SessionSpecError(str(error)) from error
         session.set_output_contract(contract)
+    # Shape only: the wait itself is the session's first-turn MCP gate
+    # (``session/declared_mcp_ready.py``); this tells it an SDK owner wants
+    # every configured server, not just declared ones, or (None) no wait.
+    session.set_first_turn_mcp_wait(spec.mcp_ready_timeout_s)
     _install_approval_policy(session, spec.approvals)
     return session
 
@@ -921,6 +949,7 @@ def open_session(
     roots: SessionRoots,
     mode: Literal["own"] = "own",
     allow_multi_root: bool = False,
+    verbose: bool = False,
 ) -> AbstractAsyncContextManager[OwningSessionProtocol]: ...
 
 
@@ -931,6 +960,7 @@ def open_session(
     roots: SessionRoots,
     mode: Literal["attach"],
     allow_multi_root: bool = False,
+    verbose: bool = False,
 ) -> AbstractAsyncContextManager[ViewerSessionProtocol]: ...
 
 
@@ -941,6 +971,7 @@ def open_session(
     roots: SessionRoots,
     mode: Literal["own", "attach"],
     allow_multi_root: bool = False,
+    verbose: bool = False,
 ) -> AbstractAsyncContextManager[SessionProtocol]: ...
 
 
@@ -951,6 +982,7 @@ async def open_session(
     roots: SessionRoots,
     mode: Literal["own", "attach"] = "own",
     allow_multi_root: bool = False,
+    verbose: bool = False,
 ) -> AsyncIterator["SessionProtocol"]:
     """Open a session against explicit ``roots``; yield it; dispose on exit.
 
@@ -960,6 +992,14 @@ async def open_session(
     live (``spec.resume`` is required; every other spec field is refused) and
     yields the ``AttachedSession``; a cold id is refused with a remedy rather
     than silently becoming an owner.
+
+    ``verbose=True`` subscribes :func:`trace_events` for the session's lifetime
+    so tool calls, output validation, turn usage, and terminal status log to
+    ``logging.getLogger("local_operator.sdk")`` at ``INFO`` level (unsubscribed
+    before ``dispose()``). Default ``False`` emits nothing and adds no
+    subscription. Configure a handler in your app (for example,
+    ``logging.basicConfig()`` in a standalone script), then enable INFO with
+    ``logging.getLogger("local_operator.sdk").setLevel(logging.INFO)``.
 
     The environment is scoped to ``roots`` for the whole ``async with`` body:
     construction, the caller's turns, and every lazy resolver in between see
@@ -996,12 +1036,24 @@ async def open_session(
         with _scoped_process_env(roots):
             _check_resolved_roots(roots)
             session = await _build_session(spec, roots, mode=mode, world_root=world_root)
+            unsub_trace: Callable[[], None] | None = None
             try:
                 if mode == "own":
                     _assert_session_dir_under_root(session, roots)
+                if verbose:
+                    unsub_trace = trace_events(session)
                 yield session
             finally:
-                await session.dispose()
+                try:
+                    if unsub_trace is not None:
+                        unsub_trace()
+                finally:
+                    await session.dispose()
+
+
+#: ``SessionSpec.mcp_ready_timeout_s``'s default, read from the dataclass so
+#: the attach/spawn refusals below cannot drift from it.
+_DEFAULT_MCP_READY_TIMEOUT_S = SessionSpec.__dataclass_fields__["mcp_ready_timeout_s"].default
 
 
 def _refuse_attach_extras(spec: SessionSpec) -> None:
@@ -1034,6 +1086,10 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
         )
         if value is not None
     ]
+    # The first-prompt MCP wait runs in the OWNER's turn loop; a viewer's
+    # setting would never be consulted, so only the default passes.
+    if spec.mcp_ready_timeout_s != _DEFAULT_MCP_READY_TIMEOUT_S:
+        set_fields.append("mcp_ready_timeout_s")  # i18n: ignore spec field identifier
     occupancy = [
         name
         for name, value in (
@@ -1097,6 +1153,9 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
         )
         if value not in (None, False)
     ]
+    # Post-open state like the rest: no channel carries it to a NEW child.
+    if spec.mcp_ready_timeout_s != _DEFAULT_MCP_READY_TIMEOUT_S:
+        blockers.append("mcp_ready_timeout_s")  # i18n: ignore spec field identifier
     output_fields = [
         name
         for name, value in (
@@ -1362,3 +1421,347 @@ def events(session: Any) -> SessionEventStream:
     line-oriented consumers — this adapter adds no second serialization.
     """
     return SessionEventStream(session)
+
+
+# ---------------------------------------------------------------------------
+# Verbose tracing — opt-in single-line diagnostics for SDK callers
+# ---------------------------------------------------------------------------
+
+#: Short call-id prefix length so logs stay compact while preserving uniqueness
+#: past common ``call_`` / ``toolu_`` prefixes.
+_TRACE_CALL_ID_LEN = 12
+#: Per-string cap for tool argument values so large file writes/reads stay readable.
+_TRACE_ARG_STRING_LIMIT = 160
+#: Overall cap on serialized JSON arguments for wide dict/list payloads.
+_TRACE_ARGS_JSON_LIMIT = 512
+#: Snippet cap for tool output/errors, validation errors, and terminal errors.
+_TRACE_SNIPPET_LIMIT = 160
+#: Container depth cap and scrub budget so pathological payloads cannot stall
+#: tracing. An incomplete input (e.g. a PEM missing its closing line) cannot
+#: be scrubbed reliably, so the entire field is withheld beyond this budget.
+_TRACE_CONTAINER_MAX_DEPTH = 6
+_TRACE_REDACT_SCAN_LIMIT = 4096
+#: Legacy env markers match anywhere in the name (e.g. DB_PASSWORD_FALLBACK).
+#: Keep the length floor only for this broad match so short flags stay readable.
+_TRACE_SECRET_ENV_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTHORIZATION")
+_TRACE_SECRET_MIN_LEN = 8
+
+
+def _env_secret_values() -> list[str]:
+    """Read fresh so credentials injected after SDK import are still scrubbed."""
+    from local_operator.redaction_shapes import is_credential_name
+
+    return [
+        value
+        for name, value in os.environ.items()
+        if value
+        and (
+            is_credential_name(name)
+            or (
+                len(value) >= _TRACE_SECRET_MIN_LEN
+                and any(marker in name.upper() for marker in _TRACE_SECRET_ENV_MARKERS)
+            )
+        )
+    ]
+
+
+def _redact_trace_text(text: str, env_secrets: list[str]) -> str:
+    """Scrub known env secrets and credential shapes from ``text``.
+
+    Imports ``local_operator.redaction_shapes`` function-locally (stdlib-only)
+    to uphold ``sdk.py``'s import-cheap contract while reusing the repo's
+    audited redaction table and multi-spelling value scrubber.
+    """
+    if not text:
+        return text
+    from local_operator.redaction_shapes import scrub_secrets
+
+    return scrub_secrets(text, env_secrets)
+
+
+def _printable_trace_text(text: str) -> str:
+    # Escape terminal, bidi, and other nonprintable characters only AFTER
+    # redaction has seen their original spelling.
+    return "".join(char if char.isprintable() else ascii(char)[1:-1] for char in text)
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    single_line = _printable_trace_text(" ".join(text.split()))
+    if len(single_line) <= limit:
+        return single_line
+    return single_line[: limit - 3].rstrip() + "..."
+
+
+def _redact_trace_field(text: str, env_secrets: list[str]) -> str:
+    from local_operator.redaction_shapes import REDACTION_MARKER
+
+    if len(text) > _TRACE_REDACT_SCAN_LIMIT:
+        return REDACTION_MARKER
+    return _redact_trace_text(text, env_secrets)
+
+
+def _redact_and_truncate(text: str, limit: int, env_secrets: list[str]) -> str:
+    return _truncate_text(_redact_trace_field(text, env_secrets), limit)
+
+
+def _format_trace_args(args: Any, env_secrets: list[str]) -> str:
+    from local_operator.redaction_shapes import REDACTION_MARKER, is_credential_name
+
+    remaining = _TRACE_REDACT_SCAN_LIMIT
+
+    def project(value: Any, depth: int = 0) -> Any:
+        nonlocal remaining
+        remaining -= len(value) + 1 if isinstance(value, str) else 1
+        if remaining < 0 or depth > _TRACE_CONTAINER_MAX_DEPTH:
+            raise ValueError("trace argument exceeds scrub budget")
+        if isinstance(value, dict):
+            return {
+                project(key, depth + 1): (
+                    REDACTION_MARKER
+                    if isinstance(key, str) and is_credential_name(key)
+                    else project(item, depth + 1)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [project(item, depth + 1) for item in value]
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+        raise ValueError("trace argument is not JSON data")
+
+    def clip(value: Any) -> Any:
+        if isinstance(value, str):
+            return _redact_and_truncate(value, _TRACE_ARG_STRING_LIMIT, env_secrets)
+        if isinstance(value, list):
+            return [clip(item) for item in value]
+        if isinstance(value, dict):
+            return {clip(key): clip(item) for key, item in value.items()}
+        return value
+
+    try:
+        # Direct credential keys own their entire subtree. Run the shared
+        # shape pass on complete JSON as well: e.g. a name/value pair needs
+        # both siblings intact. Only then shorten individual display values.
+        raw = json.dumps(project(args), ensure_ascii=False)
+        if len(raw) > _TRACE_REDACT_SCAN_LIMIT:
+            return REDACTION_MARKER
+        scrubbed = json.loads(_redact_trace_text(raw, env_secrets))
+    except (TypeError, ValueError):
+        return REDACTION_MARKER
+    return _truncate_text(json.dumps(clip(scrubbed), ensure_ascii=False), _TRACE_ARGS_JSON_LIMIT)
+
+
+def _extract_tool_result_text(result: Any) -> str:
+    """Read plain text from a ``ToolResult`` without serializing private fields."""
+    if result is None:
+        return ""
+    # Real ToolResult.text joins all blocks eagerly; check the blocks before
+    # making a copy of a result that cannot fit the scrub budget.
+    content = getattr(result, "content", None)
+    if isinstance(content, list):
+        from local_operator.redaction_shapes import REDACTION_MARKER
+
+        pieces: list[str] = []
+        size = 0
+        for block in content:
+            block_text = getattr(block, "text", None)
+            if isinstance(block_text, str) and block_text:
+                size += len(block_text)
+                if size > _TRACE_REDACT_SCAN_LIMIT:
+                    return REDACTION_MARKER
+                pieces.append(block_text)
+        return "".join(pieces)
+    text_attr = getattr(result, "text", None)
+    return text_attr if isinstance(text_attr, str) else ""
+
+
+def _trace_tool_label(event: Any, env_secrets: list[str]) -> str:
+    tool_name = _redact_and_truncate(
+        str(getattr(event, "tool_name", "") or "unknown"), _TRACE_SNIPPET_LIMIT, env_secrets
+    )
+    call_id = str(getattr(event, "tool_call_id", "") or "")
+    scrubbed_id = _redact_trace_field(call_id, env_secrets)
+    short_id = _printable_trace_text(" ".join(scrubbed_id.split()))[:_TRACE_CALL_ID_LEN]
+    return f"{tool_name} ({short_id})" if short_id else tool_name
+
+
+def format_event_trace(event: Any) -> str | None:
+    """Format a supported ``AgentEvent`` into a single-line, redacted trace string.
+
+    Returns ``None`` for events outside the concise diagnostic set
+    (``tool_execution_start``, ``tool_execution_end``, ``output_validation``,
+    ``turn_end``, ``agent_end``). Duck-typed on ``event.type`` so formatting
+    neither imports ``harness.types`` nor invents a second event wire format.
+    """
+    event_type = getattr(event, "type", None)
+    if event_type not in (
+        "tool_execution_start",
+        "tool_execution_end",
+        "output_validation",
+        "turn_end",
+        "agent_end",
+    ):
+        return None
+
+    env_secrets = _env_secret_values()
+
+    if event_type == "tool_execution_start":
+        label = _trace_tool_label(event, env_secrets)
+        args_raw = getattr(event, "args", None)
+        args_json = _format_trace_args({} if args_raw is None else args_raw, env_secrets)
+        line = f"[tool:start] {label} {args_json}"
+
+    elif event_type == "tool_execution_end":
+        label = _trace_tool_label(event, env_secrets)
+        result = getattr(event, "result", None)
+        is_error = bool(getattr(event, "is_error", False) or getattr(result, "is_error", False))
+        status = "error" if is_error else "returned"
+        duration = getattr(event, "duration_s", None)
+        if duration is None and result is not None:
+            duration = getattr(result, "duration_s", None)
+        dur_part = f" {duration:.3f}s" if isinstance(duration, (int, float)) else ""
+        snippet_raw = _extract_tool_result_text(result)
+        snippet = (
+            _redact_and_truncate(snippet_raw, _TRACE_SNIPPET_LIMIT, env_secrets)
+            if snippet_raw
+            else ""
+        )
+        tail = f" | {snippet}" if snippet else ""
+        line = f"[tool:end] {label} {status}{dur_part}{tail}"
+
+    elif event_type == "output_validation":
+        fmt = str(getattr(event, "format", "") or "")
+        attempt = getattr(event, "attempt", 1)
+        max_attempts = getattr(event, "max_attempts", 1)
+        ok = bool(getattr(event, "ok", False))
+        exhausted = bool(getattr(event, "exhausted", False))
+        status = "ok" if ok else ("exhausted" if exhausted else "retry")
+        error_raw = str(getattr(event, "error", "") or "")
+        parts = ["[output_validation]"]
+        if fmt:
+            parts.append(_redact_and_truncate(fmt, _TRACE_SNIPPET_LIMIT, env_secrets))
+        parts.append(f"attempt={attempt}/{max_attempts}")
+        parts.append(f"status={status}")
+        if error_raw:
+            err_text = _redact_and_truncate(error_raw, _TRACE_SNIPPET_LIMIT, env_secrets)
+            parts.append(f"error={err_text}")
+        line = " ".join(parts)
+
+    elif event_type == "turn_end":
+        message = getattr(event, "message", None)
+        usage = getattr(message, "usage", None) if message is not None else None
+        parts = ["[turn:end]"]
+        model_id = (
+            (getattr(usage, "model_id", None) if usage is not None else None)
+            or (getattr(message, "model_id", None) if message is not None else None)
+            or (getattr(message, "model", None) if message is not None else None)
+        )
+        if model_id:
+            parts.append(
+                f"model={_redact_and_truncate(str(model_id), _TRACE_SNIPPET_LIMIT, env_secrets)}"
+            )
+        if usage is not None:
+            in_tok = getattr(usage, "input_tokens", 0)
+            cache_read = getattr(usage, "cache_read_tokens", 0)
+            out_tok = getattr(usage, "output_tokens", 0)
+            parts.append(f"in={in_tok} cache_read={cache_read} out={out_tok}")
+            usd_cost = getattr(usage, "usd_cost", None)
+            est_cost = getattr(usage, "estimated_usd_cost", None)
+            if isinstance(usd_cost, (int, float)):
+                parts.append(f"cost=${usd_cost:.4f}")
+            elif isinstance(est_cost, (int, float)):
+                parts.append(f"cost=~${est_cost:.4f}")
+        line = " ".join(parts)
+
+    else:  # agent_end
+        aborted = bool(getattr(event, "aborted", False))
+        error_raw = str(getattr(event, "error", "") or "")
+        failing_model = str(getattr(event, "failing_model", "") or "")
+        cut_off = str(getattr(event, "cut_off", "") or "")
+        if error_raw:
+            status = "aborted error" if aborted else "error"
+            safe_model = _redact_and_truncate(failing_model, _TRACE_SNIPPET_LIMIT, env_secrets)
+            model_part = f" model={safe_model}" if safe_model else ""
+            err_text = _redact_and_truncate(error_raw, _TRACE_SNIPPET_LIMIT, env_secrets)
+            line = f"[agent:end] {status}{model_part} | {err_text}"
+        elif aborted:
+            tail = (
+                f" | {_redact_and_truncate(cut_off, _TRACE_SNIPPET_LIMIT, env_secrets)}"
+                if cut_off
+                else ""
+            )
+            line = f"[agent:end] aborted{tail}"
+        else:
+            tail = (
+                f" | {_redact_and_truncate(cut_off, _TRACE_SNIPPET_LIMIT, env_secrets)}"
+                if cut_off
+                else ""
+            )
+            line = f"[agent:end] completed{tail}"
+
+    # Final safety sweep guarantees single-line, redacted output even if a
+    # secret spans formatted fields.
+    return _printable_trace_text(" ".join(_redact_trace_text(line, env_secrets).splitlines()))
+
+
+def trace_events(
+    session: Any,
+    *,
+    logger: logging.Logger | None = None,
+    stream: "TextIO | None" = None,
+) -> Callable[[], None]:
+    """Subscribe a concise, secret-redacted verbose trace handler to ``session``.
+
+    When neither ``logger`` nor ``stream`` is provided, logs ``INFO`` records
+    to ``logging.getLogger("local_operator.sdk")``. Passing ``stream`` alone
+    writes lines only to that stream (no duplicate logger output); passing both
+    writes to both. Returns an idempotent unsubscribe callable.
+
+    Defensive by contract (matching :class:`SessionEventStream`): a sink or
+    formatting error never escapes to abort the session's event dispatch.
+    """
+    target_logger = (
+        logger if logger is not None else (logging.getLogger(__name__) if stream is None else None)
+    )
+
+    def _on_event(event: Any) -> None:
+        try:
+            if (
+                stream is None
+                and target_logger is not None
+                and not target_logger.isEnabledFor(logging.INFO)
+            ):
+                return
+            line = format_event_trace(event)
+            if line is None:
+                return
+            if target_logger is not None:
+                target_logger.info("%s", line)
+            if stream is not None:
+                stream.write(line + "\n")
+                flush = getattr(stream, "flush", None)
+                if callable(flush):
+                    flush()
+        except Exception:  # noqa: BLE001 — tracing must never break session dispatch
+            pass
+
+    # The attached viewer gives its first regular consumer sole ownership of
+    # the replay buffer. Tracing must not take that consumer's place.
+    observe: Callable[[Callable[[Any], None]], Callable[[], None]] | None = getattr(
+        session, "_observe_events", None
+    )
+    raw_unsub: Callable[[], None] | None = (
+        observe(_on_event) if callable(observe) else session.subscribe(_on_event)
+    )
+    unsubscribed = False
+
+    def _unsubscribe() -> None:
+        nonlocal unsubscribed, raw_unsub
+        if unsubscribed:
+            return
+        unsubscribed = True
+        if raw_unsub is not None:
+            raw_unsub()
+            raw_unsub = None
+
+    return _unsubscribe

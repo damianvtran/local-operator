@@ -1701,6 +1701,99 @@ def test_reason_and_cause_round_trip_and_an_old_database_migrates(
     assert {"reason", "cause"} <= columns
 
 
+def _pre_0107_store(path: Path) -> None:
+    """A database as 0.106 left it: reason/cause/notify, but no origin/needs_user.
+
+    Every other table is the one the current store creates, so the ONLY thing
+    this database lacks is the two ADR 0009 routing columns. That is the shape
+    of every real install that ran any release before 0.107.0.
+    """
+    from local_operator.session.attention import (
+        _CREATE_DELIVERIES,
+        _CREATE_MUTATIONS,
+        _CREATE_SUPERSEDE_LOG,
+    )
+
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute(
+            "CREATE TABLE completions ("
+            "sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, "
+            "anchor TEXT NOT NULL, kind TEXT NOT NULL, "
+            "reason TEXT NOT NULL DEFAULT '', cause TEXT NOT NULL DEFAULT '', "
+            "notify INTEGER NOT NULL DEFAULT 1)"
+        )
+        conn.execute("CREATE INDEX completion_conversation ON completions(conversation, sequence)")
+        conn.execute(
+            "CREATE TABLE receipts ("
+            "conversation TEXT PRIMARY KEY, acknowledged INTEGER NOT NULL)"
+        )
+        conn.execute(_CREATE_DELIVERIES)
+        conn.execute(_CREATE_MUTATIONS)
+        conn.execute(_CREATE_SUPERSEDE_LOG)
+
+
+def _completion_columns(path: Path) -> set[str]:
+    with closing(sqlite3.connect(path)) as conn:
+        return {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
+
+
+def test_a_pre_0107_database_gains_origin_and_needs_user_on_the_first_write(
+    tmp_path: Path,
+) -> None:
+    """Regression: the upgrade gate ignored origin/needs_user, so no write ever worked.
+
+    A database with reason/cause/notify was judged CURRENT, the ALTERs never ran,
+    and every completion INSERT failed with "table completions has no column named
+    origin" -- so no unread completion ever reached the store.
+    """
+    path = tmp_path / "attention.db"
+    _pre_0107_store(path)
+    assert not {"origin", "needs_user"} & _completion_columns(path)
+
+    store = AttentionStore(path)
+    token = str(uuid.uuid4())
+    store.publish("session/a", token, "anchor", "complete", origin="mobile", needs_user=True)
+
+    assert {"origin", "needs_user"} <= _completion_columns(path)
+    state = store.state("session/a")
+    assert state["completion_token"] == token
+    assert state["unseen"] is True
+    assert state["origin"] == "mobile"
+    assert state["needs_user"] is True
+
+
+def test_the_upgrade_gate_is_false_for_a_current_database_and_true_for_each_gap(
+    tmp_path: Path,
+) -> None:
+    """A current store is not re-migrated; a store missing ANY additive column is."""
+    from local_operator.session.attention import _ADDITIVE_COMPLETION_COLUMNS
+
+    def settled(path: Path) -> None:
+        # A brand-new store is created WITHOUT `supersede_log` and gains it on
+        # its next open, so settle it with a second write before asking the gate.
+        store = AttentionStore(path)
+        store.publish("session/a", str(uuid.uuid4()), "anchor", "complete")
+        store.publish("session/a", str(uuid.uuid4()), "anchor", "complete")
+
+    current = tmp_path / "current.db"
+    settled(current)
+    with closing(sqlite3.connect(current)) as conn:
+        assert AttentionStore._additive_migrations_pending(conn) is False
+
+    # Fresh-create DDL and the shared list cannot drift: whatever a new store
+    # creates is exactly what the gate demands.
+    assert {name for name, _ in _ADDITIVE_COMPLETION_COLUMNS} <= _completion_columns(current)
+
+    for name, _ in _ADDITIVE_COMPLETION_COLUMNS:
+        gap = tmp_path / f"gap-{name}.db"
+        settled(gap)
+        with closing(sqlite3.connect(gap)) as conn, conn:
+            conn.execute(f"ALTER TABLE completions DROP COLUMN {name}")
+        with closing(sqlite3.connect(gap)) as conn:
+            assert AttentionStore._additive_migrations_pending(conn) is True, name
+
+
 @pytest.mark.asyncio
 async def test_a_witnessed_cut_off_reaches_the_row_the_daemon_cannot_classify(
     tmp_path: Path,

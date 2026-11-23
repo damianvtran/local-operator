@@ -1,0 +1,110 @@
+{
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "audit_id": "ts1a7a",
+  "audit_date": "2026-11-19T21:17:12.879302+00:00",
+  "key_count": 17,
+  "audit_pass": "first independent instance",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "terminal-status-vi-audit",
+    "session": "7a2548e2c7b1",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model header",
+    "fallback_used": false,
+    "independent_from_translator_session": "56c3029571f6",
+    "independent_from_translator": true,
+    "date": "2026-11-19T21:17:12.879302+00:00",
+    "result": "passed",
+    "unresolved_blocker_major": 0
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "vi": {
+      "path": "/Users/damian/.local-operator/sessions/56c3029571f6/scratchpad/wire.session_status.vi.json",
+      "sha256": "963b8bf337981a328bb80b265cb49d033db10c7afb2838c4ec8d5f05df20c1d1"
+    },
+    "style_guide": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts1a7a/report.md",
+      "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/vi-first-report.md",
+      "sha256": "8b16e4661bff8db7b81c03312bc3e936c240d91daba353ab670ffedd5c2140ae"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts1a7a/audit.log",
+      "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/vi-first-audit.log",
+      "sha256": "50bf4736c8477b1095a3de55fb4d68e147a688181932f85426fb6945b93c55a6"
+    },
+    "icu-cases.json": {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts1a7a/icu-cases.json",
+      "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/vi-first-render-cases.json",
+      "sha256": "f5d3585a572d57e021aa5506e5cb016ab4aac9dc77e6e9adbd1a42b21cf4ad94"
+    },
+    "audit-script.py.txt": {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts1a7a/audit-script.py.txt",
+      "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/audit_vi.py",
+      "sha256": "141dde5a01d3162b6decd9944b05f0b3f635568fbcc809fd3f9055c1dbba2803"
+    },
+    "ledger-dryrun.log": {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts1a7a/ledger-dryrun.log",
+      "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/vi-first-ledger-dryrun.log",
+      "sha256": "ef248edc168a9e71f5d0285e981fed202c51b6a8254dadee566b7582969fecd1"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "frozen_commit": "2930492e05a6968a2e1adfe34a091b94802bacd0",
+  "report_kind": "audit_notes_not_execution_log",
+  "execution_log": "i18n/audits/evidence/vi/wire.session_status/ts1a7a/audit.log",
+  "actual_icu_cases": 58,
+  "mechanical_scope": "repository check_catalogues() isolated en/context/vi fixture, recursive AST select parity and CLDR completeness independently checked",
+  "negative_controls_rejected": [
+    "missing-key",
+    "extra-key",
+    "renamed-placeholder",
+    "wrong-argument-type",
+    "invalid-vi-plural-category",
+    "malformed-ICU"
+  ],
+  "observed_validator_gaps": [
+    "missing select arm accepted by repo validator; rejected by independent AST check",
+    "plural helper fails to enforce missing non-other CLDR categories; actual vi other-only target complete"
+  ],
+  "retention_status": "scratch handoff only; coordinator must preserve canonical bundle before history apply",
+  "limitations": [
+    "second independent pass pending",
+    "no visual/runtime/pseudo/shaping or human native-speaker proof",
+    "external diagnostic legacy-English path remains UNRESOLVED"
+  ],
+  "original_lost_evidence": {
+    "status": "not_applicable"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "ledger_dry_run": {
+    "result": "passed",
+    "applied": false,
+    "expected_history_sha256": "f3329749bec6e39c39a685e16aad99a9c7d8e34f272bff08b9b3cb9c8383dc2e",
+    "note": "Actual append --dry-run accepted receipt; coordinator must recalculate history-sha before any later append."
+  }
+}

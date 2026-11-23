@@ -1,0 +1,211 @@
+{
+  "schema": "approval-repair-r3-author/v1",
+  "locale": "vi",
+  "namespace": "wire.settings",
+  "round": 3,
+  "scope": "K..newvalues; assigned four HELP values only",
+  "created_at": "2026-11-22T03:37:12.452412+00:00",
+  "agent": {
+    "role": "translator",
+    "session_id": "abee2a135156",
+    "actual_model": "openai/gpt-6.1-sol",
+    "requested_model": "anthropic/claude-opus-5-5",
+    "fallback": "Host model-switch message: provider failure quota, before authoring",
+    "serving_identity": "host-attested model; backend serving instance otherwise unknown"
+  },
+  "source_head": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+  "head_unchanged": true,
+  "source_sha256": "d9498d844e7924e2eba039d627b67a02725c5cc23c6a6020c823ce4db6a38bf1",
+  "source_context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "target_path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+  "target_old_raw_sha256": "29f7b24c09420c3dfb5e54bb0c836f7abed5cda07c128ab22b200cc78c39fcb1",
+  "target_new_raw_sha256": "100fc2ccedd6bc0def2837912b4332d9b0438c1f0dc5451e072d37bf94e1e964",
+  "source_binding": {
+    "readerbrief_sha256": "e06649f101e397c32acd49b83cdc816209687d86c0f491fcafa12be03f9adf29",
+    "manifest_sha256": "ded49b2ba05e698f284de1676ee4fa16ee5f89a91dc23be4fc714f4175595390",
+    "approved_vi_envelope_sha256": "4a1da59eb3602aa4ffa2a7c426431605a16cd4aaeddfc6da09b02bcc0d469792",
+    "approved_en_envelope_sha256": "c17b1262dc76d312cfa21313bd0d1414e2b4132d9900265119d4c1d8d9c237f6",
+    "English_canonical_sha256": "8df2396d637f817a9b184aaf6f5c46fbde24f29532c9c8dd937a58fc3ecf3ae9",
+    "Vietnamese_K_canonical_sha256": "7d841e8707558909bd33422a972130a0843b9c781745ee54ab461665280601ef",
+    "key_parity": 895,
+    "key_order_unchanged": true,
+    "all_input_hashes_match": true
+  },
+  "audit_source": {
+    "path": "/Users/damian/.local-operator/sessions/465096fd021d/scratchpad/approval-repair-audit-vi-B-r2.json",
+    "sha256": "f4080d71e211a1812fab58bf0fe7060c8f2cfc03537ad79981e3a1c2217a540a",
+    "proposals": "Adopted all four actual auditor proposals after checking EN meaning, glossary, and current K localized choice labels."
+  },
+  "changed_keys": [
+    "wire.settings.display_nerd_icons.help",
+    "wire.settings.providers_openrouter_enforce_distillable_text.help",
+    "wire.settings.providers_openrouter_zdr.help",
+    "wire.settings.web_fetch_render_backend.help"
+  ],
+  "changed_value_count": 4,
+  "namespace_key_count": 895,
+  "unchanged_value_count": 891,
+  "raw_diff": {
+    "added_lines": 4,
+    "removed_lines": 4,
+    "inverse_restores_exact_original_bytes": true,
+    "inverse_sha256": "29f7b24c09420c3dfb5e54bb0c836f7abed5cda07c128ab22b200cc78c39fcb1",
+    "inverse_matches_old_sha256": true,
+    "formatting_and_all_other_bytes_preserved": true
+  },
+  "per_key": [
+    {
+      "key": "wire.settings.display_nerd_icons.help",
+      "finding_id": "VI-B-R2-M1",
+      "original_severity": "major",
+      "source": "Expanded tool-row icons. Auto reads the terminal emulator's markers.",
+      "old": "Biểu tượng mở rộng cho hàng công cụ. “Tự động” đọc các dấu hiệu của trình mô phỏng terminal.",
+      "new": "Biểu tượng mở rộng cho hàng công cụ. “Tự động” đọc các dấu hiệu của trình giả lập thiết bị đầu cuối.",
+      "backtranslation": "Expanded tool-row icons. Automatic reads the terminal emulator’s markers.",
+      "glossary_decision": "terminal emulator → trình giả lập thiết bị đầu cuối; ordinary human noun fully localized",
+      "safety": "Meaning and enable/default semantics preserved; no policy, API/config, defaults, code or choice-value changes.",
+      "code_facts": "No technical token changed; localized choiceLabel references identical to captured K menu.",
+      "placeholders": {
+        "source": [],
+        "old": [],
+        "new": [],
+        "unchanged": true
+      },
+      "NFC": true,
+      "bidi_controls_absent": true,
+      "width": {
+        "method": "unicodedata cell estimate; not rendered",
+        "old": 92,
+        "new": 100,
+        "English": 68,
+        "rendered": false
+      },
+      "author_disposition": "proposed remediation written; independent R3 A/B decision pending, not native PASS"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "finding_id": "VI-B-R2-m1",
+      "original_severity": "minor",
+      "source": "'true': restrict to endpoints whose text output may be distilled. 'default': nothing sent.",
+      "old": "“Có”: chỉ dùng các điểm cuối có đầu ra văn bản được phép dùng để chưng cất mô hình. “Mặc định”: không gửi tùy chọn nào.",
+      "new": "“Có”: chỉ dùng các endpoint có đầu ra văn bản được phép dùng để chưng cất mô hình. “Mặc định”: không gửi tùy chọn nào.",
+      "backtranslation": "Yes: only use endpoints whose text output is permitted for model distillation. Default: send no option.",
+      "glossary_decision": "endpoint retained as shared-glossary Latin term",
+      "safety": "Meaning and enable/default semantics preserved; no policy, API/config, defaults, code or choice-value changes.",
+      "code_facts": "No technical token changed; localized choiceLabel references identical to captured K menu.",
+      "placeholders": {
+        "source": [],
+        "old": [],
+        "new": [],
+        "unchanged": true
+      },
+      "NFC": true,
+      "bidi_controls_absent": true,
+      "width": {
+        "method": "unicodedata cell estimate; not rendered",
+        "old": 119,
+        "new": 118,
+        "English": 90,
+        "rendered": false
+      },
+      "author_disposition": "proposed remediation written; independent R3 A/B decision pending, not native PASS"
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "finding_id": "VI-B-R2-m2",
+      "original_severity": "minor",
+      "source": "'true': restrict to zero-data-retention endpoints. 'default': nothing sent.",
+      "old": "“Có”: chỉ dùng các điểm cuối không lưu giữ dữ liệu. “Mặc định”: không gửi tùy chọn nào.",
+      "new": "“Có”: chỉ dùng các endpoint không lưu giữ dữ liệu. “Mặc định”: không gửi tùy chọn nào.",
+      "backtranslation": "Yes: only use endpoints with zero data retention. Default: send no option.",
+      "glossary_decision": "endpoint retained as shared-glossary Latin term",
+      "safety": "Meaning and enable/default semantics preserved; no policy, API/config, defaults, code or choice-value changes.",
+      "code_facts": "No technical token changed; localized choiceLabel references identical to captured K menu.",
+      "placeholders": {
+        "source": [],
+        "old": [],
+        "new": [],
+        "unchanged": true
+      },
+      "NFC": true,
+      "bidi_controls_absent": true,
+      "width": {
+        "method": "unicodedata cell estimate; not rendered",
+        "old": 87,
+        "new": 86,
+        "English": 75,
+        "rendered": false
+      },
+      "author_disposition": "proposed remediation written; independent R3 A/B decision pending, not native PASS"
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "finding_id": "VI-B-R2-m3",
+      "original_severity": "minor",
+      "source": "Auto uses markdownify when the [fetch] extra is installed.",
+      "old": "“Tự động” dùng markdownify khi đã cài phần bổ sung [fetch].",
+      "new": "“Tự động” dùng markdownify khi đã cài extra [fetch].",
+      "backtranslation": "Automatic uses markdownify when extra [fetch] is installed.",
+      "glossary_decision": "pip extra retained as shared-glossary term; [fetch] and markdownify exact",
+      "safety": "Meaning and enable/default semantics preserved; no policy, API/config, defaults, code or choice-value changes.",
+      "code_facts": "markdownify and [fetch] byte-identical",
+      "placeholders": {
+        "source": [],
+        "old": [],
+        "new": [],
+        "unchanged": true
+      },
+      "NFC": true,
+      "bidi_controls_absent": true,
+      "width": {
+        "method": "unicodedata cell estimate; not rendered",
+        "old": 59,
+        "new": 52,
+        "English": 58,
+        "rendered": false
+      },
+      "author_disposition": "proposed remediation written; independent R3 A/B decision pending, not native PASS"
+    }
+  ],
+  "validation": {
+    "all_four_plain_literals": true,
+    "no_ICU_branches_or_placeholders_in_touched_values": true,
+    "namespace_placeholder_preservation": "Touched literals contain none; other 891 values and every unrelated byte restored exactly by inverse proof. No broad ICU suite run.",
+    "code_tokens_preserved": [
+      "markdownify",
+      "[fetch]"
+    ],
+    "choiceLabel_references_checked": [
+      "Tự động",
+      "Có",
+      "Mặc định"
+    ],
+    "NFC": true,
+    "bidi_controls_absent": true,
+    "key_order_count_parity": true
+  },
+  "technical_exceptions": [
+    "endpoint: established shared glossary technical noun",
+    "extra: pip extras terminology",
+    "markdownify: package name",
+    "[fetch]: literal pip extra name"
+  ],
+  "major_status": {
+    "assigned_major": "VI-B-R2-M1",
+    "author_remediation_written": true,
+    "independent_major_resolution": "PENDING R3 independent A/B; no native linguistic PASS claimed",
+    "known_assigned_major_deferred_without_edit": [],
+    "historical_findings": "R2 failure preserved; 35 prior deferred minor records retained per VI-B R2 receipt, not re-audited or cleared here."
+  },
+  "render_fit_risks": [
+    "display_nerd_icons.help grows from estimated 92 to 100 cells; wrapping/rendered fit unverified.",
+    "distillable-text help remains estimated 118 cells; not a label, no measured clipping."
+  ],
+  "limitations": [
+    "No self-audit or native linguistic clearance.",
+    "No browser/native/rendered, framework/full tests, generated/history/ledger edits.",
+    "Four VI edits are this lane’s entire share of manager’s eleven-value ES+VI batch; seven ES keys owned by separate author and not inspected or modified.",
+    "First edit occurred after initial input-location/schema resolution rather than requested first-ten-call target; no fresh copy lease or raw product prose fallback was used."
+  ],
+  "receipt_location": "own session scratch; Root copies into evidence/approval-repair-r3-author-vi.json"
+}

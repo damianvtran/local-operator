@@ -1,0 +1,3 @@
+{
+  "session.remote_peek.display_too_large": "Essayez `head=20` pour voir les premières étapes ou `digest` pour un résumé.\nL’historique récent a dépassé la limite de la page d’affichage ou du socket d’exécution.\nLimites de la page : en octets ({bytes}) ou en messages ({messages}).\nPour consulter l’historique exact, ouvrez la conversation sur l’appareil qui l’héberge."
+}

@@ -3278,7 +3278,7 @@ class TestQwenCloudTicketFromSecretStore:
 
         assert len(reports) == 1
         assert reports[0].notes is not None
-        assert "lop secret broker restart" in reports[0].notes
+        assert "lop secret broker stop" in reports[0].notes
         # The pid and protocol ride on the exception for the CLI's benefit;
         # a panel note is 40 cells and they would cost the remedy its room.
         assert "123" not in reports[0].notes
@@ -3361,7 +3361,7 @@ class TestQwenCloudTicketFromSecretStore:
             (QWENCLOUD_TICKET_LOCKED_NOTE, "lop secret unlock", 40),
             (QWENCLOUD_TICKET_ORPHAN_NOTE, "lop qwencloud-ticket set", 50),
             (QWENCLOUD_TICKET_EXPOSED_NOTE, "lop secret status", 45),
-            (QWENCLOUD_TICKET_BROKER_NOTE, "lop secret broker restart", 55),
+            (QWENCLOUD_TICKET_BROKER_NOTE, "lop secret broker stop", 55),
         )
 
         for note, remedy, lowest in cases:
@@ -4271,6 +4271,10 @@ def test_no_login_flavour_is_in_the_chat_registry() -> None:
         # whose own login is a subscription sign-in (audit Q1).
         "openai-api-key",
         "anthropic-key",
+        # Google Vertex AI's API-key and service-account sign-ins: both write
+        # the one `google-vertex` credential slot.
+        "google-vertex-key",
+        "google-vertex-sa",
     }
     assert flavours & _chat_ids() == set()
 

@@ -1,0 +1,23 @@
+# Second independent safety audit — vi — PR #4245 delta (22 cli.sessions_move_workset + 6 wire.settings mesh_* keys vs 696a18338)
+# auditor session 1946542ef662 (anthropic/claude-opus-5-5); worktree HEAD 4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10
+
+## HOWTO gates (each alone)
+# HEAD 4ba2f42185ccb51b5e5e452cb261b6cbdc13ef10 origin/main 1d7e456afbb93d14e855884a4eb988cbbe5f7553 — before second-audit receipts
+$ python scripts/i18n/generate.py --check
+generate.py --check: 179 artifact(s) byte-identical
+exit=0
+$ python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ python scripts/i18n/check.py --audit-base origin/main
+check.py: ok — 235 file(s) scanned, 2714 literal(s) at or below the baseline, catalogues consistent; 107 advisory finding(s) (report-only until activated)
+exit=0
+
+## Independent mechanical pass + plural renders (n=0,1,2,5,21; source=mbp, device=studio)
+vi cli.sessions_move_workset: 22 delta keys present=True; mismatches=none
+vi wire.settings: 6 delta keys present=True; mismatches=none
+vi n=0: Các tệp làm việc đã đến từ mbp: 0 worktree đã được khôi phục tại đây. | 0 worktree chưa được khôi phục; thiết bị này sẽ thử lại khi relay của nó khởi động lại, và mbp vẫn còn các tệp. | Các tệp làm việc đã được gửi tới studio: 0 worktree đã được nhận ở đó; studio khôi phục chúng khi cuộc trò chuyện đến nơi.
+vi n=1: Các tệp làm việc đã đến từ mbp: 1 worktree đã được khôi phục tại đây. | 1 worktree chưa được khôi phục; thiết bị này sẽ thử lại khi relay của nó khởi động lại, và mbp vẫn còn các tệp. | Các tệp làm việc đã được gửi tới studio: 1 worktree đã được nhận ở đó; studio khôi phục chúng khi cuộc trò chuyện đến nơi.
+vi n=2: Các tệp làm việc đã đến từ mbp: 2 worktree đã được khôi phục tại đây. | 2 worktree chưa được khôi phục; thiết bị này sẽ thử lại khi relay của nó khởi động lại, và mbp vẫn còn các tệp. | Các tệp làm việc đã được gửi tới studio: 2 worktree đã được nhận ở đó; studio khôi phục chúng khi cuộc trò chuyện đến nơi.
+vi n=5: Các tệp làm việc đã đến từ mbp: 5 worktree đã được khôi phục tại đây. | 5 worktree chưa được khôi phục; thiết bị này sẽ thử lại khi relay của nó khởi động lại, và mbp vẫn còn các tệp. | Các tệp làm việc đã được gửi tới studio: 5 worktree đã được nhận ở đó; studio khôi phục chúng khi cuộc trò chuyện đến nơi.
+vi n=21: Các tệp làm việc đã đến từ mbp: 21 worktree đã được khôi phục tại đây. | 21 worktree chưa được khôi phục; thiết bị này sẽ thử lại khi relay của nó khởi động lại, và mbp vẫn còn các tệp. | Các tệp làm việc đã được gửi tới studio: 21 worktree đã được nhận ở đó; studio khôi phục chúng khi cuộc trò chuyện đến nơi.

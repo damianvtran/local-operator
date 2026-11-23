@@ -1,0 +1,200 @@
+{
+  "locale": "fr",
+  "namespace": "wire.teams.effective",
+  "audit_date": "2026-11-19",
+  "audit_kind": "second_independent_linguistic_mechanical_pass",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "89b8acddcc7c",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session-state model declaration: openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "independent_from_translator_session": "34a8703ccbff",
+    "independent_from_first_auditor_session": "32077ea6da37"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/34a8703ccbff/scratchpad/wire.teams.effective.fr.json",
+      "sha256": "9c7ffd5f52a5ad10267d739074e19c56c90f532b6c79b15314e2256655038226"
+    }
+  },
+  "audit_sequence": "Source/context/target reviewed and this per-key verdict recorded before opening first-auditor receipts.",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings": [],
+  "per_key": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "source": "No team named {role} was found.",
+      "current_text": "Aucune équipe nommée {role} n’a été trouvée.",
+      "status": "passed",
+      "mechanical": "Exact placeholder names/types and technical syntax; no plural/select, tags, code spans, flags or commands to alter. No added/dropped keys.",
+      "linguistic_review": "Team-name lookup failure retained; opaque role/name placeholder unchanged; no implication of member launch.",
+      "idiom_register_terminology": "Natural professional French, vous via imperative; équipe/agent/modèle; curly apostrophes; no French punctuation requiring a narrow no-break space.",
+      "fit": {
+        "chars": 44,
+        "cells": 44,
+        "maxChars": null,
+        "maxCells": null,
+        "assessment": "Wrapping desktop warning; no fixed budget in sidecar. Width measured, not a rendered fit claim."
+      },
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "source": "The agent registry could not be read. Check the agent definitions and try again.",
+      "current_text": "Impossible de lire le registre des agents. Vérifiez les définitions des agents et réessayez.",
+      "status": "passed",
+      "mechanical": "Exact placeholder names/types and technical syntax; no plural/select, tags, code spans, flags or commands to alter. No added/dropped keys.",
+      "linguistic_review": "Registry readability failure retained without inventing corruption or exception details; agent definitions and retry both retained.",
+      "idiom_register_terminology": "Natural professional French, vous via imperative; équipe/agent/modèle; curly apostrophes; no French punctuation requiring a narrow no-break space.",
+      "fit": {
+        "chars": 92,
+        "cells": 92,
+        "maxChars": null,
+        "maxCells": null,
+        "assessment": "Wrapping desktop warning; no fixed budget in sidecar. Width measured, not a rendered fit claim."
+      },
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "source": "The model configuration could not be read. Check your configuration and try again.",
+      "current_text": "Impossible de lire la configuration du modèle. Vérifiez votre configuration et réessayez.",
+      "status": "passed",
+      "mechanical": "Exact placeholder names/types and technical syntax; no plural/select, tags, code spans, flags or commands to alter. No added/dropped keys.",
+      "linguistic_review": "Model configuration readability failure and inspect-configuration/retry remedy retained.",
+      "idiom_register_terminology": "Natural professional French, vous via imperative; équipe/agent/modèle; curly apostrophes; no French punctuation requiring a narrow no-break space.",
+      "fit": {
+        "chars": 89,
+        "cells": 89,
+        "maxChars": null,
+        "maxCells": null,
+        "assessment": "Wrapping desktop warning; no fixed budget in sidecar. Width measured, not a rendered fit claim."
+      },
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "source": "The value at subagents.models.{tier} is invalid. Set it to a provider/model selector or a model mapping.",
+      "current_text": "La valeur de subagents.models.{tier} est invalide. Utilisez un sélecteur provider/model ou un objet de configuration de modèle.",
+      "status": "passed",
+      "mechanical": "Exact placeholder names/types and technical syntax; no plural/select, tags, code spans, flags or commands to alter. No added/dropped keys.",
+      "linguistic_review": "Invalid value and both accepted alternatives retained: provider/model selector or configuration mapping object.",
+      "idiom_register_terminology": "Natural professional French, vous via imperative; équipe/agent/modèle; curly apostrophes; no French punctuation requiring a narrow no-break space.",
+      "fit": {
+        "chars": 127,
+        "cells": 127,
+        "maxChars": null,
+        "maxCells": null,
+        "assessment": "Wrapping desktop warning; no fixed budget in sidecar. Width measured, not a rendered fit claim."
+      },
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "source": "The mapping at subagents.models.{tier} is invalid. Set model to a provider/model selector and, optionally, effort to a supported reasoning effort.",
+      "current_text": "L’objet de configuration à l’emplacement subagents.models.{tier} est invalide. Définissez model sur un sélecteur provider/model et, si nécessaire, effort sur un niveau d’effort de raisonnement pris en charge.",
+      "status": "passed",
+      "mechanical": "Exact placeholder names/types and technical syntax; no plural/select, tags, code spans, flags or commands to alter. No added/dropped keys.",
+      "linguistic_review": "Required model setting and optional effort setting remain distinct; supported reasoning-effort restriction retained. fr si nécessaire conveys optionality; Chinese effort可选 is explicit and the second 请 begins a separate directive after a semicolon.",
+      "idiom_register_terminology": "Natural professional French, vous via imperative; équipe/agent/modèle; curly apostrophes; no French punctuation requiring a narrow no-break space.",
+      "fit": {
+        "chars": 208,
+        "cells": 208,
+        "maxChars": null,
+        "maxCells": null,
+        "assessment": "Wrapping desktop warning; no fixed budget in sidecar. Width measured, not a rendered fit claim."
+      },
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "source": "No model is configured at subagents.models.{tier}.",
+      "current_text": "Aucun modèle n’est configuré à l’emplacement subagents.models.{tier}.",
+      "status": "passed",
+      "mechanical": "Exact placeholder names/types and technical syntax; no plural/select, tags, code spans, flags or commands to alter. No added/dropped keys.",
+      "linguistic_review": "Absent configured model remains distinct from invalid model; literal tier path retained.",
+      "idiom_register_terminology": "Natural professional French, vous via imperative; équipe/agent/modèle; curly apostrophes; no French punctuation requiring a narrow no-break space.",
+      "fit": {
+        "chars": 69,
+        "cells": 69,
+        "maxChars": null,
+        "maxCells": null,
+        "assessment": "Wrapping desktop warning; no fixed budget in sidecar. Width measured, not a rendered fit claim."
+      },
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "source": "The model selector at subagents.models.{tier} is invalid. Use the provider/model format.",
+      "current_text": "Le sélecteur de modèle à l’emplacement subagents.models.{tier} est invalide. Utilisez le format provider/model.",
+      "status": "passed",
+      "mechanical": "Exact placeholder names/types and technical syntax; no plural/select, tags, code spans, flags or commands to alter. No added/dropped keys.",
+      "linguistic_review": "Invalid selector and exact provider/model format retained; no raw invalid value exposed.",
+      "idiom_register_terminology": "Natural professional French, vous via imperative; équipe/agent/modèle; curly apostrophes; no French punctuation requiring a narrow no-break space.",
+      "fit": {
+        "chars": 111,
+        "cells": 111,
+        "maxChars": null,
+        "maxCells": null,
+        "assessment": "Wrapping desktop warning; no fixed budget in sidecar. Width measured, not a rendered fit claim."
+      },
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "source": "The model {selector} could not be resolved. Check the model selector and provider configuration.",
+      "current_text": "Impossible de déterminer le modèle correspondant à {selector}. Vérifiez le sélecteur de modèle et la configuration du fournisseur.",
+      "status": "passed",
+      "mechanical": "Exact placeholder names/types and technical syntax; no plural/select, tags, code spans, flags or commands to alter. No added/dropped keys.",
+      "linguistic_review": "Model resolution failure retained, not conflated with network resolution; selector and provider-configuration remedy both retained.",
+      "idiom_register_terminology": "Natural professional French, vous via imperative; équipe/agent/modèle; curly apostrophes; no French punctuation requiring a narrow no-break space.",
+      "fit": {
+        "chars": 130,
+        "cells": 130,
+        "maxChars": null,
+        "maxCells": null,
+        "assessment": "Wrapping desktop warning; no fixed budget in sidecar. Width measured, not a rendered fit claim."
+      },
+      "findings": []
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "source": "This team member is unavailable. Check its model configuration and agent definition.",
+      "current_text": "Ce membre de l’équipe est indisponible. Vérifiez la configuration de son modèle et sa définition d’agent.",
+      "status": "passed",
+      "mechanical": "Exact placeholder names/types and technical syntax; no plural/select, tags, code spans, flags or commands to alter. No added/dropped keys.",
+      "linguistic_review": "Member availability fallback retained with model-configuration and agent-definition checks; no successful launch implication.",
+      "idiom_register_terminology": "Natural professional French, vous via imperative; équipe/agent/modèle; curly apostrophes; no French punctuation requiring a narrow no-break space.",
+      "fit": {
+        "chars": 105,
+        "cells": 105,
+        "maxChars": null,
+        "maxCells": null,
+        "assessment": "Wrapping desktop warning; no fixed budget in sidecar. Width measured, not a rendered fit claim."
+      },
+      "findings": []
+    }
+  ],
+  "evidence_limits": [
+    "No translation/MT service used.",
+    "Scoped repository catalogue validator plus independent structural checks only.",
+    "No plural/select messages; CLDR branch completeness not applicable.",
+    "No pseudo-localization, fallback, bidi/mixed-direction rendered review, HTTP serving, or UI integration execution.",
+    "Neither shipped status nor runtime visual fit is certified."
+  ],
+  "audit_notes_not_execution_log": true
+}

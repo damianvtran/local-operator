@@ -54,6 +54,29 @@ command pgid, command preview, start time) so a waiter can say WHO it is
 queued behind. The record is advisory: a record whose ``pid`` is dead is
 stale and ignored, because only the flock can prove a slot is held.
 
+RE-ENTRANT FOR DESCENDANTS
+--------------------------
+A leased command's children are inside its lease. The holder exports
+``LOCAL_OPERATOR_HEAVY_LEASE=<slot>:<fd>`` (:data:`HEAVY_LEASE_INHERITED_ENV`)
+beside the descriptor it passes down, and :func:`acquire` (so the bash tool,
+including a nested lop runtime's, and ``lop services heavy run``) and
+``heavy wait`` first check it with :func:`inherited_lease`. Verified means the
+fd is open on this very ``slot-<i>.lock``, the slot's live record names a pid
+other than the checking process, and a non-blocking ``flock`` on the fd
+succeeds. A separately opened description is refused by the holder's lock, so
+only the holder's own description passes; and since the holder itself also
+passes that probe on its own fd, the pid check rules the holder out, leaving
+its descendants. Then the command runs under that slot without taking another,
+and a ``nested`` audit line is written. Anything less (a closed fd, a different
+file, a lock not held, this process's own lease, a bare or forged variable) is
+ignored and the command queues as before. A nested run SHARES its ancestor's
+slot and never gets one of its own: it is inside the ancestor's lease exactly
+as a backgrounded child is, so if it outlives the ancestor it runs on with no
+slot (the same residual as the self-backgrounding bullet above). Why:
+on 2026-11-20 a bash-tool lease on a ``go test -race`` line held the only slot
+while a ``lop services heavy run`` inside that same line queued behind it for
+its whole 3300 s timeout, and every other heavy command was refused at 900 s.
+
 USING AND DISABLING IT
 ----------------------
 The ``bash`` tool classifies each command with :func:`is_heavy` and, for a
@@ -70,15 +93,20 @@ from and never capped by the command's own ``timeout``).
 from __future__ import annotations
 
 import asyncio
+import configparser
 import json
 import math
 import os
 import re
 import shlex
+import stat
 import time
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
+
+from local_operator import heavy_audit
 
 try:  # POSIX only; Windows has no flock and runs without the lease.
     import fcntl
@@ -104,6 +132,25 @@ HEAVY_JOBS_ENABLED_DEFAULT = True
 #: slots both of them count.
 HEAVY_JOBS_SLOTS_ENV = "LOCAL_OPERATOR_HEAVY_JOB_SLOTS"
 HEAVY_JOBS_WAIT_SECONDS_ENV = "LOCAL_OPERATOR_HEAVY_JOB_WAIT_S"
+
+#: Names the slot a leased command runs under, as ``"<slot>:<fd>"``, exported to
+#: the command's environment beside the inherited lock descriptor itself (the
+#: bash tool and ``lop services heavy run`` both pass that fd down).
+#:
+#: WHY (the 2026-11-20 deadlock): the bash tool leased a whole line because it
+#: contained ``go test -race`` and handed the lock fd to it; a ``lop services
+#: heavy run --timeout 3300`` INSIDE that same line then queued for the slot its
+#: own ancestor held, and waited out its whole timeout while every other heavy
+#: command on the machine was refused at 900 s. The holder was alive, so no
+#: liveness or pid-reuse check could see anything wrong: the lease simply was not
+#: re-entrant. A descendant of a holder is already inside the lease, so it runs
+#: under that slot instead of queueing for a second one.
+#:
+#: The variable alone is NEVER authority (any process can set it, and a stale one
+#: is inherited by every grandchild): :func:`inherited_lease` trusts it only once
+#: the named descriptor is proved to be the holder's own open lock.
+HEAVY_LEASE_INHERITED_ENV = "LOCAL_OPERATOR_HEAVY_LEASE"
+_INHERITED_MARKER = re.compile(r"(\d{1,6}):(\d{1,9})")
 #: ``0`` (or unset) means "size from the host" (:func:`auto_slot_count`).
 HEAVY_JOBS_SLOTS_DEFAULT = 0
 #: Fifteen minutes: long enough to outlast a typical 5-10 minute build ahead in
@@ -131,7 +178,10 @@ _MAX_SLOTS = 4
 
 #: How often a waiter retries; flock(LOCK_NB) is a syscall, so this is cheap.
 _POLL_SECONDS = 0.25
-#: Command preview length in records and messages: enough to recognise a build.
+#: Former raw-preview length of the holder record's ``command``. The record now
+#: stores :func:`heavy_audit.command_label` (argv[0] plus a filtered subcommand)
+#: instead, so no argv text reaches ``slot-N.json``, the status rows or the
+#: waiter messages (PR #4264 Q3); kept as an outer bound on the stored label.
 PREVIEW_CHARS = 80
 
 
@@ -145,6 +195,33 @@ class HeavyClass:
     #: the lease would last as long as the server (PR #4104 R2-1). The caller
     #: prints a note telling the agent to run the build on its own so it queues.
     long_lived: bool = False
+    #: The line also POLLS the lease (``lop services status`` inside a loop):
+    #: leased, it would hold the slot it waits for and wait on itself until
+    #: killed (2026-11-22: ~21 min, two other sessions timed out behind it). The
+    #: bash tool refuses such a line before taking a slot; see :func:`polls_lease`.
+    polls_lease: bool = False
+
+    def label(self, command: str) -> str:
+        """The holder label: the segment that made the line heavy, else argv[0].
+
+        :func:`heavy_audit.command_label` names a line by its FIRST command, so
+        on 2026-11-20 ``cd … && rm -rf probe && … go test -race …`` held the
+        machine's slot as ``rm`` and the operator could not tell what was
+        running. ``reason`` is the classifier's own short name for the heavy
+        segment (``go test``, ``pnpm build``); it still goes through
+        ``command_label``'s privacy filter, and a reason that is not a command
+        (``memory_mb=2048``) falls back to the line's label. The line's label
+        also wins when it merely REFINES the reason's: the classifier normalises
+        ``make test-all`` to the reason ``make test``, and the line's own
+        ``make test-all`` (both already privacy-filtered) says more (PR #4351
+        N1). A different first command (``make lint && make test-all``) keeps
+        the reason's label.
+        """
+        named = heavy_audit.command_label(self.reason)
+        line = heavy_audit.command_label(command)
+        if named == "?" or line.startswith(named):
+            return line
+        return named
 
 
 @dataclass(frozen=True)
@@ -205,6 +282,8 @@ _PREFIX_WRAPPERS: dict[str, tuple[int, frozenset[str]]] = {
     "stdbuf": (0, frozenset({"-i", "-o", "-e"})),
     "ionice": (0, frozenset({"-c", "--class", "-n", "--classdata"})),
     "caffeinate": (0, frozenset({"-t", "-w"})),
+    # `arch -arm64 pod install`: the Apple Silicon spelling of CocoaPods.
+    "arch": (0, frozenset()),
     "taskset": (1, frozenset()),
     "chrt": (1, frozenset()),
     "prlimit": (0, frozenset({"-p", "--pid", "-o", "--output"})),
@@ -270,8 +349,84 @@ _SHALLOW_HEAVY_TOOLS = {"esbuild", "tsc", "vue-tsc", "vitest", "jest", "electron
     "webpack",
     "rollup",
 }
+#: ``xcodebuild`` options that only PRINT something (versions, schemes, build
+#: settings, destinations); anything else compiles or tests. Single-dash
+#: spellings, which :data:`_INFO_FLAGS_ANYWHERE` does not cover.
+_XCODEBUILD_INFO_FLAGS = frozenset(
+    {"-version", "-list", "-showsdks", "-showBuildSettings", "-showBuildSettingsForIndex"}
+    | {"-showdestinations", "-showTestPlans", "-usage", "-help", "-license"}
+    | {"-checkFirstLaunchStatus", "-runFirstLaunch"}
+)
+
+#: Placeholder for a ``$(…)``/backtick substitution, masked out of the line
+#: before tokenising. Why (node2, 2026-11-18): ``env $(env | grep -o
+#: '^CMUX_[A-Z_]*' | sed 's/^/-u /') -u NO_COLOR make test-affected`` split
+#: on the substitution's own ``(``/``|``/``)``, so the segment that held
+#: ``make test-affected`` began with ``-u`` and the whole line came back
+#: unclassified: a heavy run with no slot, which is how node2 OOM'd before the
+#: lease existed. The substitution's body is classified on its own instead.
+_SUBST = "__lop_subst__"
+
+#: pytest options that consume the NEXT argument, so it is not a test target
+#: (``-k expr``, ``--deselect x``). The ``--opt=value`` form needs no entry.
+_PYTEST_VALUE_OPTS = frozenset(
+    {"-k", "-m", "-p", "-c", "-o", "-W", "-r", "--rootdir", "--confcutdir", "--deselect"}
+    | {"--ignore", "--ignore-glob", "--durations", "--maxfail", "--tb", "--junitxml"}
+    | {"--basetemp", "--timeout", "--dist", "--log-level", "--override-ini", "--import-mode"}
+    | {"--cov", "--cov-report", "--max-worker-restart", "--config-file", "--capture"}
+    # Common plugins' value options (pytest-rerunfailures, -repeat, -html, -cov).
+    | {"--reruns", "--reruns-delay", "--count", "--log-file", "--html", "--cov-config"}
+)
+#: Calls that never run a test: collection listings and plugin/fixture docs.
+_PYTEST_INFO_FLAGS = frozenset({"--collect-only", "--co", "--fixtures", "--markers"})
+#: pytest config files, in pytest's own precedence order per directory.
+_PYTEST_CONFIGS = ("pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
+_PYTEST_CONFIG_MAX_BYTES = 1_000_000
 
 _Seen = frozenset[tuple[str | None, str]]
+
+
+def _mask_substitutions(command: str) -> tuple[str, list[str]]:
+    """``command`` with each top-level ``$(…)``/backtick body replaced by
+    :data:`_SUBST`, plus those bodies.
+
+    Single-quoted text is literal in the shell (``echo '$(pnpm build)'`` runs
+    nothing), so it is left alone. Parentheses nest (``$(a $(b))``); an
+    unbalanced one masks to the end of the line, which errs toward classifying
+    the body rather than hiding what follows it. Linear, no subprocess.
+    """
+    out: list[str] = []
+    bodies: list[str] = []
+    i, n = 0, len(command)
+    in_single = in_double = False
+    while i < n:
+        char = command[i]
+        if char == "\\" and not in_single:
+            out.append(command[i : i + 2])
+            i += 2
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif not in_single and (char == "`" or command.startswith("$(", i)):
+            if char == "`":
+                end = command.find("`", i + 1)
+                end = n if end < 0 else end
+                bodies.append(command[i + 1 : end])
+                i = end + 1
+            else:
+                depth, j = 1, i + 2
+                while j < n and depth:
+                    depth += {"(": 1, ")": -1}.get(command[j], 0)
+                    j += 1
+                bodies.append(command[i + 2 : j - 1 if depth == 0 else j])
+                i = j
+            out.append(_SUBST)
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out), bodies
 
 
 def _unpack(verdict: str | None) -> tuple[str | None, bool]:
@@ -297,6 +452,25 @@ def _shallow_guess(command: str) -> str | None:
         name = os.path.basename(word.strip("'\""))
         if name in _SHALLOW_HEAVY_TOOLS:
             return name
+        if (tool := _native_tool_name(word)) in _NATIVE_MOBILE_TOOLS:
+            after_words: list[str] = []
+            for later in words[index + 1 :]:
+                if later in ("&&", "||", ";", "|", "&"):
+                    break
+                after_words.append(later.strip("'\""))
+            if verdict := _classify_native_mobile(tool, after_words):
+                return verdict
+        is_module = name == "-m" and words[index + 1 : index + 2] == ["pytest"]
+        if name == "pytest" or is_module:
+            # Past the recursion bound a pytest gets the same verdict as a
+            # resolved one, from its words up to the next shell operator.
+            after: list[str] = []
+            for later in words[index + (2 if is_module else 1) :]:
+                if later in ("&&", "||", ";", "|", "&"):
+                    break
+                after.append(later.strip("'\""))
+            if verdict := _classify_pytest(after, None):  # no cwd: token-only
+                return verdict
         if name in _PACKAGE_MANAGERS:
             rest = [w.strip("'\"") for w in words[index + 1 :] if not w.startswith("-")]
             if rest[:1] in (["run"], ["run-script"]):
@@ -370,7 +544,9 @@ def _strip_wrappers(tokens: list[str]) -> list[str]:
                 if tokens[i].startswith("-") and tokens[i] != "-":
                     i += 2 if tokens[i] in value_opts else 1
                     continue
-                if base == "env" and _ENV_ASSIGNMENT.match(tokens[i]):
+                if base == "env" and (_ENV_ASSIGNMENT.match(tokens[i]) or tokens[i] == _SUBST):
+                    # A substitution in env's argument position expands to
+                    # flags/assignments (`env $(… sed 's/^/-u /') make test`).
                     i += 1
                     continue
                 if positionals > 0:
@@ -463,6 +639,11 @@ def _classify_command(
         return _shallow_guess(command)
     heavy: str | None = None
     long_lived = False
+    command, bodies = _mask_substitutions(command)
+    for body in bodies:
+        # `$(pnpm build)` still runs the build; only its heaviness counts, since
+        # a watcher's output can never be substituted (it would never end).
+        heavy = heavy or _unpack(_classify_command(body, cwd, depth + 1, seen))[0]
     for segment in _segments(command):
         if segment[0] in ("cd", "pushd"):
             cwd = _cd(cwd, segment[1:])
@@ -494,6 +675,49 @@ def _shell_c_string(args: list[str]) -> str | None:
         if "c" in arg[1:]:
             return args[i + 1] if i + 1 < len(args) else None
         i += 1
+    return None
+
+
+_NATIVE_MOBILE_TOOLS = frozenset({"xcodebuild", "pod-install", "expo", "pod", "eas", "eas-cli"})
+
+
+def _native_tool_name(token: str) -> str:
+    """The tool a token names: no quotes, directory or npx ``@version``; the
+    package ``@expo/cli`` (what ``npx @expo/cli`` runs) is ``expo``."""
+    token = token.strip("'\"")
+    if re.fullmatch(r"@expo/cli(@[^/]*)?", token):
+        return "expo"
+    return re.sub(r"@[^/]*$", "", os.path.basename(token))
+
+
+def _classify_native_mobile(program: str, args: list[str]) -> str | None:
+    """Native iOS/Expo build tools: ``xcodebuild``, ``expo run:ios|prebuild``,
+    ``pod install``/``pod-install``, ``eas build --local``.
+
+    Why (2026-11-22): the lease counted none of these, so several lanes compiled
+    iOS apps at once and the host reached load 290-750 on 14 cores. ``program``
+    may carry an npx version (``eas-cli@latest``). Informational calls
+    (``xcodebuild -version|-list``, ``pod --version``, ``-h``) and everything else
+    (``expo start``, ``pod repo update``, a REMOTE ``eas build``) are not heavy.
+    """
+    if "-h" in args:  # `-h` is help for these tools (`xcodebuild -help` is listed below)
+        return None
+    first = _positionals(args)[:1]
+    if program == "xcodebuild":
+        return None if any(a in _XCODEBUILD_INFO_FLAGS for a in args) else "xcodebuild"
+    if program == "pod-install":
+        return "pod install"
+    # Subcommand anywhere in the line, not the first positional: an option VALUE
+    # can come first (`pod --project-directory ios install`, `expo --config a run:ios`).
+    if program == "pod" and "install" in args:
+        return "pod install"
+    if program == "expo":
+        for sub in ("run:ios", "prebuild"):
+            if sub in args:
+                return f"expo {sub}"
+    local = any(a in ("--local", "--local=true") for a in args)
+    if program in ("eas", "eas-cli") and first == ["build"] and local:
+        return "eas build --local"
     return None
 
 
@@ -592,14 +816,24 @@ def _classify_segment(
 ) -> str | None:
     if depth > _MAX_DEPTH:
         return _shallow_guess(" ".join(tokens))
-    tokens = _strip_wrappers(tokens)
+    stripped = _strip_wrappers(tokens)
+    # Assignments in the prefix (`PYTEST_ADDOPTS=-n8 pytest x.py`, also via
+    # `env`) are part of what runs; only the command text counts, never this
+    # process's own environment.
+    assignments = [t for t in tokens[: len(tokens) - len(stripped)] if _ENV_ASSIGNMENT.match(t)]
+    tokens = stripped
     if not tokens:
         return None
     program = os.path.basename(tokens[0])
+    if (tool := _native_tool_name(tokens[0])) in _NATIVE_MOBILE_TOOLS:
+        program = tool  # `expo@latest`, `eas-cli@12`, `@expo/cli`: strip the package spec
     args = tokens[1:]
-    if (len(args) == 1 and args[0] in _VERSION_FLAGS) or any(
-        a in _INFO_FLAGS_ANYWHERE for a in args
-    ):
+    # pytest's `-v` is VERBOSE (its version flag is `-V`/`--version`): a bare
+    # `pytest -v` is a whole-suite run and must reach the pytest rules.
+    version_call = len(args) == 1 and args[0] in _VERSION_FLAGS
+    if version_call and program in ("pytest", "py.test") and args[0] == "-v":
+        version_call = False
+    if version_call or any(a in _INFO_FLAGS_ANYWHERE for a in args):
         # `tsc --version`, `pnpm build --help`: an informational call is not a build.
         return None
     if program in _SHELLS:
@@ -610,7 +844,8 @@ def _classify_segment(
     ):
         # The bounded runner AGENTS.md prescribes for heavy runs: `… -- <cmd>`.
         rest = args[args.index("--") + 1 :] if "--" in args else []
-        return _classify_segment(rest, cwd, depth + 1, seen) if rest else None
+        # The runner passes its environment on, so the assignments ride along.
+        return _classify_segment([*assignments, *rest], cwd, depth + 1, seen) if rest else None
     if program in _PACKAGE_MANAGERS:
         verdict = _classify_pm(program, args, cwd, depth, seen)
         if verdict is not None or program != "bun":
@@ -665,27 +900,210 @@ def _classify_segment(
         return f"{program} {heavy}" if heavy else None
     if program in ("cargo", "go") and args[:1] and args[0] in ("build", "test"):
         return f"{program} {args[0]}"
+    if program == "bundle" and args[:1] == ["exec"]:
+        # `bundle exec pod install`: the Gemfile-pinned CocoaPods most iOS repos use.
+        rest = [a for a in args[1:] if a != "--"]
+        return _classify_segment(rest, cwd, depth + 1, seen) if rest else None
+    if native := _classify_native_mobile(program, args):
+        return native
     if program == "make" and any(a.startswith("test") for a in args if not a.startswith("-")):
         return "make test"
+    if program == "affected_tests.py" or (
+        _PYTHON.fullmatch(program) and args[:1] and os.path.basename(args[0]) == "affected_tests.py"
+    ):
+        # `make test-affected`'s engine: `--run`/`--evidence` run the selection
+        # (node2 measured 1139 s / 6720 tests with no slot); bare, it only lists.
+        return "affected_tests --run" if {"--run", "--evidence"} & set(args) else None
     pytest_args: list[str] | None = None
     if program in ("pytest", "py.test"):
         pytest_args = args
     elif _PYTHON.fullmatch(program) and args[:2] == ["-m", "pytest"]:
         pytest_args = args[2:]
     if pytest_args is not None:
-        # Only a PARALLEL pytest is heavy: `-n 8` forks eight interpreters,
-        # each importing the whole package. A single targeted file is not.
-        for index, arg in enumerate(pytest_args):
-            if arg in ("-n", "--numprocesses"):
-                value = pytest_args[index + 1] if index + 1 < len(pytest_args) else ""
-            elif match := re.fullmatch(r"-n(\S+)|--numprocesses=(\S+)", arg):
-                value = match.group(1) or match.group(2)
-            else:
-                continue
-            # `-n 0` is xdist's "run in-process": one interpreter, not heavy.
-            if value != "0":
-                return "pytest -n"
+        env_addopts = next(
+            (t.split("=", 1)[1] for t in reversed(assignments) if t.startswith("PYTEST_ADDOPTS=")),
+            "",
+        )
+        try:
+            env_args = shlex.split(env_addopts)
+        except ValueError:
+            env_args = []
+        return _classify_pytest(pytest_args, cwd, env_args)
+    return None
+
+
+def _xdist_workers(args: list[str]) -> str | None:
+    """The LAST ``-n`` value in ``args`` (pytest lets the last one win), or None."""
+    value: str | None = None
+    for index, arg in enumerate(args):
+        if arg in ("-n", "--numprocesses"):
+            value = args[index + 1] if index + 1 < len(args) else ""
+        elif match := re.fullmatch(r"-n(\S+)|--numprocesses=(\S+)", arg):
+            # argparse reads `-n=2` as 2, like `--numprocesses=2`.
+            value = match.group(1).removeprefix("=") if match.group(1) else match.group(2)
+        elif arg == "-pno:xdist" or (arg == "-p" and args[index + 1 : index + 2] == ["no:xdist"]):
+            return "0"
+    return value
+
+
+def _config_file_arg(args: list[str]) -> str | None:
+    """The last ``-c FILE``/``--config-file FILE`` in ``args`` (any spelling), or None."""
+    found: str | None = None
+    for index, arg in enumerate(args):
+        if arg in ("-c", "--config-file"):
+            found = args[index + 1] if index + 1 < len(args) else None
+        elif arg.startswith("--config-file="):
+            found = arg.split("=", 1)[1]
+        elif arg.startswith("-c") and not arg.startswith("--"):
+            found = arg[2:].removeprefix("=")
+    return found
+
+
+def _read_pytest_config(path: Path, explicit: bool) -> list[str] | None:
+    """``addopts`` from one config file; None when it is not a pytest config.
+
+    ``explicit`` (a ``-c`` file) makes the file THE config even without a
+    pytest section, as pytest does. Bounded: regular files of at most
+    :data:`_PYTEST_CONFIG_MAX_BYTES`; any read/parse failure means no addopts.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size > _PYTEST_CONFIG_MAX_BYTES:
+            return [] if explicit else None
+        text = path.read_text(encoding="utf-8")
+        if path.suffix == ".toml":
+            tool = tomllib.loads(text).get("tool", {})
+            section = tool.get("pytest") if isinstance(tool, dict) else None
+            if not isinstance(section, dict):
+                return [] if explicit else None  # a pyproject without pytest config
+            options = section.get("ini_options")
+            if not isinstance(options, dict):
+                # pytest 9's native `[tool.pytest]` table: options sit directly in it.
+                if not (set(section) - {"ini_options"}):
+                    return [] if explicit else None
+                options = section
+            addopts = options.get("addopts", "")
+        else:
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read_string(text)
+            section_name = next(
+                (n for n in ("pytest", "tool:pytest") if parser.has_section(n)), None
+            )
+            if path.name == "setup.cfg" and not explicit:
+                section_name = "tool:pytest" if parser.has_section("tool:pytest") else None
+            elif path.name in ("tox.ini",) and not explicit:
+                section_name = "pytest" if parser.has_section("pytest") else None
+            if section_name is None:
+                # pytest.ini is the config even when empty; tox/setup.cfg are not.
+                return None if path.name in ("tox.ini", "setup.cfg") and not explicit else []
+            addopts = parser.get(section_name, "addopts", fallback="")
+    except (OSError, ValueError, configparser.Error, tomllib.TOMLDecodeError):
+        return []
+    if isinstance(addopts, list):
+        return [str(item) for item in addopts]
+    try:
+        return shlex.split(str(addopts))
+    except ValueError:
+        return []
+
+
+def _pytest_addopts(directory: str | None, config_file: str | None = None) -> list[str]:
+    """``addopts`` from the pytest config pytest would pick at or above ``directory``.
+
+    Why: a "serial" ``pytest tests/unit/x.py`` is not serial in a repo whose
+    addopts say ``-n auto`` (local-operator's do): it forks 2..8 interpreters,
+    each importing the package. Cheap by contract, like :func:`_package_scripts`:
+    a few small file reads, no pytest import; any failure means "no addopts".
+    ``config_file`` (``-c FILE``) replaces the search, as it does in pytest;
+    a relative one needs ``directory`` to resolve against.
+    """
+    if config_file:
+        path = Path(config_file).expanduser()
+        if not path.is_absolute():
+            if not directory:
+                return []
+            path = Path(directory).expanduser() / path
+        return _read_pytest_config(path, explicit=True) or []
+    if not directory:
+        return []
+    try:
+        current = Path(directory).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return []
+    for folder in (current, *current.parents):
+        for name in _PYTEST_CONFIGS:
+            found = _read_pytest_config(folder / name, explicit=False)
+            if found is not None:
+                return found
+    return []
+
+
+#: Effective xdist workers above this make even a targeted pytest heavy.
+#: Manager decision (79, 2026-11-18 11:52Z, PR #4227): two workers are a
+#: quick iteration; ``auto`` forks 2..8 interpreters, each importing the
+#: package, which is the load the slot exists to serialise.
+_PYTEST_LIGHT_MAX_WORKERS = 2
+
+
+def _heavy_workers(value: str | None) -> bool:
+    """True when an effective ``-n`` value exceeds :data:`_PYTEST_LIGHT_MAX_WORKERS`.
+
+    ``auto``/``logical`` count as more. A value we cannot read (``-n "$N"``)
+    counts as more too: a false negative is what the lease exists to prevent.
+    """
+    if value is None:
+        return False
+    try:
+        return int(value) > _PYTEST_LIGHT_MAX_WORKERS
+    except ValueError:
+        return True
+
+
+def _classify_pytest(
+    args: list[str], cwd: str | None, env_addopts: list[str] | None = None
+) -> str | None:
+    """Heavy reason for a pytest run, or None.
+
+    Policy (AGENTS.md "To wait for heavy work"; manager decision 79,
+    2026-11-18 11:52Z, PR #4227): the EFFECTIVE worker count decides. A quick
+    iteration (one file or node id) stays off the slot so it never queues
+    behind a long run, but only while it really is
+    small: local-operator's addopts say ``-n auto``, so a bare
+    ``pytest tests/unit/x.py`` there forks up to 8 interpreters and IS heavy;
+    ``-n 0`` keeps it light. In order:
+
+    * ``--collect-only``/``--fixtures``/``--markers`` never run a test: light.
+    * effective workers (the last ``-n`` across config addopts, then a
+      ``PYTEST_ADDOPTS=`` prefix, then argv: pytest's own precedence;
+      ``-p no:xdist`` serialises) above :data:`_PYTEST_LIGHT_MAX_WORKERS`, or
+      ``auto``/``logical``: heavy. ``-c FILE`` picks the config read.
+    * only test files or node ids (``x.py``, ``x.py::test``): light.
+    * a directory target, or no target at all (the whole ``testpaths``), is
+      heavy even serially and even with ``-k`` (manager decision, PR #4227
+      R3): ``-k`` deselects AFTER collection, and collecting a tree imports
+      every module in it, one interpreter's worth of the suite (node2,
+      2026-11-18: ``pytest -q tests/unit`` ran with no slot).
+    """
+    env_addopts = env_addopts or []
+    if any(arg in _PYTEST_INFO_FLAGS for arg in args):
         return None
+    config = _pytest_addopts(cwd, _config_file_arg([*env_addopts, *args]))
+    if _heavy_workers(_xdist_workers([*config, *env_addopts, *args])):
+        return "pytest -n"
+    targets: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg.startswith("-"):
+            skip = arg in _PYTEST_VALUE_OPTS or arg in ("-n", "--numprocesses")
+        elif not arg.isdigit():
+            # A bare number is an unknown plugin option's value (`--foo 2`),
+            # never a test path worth classifying.
+            targets.append(arg)
+    if not targets:
+        return "pytest (whole suite)"
+    if any(not (t.split("::", 1)[0].endswith(".py")) for t in targets):
+        return "pytest <directory>"
     return None
 
 
@@ -701,7 +1119,17 @@ def is_heavy(
     bundlers (esbuild, vite/electron-vite build, webpack, rollup, next build),
     the TypeScript compiler, JS test runners (vitest, jest, node --test),
     package-manager build/test/typecheck scripts, nx/turbo build|test targets,
-    parallel pytest (``-n``), ``make test*`` and ``cargo``/``go`` build|test.
+    pytest with more than two effective xdist workers (command line over the
+    nearest config's ``addopts`` and a ``PYTEST_ADDOPTS=`` prefix), a directory
+    or whole-suite pytest (``-k`` or not),
+    ``affected_tests.py --run|--evidence``, ``make test*`` and
+    ``cargo``/``go`` build|test, and native iOS builds: ``xcodebuild`` (not its
+    print-only ``-version``/``-list``/``-showBuildSettings`` family),
+    ``expo run:ios|prebuild``, ``pod install``/``pod-install`` and ``eas build
+    --local`` (also under ``npx``/``pnpm exec``/``bundle exec``/``arch``).
+    ``expo run:ios`` stays attached to Metro unless ``--no-bundler`` is given, so
+    it holds its slot until stopped or timed out. ``$(…)``/backtick bodies are classified too,
+    and never hide the command around them.
 
     Classified by what actually runs: wrappers (``cd x &&``, env assignments,
     ``timeout N``, ``nice``, ``taskset``, ``chrt``, ``prlimit``, ``xvfb-run``,
@@ -729,7 +1157,41 @@ def is_heavy(
     reason, long_lived = _unpack(_classify_command(command, cwd, 0))
     if reason is None:
         return None
-    return HeavyClass(reason, long_lived=long_lived)
+    return HeavyClass(reason, long_lived=long_lived, polls_lease=polls_lease(command))
+
+
+#: A lease READ: ``lop|lo|local-operator [options] services [heavy] status``.
+_LEASE_READ = re.compile(
+    r"(?:^|[\s;&|(`'\"])(?:\S*/)?(?:lop|lo|local-operator)(?=\s)[^;&|\n]*?"
+    r"\bservices\s+(?:heavy\s+)?status\b"
+)
+#: A shell loop keyword in command position: start of a line, or after a
+#: separator, newline, brace, ``!``, quote, ``do``/``then``/``else``/``elif``,
+#: so an argument that merely reads ``for`` is not one.
+_SHELL_LOOP = re.compile(
+    r"(?:^|[;&|(){!`'\"\n]|\b(?:do|then|else|elif)\b)[ \t]*(?:while|until|for)\s"
+)
+
+
+def polls_lease(command: str) -> bool:
+    """Whether ``command`` reads the heavy-job lease from inside a shell loop.
+
+    A leased command holds a slot for its whole life, so a loop that waits for
+    the slot to free (``while lop services status | grep "1/1 slots held"; do
+    sleep 50; done; vitest run``) waits for ITSELF. Only a loop counts: one
+    status read beside a heavy command (``lop services status; pytest -n 4``)
+    returns at once and is harmless, so the read must come AFTER a loop keyword.
+
+    Best effort, not a parser: it can still refuse an unrelated loop that
+    follows a loop keyword and a status read in one line (the refusal says to
+    split the call), and it does not see a renamed or variable binary
+    (``$LOP services status``), ``watch lop services status`` or a script that
+    shells out to ``lop``.
+    """
+    return any(
+        _LEASE_READ.search(command, loop.end() - 1) is not None
+        for loop in _SHELL_LOOP.finditer(command)
+    )
 
 
 # -- slot sizing ------------------------------------------------------------
@@ -847,11 +1309,23 @@ def _group_alive(pgid: int) -> bool:
 class Lease:
     """One held slot. Release exactly once; closing the fd drops the flock."""
 
-    def __init__(self, slot: int, fd: int, record_path: Path, record: dict[str, Any]):
+    def __init__(
+        self,
+        slot: int,
+        fd: int,
+        record_path: Path,
+        record: dict[str, Any],
+        audit: dict[str, Any] | None = None,
+    ):
         self.slot = slot
         self._fd: int | None = fd
         self._record_path = record_path
         self._record = record
+        # The heavy_audit fields this lease carries into its ``release`` line
+        # (pid/session/label/memory_mb), plus the monotonic take time for
+        # ``held_s``. None for a Lease built without auditing (tests).
+        self._audit = audit
+        self._taken = time.monotonic()
 
     @property
     def held(self) -> bool:
@@ -873,12 +1347,22 @@ class Lease:
         self._record["pgid"] = pgid
         _write_record(self._record_path, self._record)
 
+    def marker(self) -> str | None:
+        """The :data:`HEAVY_LEASE_INHERITED_ENV` value for a child given :meth:`fileno`."""
+        return None if self._fd is None else f"{self.slot}:{self._fd}"
+
     def __del__(self) -> None:
         # Safety net only: every caller releases explicitly. A Lease dropped on
         # an unexpected path must not keep the machine's slot until exit.
         self.release()
 
-    def release(self) -> None:
+    def release(self, exit_code: int | None = None) -> None:
+        """Free the slot; ``exit_code`` is the command's, for the audit line.
+
+        A negative ``exit_code`` (asyncio/Popen's ``-N``, "killed by signal N")
+        is logged as the shell's ``128 + N`` — see :func:`shell_exit_code` —
+        so the trail reads the same whichever path held the slot.
+        """
         fd, self._fd = self._fd, None
         if fd is None:
             return
@@ -901,6 +1385,198 @@ class Lease:
             os.close(fd)
         except OSError:
             pass
+        # Logged only AFTER the unlock: the audit append must never lengthen
+        # how long the slot is held (heavy_audit "CONSTRAINTS"). The next
+        # holder's ``take`` may therefore precede this line by microseconds;
+        # serialization is proved by intervals (take ts + waited, release ts -
+        # held_s), not by line order.
+        if self._audit is not None:
+            heavy_audit.record(
+                self._record_path.parent,
+                "release",
+                slot=self.slot,
+                held_s=round(time.monotonic() - self._taken, 3),
+                exit=shell_exit_code(exit_code),
+                **self._audit,
+            )
+
+
+class InheritedLease:
+    """A slot held by an ANCESTOR, proved through the lock descriptor it passed down.
+
+    Shaped like :class:`Lease` (``slot``, ``held``, ``fileno``, ``note_pgid``,
+    ``release``, ``marker``) so the bash tool and ``heavy run`` spawn under it
+    with their ordinary code, but it owns nothing. ``release`` must never
+    unlock: the descriptor is the ancestor's own open file description, and
+    ``LOCK_UN`` on it would free the ANCESTOR's slot while its command is still
+    running. The ancestor's release (or the last copy closing) frees the slot,
+    exactly as before, and its record stays the one ``status`` shows.
+    """
+
+    def __init__(self, slot: int, fd: int, holder: Holder):
+        self.slot = slot
+        self._fd = fd
+        #: The ancestor's slot record, for the note and the audit line.
+        self.holder = holder
+
+    @property
+    def held(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        """The inherited descriptor, passed on so a deeper descendant can verify too."""
+        return self._fd
+
+    def note_pgid(self, pgid: int | None) -> None:
+        """No-op: the record is the ancestor's, and names the ancestor's group."""
+
+    def release(self, exit_code: int | None = None) -> None:
+        """No-op, deliberately (see the class docstring)."""
+
+    def marker(self) -> str:
+        return f"{self.slot}:{self._fd}"
+
+
+def _slot_holder(directory: Path, slot: int) -> Holder | None:
+    return next((holder for holder in read_holders(directory) if holder.slot == slot), None)
+
+
+def inherited_lease(
+    directory: Path, environ: Mapping[str, str] | None = None
+) -> InheritedLease | None:
+    """The ancestor's slot this process runs under, or None to queue normally.
+
+    :data:`HEAVY_LEASE_INHERITED_ENV` is a claim, not a credential, so every
+    step below must hold or the marker is ignored (a spoofed or stale marker
+    therefore only queues, as if it were absent):
+
+    1. it parses as ``<slot>:<fd>``;
+    2. ``fstat(fd)`` is ``slot-<slot>.lock`` in ``directory`` (same device and
+       inode): a closed fd, a recycled fd number, or an fd to any other file
+       fails here;
+    3. the slot has a live holder record: :meth:`Lease.release` unlinks the
+       record BEFORE it unlocks, so a lease already released fails here
+       without the lock being touched; and that record's ``pid`` is NOT this
+       process. A process is never its own ancestor, but its own
+       :class:`Lease` passes steps 2 and 4 (its fd is that lock, and a flock
+       on its own description is a no-op). A bare marker reaches a process
+       routinely (a Python or JVM runner in between keeps the environment and
+       drops the fd), so once the ancestor has released and this process's
+       own later lease lands on the same fd number, the marker would
+       otherwise wave a second heavy job past the queue (PR #4351 R1).
+       Every genuine descendant checks against someone else's record: the
+       bash tool's command, or ``heavy run``'s child, has its own pid, and a
+       nested runtime's record names the outer harness. Subagents share their
+       runtime's pid, so a runtime whose bash tool finds its OWN pid on the
+       slot is looking at a sibling session's lease, never an ancestor's;
+    4. ``flock(fd, LOCK_EX | LOCK_NB)`` succeeds. flock locks belong to the
+       open file DESCRIPTION, so on the holder's own description (inherited
+       through fork/exec) this is a no-op that succeeds, while a description
+       opened separately (a process opening the lock file itself) is refused
+       by the real holder's lock. This is the step that proves the ancestor's
+       lease is the one held;
+    5. the same record is still there afterwards. If the ancestor released
+       between 3 and 4, step 4 may have RE-TAKEN the freed lock on the shared
+       description; it is unlocked again (what the ancestor's release was
+       doing anyway) and the marker refused, so no slot is ever held without
+       a record. The unlock happens ONLY when ``slot-<i>.json`` is provably
+       gone: a mismatch can also be a failed read (``read_holders`` skips a
+       file it cannot read or parse), and a record still on disk means the
+       ancestor has not reached its ``LOCK_UN`` yet (release unlinks first),
+       so step 4 was a no-op on a lock it still holds and unlocking would free
+       its slot mid-build (PR #4351 M1). That case is refused untouched.
+    """
+    if fcntl is None:
+        return None
+    value = (os.environ if environ is None else environ).get(HEAVY_LEASE_INHERITED_ENV, "")
+    match = _INHERITED_MARKER.fullmatch(value.strip())
+    if match is None:
+        return None
+    slot, fd = int(match.group(1)), int(match.group(2))
+    try:
+        held = os.fstat(fd)
+        lock = os.stat(directory / f"slot-{slot}.lock")
+    except (OSError, OverflowError, ValueError):
+        return None
+    if not stat.S_ISREG(held.st_mode) or (held.st_dev, held.st_ino) != (lock.st_dev, lock.st_ino):
+        return None
+    before = _slot_holder(directory, slot)
+    # Refused BEFORE the flock probe, so this process's own lease is never
+    # touched (step 3 above).
+    if before is None or before.pid == os.getpid():
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return None
+    after = _slot_holder(directory, slot)
+    if after is None or (after.pid, after.started_at) != (before.pid, before.started_at):
+        if _record_gone(directory, slot):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        return None
+    return InheritedLease(slot, fd, after)
+
+
+def _record_gone(directory: Path, slot: int) -> bool:
+    """True only when ``slot-<slot>.json`` is provably absent (step 5 above).
+
+    Any other ``lstat`` failure counts as present: the one effect of a False
+    here is leaving a lock alone, and that is the safe side when the answer
+    is unknown.
+    """
+    try:
+        os.lstat(directory / f"slot-{slot}.json")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def export_marker(env: MutableMapping[str, str], lease: Lease | InheritedLease | None) -> None:
+    """Name the lock a child inherits in its ``env``; clear any marker otherwise.
+
+    Call it only with a lease whose :meth:`~Lease.fileno` the child really gets
+    (``pass_fds``). Clearing matters as much as setting: a marker inherited
+    from this process's own ancestry would otherwise reach a child that does
+    NOT get the descriptor, where it can only fail verification.
+    """
+    marker = lease.marker() if lease is not None else None
+    if marker is None:
+        env.pop(HEAVY_LEASE_INHERITED_ENV, None)
+    else:
+        env[HEAVY_LEASE_INHERITED_ENV] = marker
+
+
+def record_nested(
+    directory: Path, inherited: InheritedLease, *, session_id: str = "", label: str
+) -> None:
+    """Append the ``nested`` audit line: a descendant ran under its ancestor's slot.
+
+    No ``take``/``release`` pair: the slot changed hands with no one, so the
+    trail's serialization proof (every take released before the next) is
+    unaffected; ``holder`` names the ancestor whose ``take`` covers this.
+    """
+    heavy_audit.record(
+        directory,
+        "nested",
+        slot=inherited.slot,
+        pid=os.getpid(),
+        session=session_id or None,
+        label=label,
+        holder=inherited.holder.pid,
+    )
+
+
+def nested_line(inherited: InheritedLease) -> str:
+    """The one visible note for a command that runs under an ancestor's slot."""
+    return (
+        f"running under heavy-job slot {inherited.slot}, already held by an ancestor"
+        f" ({describe_holders([inherited.holder])}); not queueing for another"
+    )
 
 
 def _write_record(path: Path, record: dict[str, Any]) -> None:
@@ -923,10 +1599,21 @@ def try_acquire(
     session_id: str = "",
     command: str = "",
     pid: int | None = None,
+    waited_s: float = 0.0,
+    memory_mb: int | None = None,
+    label: str | None = None,
 ) -> Lease | None:
-    """Take a free slot without waiting, or return None when all are held."""
+    """Take a free slot without waiting, or return None when all are held.
+
+    Every take is appended to the audit trail (:mod:`local_operator.heavy_audit`)
+    with ``waited_s`` (the caller's time in the queue) and the ``memory_mb``
+    ceiling; a slot whose previous holder died without releasing is logged as
+    ``stale-reclaim`` first. ``label`` overrides the one derived from
+    ``command`` (see :meth:`HeavyClass.label`).
+    """
     if fcntl is None:
         return None
+    label = label or heavy_audit.command_label(command)
     directory.mkdir(parents=True, exist_ok=True)
     for slot in range(max(1, slots)):
         lock_path = directory / f"slot-{slot}.lock"
@@ -939,18 +1626,87 @@ def try_acquire(
         except OSError:
             os.close(fd)
             continue
+        record_path = directory / f"slot-{slot}.json"
+        holder_pid = pid if pid is not None else os.getpid()
+        # A record still on disk while the flock was free means its holder
+        # never ran release() (which unlinks before unlocking): it was killed
+        # and the kernel dropped the lock. Logged here, at the overwrite, not
+        # in read_holders: that skip happens on every status read, and a
+        # status read must never write.
+        _audit_stale(directory, record_path, slot, holder_pid)
         record = {
             "slot": slot,
-            "pid": pid if pid is not None else os.getpid(),
+            "pid": holder_pid,
             "session_id": session_id,
-            "command": command[:PREVIEW_CHARS],
+            # The label, never the command line: this file is readable by the
+            # user's other processes and printed by every status surface, and
+            # a heavy command line routinely carries a token (PR #4264 Q3).
+            "command": label[:PREVIEW_CHARS],
             "started_at": time.time(),
             "pgid": None,
         }
-        record_path = directory / f"slot-{slot}.json"
         _write_record(record_path, record)
-        return Lease(slot, fd, record_path, record)
+        audit = {
+            "pid": holder_pid,
+            "session": session_id or None,
+            "label": label,
+            "memory_mb": memory_mb,
+        }
+        heavy_audit.record(directory, "take", slot=slot, waited_s=round(waited_s, 3), **audit)
+        return Lease(slot, fd, record_path, record, audit)
     return None
+
+
+def shell_exit_code(returncode: int | None) -> int | None:
+    """``-N`` ("killed by signal N", asyncio/Popen) as the shell's ``128 + N``.
+
+    The audit trail's one convention for ``exit``: the ``bash`` tool hands
+    ``Lease.release`` the raw asyncio returncode (``-9``) while ``heavy run``
+    already converts to ``137``; normalizing at the single write site keeps
+    both paths comparable (PR #4264 R3). Idempotent for non-negative codes.
+    """
+    if isinstance(returncode, int) and returncode < 0:
+        return 128 - returncode
+    return returncode
+
+
+def _audit_stale(directory: Path, record_path: Path, slot: int, new_pid: int) -> None:
+    """Log ``stale-reclaim`` for a dead holder's leftover record; best-effort.
+
+    Runs AFTER the slot's flock is taken, so nothing may escape it: an
+    exception here would leave ``try_acquire`` holding an fd it never wraps in
+    a Lease, i.e. a slot locked until this process exits (PR #4264 R1 — a
+    hand-edited or corrupt record's ``started_at: 1e999`` made ``float``
+    overflow). The record is evidence, never a gate.
+    """
+    try:
+        _audit_stale_unguarded(directory, record_path, slot, new_pid)
+    except Exception:  # noqa: BLE001 - see docstring
+        pass
+
+
+def _audit_stale_unguarded(directory: Path, record_path: Path, slot: int, new_pid: int) -> None:
+    try:
+        raw = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(raw, dict):
+        return
+    started = raw.get("started_at")
+    heavy_audit.record(
+        directory,
+        "stale-reclaim",
+        slot=slot,
+        pid=raw.get("pid") if isinstance(raw.get("pid"), int) else None,
+        session=str(raw.get("session_id") or "") or None,
+        label=heavy_audit.command_label(str(raw.get("command") or "")),
+        held_s=(
+            round(max(0.0, time.time() - float(started)), 3)
+            if isinstance(started, (int, float))
+            else None
+        ),
+        reclaimed_by=new_pid,
+    )
 
 
 def read_holders(directory: Path, slots: int | None = None) -> list[Holder]:
@@ -987,13 +1743,23 @@ def read_holders(directory: Path, slots: int | None = None) -> list[Holder]:
                 slot=slot,
                 pid=pid,
                 session_id=str(raw.get("session_id") or ""),
-                command=str(raw.get("command") or ""),
+                # Re-labelled on read: a record written by an older lop holds
+                # the raw 80-char preview, and a holder outlives an upgrade.
+                # command_label is idempotent on labels, so new records pass
+                # through unchanged.
+                command=_holder_label(raw.get("command")),
                 started_at=float(raw.get("started_at") or 0.0),
                 pgid=pgid if isinstance(pgid, int) else None,
                 harness_alive=harness_alive,
             )
         )
     return holders
+
+
+def _holder_label(command: Any) -> str:
+    """A record's ``command`` as a label; ``""`` when the record named none."""
+    text = str(command or "").strip()
+    return heavy_audit.command_label(text) if text else ""
 
 
 def describe_holders(holders: Iterable[Holder]) -> str:
@@ -1047,20 +1813,42 @@ async def acquire(
     reason: str,
     session_id: str = "",
     command: str = "",
+    memory_mb: int | None = None,
     on_wait: Callable[[str], None] | None = None,
     aborted: Callable[[], bool] | None = None,
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
-) -> Lease | Refusal | None:
+    label: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Lease | InheritedLease | Refusal | None:
     """Wait up to ``wait_seconds`` for a slot.
 
     Returns the :class:`Lease`, a :class:`Refusal` when the wait ran out, or
     ``None`` when ``aborted()`` turned true (the caller handles its own abort).
     ``on_wait`` receives the visible "queued behind …" line about once a second.
+
+    Re-entrant: when this process verifiably runs under an ancestor's slot
+    (:func:`inherited_lease`, read from ``environ``, default this process's
+    environment) it returns that :class:`InheritedLease` at once, with a
+    ``nested`` audit line, instead of queueing behind its own ancestor (the
+    2026-11-20 deadlock, see :data:`HEAVY_LEASE_INHERITED_ENV`).
     """
+    label = label or heavy_audit.command_label(command)
+    inherited = inherited_lease(directory, environ)
+    if inherited is not None:
+        record_nested(directory, inherited, session_id=session_id, label=label)
+        return inherited
     started = time.monotonic()
     last_note = -1.0
     while True:
-        lease = try_acquire(directory, slots, session_id=session_id, command=command)
+        lease = try_acquire(
+            directory,
+            slots,
+            session_id=session_id,
+            command=command,
+            waited_s=time.monotonic() - started,
+            memory_mb=memory_mb,
+            label=label,
+        )
         if lease is not None:
             return lease
         waited = time.monotonic() - started
@@ -1068,6 +1856,16 @@ async def acquire(
             return None
         if waited >= wait_seconds:
             holders = tuple(read_holders(directory))
+            heavy_audit.record(
+                directory,
+                "timeout",
+                pid=os.getpid(),
+                session=session_id or None,
+                label=label,
+                waited_s=round(waited, 3),
+                memory_mb=memory_mb,
+                holders=[holder.pid for holder in holders],
+            )
             return Refusal(refusal_message(holders, waited, reason, wait_seconds), holders)
         if on_wait is not None and waited - last_note >= 1.0:
             last_note = waited

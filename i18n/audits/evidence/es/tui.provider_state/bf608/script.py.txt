@@ -1,0 +1,69 @@
+"""Independent Spanish B scoped mechanical audit, no application startup.
+Only official locale/namespace enumeration is narrowed, never validation logic.
+"""
+import hashlib, json, os, re, sys, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+from rich.cells import cell_len
+from rich.text import Text
+from local_operator.i18n import catalogues, messages, runtime
+from scripts.i18n import check
+root = Path('/Users/damian/local-operator/.worktrees/i18n-provider-state-labels')
+ns = 'tui.provider_state'
+print('interpreter', sys.executable)
+print('isolated HOME', os.environ['HOME'], 'config', os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+assert not any(k.startswith('CMUX_') for k in os.environ)
+for mod in (catalogues, messages, runtime, check):
+    print('module', mod.__name__, mod.__file__)
+    assert Path(mod.__file__).resolve().is_relative_to(root)
+expected = {'en': '113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912', 'context': '67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be', 'es': '4567c719cd1492b7edc62ae85ef4769f40a2adc774a1eb49dca072883a36b490'}
+for name in expected:
+    path = root / 'local_operator/i18n/catalogues' / ('en' if name == 'context' else name) / (ns + ('.context' if name == 'context' else '') + '.json')
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    print('input', name, actual)
+    assert actual == expected[name]
+with patch.object(catalogues, 'namespaces', side_effect=lambda loc: (ns,) if loc in ('en','es') else ()), patch.object(catalogues, 'locales', return_value=('en','es')):
+    errors = check.check_catalogues()
+    print('OFFICIAL scoped check_catalogues', errors)
+    assert errors == []
+    en = catalogues.load_catalogue('en', ns)
+    es = catalogues.load_catalogue('es', ns)
+    context = catalogues.context('en', ns)
+    assert len(en) == len(es) == len(context) == 5
+    assert list(en) == list(es) == list(context)
+    for key in en:
+        source, target = en[key], es[key]
+        for value in (source, target):
+            assert runtime.message_arguments(value) == ()
+            assert runtime.plural_selectors(value) == ()
+            assert unicodedata.normalize('NFC', value) == value
+            assert not re.search(r'[{}<>`\[\]]', value)  # No placeholders, tags, markup or protected literals in this group.
+        for locale, value in [('en', source), ('es', target)]:
+            assert runtime.render_message(value, {}, locale) == value
+            rendered = messages.render_record(key, {}, locale=locale)
+            assert rendered.text == value and rendered.source_locale == locale
+            assert Text.from_markup(value).plain == value
+        pseudo = '⟦' + ''.join(c * 2 if c in 'aeiouáéíóú' else c for c in target) + '⟧'
+        assert runtime.render_message(pseudo, {}, 'es') == pseudo
+        assert Text.from_markup(pseudo).plain == pseudo
+        print('KEY', key, 'EN', repr(source), 'ES', repr(target), 'args=0 plural/select=0 NFC=yes protected-token-count=0', 'cells en/es/pseudo', cell_len(source), cell_len(target), cell_len(pseudo))
+        for width in (17, 23, 31):
+            fits = []
+            for value in (source, target, pseudo):
+                t = Text(value); t.truncate(width, overflow='ellipsis'); fits.append(t.plain)
+            print('Rich synthetic segment width', width, 'EN/ES/pseudo', fits)
+    original = catalogues.load_catalogue
+    for kind in ('missing-key', 'added-argument'):
+        def mutated(locale, namespace):
+            result = dict(original(locale, namespace))
+            if locale == 'es':
+                if kind == 'missing-key': del result[next(iter(result))]
+                else: result[next(iter(result))] += ' {unexpected}'
+            return result
+        with patch.object(catalogues, 'load_catalogue', side_effect=mutated):
+            failures = check.check_catalogues()
+            print('NEGATIVE', kind, failures)
+            assert failures
+            assert any(('missing key' if kind == 'missing-key' else 'unexpected') in f for f in failures)
+print('PASS scoped catalogue/context/ICU/real render-record APIs, negative controls, NFC, protected tokens and synthetic Rich/pseudo checks')
+print('LIMIT: not app/native/font/styled integration evidence; widths have no global fixed maximum; no locale eligibility clearance')

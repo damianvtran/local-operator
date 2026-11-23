@@ -1,0 +1,28 @@
+{
+  "locale": "ur",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "status": "passed",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "8dce6c4d11c0",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session host Model declaration",
+    "date": "2026-11-19",
+    "fallback": "none used"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "4a898e257f9c",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session Model declaration",
+    "fallback": "none used",
+    "independent_from_translator_session": "8dce6c4d11c0",
+    "independent_from_first_auditor_session": "da45f1eea614",
+    "date": "2026-11-19",
+    "result": "passed",
+    "findings": 0
+  },
+  "date": "2026-11-19",
+  "note": "i18n/audits/evidence/ur/wire.teams.effective/a2-4a898/record.json; second independent audit 9/9; 0 blocker/major; no visual/runtime/pseudo/fallback proof."
+}

@@ -103,6 +103,7 @@ from local_operator.mobile.auth import (
     sign_cookie,
     verify_cookie,
 )
+from local_operator.mobile.community import community_routes
 from local_operator.mobile.start_receipts import CAPABILITY as START_CAPABILITY
 from local_operator.mobile.start_receipts import (
     START_BODY_MAX_BYTES,
@@ -110,6 +111,7 @@ from local_operator.mobile.start_receipts import (
     StartRefusal,
     canonical_request,
     start_effort,
+    start_target,
 )
 from local_operator.mobile.transfer_receipts import (
     ReceiptsUnreadable,
@@ -383,6 +385,49 @@ STT_TOO_LARGE_ERROR = (
     f"Recording is too large — the limit is {STT_MAX_UPLOAD_BYTES // (1024 * 1024)} MB. "
     "Try a shorter clip."
 )
+
+#: The client classes the transcribe log line may name. The web client and the
+#: phone app declare themselves with a multipart ``client`` field; anything else
+#: (an older client, a probe, a hand-rolled curl) is classified coarsely from
+#: the User-Agent instead of being echoed, because that field is caller input
+#: and this value lands in a log line.
+STT_CLIENT_KINDS = frozenset({"web", "app"})
+
+
+def _stt_log_text(value: str, limit: int = 200) -> str:
+    """Caller-influenced text made safe to place in ONE log record.
+
+    ``media_type`` is the uploaded part's own ``Content-Type`` and ``detail`` is
+    a transport failure's sentence: both are caller text. A newline inside one
+    forges a second record — python-multipart accepts a bare LF in a part-header
+    value, so ``Content-Type: audio/x\\nFAKE status=200`` used to render as two
+    lines, the second reading as a successful call in a grep of ``mobile.log``.
+    Non-printables become spaces rather than escapes: a log file is read, never
+    round-tripped, so a literal ``\\n`` would be noise, not fidelity.
+    """
+    printable = "".join(ch if ch.isprintable() else " " for ch in value)
+    return printable.strip()[:limit]
+
+
+def _stt_client_kind(declared: Any, user_agent: str) -> str:
+    """The coarse client class for the transcription refusal line.
+
+    ``declared`` is the request's own ``client`` field when the body parsed (a
+    pre-parse refusal has none). The User-Agent fallback exists so a 413 that
+    never read the body still says which surface hit the cap; React Native's
+    fetch sends ``okhttp``/``CFNetwork`` and a browser sends ``Mozilla/5.0``,
+    so two substrings separate the shipped surfaces without a UA database.
+    """
+    value = declared.strip().lower() if isinstance(declared, str) else ""
+    if value in STT_CLIENT_KINDS:
+        return value
+    agent = user_agent.lower()
+    if "okhttp" in agent or "cfnetwork" in agent or "expo" in agent:
+        return "app"
+    if "mozilla" in agent or "applewebkit" in agent:
+        return "web"
+    return "unknown"
+
 
 #: Memo for the STATIC half of the lifted feature-flag dict
 #: (``capabilities.features``). Only ``server.features.static_feature_flags``
@@ -7411,6 +7456,13 @@ def build_app(daemon: MobileDaemon):
                 # the full seed) — so a client must feature-detect, never probe.
                 "history_after": {"available": True},
                 "seed_digest": {"available": True},
+                # STEER JOURNAL ORDER: ``?steer_journal_order=1`` on a session
+                # events stream moves each delivered phone steer to its journal
+                # slot (as a ``user`` row), so the live frame agrees with
+                # ``/history``. A RELAY capability like ``seed_digest``: an older
+                # relay ignores the parameter and keeps the send-time slot, so a
+                # client must feature-detect rather than assume the order.
+                "steer_journal_order": {"available": True},
                 # Per-device push preferences (Settings → Notifications): the
                 # register body accepts ``preferences`` and the push worker
                 # gates emits on them (``push_devices.PREFERENCE_KEYS``). A
@@ -7652,6 +7704,25 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         session_id = str(request.path_params["session_id"])
+        # STEER JOURNAL ORDER (``capabilities.steer_journal_order``): a client
+        # that declares it gets each delivered phone steer at its journal slot,
+        # so the live frame agrees with ``/history``. Absent, the frame is the
+        # byte-identical legacy one — installed phones from before
+        # local-operator-mobile #359 mis-place a held row that moves, so the
+        # move must never reach a client that did not ask for it. Resolved per
+        # stream because the frame is shared by every subscriber.
+        # Local import, like ``_projection_frame``'s: the fold module is heavy
+        # and the daemon keeps it off its import path.
+        from local_operator.mobile.projection import (
+            STEER_JOURNAL_ORDER_PARAM,
+            steer_journal_order_frame,
+        )
+
+        steer_order = request.query_params.get(STEER_JOURNAL_ORDER_PARAM) == "1"
+
+        def client_frame(frame: dict[str, Any]) -> dict[str, Any]:
+            return steer_journal_order_frame(frame, declared=steer_order)
+
         try:
             owner_row = await remote_row(session_id)
             if owner_row is not None:
@@ -7664,7 +7735,7 @@ def build_app(daemon: MobileDaemon):
                     try:
                         if view.frame is not None:
                             yield _projection_seed_event(
-                                view.frame, request.query_params.get("have")
+                                client_frame(view.frame), request.query_params.get("have")
                             )
                         while True:
                             try:
@@ -7687,7 +7758,7 @@ def build_app(daemon: MobileDaemon):
                                 yield "event: remote_error\ndata: " + json.dumps(frame) + "\n\n"
                             else:
                                 yield _projection_live_event(
-                                    frame, request.query_params.get("have")
+                                    client_frame(frame), request.query_params.get("have")
                                 )
                     finally:
                         release_remote()
@@ -7806,7 +7877,7 @@ def build_app(daemon: MobileDaemon):
                     # stable between repaints; a mark, Keep or activity that
                     # moves it is a real change the phone must receive in full.
                     yield _projection_seed_event(
-                        stamp_temporary(_projection_frame(projection)), have
+                        client_frame(stamp_temporary(_projection_frame(projection))), have
                     )
                     sent_at = loop.time()
                 while True:
@@ -7825,7 +7896,8 @@ def build_app(daemon: MobileDaemon):
                         if wait > 0:
                             await asyncio.sleep(wait)
                     yield _projection_live_event(
-                        stamp_temporary(_latest_projection_frame(queue, frame)), have
+                        client_frame(stamp_temporary(_latest_projection_frame(queue, frame))),
+                        have,
                     )
                     sent_at = loop.time()
             finally:
@@ -9099,6 +9171,37 @@ def build_app(daemon: MobileDaemon):
             media_type=mime_type,
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
+
+    async def api_session_bridge_card_body(request: Request) -> Response:
+        """The admitted body behind one inbound Team Bridge card (design §4).
+
+        The relay twin of ``GET /v1/desktop/sessions/{id}/bridge-cards/{entry}/body``:
+        both call ``team_bridge.card_body.resolve_card_body`` so a phone and a
+        desktop can never disagree about what a card may show. Keyed by the
+        transcript row the phone can already read, never by a message id, and
+        only for a durable user conversation on THIS machine. Bodies are
+        untrusted third-party text: private, never cached.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry_id = str(request.path_params["entry_id"])
+        directory = await asyncio.to_thread(_durable_user_session_dir, session_id, root=relay_root)
+        if directory is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        from local_operator.team_bridge.card_body import (
+            CardBodyNotFound,
+            resolve_card_body,
+        )
+
+        try:
+            answer = await resolve_card_body(
+                relay_root, session_id, entry_id, sessions_root=directory.parent
+            )
+        except CardBodyNotFound:
+            return JSONResponse({"error": "no such bridge card"}, status_code=404)
+        return JSONResponse(answer, headers={"Cache-Control": "private, no-store"})
 
     async def api_session_attachment(request: Request) -> Response:
         """One attachment's bytes, with byte-Range (206) support.
@@ -10733,6 +10836,14 @@ def build_app(daemon: MobileDaemon):
                         chosen["effort"] = intent["effort"]
                     if intent.get("temporary"):
                         chosen["temporary"] = "1"
+                    # Already off the loop (the receipt store runs ``resolve``
+                    # in a thread). The CANONICAL name is frozen under the same
+                    # key the intent used, keeping ``set(chosen)==set(intent)``;
+                    # ``_resolve_start_target`` raises typed refusals so the
+                    # store's handler cannot misreport them as a broken store.
+                    for kind in ("agent", "team"):
+                        if intent.get(kind):
+                            chosen[kind] = _resolve_start_target(kind, intent[kind])
                     return chosen
 
                 async def spawn_start(chosen: dict[str, str], sid: str) -> int:
@@ -10743,6 +10854,16 @@ def build_app(daemon: MobileDaemon):
                             # its refusal carries the same code/status/sid body.
                             code = json.loads(bytes(refused.body))["code"]
                             raise StartRefusal(code, refused.status_code, session_id=sid)
+                    # Bound HERE, on the fresh start only: a completed replay
+                    # never reaches ``spawn_start``, so it cannot clobber a
+                    # later ``/team clear`` the user made in that chat.
+                    for kind in ("agent", "team"):
+                        if chosen.get(kind):
+                            bound = await asyncio.to_thread(
+                                _bind_started_session, sid, kind, chosen[kind]
+                            )
+                            if not bound:
+                                raise StartRefusal("start_target_unsaved", 503, session_id=sid)
                     return await daemon.spawn_session(
                         chosen["cwd"],
                         provider=chosen["provider"],
@@ -10755,7 +10876,7 @@ def build_app(daemon: MobileDaemon):
                     body, resolve_start, spawn_start, daemon.recover_started_session
                 )
             except StartRefusal as exc:
-                payload: dict[str, Any] = {"error": exc.code, "code": exc.code}
+                payload: dict[str, Any] = {"error": exc.code, "code": exc.code, **exc.detail}
                 if exc.session_id is not None:
                     payload["session_id"] = exc.session_id
                 return JSONResponse(payload, status_code=exc.status)
@@ -10769,8 +10890,25 @@ def build_app(daemon: MobileDaemon):
         # the same validator the keyed path applies inside ``canonical_request``.
         try:
             effort = start_effort(body.get("effort"))
+            target = start_target(body)
         except StartRefusal as exc:
             return JSONResponse({"error": exc.code, "code": exc.code}, status_code=exc.status)
+        # Validated BEFORE the session id is minted, so every refusal leaves
+        # nothing on disk. Off the loop: it builds both registries and walks a
+        # team's roster. The capability flags (``session_start.agent/team``)
+        # exist because THIS path, on an older relay, drops unknown fields: a
+        # phone that sent ``team`` blind would get an unbound chat.
+        canonical_target: tuple[str, str] | None = None
+        if target is not None:
+            try:
+                canonical_target = (
+                    target[0],
+                    await asyncio.to_thread(_resolve_start_target, *target),
+                )
+            except StartRefusal as exc:
+                return JSONResponse(
+                    {"error": exc.code, "code": exc.code, **exc.detail}, status_code=exc.status
+                )
         # NO DIRECTORY NAMED MEANS "WHERE THE USER HAS BEEN WORKING LATELY".
         # The one-tap start posts no cwd at all, so the resolution lives here,
         # server-side, and is the SAME function ``GET /api/directories``
@@ -10804,6 +10942,14 @@ def build_app(daemon: MobileDaemon):
             refused = await _mark_started_temporary(session_id)
             if refused is not None:
                 return refused
+        if canonical_target is not None:
+            # Sidecar before spawn: the child's restore binds the persona at
+            # construction, so the first turn already runs as the chosen one.
+            if not await asyncio.to_thread(_bind_started_session, session_id, *canonical_target):
+                return JSONResponse(
+                    {"error": "start_target_unsaved", "code": "start_target_unsaved"},
+                    status_code=503,
+                )
         try:
             pid = await daemon.spawn_session(
                 cwd,
@@ -11458,6 +11604,17 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
         return _maybe_gzip(request, JSONResponse(payload))
 
+    async def api_start_targets(request: Request) -> Response:
+        """What a new chat may be bound to: agents and teams, for the phone's
+        start picker. Licensed by ``capabilities.session_start.agent/team``.
+        Built off the loop (two registries, ~0.3 s); never 500s -- a registry
+        failure answers ``degraded: true`` with empty lists."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        payload = await asyncio.to_thread(_start_targets_payload)
+        return _maybe_gzip(request, JSONResponse(payload))
+
     async def api_transcribe(request: Request) -> Response:
         """Record-then-upload speech-to-text for the phone's voice mic.
 
@@ -11486,6 +11643,74 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
+        # The refusal line's fields, filled in as the request is read: locals a
+        # ``refusal`` closure reads at call time, so each arm below stays the
+        # one-line answer it was instead of nine copies of the same log call.
+        user_agent = str(request.headers.get("user-agent") or "")
+        client_kind = _stt_client_kind(None, user_agent)
+        session_ref: str | None = None
+        audio_bytes: int | None = None
+        media_type = ""
+        provider = ""
+
+        def refusal(
+            status: int,
+            code: str,
+            body: dict[str, str],
+            *,
+            upstream: str = "-",
+            detail: str = "",
+        ) -> Response:
+            """Answer a transcription refusal with ONE operator log line.
+
+            WHY one line, and this shape: a phone report says "transcription
+            failed" and this route used to answer with a status and nothing
+            else, so afterwards nobody could name the hop (ours, Radient's, the
+            provider's) or the reason. These are the fields that split that
+            question: our status and code (also the request log's ``reason``,
+            through ``note_reason``), the provider label, the upstream status
+            or exception class, the client class, the session, the size and
+            the media type.
+
+            WHAT IS NEVER HERE: the audio, the Authorization header, the
+            upstream body (it can carry a credential or an account name, and
+            the classifier has already read it), any header value or cookie.
+            ``detail`` is the ONE tolerated free text — a transport failure's
+            own sentence ("connection refused"), truncated; it never carries a
+            response body. Both fields below are caller text: ``media`` is
+            allowlisted and ``detail`` goes through ``_stt_log_text`` before
+            this ONE record is written.
+            """
+            note_reason(request.scope, code)
+            # The part's Content-Type is whatever the client sent, and it lands
+            # in a log line: only an allowlisted media type is echoed, anything
+            # else is the literal ``other`` (a pre-parse arm has none: ``-``).
+            # Logged raw, ``audio/x\nFAKE status=200`` forged a second record
+            # that reads as a successful call — see ``_stt_log_text``.
+            if not media_type:
+                media_log = "-"
+            elif media_type in STT_MIME_ALLOWLIST:
+                media_log = media_type
+            else:
+                media_log = "other"
+            detail_log = _stt_log_text(detail) if detail else ""
+            logger.warning(
+                "mobile transcription refused: status=%s code=%s provider=%s upstream=%s "
+                "client=%s session=%s bytes=%s media=%s%s",
+                status,
+                code,
+                provider or "-",
+                upstream,
+                client_kind,
+                session_ref or "-",
+                # The audio part's own size once it was read; the declared body
+                # length when the header refused it before the parse.
+                "-" if audio_bytes is None else audio_bytes,
+                media_log,
+                f" detail={detail_log}" if detail_log else "",
+            )
+            return JSONResponse(body, status_code=status)
+
         declared = request.headers.get("content-length")
         if declared is not None and declared.isdigit():
             # Multipart framing costs a few hundred bytes; the 1 MB of slack
@@ -11493,35 +11718,55 @@ def build_app(daemon: MobileDaemon):
             # admitting a sizeably larger one (the post-read check is the real
             # bound).
             if int(declared) > STT_MAX_UPLOAD_BYTES + (1 << 20):
-                return JSONResponse({"error": STT_TOO_LARGE_ERROR}, status_code=413)
+                audio_bytes = int(declared)
+                return refusal(413, "stt_too_large", {"error": STT_TOO_LARGE_ERROR})
         try:
             form = await request.form()
-        except Exception:  # noqa: BLE001 — a malformed multipart body is a 422, not a 500
-            return JSONResponse({"error": "invalid multipart body"}, status_code=422)
-        from starlette.datastructures import UploadFile as StarletteUploadFile
-
-        audio = form.get("audio")
-        if not isinstance(audio, StarletteUploadFile):
-            return JSONResponse({"error": "audio file is required"}, status_code=422)
-        try:
-            payload = await audio.read()
-        finally:
-            await audio.close()
-        if not payload:
-            return JSONResponse({"error": "audio file is empty"}, status_code=422)
-        if len(payload) > STT_MAX_UPLOAD_BYTES:
-            return JSONResponse({"error": STT_TOO_LARGE_ERROR}, status_code=413)
-        media_type = str(audio.content_type or "").split(";", 1)[0].strip().lower()
-        if media_type not in STT_MIME_ALLOWLIST:
-            return JSONResponse(
-                {"error": f"Unsupported audio format: {media_type or 'unknown'}."},
-                status_code=422,
+        except Exception as exc:  # noqa: BLE001 — a malformed multipart body is a 422, not a 500
+            return refusal(
+                422,
+                "stt_invalid_multipart",
+                {"error": "invalid multipart body"},
+                upstream=type(exc).__name__,
             )
+        from starlette.datastructures import UploadFile as StarletteUploadFile
 
         def _optional_field(name: str) -> str | None:
             """A form text field, or None when absent/blank (forward-compat)."""
             value = form.get(name)
             return value if isinstance(value, str) and value.strip() else None
+
+        # WHO is calling, for the log line only: an allowlisted ``client`` word
+        # (never echoed) and the session, kept only when it matches the daemon's
+        # own id shape — anything else is dropped rather than written out. Read
+        # here, before the audio checks, so a 413/422 still names its caller.
+        client_kind = _stt_client_kind(_optional_field("client"), user_agent)
+        declared_session = _optional_field("session_id")
+        if declared_session is not None:
+            from local_operator.session.attention import _SESSION_ID_RE
+
+            if _SESSION_ID_RE.fullmatch(declared_session):
+                session_ref = declared_session
+
+        audio = form.get("audio")
+        if not isinstance(audio, StarletteUploadFile):
+            return refusal(422, "stt_audio_missing", {"error": "audio file is required"})
+        try:
+            payload = await audio.read()
+        finally:
+            await audio.close()
+        audio_bytes = len(payload)
+        media_type = str(audio.content_type or "").split(";", 1)[0].strip().lower()
+        if not payload:
+            return refusal(422, "stt_audio_empty", {"error": "audio file is empty"})
+        if len(payload) > STT_MAX_UPLOAD_BYTES:
+            return refusal(413, "stt_too_large", {"error": STT_TOO_LARGE_ERROR})
+        if media_type not in STT_MIME_ALLOWLIST:
+            return refusal(
+                422,
+                "stt_unsupported_media",
+                {"error": f"Unsupported audio format: {media_type or 'unknown'}."},
+            )
 
         from local_operator.clients._http import APIError
         from local_operator.clients.stt import SttBackendUnavailable
@@ -11548,6 +11793,7 @@ def build_app(daemon: MobileDaemon):
         # provider label and the dispatch both use is the SAME read (the module
         # caches anyway; passing it makes the route's view internally coherent).
         answer = await stt_availability()
+        provider = path_provider_label(answer.get("path"))
         try:
             outcome = await transcribe_audio(
                 payload,
@@ -11558,34 +11804,59 @@ def build_app(daemon: MobileDaemon):
                 cleanup=requested_cleanup or default_cleanup,
                 availability=answer,
             )
-        except SttBackendUnavailable:
+        except SttBackendUnavailable as exc:
             # Defence in depth: availability said available a moment ago (or the
             # caller raced a cache expiry); the fixed sentence keeps the phone's
             # copy stable whatever the rung-level reason was.
-            return JSONResponse(
+            return refusal(
+                503,
+                "stt_unavailable",
                 {
                     "error": "Voice input isn't available on this machine.",
                     "code": "stt_unavailable",
                 },
-                status_code=503,
+                upstream=type(exc).__name__,
             )
         except APIError as exc:
-            status, body = describe_stt_failure(
-                exc, provider=path_provider_label(answer.get("path"))
+            status, body = describe_stt_failure(exc, provider=provider)
+            # A transport failure (no status) never reached the upstream: its own
+            # sentence is the diagnostic and carries no body. A statused refusal
+            # is named by the NUMBER only — its body can carry an account name.
+            transport = exc.status_code is None
+            return refusal(
+                status,
+                str(body.get("code") or "stt_upstream"),
+                body,
+                upstream=str(exc.status_code) if not transport else type(exc).__name__,
+                detail=str(exc) if transport else "",
             )
-            return JSONResponse(body, status_code=status)
         except ValueError as exc:
             # A pre-admission refusal from the client's own validators (prompt
             # length, language shape): 422, the daemon's shape-refusal status.
-            return JSONResponse({"error": str(exc)}, status_code=422)
+            return refusal(
+                422,
+                "stt_invalid_request",
+                {"error": str(exc)},
+                upstream=type(exc).__name__,
+            )
         except RuntimeError as exc:
             # A plain RuntimeError is OURS: the clients raise one only for a
             # server-side configuration fault (no Radient key) or an unforeseen
             # internal error; every upstream failure arrives typed (above).
-            return JSONResponse({"error": str(exc)}, status_code=500)
-        except Exception:  # noqa: BLE001 — an unforeseen fault stays a 500
+            return refusal(
+                500,
+                "stt_internal",
+                {"error": str(exc)},
+                upstream=type(exc).__name__,
+            )
+        except Exception as exc:  # noqa: BLE001 — an unforeseen fault stays a 500
             logger.exception("mobile transcription failed unexpectedly")
-            return JSONResponse({"error": "Voice input failed unexpectedly."}, status_code=500)
+            return refusal(
+                500,
+                "stt_internal",
+                {"error": "Voice input failed unexpectedly."},
+                upstream=type(exc).__name__,
+            )
         return JSONResponse(
             {
                 "text": outcome.text,
@@ -12600,6 +12871,10 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route("/api/sessions/{session_id:str}/attachment", api_session_attachment),
+        Route(
+            "/api/sessions/{session_id:str}/bridge-cards/{entry_id:str}/body",
+            api_session_bridge_card_body,
+        ),
         # The supplement sound family (sound parity, lane C): digest-addressed audio
         # bytes with Range support, and the peaks sidecar beside them. Both are
         # keyed by the beat's own ``sounds[].attachment`` rather than a message
@@ -12653,6 +12928,9 @@ def build_app(daemon: MobileDaemon):
         # needs it BEFORE the composer is usable, and it is a pure read.
         Route("/api/skills", api_skills),
         Route("/api/models", api_models),
+        # The new-chat target picker's listing (agents + teams); gated by the
+        # ``session_start.agent/team`` capability flags.
+        Route("/api/start-targets", api_start_targets),
         Route("/api/usage", api_usage),
         # The ONLY phone usage path that reaches vendors and writes the cache;
         # GET /api/usage above stays write-free (see PAID_USAGE.md "Refresh").
@@ -12733,6 +13011,12 @@ def build_app(daemon: MobileDaemon):
             api_push_device_unrevoke,
             methods=["POST"],
         ),
+        # Relay web's community door (RFC v2.4 §7.2): exactly the member
+        # operations of `community.member_ops.MEMBER_OPERATIONS`, behind this
+        # daemon's own `gate`; no staff operation is reachable over relay.
+        # Every template starts with the literal `/api/community/communities`,
+        # which nothing above declares. See `mobile/community.py`.
+        *community_routes(gate),
         Route("/mark.png", mark_png),
         Route("/manifest.webmanifest", manifest),
         Route("/", index),
@@ -13090,6 +13374,139 @@ def _default_start_cwd() -> str:
         if path.is_dir() and _spawn_dir_allowed(path):
             return str(path)
     return str(Path.home())
+
+
+def _resolve_start_target(kind: str, name: str) -> str:
+    """The canonical name of a Start request's ``agent``/``team``, or a typed refusal.
+
+    BLOCKING (it builds both registries and walks a team's whole roster graph,
+    ~0.3 s on a populated machine), so callers run it via ``asyncio.to_thread``.
+    The SAME validator the desktop create uses (``validate_target``), against the
+    same global registries, so a target one surface accepts the other does too,
+    and validation canonicalises case (``LOPDEV`` -> ``lopdev``).
+
+    It raises :class:`StartRefusal` ITSELF rather than letting ``KeyError`` /
+    ``ValueError`` escape, and that is load-bearing on the keyed path: the
+    receipt store's ``_database`` handler turns any ``KeyError``/``ValueError``
+    raised inside ``resolve()`` into ``create_receipts_unavailable`` -- which
+    would tell the phone its store is broken when the user simply picked a
+    deleted team. ``ProfileRegistryUnavailable`` IS a ``ValueError``, so it is
+    caught first.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.paths import config_dir
+    from local_operator.server.utils.desktop_profiles import (
+        UnresolvedTarget,
+        validate_target,
+    )
+    from local_operator.session.errors import ProfileRegistryUnavailable
+    from local_operator.teams import TeamRegistry
+
+    try:
+        root = config_dir()
+        return validate_target(AgentRegistry(root), TeamRegistry(root), kind, name)
+    except UnresolvedTarget as exc:
+        raise StartRefusal("unknown_start_target", 404, detail=exc.wire_fields()) from exc
+    except KeyError as exc:
+        raise StartRefusal("unknown_start_target", 404) from exc
+    except (ProfileRegistryUnavailable, OSError) as exc:
+        raise StartRefusal("start_target_registry_unavailable", 503) from exc
+    except ValueError as exc:
+        # A roster cycle or one past the nesting limit: the request named a
+        # team that can never launch, which is the caller's answer (400).
+        raise StartRefusal("invalid_start_target", 400) from exc
+
+
+def _bind_started_session(session_id: str, kind: str, name: str) -> bool:
+    """Write and read back ``attachment.json`` for a not-yet-spawned session.
+
+    BLOCKING; run via ``asyncio.to_thread``. The sidecar must exist BEFORE the
+    child spawns: ``Session.__init__`` restores it unconditionally, so the
+    manager role, the team briefs and the roster are bound at construction and
+    the first turn already runs as the chosen identity. The child adopts this
+    directory (``resume=<sid>`` under ``config_dir()/sessions``), as it adopts
+    the temporary mark's. ``False`` means "do not spawn".
+    """
+    from local_operator.paths import config_dir
+    from local_operator.resume import bind_session_attachment
+
+    if not session_id or Path(session_id).name != session_id:
+        return False
+    directory = config_dir() / "sessions" / session_id
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return bind_session_attachment(
+        directory,
+        agent=name if kind == "agent" else "",
+        team=name if kind == "team" else "",
+    )
+
+
+def _start_targets_payload() -> dict[str, Any]:
+    """The body of ``GET /api/start-targets``: what a new chat may be bound to.
+
+    BLOCKING; run via ``asyncio.to_thread``. Projected from the desktop menu's
+    OWN catalogues (``profile_catalogue`` / ``team_catalogue``), never a second
+    listing, so the phone offers exactly the names the desktop offers and the
+    start route will accept. ``label`` is pre-painted through the shared display
+    rules so the phone never reimplements them; ``avatar_sha256`` comes from the
+    same ``agent_avatar.agent_index`` session rows use, so the image is fetched
+    through the existing ``/v1/agents/{agent_id}/avatar?v=`` route.
+
+    A registry failure answers ``degraded: true`` with empty lists (the listing
+    convention), so the picker can say "couldn't load" instead of "you have no
+    agents".
+    """
+    from local_operator import display_labels
+    from local_operator import teams as teams_module
+    from local_operator.agent_avatar import agent_index
+    from local_operator.agents import AgentRegistry
+    from local_operator.paths import config_dir
+    from local_operator.server.utils.desktop_profiles import (
+        profile_catalogue,
+        team_catalogue,
+    )
+    from local_operator.teams import TeamRegistry
+
+    root = config_dir()
+    try:
+        profiles = profile_catalogue(AgentRegistry(root))
+        team_rows = team_catalogue(TeamRegistry(root))
+    except Exception:  # noqa: BLE001 -- a degraded listing, never a 500
+        logger.warning("start targets: registry unreadable", exc_info=True)
+        return {"agents": [], "teams": [], "degraded": True}
+    try:
+        avatars = agent_index(root)
+    except Exception:  # noqa: BLE001 -- avatars are decoration; names still list
+        avatars = {}
+    agents = []
+    for row in profiles:
+        name = str(row["name"])
+        identity = avatars.get(name)
+        agents.append(
+            {
+                "name": name,
+                "label": display_labels.display_form(name, str(row.get("label") or "")),
+                "kind": row.get("kind"),
+                "source": row.get("source"),
+                "description": str(row.get("description") or ""),
+                "agent_id": row.get("agent_id"),
+                "avatar_sha256": identity.avatar_sha256 if identity is not None else None,
+            }
+        )
+    teams = [
+        {
+            "name": str(row["name"]),
+            "label": teams_module.display_form(str(row["name"]), str(row.get("label") or "")),
+            "description": str(row.get("description") or ""),
+            "manager": str(row.get("manager") or ""),
+            "member_count": len(row.get("members") or []),
+        }
+        for row in team_rows
+    ]
+    return {"agents": agents, "teams": teams, "degraded": False}
 
 
 class _PhoneResetLogin(NamedTuple):
@@ -13958,8 +14375,14 @@ def _models_payload() -> dict[str, Any]:
     which the phone renders as "unavailable". Raises whatever ``_list_models``
     raises, which the route answers as a 502.
     """
-    models = _list_models()
-    return {"models": models, "default": _configured_default()}
+    models, provider_status = _list_models()
+    payload: dict[str, Any] = {"models": models, "default": _configured_default()}
+    if provider_status:
+        # ADDITIVE and omitted when empty, the ``efforts`` convention: an older
+        # relay never sends it, so a client already has to read absence as
+        # "nothing to act on", and a healthy owner's body stays byte-identical.
+        payload["provider_status"] = provider_status
+    return payload
 
 
 def _file_stat(path: Path) -> tuple[int, int, int] | None:
@@ -14320,8 +14743,16 @@ def _efforts_field(
     return {} if ladder is None else {"efforts": ladder}
 
 
-def _list_models() -> list[dict[str, Any]]:
+def _list_models() -> tuple[list[dict[str, Any]], dict[str, dict[str, str]]]:
     """The model sheet's rows: what the owner can run, ranked exactly as ``/model``.
+
+    Returns ``(rows, provider_status)``. ``provider_status`` is
+    :meth:`ProviderController.provider_notices` over the live pass's statuses
+    -- provider id -> ``{"status", "name"}`` for a state the owner must act on
+    (today only ``reauth_required``: a stored sign-in whose grant the IdP
+    refused for good). It is the same map the desktop route publishes, so the
+    phone and the desktop say "sign in again" from one fact; it carries no
+    credential detail because it crosses the tunnel.
 
     THE SAME CATALOGUE AND THE SAME ORDER AS THE DESKTOP, by construction rather
     than by convention. This used to walk ``model/registry.SupportedHostingProviders``
@@ -14402,7 +14833,8 @@ def _list_models() -> list[dict[str, Any]]:
             usable=None,
             use_max_context=use_max_context,
         )
-        return _model_rows(cached_rows)
+        # No live pass ran, so there are no statuses to report.
+        return _model_rows(cached_rows), {}
     with closing(store):
         controller = ProviderController(store, directory)
         admitted = controller.persisted_providers()
@@ -14449,7 +14881,7 @@ def _list_models() -> list[dict[str, Any]]:
                 f"Model catalogue unavailable for {', '.join(unavailable)}; "
                 "retry or log in again"
             )
-    return _model_rows(rows)
+    return _model_rows(rows), ProviderController.provider_notices(statuses)
 
 
 #: The login page is server-rendered (not part of the SPA) so the auth gate

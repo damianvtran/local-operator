@@ -1,0 +1,22 @@
+CASE normal admission actual_rc=0 expected_rc=0
+check.py: catalogue checks: 0 problem(s)
+
+CASE missing key actual_rc=1 expected_rc=1
+fr/wire.session_status: missing key 'wire.session_status.recent'
+check.py: catalogue checks: 1 problem(s)
+
+CASE wrong placeholder actual_rc=1 expected_rc=1
+fr/wire.session_status: wire.session_status.retired_label: arguments (('wrong', 'simple'),) != en's (('base', 'simple'),): argument 1 is 'wrong', en's is 'base' (renamed or reordered)
+check.py: catalogue checks: 1 problem(s)
+
+CASE missing many CLDR actual_rc=0 expected_rc=1
+check.py: catalogue checks: 0 problem(s)
+
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/4730cb4c2fb8/scratchpad/audit_fr.py", line 38, in <module>
+    d=copy.deepcopy(fr);mutate(d);check(label,d,1)
+                                  ^^^^^^^^^^^^^^^^
+  File "/Users/damian/.local-operator/sessions/4730cb4c2fb8/scratchpad/audit_fr.py", line 35, in check
+    assert rc==expect,(label,rc)
+           ^^^^^^^^^^
+AssertionError: ('missing many CLDR', 0)

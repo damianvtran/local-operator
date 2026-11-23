@@ -81,7 +81,8 @@ if TYPE_CHECKING:
     from local_operator.buildwatch import OffLoopBuildRead
     from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
 
-from local_operator.asks.surfaces import stamp_answer_surface
+from local_operator.asks.store import parse_mirror_request_id
+from local_operator.asks.surfaces import StampedReceipt, stamp_answer_surface
 from local_operator.harness.approval import (
     ASK_ANSWER_OPS,
     AUTHORITY_OPS,
@@ -96,6 +97,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import SessionProjection
+from local_operator.network import origin as mesh_origin
 from local_operator.operator import report_operator_authority
 from local_operator.operator import verify as operator_verify
 from local_operator.operator.trust import (
@@ -138,6 +140,7 @@ from local_operator.session.runtime.types import (
     PEER_MESSAGE_ID_CAPABILITY,
     QUEUED_MOVE_CAPABILITY,
     RUNTIME_RECORD_KIND,
+    TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY,
     VIEWED_MOVE_REFUSAL,
     ClientKind,
     ClientLocality,
@@ -161,7 +164,13 @@ logger = logging.getLogger(__name__)
 
 
 def _stamp_ask_answer(
-    authority: _ConnectionAuthority, *, op: str, ask_id: str, mirror: bool = False
+    authority: _ConnectionAuthority,
+    *,
+    op: str,
+    ask_id: str,
+    mirror: bool = False,
+    minted: bool = True,
+    attested: Callable[[], bool] | None = None,
 ) -> str:
     """Stamp one wire ask answer's surface (``asks.surfaces``) and log the decision.
 
@@ -172,29 +181,59 @@ def _stamp_ask_answer(
     INFO line per stamp makes "who answered, and could they prove it" readable
     after the fact. Connection facts only: never the answer's content, never
     the proof.
+
+    ``minted``/``attested`` are F2's inputs (``stamp_answer_surface``): the
+    Part C minted-here rule and the app-signature attestation. ``proof=`` in
+    the line names which one carried the stamp (``app-signature``, ``cap`` or
+    ``none``), so an inherited ask stamped ``unverified`` despite a cap reads
+    as such.
     """
+    used: list[bool] = []
+
+    def _attested() -> bool:
+        # Wrapped so the log can tell an attested stamp from a cap one; still
+        # invoked only by ``stamp_answer_surface`` after its locality checks.
+        hit = bool(attested()) if attested is not None else False
+        used.append(hit)
+        return hit
+
     stamped = stamp_answer_surface(
         proved=authority.operator_proved,
         surface=authority.surface,
         locality=authority.locality,
         kind=authority.kind,
         mirror=mirror,
+        minted=minted,
+        attested=_attested if attested is not None else None,
+    )
+    from local_operator.asks import surfaces as _surfaces
+
+    proof = (
+        _surfaces.APP_SIGNATURE_PROOF
+        if any(used)
+        else ("cap" if stamped in _surfaces.GUARD_TRUSTED_SURFACES else "none")
     )
     # ``ask`` (and ``conn.surface``, from the dialer's hello) are client-supplied
     # and unvalidated here, so they are ``%r``: a newline in a forged id must not
     # mint a second, fake "surface=desktop proved=True" line in the very record
     # this log exists to be trusted for (PR #4127 review R1-m1).
     logger.info(
-        "ask answer stamped: op=%s ask=%r surface=%s conn.kind=%s conn.surface=%r "
-        "locality=%s proved=%s",
+        "ask answer stamped: op=%s ask=%r surface=%s proof=%s conn.kind=%s "
+        "conn.surface=%r locality=%s minted=%s proved=%s",
         op,
         ask_id,
         stamped,
+        proof,
         authority.kind or "-",
         authority.surface or "-",
         authority.locality,
+        minted,
         authority.operator_proved,
     )
+    if any(used):
+        # Persisted as ``answered_by.proof`` beside the stamp (R1-m3), so the
+        # audit trail says WHY this answer is ``desktop`` without the log.
+        return _surfaces.ProvenSurface(stamped, _surfaces.APP_SIGNATURE_PROOF)
     return stamped
 
 
@@ -395,9 +434,14 @@ def document_blocks(
     supports_images = bool(getattr(model, "supports_images", True))
     form = document_form(
         provider,
-        admission_wire(provider, supports_responses_api=supports_responses),
+        admission_wire(
+            provider,
+            supports_responses_api=supports_responses,
+            model_id=getattr(model, "model_id", None),
+        ),
         supports_images=supports_images,
         context_window=getattr(model, "context_window", None),
+        model_id=getattr(model, "model_id", None),
     )
     store = AttachmentStore()
     out: list[DocumentContent] = []
@@ -2110,6 +2154,10 @@ def _ack_frame_parts(outcome: Any) -> tuple[str, dict[str, Any]]:
     """
     if isinstance(outcome, AckDetail):
         return outcome.detail, {"attention": outcome.attention, **outcome.fields}
+    if isinstance(outcome, StampedReceipt):
+        # F2: an ask answer's ack names the label the runtime STAMPED, so the
+        # caller reports what was recorded rather than inferring it from its cap.
+        return str(outcome), {"surface": outcome.surface}
     delivery = getattr(outcome, "delivery", None)
     if isinstance(delivery, dict):
         return str(outcome), {"delivery": delivery}
@@ -2154,11 +2202,52 @@ class _ConnectionAuthority:
     #: how an unproven one is told apart (``asks/surfaces.stamp_answer_surface``).
     surface: str = ""
     kind: str = ""
+    #: G6 (mesh-origin-stamp): whether the owner's relay PROVED, on this
+    #: connection, that it holds ``K_relay`` over the peer block it declared
+    #: (``RuntimeServer._relay_attest_reply``). False for every connection that
+    #: sent no valid ``relay_attest`` as its first post-welcome frame.
+    mesh_verified: bool = False
+    #: The PROVED block's ``peer_verified``: whether the relay's link to the peer
+    #: device proved that device's identity in its handshake. Meaningful only with
+    #: ``mesh_verified``; ``verified`` on a stamp is the AND of the two.
+    peer_verified: bool = False
+    #: This runtime's own mesh ``device_id`` (``identity.load().device_id``): who
+    #: MINTED a stamp, so a stamp imported from another device never counts here
+    #: (``origin.mesh_origin_counts``). Empty when this install has no identity.
+    stamped_by: str = ""
     #: ADR 0009 origin of human input on this connection
     #: (:func:`_input_surface_for`), decided once at auth time from the
     #: connection's facts. ``""`` is no connection at all (a direct
     #: ``_dispatch``), which leaves the handle's in-process default.
     input_surface: str = ""
+
+    def mesh_origin(self) -> dict[str, Any] | None:
+        """The G5 stamp for a row or answer this connection writes, or ``None``.
+
+        ``None`` for a LOCAL connection: rule 2 writes no stamp there. Every
+        non-local connection gets one — ``verified`` only when the relay proved
+        itself AND its link proved the peer (§2 rule 3); otherwise the claimed
+        identity is kept for audit with ``verified: false``. Built from these
+        connection facts alone, never from a frame (rule 1).
+        """
+        if self.locality == "local":
+            return None
+        return mesh_origin.build_stamp(
+            self.peer,
+            self.capabilities,
+            verified=self.mesh_verified and self.peer_verified,
+            stamped_by=self.stamped_by,
+        )
+
+
+def _strip_frame_origin(frame: Mapping[str, Any]) -> dict[str, Any]:
+    """``frame`` without any frame-supplied mesh origin stamp (G5 rule 1).
+
+    A stamp is minted by THIS runtime from the connection; a copy in a frame is
+    at best noise and at worst a forgery, so it is dropped before any op reads
+    the frame — for every connection, local ones included.
+    """
+    return {key: value for key, value in frame.items() if key not in mesh_origin.FRAME_ORIGIN_KEYS}
 
 
 #: The auth-frame key the mobile daemon declares on every dial that carries the
@@ -2251,6 +2340,53 @@ async def _answer_noting_surface(
         raise
 
 
+def _ask_answer_stamp(
+    server: Any,
+    op: str,
+    frame: dict[str, Any],
+    authority: _ConnectionAuthority,
+    *,
+    ask_id: str,
+) -> str:
+    """The surface for one queued-ask answer: attestation, then Part C, then cap.
+
+    A MODULE function over ``server`` read with ``getattr``: ``_dispatch`` is
+    also driven on bare namespaces by test rigs that carry only ``_handle``.
+    Minted-here is asked of the HANDLE (the queue that minted the ask knows its
+    own session id); a handle without the probe reads not-minted, fail-closed.
+    """
+    probe = getattr(getattr(server, "_handle", None), "ask_minted_here", None)
+    minted = bool(probe(ask_id)) if callable(probe) else False
+    attest = getattr(server, "_attest", None)
+    from local_operator.asks.app_attest import OP_TO_ACT, image_digests
+
+    act = OP_TO_ACT.get(op) if attest is not None else None
+
+    def attested() -> bool:
+        if attest is None or act is None:
+            return False
+        try:
+            return bool(
+                attest.table.consume(
+                    attest.session_id,
+                    ask_id,
+                    act,
+                    frame.get("answers") if act in ("respond", "revise") else {},
+                    image_digests(frame.get("images")) if act == "respond" else [],
+                    # The SAME coercion the dismiss arm forwards with (R1-m1):
+                    # an injected reason is content nobody attested.
+                    str(frame.get("reason") or "") if act == "dismiss" else "",
+                )
+            )
+        except Exception:  # noqa: BLE001 — R1-m2: a malformed frame is unattested
+            logger.debug("attest: consume raised for ask=%r", ask_id, exc_info=True)
+            return False
+
+    # One stamping + log seam (``_stamp_ask_answer``, incident a-48e3's
+    # ``%r``-quoted line) for every wire answer, attested or not.
+    return _stamp_ask_answer(authority, op=op, ask_id=ask_id, minted=minted, attested=attested)
+
+
 def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:
     """The sender dict a ``peer_message`` card carries, device stamped by the OWNER.
 
@@ -2267,6 +2403,11 @@ def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str,
     sender = dict(raw) if isinstance(raw, Mapping) else {}
     sender.pop(MESH_SENDER_DEVICE_ID_KEY, None)
     sender.pop(MESH_SENDER_DEVICE_NAME_KEY, None)
+    # A sender dict rides peer rows (and their spool lines), which are PEER-
+    # controlled: a stamp smuggled here would sit beside the provenance the owner
+    # trusts. Both spellings go, for every locality (mesh-origin-stamp M-2).
+    for key in mesh_origin.FRAME_ORIGIN_KEYS:
+        sender.pop(key, None)
     if authority.locality == "local":
         return sender
     sender.pop("pid", None)
@@ -2464,6 +2605,20 @@ class _ClientConn:
     #: holds no capability for this runtime — which is the fail-closed state.
     operator_nonce: str = ""
     operator_salt: str = ""
+    #: G6 relay proof material (mesh-origin-stamp §3.1). The owner's relay offers
+    #: ``relay_nonce`` in its auth frame; this runtime mints ``relay_salt`` per
+    #: connection and returns it in the welcome, and the relay then proves itself
+    #: with ``relay_attest`` as its FIRST post-welcome frame. Neither is secret;
+    #: both die with the connection, so a proof is worthless on another one.
+    relay_nonce: str = ""
+    relay_salt: str = ""
+    #: True until the first post-welcome frame has been read: the ONE position a
+    #: ``relay_attest`` is accepted in (M-9). Cleared by that frame, whatever it is.
+    awaiting_first_frame: bool = True
+    #: Set by a valid ``relay_attest``: the relay proved the peer block on this
+    #: connection (``mesh_verified``), and that block's ``peer_verified``.
+    mesh_verified: bool = False
+    peer_verified: bool = False
     #: The operator-signed device certificate this connection declared in its
     #: auth frame, or "" when it declared none. NOT yet verified at the point it
     #: is stored — ``_device_cert_point`` is what resolves it under the anchor,
@@ -2962,6 +3117,7 @@ class RuntimeServer:
                 logger.debug("could not install the interactivity probe", exc_info=True)
         seed = handle.session_projection_seed
         seed.kind = kind
+        self._goal_recovery_enabled = kind != "exec"
         # The projection fold is an OPTIONAL, injected collaborator. A caller
         # that already owns a fold may hand it in and the runtime uses it
         # as-is — only tests do today; every production constructor call
@@ -3076,6 +3232,10 @@ class RuntimeServer:
                 # and the viewer must see the string before it sends the op,
                 # because an unknown op costs it the whole stream.
                 + [ATTACH_ACTIVITY_CAPABILITY]
+                # Unconditional: the routed-inbox lookup is this runtime's own
+                # code (see the constant), and the connector reads the string
+                # to decide whether it may route a Team Bridge message here.
+                + [TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
                 + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
@@ -3281,6 +3441,11 @@ class RuntimeServer:
         #: publisher's own default.
         self._config_root: Path | None = None
         self._server: asyncio.AbstractServer | None = None
+        #: F2: this runtime's app-attestation listener and table (macOS only;
+        #: ``None`` elsewhere or when it could not bind). Read by the ask arms
+        #: of ``_dispatch`` through ``getattr`` so test rigs that build a bare
+        #: namespace in place of a server keep working.
+        self._attest: Any = None
         self._unsubscribe_events: Callable[[], None] | None = None
         # Strong references to the one event writer per subscribed client. A
         # bare create_task can be collected mid-flight, which drops frames.
@@ -4196,6 +4361,31 @@ class RuntimeServer:
         finally:
             loop.close()
 
+    async def _start_attest_listener(self) -> None:
+        """Bind ``<config>/run/attest/<session_id>.sock`` on macOS (F2).
+
+        The path is the app's dial contract (``app_attest.ATTEST_RUN_DIRNAME``),
+        pinned by ``test_the_runtime_binds_the_contract_path``.
+
+        Under this runtime's own config root (the one the record is published
+        in), so an isolated config never shares a listener with the operator's.
+        Any failure is logged and leaves ``_attest`` unset: answers then stamp
+        as they did before this listener existed, which is fail-closed.
+        """
+        from local_operator.asks import app_attest
+
+        if not app_attest.supported():
+            return
+        try:
+            from local_operator.session.runtime.registry import run_dir
+
+            service = app_attest.AttestService(str(self._record.session_id))
+            attest_dir = run_dir(self._config_root, app_attest.ATTEST_RUN_DIRNAME)
+            if await service.start(attest_dir) is not None:
+                self._attest = service
+        except Exception:  # noqa: BLE001 — additive, never a boot gate
+            logger.warning("attest: listener not started", exc_info=True)
+
     async def _serve(self) -> None:
         # HOW STRONG THE CAPABILITY'S BOUNDARY IS ON THIS HOST, reported rather
         # than assumed, and reported HERE so every host says it exactly once (the
@@ -4213,6 +4403,11 @@ class RuntimeServer:
             )
             port = self._server.sockets[0].getsockname()[1]
             self._record.control_port = port
+            # F2: the app's signature-attestation listener, bound BEFORE the
+            # record is published so a client that finds the record can dial
+            # it. Additive and never a boot gate: without it desktop answers
+            # stamp exactly as they did before (``asks/app_attest``).
+            await self._start_attest_listener()
             # BOOT RECONCILIATION (best-effort): a move whose confirmation was
             # lost is settled against where THIS process actually booted, never
             # reverted. Then the one move watcher starts; with no intent it reads
@@ -4315,7 +4510,7 @@ class RuntimeServer:
             # Probed, not required — a handle without the capability (a third-
             # party or reduced host) simply has no goal judge to re-arm.
             rearm_goal_judge = getattr(self._handle, "rearm_goal_judge", None)
-            if callable(rearm_goal_judge):
+            if self._goal_recovery_enabled and callable(rearm_goal_judge):
                 try:
                     await self._handle_call_on_session_loop(rearm_goal_judge)
                 except Exception:  # noqa: BLE001 — additive, never a boot gate
@@ -4516,6 +4711,9 @@ class RuntimeServer:
         self._event_sends.clear()
         if self._server is not None:
             self._server.close()
+        attest, self._attest = self._attest, None
+        if attest is not None:
+            await attest.close()
         clients = list(self._clients.values())
         for conn in clients:
             self._drop_client(conn, reason="runtime shutdown")
@@ -4693,6 +4891,9 @@ class RuntimeServer:
                     logger.debug("could not record the serving tick's death", exc_info=True)
                 continue
             try:
+                tick_goal_recovery = getattr(self._handle, "tick_goal_recovery", None)
+                if self._goal_recovery_enabled and callable(tick_goal_recovery):
+                    tick_goal_recovery()
                 # The FLOOR for the record's ``busy`` bit, not its fix: the
                 # handle republishes at every turn boundary (the session's
                 # ``on_turn_settled`` hook), and this only bounds how stale a
@@ -5463,6 +5664,17 @@ class RuntimeServer:
         # bind it to: a connection that will never be offered a proof does not
         # need one minted.
         server_salt = operator_nonce() if client_nonce else ""
+        # G6: only a RELAYED attach connection can be offered the relay proof —
+        # the owner's relay is the only dialer that writes ``relay_nonce`` (and
+        # always with ``locality: remote``). Same shape check as the operator
+        # nonce; an ill-shaped one degrades to "no proof offered", i.e. unverified.
+        raw_relay_nonce = frame.get("relay_nonce")
+        relay_nonce = (
+            raw_relay_nonce
+            if kind == "attach" and locality == "remote" and is_wire_hex(raw_relay_nonce)
+            else ""
+        )
+        relay_salt = mesh_origin.relay_nonce() if relay_nonce else ""
         # THE PAIRED-DEVICE DECLARATION (stage D). A relay says here that a phone
         # has been paired with THIS machine, and the runtime verifies the
         # certificate under the pinned anchor before it means anything — an
@@ -5530,6 +5742,8 @@ class RuntimeServer:
             cwd_adoption=cwd_adoption,
             operator_nonce=client_nonce,
             operator_salt=server_salt,
+            relay_nonce=relay_nonce,
+            relay_salt=relay_salt,
             device_certificate=device_certificate,
         )
         self._clients[id(writer)] = conn
@@ -5711,6 +5925,10 @@ class RuntimeServer:
                 except ValueError:
                     continue
                 conn.last_seen = time.monotonic()
+                attest_reply = self._relay_attest_reply(conn, frame)
+                if attest_reply is not None:
+                    await self._send_to(conn, attest_reply)
+                    continue
                 self._dispatch_frame(conn, frame)
         except (ConnectionResetError, BrokenPipeError):
             self._drop_client(conn, reason="reader reset")
@@ -9067,6 +9285,13 @@ class RuntimeServer:
                 operator_proved=proved,
                 surface=conn.surface,
                 kind=conn.kind,
+                # ``getattr``: a reader test may hand in a reduced connection
+                # double; absent reads as the fail-closed "not proved".
+                mesh_verified=bool(getattr(conn, "mesh_verified", False)),
+                peer_verified=bool(getattr(conn, "peer_verified", False)),
+                # Loaded only for a non-local connection: a local one writes no
+                # stamp, so it never pays for the identity read.
+                stamped_by=self._mesh_device_id() if conn.locality != "local" else "",
                 input_surface=_input_surface_for(
                     declared_origin=conn.origin,
                     kind=conn.kind,
@@ -9102,6 +9327,8 @@ class RuntimeServer:
         """
         from local_operator.mobile.types import validate_control_frame
 
+        # G5 rule 1: no op ever reads a frame-supplied mesh origin stamp.
+        frame = _strip_frame_origin(frame)
         validate_control_frame(frame)
         h = self._handle
         if op == "acknowledge_attention":
@@ -9196,6 +9423,15 @@ class RuntimeServer:
                 # the operator's own devices can still answer with their
                 # capability. Local attaches keep the default.
                 fields["owner_typed"] = False
+            # G5: the receiver-built stamp rides beside ``owner_typed``. Probed, so
+            # a handle from before the carriage keeps its exact call shape.
+            stamp = authority.mesh_origin()
+            if stamp is not None and "mesh_origin" in parameters:
+                fields["mesh_origin"] = stamp
+            if "_file_admission" in parameters:
+                from local_operator.session.file_provenance import user_admission
+
+                fields["_file_admission"] = user_admission(authority, op)
             if authority.input_surface and "input_surface" in parameters:
                 # ADR 0009: the origin is derived from the AUTHENTICATED
                 # connection, probed like ``owner_typed``; a handle without the
@@ -9243,6 +9479,13 @@ class RuntimeServer:
             if authority.locality != "local" and "owner_typed" in parameters:
                 # Same rule as the prompt op above.
                 fields["owner_typed"] = False
+            stamp = authority.mesh_origin()
+            if stamp is not None and "mesh_origin" in parameters:
+                fields["mesh_origin"] = stamp
+            if "_file_admission" in parameters:
+                from local_operator.session.file_provenance import user_admission
+
+                fields["_file_admission"] = user_admission(authority, op)
             if authority.input_surface and "input_surface" in parameters:
                 # Same rule as the prompt op above: a phone steer into a
                 # desk-started run makes that run mobile-origin.
@@ -9507,8 +9750,12 @@ class RuntimeServer:
             # to be copied verbatim, so anyone holding the record key (a model's
             # own ``bash``, any same-uid process) or a mesh peer with ``prompt``
             # could record ``desktop`` and the guard took it as delete consent.
-            # The frame's ``by`` is ignored; see ``asks/surfaces``.
-            stamped_by = _stamp_ask_answer(authority, op=op, ask_id=str(frame.get("ask_id", "")))
+            # The frame's ``by`` is ignored; see ``asks/surfaces``. F2 adds the
+            # app-signature attestation and the minted-here rule
+            # (``_ask_answer_stamp``), which logs through ``_stamp_ask_answer``.
+            stamped_by = _ask_answer_stamp(
+                self, op, frame, authority, ask_id=str(frame.get("ask_id", ""))
+            )
             if op in ("ask_respond", "ask_revise"):
                 raw = frame.get("answers") or {}
                 if not isinstance(raw, dict):
@@ -9531,6 +9778,12 @@ class RuntimeServer:
                     ask_kwargs.update(
                         await _answer_attachment_kwargs(op, method, wire_images, answers)
                     )
+                # G5: the answer's mesh origin, minted here from the connection
+                # and stored as ``answered_by.mesh_origin``; the store folds a
+                # revision's stamp into it (design §2 rule 4).
+                answer_stamp = authority.mesh_origin()
+                if answer_stamp is not None and _accepts_kw(method, "mesh_origin"):
+                    ask_kwargs["mesh_origin"] = answer_stamp
                 outcome = method(
                     str(frame.get("ask_id", "")),
                     answers,
@@ -9556,13 +9809,17 @@ class RuntimeServer:
                 # ADR 0009 R10: the answer's surface rides to the run it opens. A
                 # decline is an answer too ("decide yourself"); a dismissal asks
                 # the model nothing, so it drives no run and is not noted.
-                return cast(
-                    "str",
-                    await _answer_noting_surface(
-                        h, str(frame.get("ask_id", "")), authority, outcome
-                    ),
+                detail = await _answer_noting_surface(
+                    h, str(frame.get("ask_id", "")), authority, outcome
                 )
-            return cast("str", await outcome)
+            else:
+                detail = await outcome
+            # THE STAMPED LABEL RIDES THE ACK (``surface``, ``_ack_frame_parts``),
+            # so the caller can report what the runtime actually recorded (the
+            # desktop's ``consent_bearing``) instead of inferring it from its own
+            # cap. A ``str`` subclass: direct ``_dispatch`` callers still read
+            # the sentence.
+            return StampedReceipt(str(detail), stamped_by)
         if op == "bridge_decide":
             # TB-02 P1: the VERIFIED door for a bridge decision. The authority
             # seam above has already admitted this frame (capability proof or a
@@ -9600,9 +9857,24 @@ class RuntimeServer:
                 # label) for ANY caller. The handle now records what this seam
                 # decides; a handle without the keyword is a test double or an
                 # owner that never mirrors queued asks.
+                mirrored_id = parse_mirror_request_id(str(frame.get("request_id", "")))
+                minted_probe = getattr(h, "ask_minted_here", None)
                 answer_kwargs["by"] = _stamp_ask_answer(
-                    authority, op=op, ask_id=str(frame.get("request_id", "")), mirror=True
+                    authority,
+                    op=op,
+                    ask_id=str(frame.get("request_id", "")),
+                    mirror=True,
+                    # Part C on the mirrored id (``<ask_id>.<qidx>``). Any other
+                    # request id is a LIVE picker, which only this process can
+                    # have opened, so it is minted here by construction.
+                    minted=(
+                        mirrored_id is None
+                        or (callable(minted_probe) and bool(minted_probe(mirrored_id[0])))
+                    ),
                 )
+            mirror_stamp = authority.mesh_origin()
+            if mirror_stamp is not None and _accepts_kw(h.ask_answer, "mesh_origin"):
+                answer_kwargs["mesh_origin"] = mirror_stamp
             # ADR 0009 R10: a legacy mirrored id names a QUEUED ask (its answer
             # reaches a later run as an ``ask_response`` row); any other id is a
             # live picker in the run in flight.
@@ -11046,6 +11318,10 @@ class RuntimeServer:
                 # connection that will not outlive this list.
                 frame["operator_salt"] = conn.operator_salt
                 frame["operator_proof"] = proof
+            if conn.relay_salt:
+                # G6: the salt the relay's proof must bind. Not a credential;
+                # ``dial.dial_owner`` pops it before the welcome reaches a viewer.
+                frame["relay_salt"] = conn.relay_salt
             await self._send_to(conn, frame)
         finally:
             conn.sending_welcome = False
@@ -11097,6 +11373,98 @@ class RuntimeServer:
         if getattr(self._handle, "session_projection_seed", None) is None:
             return None
         return {"op": "welcome", "data": self._identity_projection()}
+
+    def _relay_key_material(self) -> tuple[bytes, str] | None:
+        """``(K_relay, device_id)``, derived ONCE per runtime and cached (M-10).
+
+        The device seed is read, derived from and discarded inside
+        ``origin.relay_key_for``: this runtime only ever holds the purpose-bound
+        key. Only a SUCCESS is cached — an install paired after this runtime
+        started is picked up on the next relayed connection — and a rotation after
+        caching leaves the old key here, so the relay's new proof fails and the
+        stamp reads unverified (fail-closed, never stale-true). The root is this
+        runtime's own ``config_dir()``, the root its relay shares.
+        """
+        cached = getattr(self, "_relay_key_cache", None)
+        if cached is not None:
+            return cast("tuple[bytes, str]", cached)
+        from local_operator.paths import config_dir
+
+        try:
+            material = mesh_origin.relay_key_for(config_dir())
+        except Exception:  # noqa: BLE001 — no key means no proof: unverified
+            logger.debug("mesh origin: this install's device key is unreadable", exc_info=True)
+            return None
+        if material is not None:
+            self._relay_key_cache = material
+        return material
+
+    def _mesh_device_id(self) -> str:
+        """This install's mesh ``device_id`` for ``stamped_by``, or "" with none."""
+        material = self._relay_key_material()
+        return material[1] if material is not None else ""
+
+    def _relay_attest_reply(self, conn: _ClientConn, frame: Any) -> dict[str, Any] | None:
+        """Handle a ``relay_attest`` on the reader loop; ``None`` for any other frame.
+
+        G6 (mesh-origin-stamp §3.1). Runs on the connection's READER, before the
+        frame is scheduled, because it mutates per-connection state and the
+        dispatcher deliberately holds no ``conn`` (the ``event_mute`` rule).
+
+        POSITION IS PINNED (M-9): accepted ONLY as the first frame after the
+        welcome, on a connection that was offered a salt. Anywhere else it is
+        REFUSED with no state change — so a viewer's frame pumped through the
+        owner's relay after its attest, or a second attempt, can neither verify
+        nor un-verify a connection. One attempt per connection, pass or fail.
+
+        ``verified`` on the stamp is ``proof_ok AND block.peer_verified``: the
+        block is recomputed from the auth frame's ``peer`` and ``capabilities``
+        exactly as the relay built it (``origin.canonical_block``), so a proof over
+        any other identity, link or ``peer_verified`` fails. Logged as facts only,
+        never the proof.
+        """
+        first = conn.awaiting_first_frame
+        conn.awaiting_first_frame = False
+        if not isinstance(frame, dict) or frame.get("op") != mesh_origin.RELAY_ATTEST_OP:
+            return None
+        req = frame.get("req")
+        if not first or not conn.relay_salt:
+            logger.info(
+                "relay attest refused: not the first post-welcome frame of a relayed "
+                "connection (kind=%s locality=%s)",
+                conn.kind,
+                conn.locality,
+            )
+            return {
+                "op": "error",
+                "req": req,
+                "message": "relay_attest is accepted only as the first frame of a relayed dial",
+            }
+        material = self._relay_key_material()
+        block = mesh_origin.canonical_block(conn.peer, conn.capabilities)
+        ok = material is not None and mesh_origin.relay_proof_ok(
+            frame.get("proof"),
+            key=material[0],
+            relay_nonce=conn.relay_nonce,
+            relay_salt=conn.relay_salt,
+            block=block,
+        )
+        if ok:
+            conn.mesh_verified = True
+            conn.peer_verified = block["peer_verified"] is True
+        logger.info(
+            "relay attest: proof_ok=%s peer_verified=%s device=%r network=%r",
+            ok,
+            block["peer_verified"],
+            block["device_id"],
+            block["network_id"],
+        )
+        return {
+            "op": "ack",
+            "req": req,
+            "detail": "relay attested" if ok else "relay not attested",
+            "verified": bool(ok),
+        }
 
     def _welcome_operator_proof(self, conn: _ClientConn) -> str | None:
         """This connection's handshake proof, or ``None`` when there is none to give.

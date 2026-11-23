@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "session.remote_peek",
+  "history_sha256": "4d3dc44bdd16c9b4e5a86cfdfe878b25029c2783fc0c7ff3b4894db6eb4cd880",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "session.remote_peek",
+      "source_sha256": "2dbc9c5cb44bbf8446e3770cf936aac17a12ecea7c9b89c158360b71a30e1b94",
+      "translator": {
+        "agent": "coder",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #4478 at fddaf6021c, one of one keys. Lane: radient/auto. English author: coder (peek: head/query/digest for peers; fc728feacd6c), openai/gpt-6.2-sol fallback after anthropic/claude-opus-5-5 quota failure. Translator: coder (#4478 i18n translate; 6052aeaa5e38) on a translation-only brief, openai/gpt-6.2-sol fallback after anthropic/claude-opus-5-5 HTTP 402 quota failure. Independent auditor: translation-auditor (2c42b87648f0), openai/gpt-6.2-sol fallback after anthropic/claude-opus-5-5 quota failure. Polite आप implied by आज़माएँ/खोलें; इतिहास/बातचीत and glossary रनटाइम; both direct-count units बाइट/संदेश are invariant. Commands and placeholders are byte-exact; remedies first, owning device last. Actual width 59/110 cells via Rich (524,288 bytes, 120 messages). No second audit required: narrow exceptional overflow guidance, not a primary surface or safety copy."
+    }
+  ]
+}

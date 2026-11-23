@@ -1,0 +1,30 @@
+{
+  "kind": "manager-artifact-eligibility-disposition-not-a-linguistic-audit",
+  "candidate_head": "e1c00f8c6bc4c06f2519c63d0ac406e31628dcf8",
+  "decision": "Authorize truthful transport projection of the completed independent semantic audit evidence and private generation for subsequent real-path QA. Do not authorize publication, merge, release or whole-interface clearance.",
+  "evidence": {
+    "unchanged_locales": ["zh-CN", "fr", "ru", "hi", "ur"],
+    "unchanged_locale_basis": "Both actual R2 audits passed with deferred non-blocking minors; current English, context and target bytes match their audited inputs at K2.",
+    "remediated_locales": ["es", "vi"],
+    "remediated_locale_basis": "Both actual R3 independent auditors passed each locale: ES7 fresh plus888 verified compatible records; VI4 fresh plus891 verified compatible records. All eight frozen major findings resolve.",
+    "raw_indexes": ["approval-r2-parent-primary-receipt-index.json", "approval-r3-parent-primary-receipt-index.json"],
+    "no_unknown_identity_promotion": true
+  },
+  "canonical_status_meaning": "A projected canonical passed status records this complete namespace semantic/native-language audit gate only. It does not mean native glyph shaping, rendered fit, production authorization enforcement, whole-interface, CI, deployment or release passed.",
+  "allowed_private_effect": "Use supported ledger.py append with expected-history checks, preserving all raw verdicts and history. Generate/check the private candidate using actual current English-file SHA; compare before/after locale eligibility and record every effect. These locales were already shipped in the baseline; no new locale or security-hold removal is authorized.",
+  "required_extensions": [
+    "Actual separate A/B auditor identities, models, immutable raw paths/hashes/pointers and their verdict scopes",
+    "Actual fresh keys/counts distinct from retained keys/counts with per-key source/target/context and prior-attestation proofs; never label 895 as fresh when it is not",
+    "Unknown historical translator identities remain null/unknown; named repair authors carry only their real changed-key scopes",
+    "Integrator identity marked transport/source-binding only, never auditor",
+    "Private rendering/native/whole-interface/CI/publication/release status explicitly pending or unverified",
+    "Named per-key technical exceptions, deferred minors and all earlier failed/blocked verdicts preserved"
+  ],
+  "stops": [
+    "Any source/target/context/current verdict/actor independence or retention mismatch",
+    "Any eligibility expansion beyond the previously shipped set or any weakened held-locale rule",
+    "Any unsupported receipt projection that would manufacture semantic judgment",
+    "No generated-file hand edit, baseline increase, history rewrite, source-only merge, dependency bootstrap or new network transport"
+  ],
+  "next_gate": "After valid private generation, independent code and real-path QA/design/UX run on a pushed immutable head when ordinary publication is available. Native Urdu shaping and whole-interface proof remain programme requirements, not waived here."
+}

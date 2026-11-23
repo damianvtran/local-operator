@@ -1,0 +1,31 @@
+{
+  "record_reference": "i18n/audits/evidence/hi/tui.provider_state/hi22b/record.json",
+  "hash_algorithm": "sha256",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/audit.log",
+      "sha256": "d9b9b17c1765105ce6e2ce4c8d78b2bf8d943298cb25c136665b5f8dfce9a624"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/directledger-receipt.json",
+      "sha256": "af2b5a0be5b288b239986ca7f3fde5d74485553039363b8b301d489af5a83adf"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/ledger-dry-run.log",
+      "sha256": "b815a1c11038c32c6f8b22658e5e06a86b09f8b9dc724861356da86399695f4f"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/record.json",
+      "sha256": "10a0efeeb80b3cafe20ccb7c1228eef064b3973031a44a3b0c815c4e02d2d145"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/report.md",
+      "sha256": "41b505f58a627f1d7bf79bde92fd22751ea1b9e29a95748a175d1e5c687ba390"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22b/script.py.txt",
+      "sha256": "bea0fa6dfc984a42f224cfd8bcab6732873953892e4fdc382b84181124929403"
+    }
+  ],
+  "self_hash_excluded": true
+}

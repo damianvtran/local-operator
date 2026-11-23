@@ -154,6 +154,10 @@ CREDENTIAL_PLACEMENT_DIGEST_V1 = "credential-placement-digest-v1"
 #: A distinct string (no shipped capability is reused for a new frame kind): a peer
 #: without it is not nudged and keeps counting from its last own ask, as before.
 CREDENTIAL_RENEW_PUSH_V1 = "credential-renew-push-v1"
+#: The working-set move gate (``mobility.request_move``; docs/design/move-working-set.md
+#: §11.1): the ``workset_preflight``/``workset_probe`` phases of ``net_session_move`` and
+#: the ``dry_run``/``working_set`` fields of a local move request.
+SESSION_MOVE_WORKSET_V1 = "session-move-workset-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
@@ -185,6 +189,13 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-update-v1",
     "mesh-restart-v1",
     "zlib-records-v1",
+    # THIS BUILD'S LISTENER SIGNS ITS WELCOME AND ITS DIALER REQUIRES THAT PROOF
+    # (``handshake.verify_welcome``, mesh-listener-auth). DIAGNOSTIC ONLY: it never
+    # gates enforcement — the dialer requires the proof whatever the challenge
+    # advertises, so stripping this string downgrades nothing. It lets ``peers``
+    # say which members verify listeners. ``MESH_PROTOCOL_VERSION`` is NOT bumped,
+    # so an old dialer still links to a new listener (the update path).
+    "listener-proof-v1",
     # THE COMPLETE PEER-SOURCE CONTRACT'S STORED-READ HALF. Advertised by every
     # build that can serve typed source purposes (metadata/payload/availability)
     # on the stored-history op, and it is what a viewer's relay checks BEFORE
@@ -195,6 +206,13 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "peer-journal-source-v1",
     # The remote peek (``network/peek.py``): see SESSION_PEEK_V1 below.
     "session-peek-v1",
+    # THE WORKING-SET MOVE GATE (docs/design/move-working-set.md §11.1; review R1,
+    # round 1). Advertised on the relay's own peer record as well as on links, and
+    # read by ``mobility.request_move`` BEFORE it forwards ``dry_run`` or a consent:
+    # a relay that predates the gate (one left running across an update) ignores
+    # both and performs a real, ungated move — so a CLI newer than its relay must
+    # refuse rather than send them. Additive: an older peer ignores the string.
+    SESSION_MOVE_WORKSET_V1,
     # Owner-folded mobile history/projection; never infer this schema from a
     # legacy journal page whose entries use the desktop transcript vocabulary.
     "mobile-session-read-v1",
@@ -749,6 +767,16 @@ def _decode_lifecycle_json(text: str) -> Any:
     return frame
 
 
+def peer_ack(req: Any, detail: Any) -> dict[str, Any]:
+    """The relay's ACK envelope, also used by ops that cap their full reply."""
+    return {"op": "ack", "req": req, "detail": detail}
+
+
+def encode_peer_payload(frame: dict[str, Any]) -> bytes:
+    """The uncompressed JSON payload that sender-side budgets measure."""
+    return json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
 class LinkCrypto:
     """Seals and opens the records of ONE link, one codec per side.
 
@@ -818,9 +846,7 @@ class LinkCrypto:
         """
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-        plaintext = json.dumps(
-            frame, sort_keys=False, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
+        plaintext = encode_peer_payload(frame)
         if len(plaintext) > MAX_RECORD_BYTES:
             raise LinkCryptoError(
                 f"a frame of {len(plaintext)} bytes exceeds the {MAX_RECORD_BYTES}-byte record "

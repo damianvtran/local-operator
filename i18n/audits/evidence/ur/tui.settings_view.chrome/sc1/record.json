@@ -1,0 +1,33 @@
+{
+  "locale": "ur",
+  "namespace": "tui.settings_view.chrome",
+  "source_sha256": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+  "target_sha256": "7c6bd1542328bc8b9f147ce13375fcac6e9017fcccef76eefc76e3a6218cd167",
+  "context_sha256": "33a29a836b8de99019887c9025e98e2d9382b8799a8bfe9e4f189cbc86d0df7d",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-leftovers @ 3c1b6a24f035 (target file uncommitted)",
+  "translator": {"agent": "translator (lopdev team)", "model": "anthropic/claude-opus-5-5", "fallback": "as reported by manager; not verified here"},
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, task chrome-audit-ur, session 53a51e0d7b33; independent of the translator)",
+    "session": "53a51e0d7b33",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "assigned openai/gpt-6.1-sol; provider 429 quota -> harness fallback to anthropic/claude-opus-5-5 for this run (same model family as the translator)",
+    "date": "2026-11-21",
+    "result": "passed",
+    "findings": 3,
+    "unresolved_blocker_major": 0,
+    "blocker": 0, "major": 0, "minor": 3, "nit": 0
+  },
+  "keys_read": 49,
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "mechanical": "49/49 keys, same order; message_arguments parity 49/49; {placeholder} multisets identical; plurals one/other (ur CLDR) in value.chains, clause.would_remove, confirm.ask, no =N; render_message ok for every key (counts 1/2/5); rich cell_len within maxCells for all capped keys with realistic args; confirm.contract_long exactly 40/40 — consumer _confirm_parts measures each rung and crops the chain name, so at-cap is safe; NFC; no manual bidi controls; no unsanctioned Latin outside placeholders.",
+  "findings_detail": [
+    {"id": "UR1", "severity": "minor", "key": "tui.settings_view.chrome.value.auto", "current": "خودکار", "proposed": "auto",
+     "reason": "Same row's expanded choice wire.settings.display_nerd_icons.choice.none.label ships Latin 'auto' in ur (as do all ur auto choices and help texts), so collapsed value and expanded choice disagree; _render_value states that invariant for on/off."},
+    {"id": "UR2", "severity": "minor", "key": "tui.settings_view.chrome.error.retired", "current": "یہ ترتیب ریٹائر ہو چکی ہے اور بدلی نہیں جا سکتی", "proposed": "یہ ترتیب فرسودہ ہے اور بدلی نہیں جا سکتی",
+     "reason": "Glossary drift: the section these settings sit under ships as wire.settings.retired.title = 'فرسودہ'; 40 cells <= 74."},
+    {"id": "UR3", "severity": "minor", "key": "tui.settings_view.chrome.gate_kept.long", "current": "محفوظ؛ سیشن پوچھتا رہے گا — {command} اسے نرم کرتا ہے", "proposed": "محفوظ؛ یہ سیشن پوچھتا رہے گا — {command} نرم کرتا ہے",
+     "reason": "English says THIS running session keeps its stricter gate (others follow the saved value); bare 'سیشن' loses the deixis on an approvals alert; proposed renders 58 cells <= 61 (keeping 'اسے' would be 62, over)."}
+  ],
+  "note": "Semantic read of all 49 values against en, context sidecar, i18n/glossary.md, i18n/style-guides/ur.md, and shipped ur tui.settings_view.json / tui.small.json / wire.settings.json (کیسکیڈ, چین, ہاپ/ہاپس, کلید, ہاٹ کی(ز), ڈیفالٹ, آن/آف, پیش منظر, آواز سے متن, contract style '{key} محفوظ · {key} منسوخ' all consistent). Consumer settings_view.py read for footer hint composition (glyph + ' ' + label, shed right-to-left), gate_kept rungs, confirm ladder, capture rungs, _render_value. clause.would_remove adds 'سیشن(ز)' which the English leaves implicit — accurate per context, not a finding. No rendered RTL/terminal evidence claimed; TUI ur stance is degraded-by-design per style guide. Single independent audit, same model family as translator; no native-speaker audit."
+}

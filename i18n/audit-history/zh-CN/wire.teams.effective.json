@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.teams.effective",
+  "history_sha256": "e28a970e7612c703c332ecbc6a8cb5e93e0a2c91fdf4295cea733a0ed942b0c2",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.teams.effective",
+      "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "530f154495de",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-19T18:41:24.794825+00:00",
+        "actual_model_source": "Translator receipt, hash independently verified",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "2b66cec83cdb",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-19T18:58:15.801134+00:00",
+        "independent_from_translator_session": "530f154495de",
+        "actual_model_source": "Host session model declaration: openai/gpt-6.1-sol",
+        "fallback_used": false,
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/record.json; 9-key independent linguistic+scoped mechanical pass; 0 B/M. Second independent audit and rendered/integration evidence remain required.",
+      "record_reference": "i18n/audits/evidence/zh-CN/wire.teams.effective/a2b66/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.teams.effective",
+      "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "530f154495de",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-19T18:41:24.794825+00:00",
+        "actual_model_source": "First-auditor receipt provenance (hash-verified); translator runtime not independently observed by this auditor",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "89b8acddcc7c",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "session-state model declaration: openai/gpt-6.1-sol",
+        "fallback_used": false,
+        "independent_from_translator_session": "530f154495de",
+        "independent_from_first_auditor_session": "2b66cec83cdb",
+        "date": "2026-11-19T19:18:30.602556+00:00",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Second independent audit: 9/9, 0 B/M. Scratch record: /Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/record.zh-CN.json. Runtime/pseudo/fallback/mixed-direction/HTTP/UI evidence pending.",
+      "record_sha256": "64f50de714faef89972fb7eeaf0ab831217bf1a722eebdb7f60e73b1f28c0933",
+      "record_reference": "/Users/damian/.local-operator/sessions/89b8acddcc7c/scratchpad/record.zh-CN.json"
+    }
+  ]
+}

@@ -321,9 +321,17 @@ async def test_a_quiet_wake_turn_is_silent_on_the_event_and_the_row(
 
 
 @pytest.mark.asyncio
-async def test_a_discretionary_wake_notifies(tmp_path: Path) -> None:
+@pytest.mark.parametrize("standalone", [False, True])
+async def test_a_discretionary_wake_notifies(tmp_path: Path, standalone: bool) -> None:
     stream = _complete_stream()
     session = make_session(tmp_path, stream)
+    session._config_dir = tmp_path / "config"
+    if standalone:
+        from local_operator.notifications.authority import set_grant
+        from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
+
+        mark_session_origin(session.transcript.directory, ORIGIN_AGENT_WORKSTREAM)
+        set_grant(session.transcript.directory, allow=True, reason="operator request")
     events: list[Any] = []
     session.subscribe(events.append)
     try:
@@ -345,6 +353,157 @@ async def test_a_discretionary_wake_notifies(tmp_path: Path) -> None:
         ends = _ends(events)
         assert len(ends) == 1
         assert ends[0].notify is True
+        # A requested wake is durable user attention, not just a transient end
+        # event: an unattached runtime must leave an inbox item for the existing
+        # delivery ladder without asking the model to call notify a second time.
+        from local_operator.notifications.store import NotificationStore
+
+        items, _ = NotificationStore(session._config_dir).list_items()
+        assert len(items) == 1
+        assert items[0]["body_md"] == "done"
+        assert items[0]["priority"] == "normal"
+        assert items[0]["anchor_id"] == ends[0].messages[-1].id
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    ["  \n\n", "\n# **Build result**\n\n" + "result " * 900, "A" * 180 + "\n\n**Long heading**"],
+)
+async def test_delivery_inbox_uses_existing_content_limits(tmp_path: Path, text: str) -> None:
+    from local_operator.notifications.store import (
+        BODY_MAX,
+        TITLE_MAX,
+        NotificationStore,
+    )
+
+    stream = ScriptedStream([[StreamTextDelta(delta=text), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    session._config_dir = tmp_path / "config"
+    try:
+        schedule = WakeSchedule(id="w1", message="check", next_due_at=0, created_at=0, notify=True)
+        await session._deliver_wake(
+            DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+        )
+        await wait_for(lambda: bool(stream.requests))
+        await wait_for(lambda: not session._turn_lock.locked())
+        items, _ = NotificationStore(session._config_dir).list_items()
+        assert len(items) == bool(text.strip())
+        if items:
+            assert items[0]["body_md"] == text.strip()[:BODY_MAX]
+            assert items[0]["title"] == text.strip().splitlines()[0][:TITLE_MAX]
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_notify_then_no_reply_has_no_completion_fallback(tmp_path: Path) -> None:
+    from local_operator.notifications.store import NotificationStore
+
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(
+                    index=0,
+                    id="n1",
+                    name="notify",
+                    argument_delta=json.dumps(
+                        {"title": "Build result ready", "body": "Build passed", "key": "build"}
+                    ),
+                ),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [
+                StreamToolCallDelta(index=0, id="q1", name="no_reply", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+        ]
+    )
+    session = _quiet_session(tmp_path, stream)
+    session._config_dir = tmp_path / "config"
+    try:
+        assert any(tool.name == "notify" for tool in session._tools)
+        schedule = WakeSchedule(id="w1", message="check", next_due_at=0, created_at=0, notify=True)
+        await session._deliver_wake(
+            DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+        )
+        await wait_for(lambda: len(stream.requests) == 2)
+        await wait_for(lambda: not session._turn_lock.locked())
+        assert session._run_notified is True
+        assert session._attention_outcome is None
+        items, _ = NotificationStore(session._config_dir).list_items()
+        assert len(items) == 1 and items[0]["key"] == "build"
+        assert session._attention.get("completion_token") is None
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["quiet", "child", "workstream", "explicit", "error"])
+async def test_delivery_inbox_does_not_duplicate_or_escalate(tmp_path: Path, case: str) -> None:
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
+
+    stream = _complete_stream()
+    if case == "error":
+
+        class FailingStream:
+            requests: list[Any]
+
+            def __init__(self) -> None:
+                self.requests = []
+
+            def __call__(self, request, signal):
+                self.requests.append(request)
+
+                async def fail():
+                    raise ProviderError(400, "wake failed")
+                    yield  # pragma: no cover — async generator protocol
+
+                return fail()
+
+        stream = FailingStream()
+    session = make_session(tmp_path, stream)
+    session._config_dir = tmp_path / "config"
+    if case == "child":
+        session._job_id = "synthetic-child"
+    if case == "workstream":
+        mark_session_origin(session.transcript.directory, ORIGIN_AGENT_WORKSTREAM)
+    original_publish = session._publish_attention_outcome
+
+    async def publish_after_explicit_item() -> None:
+        # The production notify door, after the turn has reset its per-run bits.
+        if case == "explicit":
+            await session._notify_inbox(
+                title="Explicit build result",
+                body="The requested result",
+                priority="normal",
+                key="build",
+                links=[],
+                anchor_id="explicit-anchor",
+                raise_banner=False,
+            )
+        await original_publish()
+
+    session._publish_attention_outcome = publish_after_explicit_item
+    try:
+        schedule = WakeSchedule(
+            id="w1", message="check", next_due_at=0, created_at=0, notify=case != "quiet"
+        )
+        await session._deliver_wake(
+            DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+        )
+        await wait_for(lambda: bool(stream.requests))
+        await wait_for(lambda: not session._turn_lock.locked())
+        items, _ = NotificationStore(session._config_dir).list_items()
+        assert len(items) == (1 if case == "explicit" else 0)
+        if items:
+            assert items[0]["key"] == "build"
+        if case == "error":
+            state = await session.refresh_attention()
+            assert state["kind"] == "error" and state["notify"] is True
     finally:
         await session.dispose()
 

@@ -1,0 +1,141 @@
+{
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/catalogues/hi/wire.teams.effective.json",
+      "sha256": "e2a1d7d25325c08db1f414105c75609e7c3a4f65d8a877169064974a9d5f1d92"
+    },
+    "translator_receipt": {
+      "path": "/Users/damian/.local-operator/sessions/47e37aebb87c/scratchpad/effective-reasons-hi/translator-receipt.json",
+      "sha256": "86a98b21628efd36399bf394ac54377cc97379bd5574b9d83a897adfb1a2f5c3"
+    }
+  },
+  "keys": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "arguments": [
+        [
+          "role",
+          "simple"
+        ]
+      ],
+      "codepoints": 32,
+      "ascii_tokens": [],
+      "width_hint": null,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "arguments": [],
+      "codepoints": 81,
+      "ascii_tokens": [],
+      "width_hint": null,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "arguments": [],
+      "codepoints": 74,
+      "ascii_tokens": [],
+      "width_hint": null,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "codepoints": 106,
+      "ascii_tokens": [
+        "subagents.models",
+        "provider/model"
+      ],
+      "width_hint": null,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "codepoints": 146,
+      "ascii_tokens": [
+        "subagents.models",
+        "model",
+        "provider/model",
+        "effort"
+      ],
+      "width_hint": null,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "codepoints": 49,
+      "ascii_tokens": [
+        "subagents.models"
+      ],
+      "width_hint": null,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "codepoints": 104,
+      "ascii_tokens": [
+        "subagents.models",
+        "provider/model"
+      ],
+      "width_hint": null,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "arguments": [
+        [
+          "selector",
+          "simple"
+        ]
+      ],
+      "codepoints": 95,
+      "ascii_tokens": [],
+      "width_hint": null,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "arguments": [],
+      "codepoints": 79,
+      "ascii_tokens": [],
+      "width_hint": null,
+      "mechanical": "passed"
+    }
+  ],
+  "validator_problems": [],
+  "negative_control": [
+    "hi/wire.teams.effective: wire.teams.effective.team_missing: arguments (('wrong', 'simple'),) != en's (('role', 'simple'),): argument 1 is 'wrong', en's is 'role' (renamed or reordered)"
+  ]
+}

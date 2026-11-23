@@ -1,0 +1,842 @@
+[
+  {
+    "locale": "fr",
+    "key": "tool_approval_mode",
+    "stage": "after",
+    "label": "Mode d’approbation des outils",
+    "help": "Assouplir exige une écriture dans cette session — /approvals auto.",
+    "summary": "  › Mode d’approbation des outils auto ▸",
+    "default": "par défaut : ask",
+    "detail": "Assouplir exige une écriture dans cette session — /approvals auto. · par défaut : ask   tool_approval_mode",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "demander",
+        "description": "demander avant les outils d’écriture/exécution",
+        "paint": "      ○ demander  (par défaut)  demander avant les outils d’écriture/exécution"
+      },
+      {
+        "value": "auto",
+        "label": "automatique",
+        "description": "les exécuter sans demander",
+        "paint": "    › ● automatique  les exécuter sans demander"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "Assouplir exige une écriture dans cette session — /approvals auto. · par défaut : ask   tool_approval_mode"
+    },
+    "pane": "fournisseurs\n  aucun connecté — /login <pro…\n\néquipes  agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … 8 de plus\n\n  lecture seule",
+    "config_unchanged": true
+  },
+  {
+    "locale": "fr",
+    "key": "shell_environment.mode",
+    "stage": "after",
+    "label": "Environnement du shell de l’agent",
+    "help": "« hériter » laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens). « liste d’autorisation » ne transmet que PATH/HOME/SHELL/TERM/USER/LOGNAME plus les deux listes à côté de ce réglage : la clé du fournisseur avec laquelle cette session a été lancée n’est donc pas transmise à une commande écrite par le modèle. Lu une fois par session : la modification prend effet au prochain lancement.",
+    "summary": "  › Environnement du shell de l’… inherit ▸",
+    "default": "",
+    "detail": "« hériter » laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens)…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "hériter",
+        "description": "votre environnement, comme aujourd’hui (par défaut)",
+        "paint": "    › ● hériter  (par défaut)  votre environnement, comme aujourd’hui (par défaut)"
+      },
+      {
+        "value": "allowlist",
+        "label": "liste d’autorisation",
+        "description": "l’ensemble sûr plus les listes ci-dessous, rien d’autre",
+        "paint": "      ○ liste d’autorisation  l’ensemble sûr plus les listes ci-dessous, rien d’autre"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "« hériter » laisse une commande exécutée par l’agent voir votre environnement (gh, aws, npm gardent leurs tokens)…"
+    },
+    "pane": "fournisseurs\n  aucun connecté — /login <pro…\n\néquipes  agents  (←→)\n  aucune équipe configurée\n  /team les liste et attache\n\n  lecture seule",
+    "config_unchanged": true
+  },
+  {
+    "locale": "fr",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "after",
+    "label": "texte distillable",
+    "help": "« oui » restreint aux endpoints dont la sortie texte peut être distillée. « par défaut » n’envoie rien.",
+    "summary": "  › texte distillable             true ▸",
+    "default": "par défaut : —",
+    "detail": "par défaut : —   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "par défaut",
+        "description": "aucune préférence envoyée",
+        "paint": "      ○ par défaut  (par défaut)  aucune préférence envoyée"
+      },
+      {
+        "value": "true",
+        "label": "oui",
+        "description": "endpoints à texte distillable uniquement",
+        "paint": "    › ● oui  endpoints à texte distillable uniquement"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "par défaut : —   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "fournisseurs\n  aucun connecté — /login <pro…\n\néquipes  agents  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … 8 de plus\n\n  lecture seule",
+    "config_unchanged": true
+  },
+  {
+    "locale": "zh-CN",
+    "key": "tool_approval_mode",
+    "stage": "after",
+    "label": "工具审批模式",
+    "help": "放宽需要在本会话内写入——/approvals auto。",
+    "summary": "  › 工具审批模式                  auto ▸",
+    "default": "默认：ask",
+    "detail": "放宽需要在本会话内写入——/approvals auto。 · 默认：ask   tool_approval_mode",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "询问",
+        "description": "写入/执行工具前先询问",
+        "paint": "      ○ 询问  （默认）  写入/执行工具前先询问"
+      },
+      {
+        "value": "auto",
+        "label": "自动",
+        "description": "不经询问直接运行",
+        "paint": "    › ● 自动  不经询问直接运行"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "放宽需要在本会话内写入——/approvals auto。 · 默认：ask   tool_approval_mode"
+    },
+    "pane": "提供商\n  未登录任何提供商 — /login <p…\n\n团队  智能体  (←→)\n  未配置团队\n  用/team列出并附加\n\n  只读",
+    "config_unchanged": true
+  },
+  {
+    "locale": "zh-CN",
+    "key": "shell_environment.mode",
+    "stage": "after",
+    "label": "智能体shell环境",
+    "help": "“继承”让智能体运行的命令看到你的环境（gh、aws、npm保留其令牌）。“允许列表”只传递PATH/HOME/SHELL/TERM/USER/LOGNAME，加上旁边这两个列表，因此本会话启动时用的提供商密钥不会交给模型编写的命令。每个会话只读取一次：修改后下次启动才生效。",
+    "summary": "  › 智能体shell环境               inherit ▸",
+    "default": "",
+    "detail": "“继承”让智能体运行的命令看到你的环境（gh、aws、npm保留其令牌）。“允许列表”只传递PATH/HOME/SHELL/TERM/USER/LOGNAME…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "继承",
+        "description": "你的环境，同现状（默认）",
+        "paint": "    › ● 继承  （默认）  你的环境，同现状（默认）"
+      },
+      {
+        "value": "allowlist",
+        "label": "允许列表",
+        "description": "安全集加下方列表，别无其他",
+        "paint": "      ○ 允许列表  安全集加下方列表，别无其他"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "“继承”让智能体运行的命令看到你的环境（gh、aws、npm保留其令牌）。“允许列表”只传递PATH/HOME/SHELL/TERM/USER/LOGNAME…"
+    },
+    "pane": "提供商\n  未登录任何提供商 — /login <p…\n\n团队  智能体  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  ……另有8项\n\n  只读",
+    "config_unchanged": true
+  },
+  {
+    "locale": "zh-CN",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "after",
+    "label": "可蒸馏文本",
+    "help": "“是”：仅限文本输出可被蒸馏的endpoint。“默认”：不发送任何内容。",
+    "summary": "  › 可蒸馏文本                    true ▸",
+    "default": "默认：—",
+    "detail": "“是”：仅限文本输出可被蒸馏的endpoint。“默认”：不发送任何内容。 · 默认：—",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "默认",
+        "description": "不发送偏好",
+        "paint": "      ○ 默认  （默认）  不发送偏好"
+      },
+      {
+        "value": "true",
+        "label": "是",
+        "description": "仅限可蒸馏文本的endpoint",
+        "paint": "    › ● 是  仅限可蒸馏文本的endpoint"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "“是”：仅限文本输出可被蒸馏的endpoint。“默认”：不发送任何内容。 · 默认：—"
+    },
+    "pane": "提供商\n  未登录任何提供商 — /login <p…\n\n团队  智能体  (←→)\n  未配置团队\n  用/team列出并附加\n\n  只读",
+    "config_unchanged": true
+  },
+  {
+    "locale": "hi",
+    "key": "tool_approval_mode",
+    "stage": "after",
+    "label": "टूल स्वीकृति मोड",
+    "help": "ढीला करने के लिए इसी सत्र से लिखना पड़ेगा — /approvals auto।",
+    "summary": "  › टूल स्वीकृति मोड                    auto ▸",
+    "default": "डिफ़ॉल्ट: ask",
+    "detail": "ढीला करने के लिए इसी सत्र से लिखना पड़ेगा — /approvals auto। · डिफ़ॉल्ट: ask   tool_approval_mode",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "पूछें",
+        "description": "लिखने/चलाने वाले टूल से पहले पूछें",
+        "paint": "      ○ पूछें  (डिफ़ॉल्ट)  लिखने/चलाने वाले टूल से पहले पूछें"
+      },
+      {
+        "value": "auto",
+        "label": "स्वचालित",
+        "description": "बिना पूछे चलाएँ",
+        "paint": "    › ● स्वचालित  बिना पूछे चलाएँ"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "ढीला करने के लिए इसी सत्र से लिखना पड़ेगा — /approvals auto। · डिफ़ॉल्ट: ask   tool_approval_mode"
+    },
+    "pane": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … 8 और\n\n  केवल पढ़ने योग्य",
+    "config_unchanged": true
+  },
+  {
+    "locale": "hi",
+    "key": "shell_environment.mode",
+    "stage": "after",
+    "label": "एजेंट शेल एनवायरनमेंट",
+    "help": "'मौजूदा परिवेश' मोड में एजेंट के चलाए कमांड को आपका परिवेश मिलता है (gh, aws, npm अपने टोकन रखते हैं)। 'अनुमति-सूची' सिर्फ़ PATH/HOME/SHELL/TERM/USER/LOGNAME और इसके पास की दोनों सूचियाँ भेजता है, इसलिए जिस प्रोवाइडर कुंजी से यह सत्र शुरू हुआ, वह मॉडल के लिखे कमांड को नहीं दी जाती। हर सत्र में एक बार पढ़ा जाता है: बदलाव अगले लॉन्च पर लागू होगा।",
+    "summary": "  › एजेंट शेल एनवायरनमेंट               inherit ▸",
+    "default": "",
+    "detail": "'मौजूदा परिवेश' मोड में एजेंट के चलाए कमांड को आपका परिवेश मिलता है (gh, aws, npm अपने टोकन रखते हैं)। 'अनुमति-सूची' सिर्फ़ PATH/HOME/SHELL/TERM/U…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "मौजूदा परिवेश",
+        "description": "आपका एनवायरनमेंट, अब जैसा है वैसा ही (डिफ़ॉल्ट)",
+        "paint": "    › ● मौजूदा परिवेश  (डिफ़ॉल्ट)  आपका एनवायरनमेंट, अब जैसा है वैसा ही (डिफ़ॉल्ट)"
+      },
+      {
+        "value": "allowlist",
+        "label": "अनुमति-सूची",
+        "description": "सुरक्षित सेट और नीचे की सूचियाँ, और कुछ नहीं",
+        "paint": "      ○ अनुमति-सूची  सुरक्षित सेट और नीचे की सूचियाँ, और कुछ नहीं"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'मौजूदा परिवेश' मोड में एजेंट के चलाए कमांड को आपका परिवेश मिलता है (gh, aws, npm अपने टोकन रखते हैं)। 'अनुमति-सूची' सिर्फ़ PATH/HOME/SHELL/TERM/U…"
+    },
+    "pane": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  कोई टीम कॉन्फ़िगर नहीं है\n  /team से सूची देखें और जोड़ें\n\n  केवल पढ़ने योग्य",
+    "config_unchanged": true
+  },
+  {
+    "locale": "hi",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "after",
+    "label": "डिस्टिलेशन योग्य टेक्स्ट",
+    "help": "'हाँ': सिर्फ़ ऐसे endpoint जिनके टेक्स्ट आउटपुट से मॉडल डिस्टिलेशन की अनुमति हो। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता।",
+    "summary": "  › डिस्टिलेशन योग्य टेक्स्ट               true ▸",
+    "default": "डिफ़ॉल्ट: —",
+    "detail": "'हाँ': सिर्फ़ ऐसे endpoint जिनके टेक्स्ट आउटपुट से मॉडल डिस्टिलेशन की अनुमति हो। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता। · डिफ़ॉल्ट: —",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "डिफ़ॉल्ट",
+        "description": "कोई प्राथमिकता नहीं भेजी जाती",
+        "paint": "      ○ डिफ़ॉल्ट  (डिफ़ॉल्ट)  कोई प्राथमिकता नहीं भेजी जाती"
+      },
+      {
+        "value": "true",
+        "label": "हाँ",
+        "description": "सिर्फ़ ऐसे endpoint जिनके टेक्स्ट से मॉडल डिस्टिलेशन की अनुमति हो",
+        "paint": "    › ● हाँ  सिर्फ़ ऐसे endpoint जिनके टेक्स्ट से मॉडल डिस्टिलेशन की अनुमति हो"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'हाँ': सिर्फ़ ऐसे endpoint जिनके टेक्स्ट आउटपुट से मॉडल डिस्टिलेशन की अनुमति हो। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता। · डिफ़ॉल्ट: —"
+    },
+    "pane": "प्रोवाइडर\n  किसी में लॉग इन नहीं — /login <prov…\n\nटीमें  एजेंट  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … 8 और\n\n  केवल पढ़ने योग्य",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ur",
+    "key": "tool_approval_mode",
+    "stage": "after",
+    "label": "ٹول منظوری موڈ",
+    "help": "نرم کرنے کے لیے اسی سیشن میں لکھنا ہوگا — /approvals auto۔",
+    "summary": "  › ٹول منظوری موڈ                auto ▸",
+    "default": "⁧ڈیفالٹ: ask⁩",
+    "detail": "نرم کرنے کے لیے اسی سیشن میں لکھنا ہوگا — /approvals auto۔ · ⁧ڈیفالٹ: ask⁩   tool_approval_mode",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "پوچھیں",
+        "description": "لکھنے/چلانے والے ٹولز سے پہلے پوچھیں",
+        "paint": "      ○ پوچھیں⁧  (ڈیفالٹ)⁩  لکھنے/چلانے والے ٹولز سے پہلے پوچھیں"
+      },
+      {
+        "value": "auto",
+        "label": "خودکار",
+        "description": "بغیر پوچھے چلائیں",
+        "paint": "    › ● خودکار  بغیر پوچھے چلائیں"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "نرم کرنے کے لیے اسی سیشن میں لکھنا ہوگا — /approvals auto۔ · ⁧ڈیفالٹ: ask⁩   tool_approval_mode"
+    },
+    "pane": "⁧پرووائیڈرز⁩\n  ⁧کوئی لاگ ان نہیں — ⁦/login <p⁩⁩…\n\n⁧ٹیمیں⁩  ⁧ایجنٹس⁩  (←→)\n  ⁧کوئی ٹیم کنفیگر نہیں⁩\n  ⁧⁦/team⁩ سے دیکھیں اور منسلک کر⁩…\n\n⁧  صرف پڑھنے کے لیے⁩",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ur",
+    "key": "shell_environment.mode",
+    "stage": "after",
+    "label": "ایجنٹ شیل ماحول",
+    "help": "'موجودہ ماحول اپنائیں' ایجنٹ کی چلائی ہوئی کمانڈ کو آپ کے ماحول تک رسائی دیتا ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'اجازت کی فہرست' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتا ہے، اس لیے سیشن شروع کرتے وقت استعمال ہونے والی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھا جاتا ہے: تبدیلی اگلے آغاز پر لاگو ہوتی ہے۔",
+    "summary": "  › ایجنٹ شیل ماحول               inherit ▸",
+    "default": "",
+    "detail": "'موجودہ ماحول اپنائیں' ایجنٹ کی چلائی ہوئی کمانڈ کو آپ کے ماحول تک رسائی دیتا ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہ…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "موجودہ ماحول اپنائیں",
+        "description": "آپ کا ماحول، جیسا آج (ڈیفالٹ)",
+        "paint": "    › ● موجودہ ماحول اپنائیں⁧  (ڈیفالٹ)⁩  آپ کا ماحول، جیسا آج (ڈیفالٹ)"
+      },
+      {
+        "value": "allowlist",
+        "label": "اجازت کی فہرست",
+        "description": "محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں",
+        "paint": "      ○ اجازت کی فہرست  محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "'موجودہ ماحول اپنائیں' ایجنٹ کی چلائی ہوئی کمانڈ کو آپ کے ماحول تک رسائی دیتا ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہ…"
+    },
+    "pane": "⁧پرووائیڈرز⁩\n  ⁧کوئی لاگ ان نہیں — ⁦/login <p⁩⁩…\n\n⁧ٹیمیں⁩  ⁧ایجنٹس⁩  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  ⁧… 8 مزید⁩\n\n⁧  صرف پڑھنے کے لیے⁩",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ur",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "after",
+    "label": "ڈسٹل ہونے والا متن",
+    "help": "'ہاں': صرف ان اینڈ پوائنٹس تک محدود کرے جن کے متنی آؤٹ پٹ سے دوسرے ماڈل کی تربیت کی جا سکتی ہے۔ 'طے شدہ': کچھ نہیں بھیجا جاتا۔",
+    "summary": "  › ڈسٹل ہونے والا متن            true ▸",
+    "default": "⁧ڈیفالٹ: —⁩",
+    "detail": "⁧ڈیفالٹ: —⁩   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "طے شدہ",
+        "description": "کوئی ترجیح نہیں بھیجی",
+        "paint": "      ○ طے شدہ⁧  (ڈیفالٹ)⁩  کوئی ترجیح نہیں بھیجی"
+      },
+      {
+        "value": "true",
+        "label": "ہاں",
+        "description": "صرف ڈسٹل قابل متن اینڈ پوائنٹس",
+        "paint": "    › ● ہاں  صرف ڈسٹل قابل متن اینڈ پوائنٹس"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "⁧ڈیفالٹ: —⁩   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "⁧پرووائیڈرز⁩\n  ⁧کوئی لاگ ان نہیں — ⁦/login <p⁩⁩…\n\n⁧ٹیمیں⁩  ⁧ایجنٹس⁩  (←→)\n  ⁧کوئی ٹیم کنفیگر نہیں⁩\n  ⁧⁦/team⁩ سے دیکھیں اور منسلک کر⁩…\n\n⁧  صرف پڑھنے کے لیے⁩",
+    "config_unchanged": true
+  },
+  {
+    "locale": "es",
+    "key": "tool_approval_mode",
+    "stage": "after",
+    "label": "Modo de aprobación de herramientas",
+    "help": "Aflojarlo requiere un cambio en esta sesión — /approvals auto.",
+    "summary": "  › Modo de aprobación de herram… auto ▸",
+    "default": "predeterminado: ask",
+    "detail": "Aflojarlo requiere un cambio en esta sesión — /approvals auto. · predeterminado: ask   tool_approval_mode",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "preguntar",
+        "description": "preguntar antes de las herramientas de escritura/ejecución",
+        "paint": "      ○ preguntar  (predeterminado)  preguntar antes de las herramientas de escritura/ejecución"
+      },
+      {
+        "value": "auto",
+        "label": "automático",
+        "description": "ejecutarlas sin preguntar",
+        "paint": "    › ● automático  ejecutarlas sin preguntar"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "Aflojarlo requiere un cambio en esta sesión — /approvals auto. · predeterminado: ask   tool_approval_mode"
+    },
+    "pane": "proveedores\n  ninguno conectado — /login <…\n\nequipos  agentes  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … 8 más\n\n  solo lectura",
+    "config_unchanged": true
+  },
+  {
+    "locale": "es",
+    "key": "shell_environment.mode",
+    "stage": "after",
+    "label": "Entorno del shell del agente",
+    "help": "“heredar” (`inherit`) deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus tokens). “lista de permitidos” (`allowlist`) solo pasa PATH/HOME/SHELL/TERM/USER/LOGNAME más las dos listas que acompañan a este ajuste, así que la clave del proveedor con la que se lanzó esta sesión no se entrega a ningún comando que escriba el modelo. Se lee una vez por sesión: el cambio surte efecto en el siguiente arranque.",
+    "summary": "  › Entorno del shell del agente  inherit ▸",
+    "default": "",
+    "detail": "“heredar” (`inherit`) deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus token…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "heredar",
+        "description": "tu entorno, como hasta ahora (predeterminado)",
+        "paint": "    › ● heredar  (predeterminado)  tu entorno, como hasta ahora (predeterminado)"
+      },
+      {
+        "value": "allowlist",
+        "label": "lista de permitidos",
+        "description": "el conjunto seguro más las listas de abajo, nada más",
+        "paint": "      ○ lista de permitidos  el conjunto seguro más las listas de abajo, nada más"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "“heredar” (`inherit`) deja que un comando que ejecuta el agente vea tu entorno (gh, aws y npm conservan sus token…"
+    },
+    "pane": "proveedores\n  ninguno conectado — /login <…\n\nequipos  agentes  (←→)\n  no hay equipos configurados\n  /team los lista y los asocia\n\n  solo lectura",
+    "config_unchanged": true
+  },
+  {
+    "locale": "es",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "after",
+    "label": "texto destilable",
+    "help": "“activado” (`true`): restringe a los endpoints cuya salida de texto pueda destilarse. “predeterminado” (`default`): no se envía nada.",
+    "summary": "  › texto destilable              true ▸",
+    "default": "predeterminado: —",
+    "detail": "predeterminado: —   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "predeterminado",
+        "description": "no se envía ninguna preferencia",
+        "paint": "      ○ predeterminado  (predeterminado)  no se envía ninguna preferencia"
+      },
+      {
+        "value": "true",
+        "label": "activado",
+        "description": "solo endpoints de texto destilable",
+        "paint": "    › ● activado  solo endpoints de texto destilable"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "predeterminado: —   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "proveedores\n  ninguno conectado — /login <…\n\nequipos  agentes  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … 8 más\n\n  solo lectura",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ru",
+    "key": "tool_approval_mode",
+    "stage": "after",
+    "label": "Режим одобрения инструментов",
+    "help": "Для ослабления нужна запись в этой сессии — /approvals auto.",
+    "summary": "  › Режим одобрения инструментов  auto ▸",
+    "default": "по умолчанию: ask",
+    "detail": "Для ослабления нужна запись в этой сессии — /approvals auto. · по умолчанию: ask   tool_approval_mode",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "спрашивать",
+        "description": "спрашивать перед инструментами записи/выполнения",
+        "paint": "      ○ спрашивать  (по умолчанию)  спрашивать перед инструментами записи/выполнения"
+      },
+      {
+        "value": "auto",
+        "label": "автоматически",
+        "description": "выполнять их, не спрашивая",
+        "paint": "    › ● автоматически  выполнять их, не спрашивая"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "Для ослабления нужна запись в этой сессии — /approvals auto. · по умолчанию: ask   tool_approval_mode"
+    },
+    "pane": "провайдеры\n  вход не выполнен — /login <p…\n\nкоманды  агенты  (←→)\n  команды не настроены\n  /team покажет и подключит их\n\n  только чтение",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ru",
+    "key": "shell_environment.mode",
+    "stage": "after",
+    "label": "Окружение shell агента",
+    "help": "«Наследовать»: командам, запускаемым агентом, доступно ваше окружение (gh, aws, npm сохраняют свои токены). «Список разрешений»: передаются только PATH/HOME/SHELL/TERM/USER/LOGNAME и два списка рядом с этой настройкой, поэтому ключ провайдера, с которым запущена сессия, не попадает в команду, написанную моделью. Настройка читается один раз за сессию: изменение вступит в силу при следующем запуске.",
+    "summary": "  › Окружение shell агента        inherit ▸",
+    "default": "",
+    "detail": "«Наследовать»: командам, запускаемым агентом, доступно ваше окружение (gh, aws, npm сохраняют свои токены). «Спис…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "наследовать",
+        "description": "ваше окружение, как сейчас (по умолчанию)",
+        "paint": "    › ● наследовать  (по умолчанию)  ваше окружение, как сейчас (по умолчанию)"
+      },
+      {
+        "value": "allowlist",
+        "label": "список разрешений",
+        "description": "безопасный набор плюс списки ниже, и ничего больше",
+        "paint": "      ○ список разрешений  безопасный набор плюс списки ниже, и ничего больше"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "«Наследовать»: командам, запускаемым агентом, доступно ваше окружение (gh, aws, npm сохраняют свои токены). «Спис…"
+    },
+    "pane": "провайдеры\n  вход не выполнен — /login <p…\n\nкоманды  агенты  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … ещё 8\n\n  только чтение",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ru",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "after",
+    "label": "дистиллируемый текст",
+    "help": "«Да»: использовать только endpoint, текстовый вывод которых разрешено дистиллировать. «По умолчанию»: предпочтение не отправляется.",
+    "summary": "  › дистиллируемый текст          true ▸",
+    "default": "по умолчанию: —",
+    "detail": "по умолчанию: —   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "по умолчанию",
+        "description": "предпочтения не отправляются",
+        "paint": "      ○ по умолчанию  (по умолчанию)  предпочтения не отправляются"
+      },
+      {
+        "value": "true",
+        "label": "да",
+        "description": "только endpoint с дистиллируемым текстом",
+        "paint": "    › ● да  только endpoint с дистиллируемым текстом"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "по умолчанию: —   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "провайдеры\n  вход не выполнен — /login <p…\n\nкоманды  агенты  (←→)\n  команды не настроены\n  /team покажет и подключит их\n\n  только чтение",
+    "config_unchanged": true
+  },
+  {
+    "locale": "vi",
+    "key": "tool_approval_mode",
+    "stage": "after",
+    "label": "Chế độ phê duyệt công cụ",
+    "help": "Nới lỏng cần một lần ghi trong chính phiên này — /approvals auto.",
+    "summary": "  › Chế độ phê duyệt công cụ      auto ▸",
+    "default": "mặc định: ask",
+    "detail": "Nới lỏng cần một lần ghi trong chính phiên này — /approvals auto. · mặc định: ask   tool_approval_mode",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "ask",
+        "label": "Hỏi trước",
+        "description": "hỏi trước với công cụ ghi/thực thi",
+        "paint": "      ○ Hỏi trước  (mặc định)  hỏi trước với công cụ ghi/thực thi"
+      },
+      {
+        "value": "auto",
+        "label": "Tự động",
+        "description": "chạy chúng không hỏi",
+        "paint": "    › ● Tự động  chạy chúng không hỏi"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "Nới lỏng cần một lần ghi trong chính phiên này — /approvals auto. · mặc định: ask   tool_approval_mode"
+    },
+    "pane": "nhà cung cấp\n  chưa đăng nhập — /login <pro…\n\nnhóm  tác nhân  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … còn 8\n\n  chỉ đọc",
+    "config_unchanged": true
+  },
+  {
+    "locale": "vi",
+    "key": "shell_environment.mode",
+    "stage": "after",
+    "label": "Môi trường shell của tác nhân",
+    "help": "“Kế thừa” cho phép lệnh do tác nhân chạy truy cập môi trường của bạn (gh, aws, npm giữ các token của chúng). “Danh sách cho phép” chỉ truyền PATH/HOME/SHELL/TERM/USER/LOGNAME cùng hai danh sách bên cạnh, nên khóa nhà cung cấp dùng để khởi chạy phiên không bị truyền cho lệnh do mô hình viết. Thiết lập được đọc một lần mỗi phiên: thay đổi có hiệu lực từ lần khởi chạy kế tiếp.",
+    "summary": "  › Môi trường shell của tác nhân inherit ▸",
+    "default": "",
+    "detail": "“Kế thừa” cho phép lệnh do tác nhân chạy truy cập môi trường của bạn (gh, aws, npm giữ các token của chúng). “Dan…",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "inherit",
+        "label": "Kế thừa",
+        "description": "môi trường của bạn, như hiện nay (mặc định)",
+        "paint": "    › ● Kế thừa  (mặc định)  môi trường của bạn, như hiện nay (mặc định)"
+      },
+      {
+        "value": "allowlist",
+        "label": "Danh sách cho phép",
+        "description": "bộ an toàn cộng các danh sách bên dưới, không gì khác",
+        "paint": "      ○ Danh sách cho phép  bộ an toàn cộng các danh sách bên dưới, không gì khác"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "“Kế thừa” cho phép lệnh do tác nhân chạy truy cập môi trường của bạn (gh, aws, npm giữ các token của chúng). “Dan…"
+    },
+    "pane": "nhà cung cấp\n  chưa đăng nhập — /login <pro…\n\nnhóm  tác nhân  (←→)\n  chưa cấu hình nhóm nào\n  /team để liệt kê và gắn\n\n  chỉ đọc",
+    "config_unchanged": true
+  },
+  {
+    "locale": "vi",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "stage": "after",
+    "label": "văn bản chưng cất được",
+    "help": "“Có”: chỉ dùng các endpoint có đầu ra văn bản được phép dùng để chưng cất mô hình. “Mặc định”: không gửi tùy chọn nào.",
+    "summary": "  › văn bản chưng cất được        true ▸",
+    "default": "mặc định: —",
+    "detail": "mặc định: —   providers.openrouter.enforce_distillable_text",
+    "width": 80,
+    "detail_width": 114,
+    "pane_display": true,
+    "first_equal_settled": true,
+    "choices": [
+      {
+        "value": "",
+        "label": "Mặc định",
+        "description": "không gửi tùy chọn nào",
+        "paint": "      ○ Mặc định  (mặc định)  không gửi tùy chọn nào"
+      },
+      {
+        "value": "true",
+        "label": "Có",
+        "description": "chỉ endpoint có văn bản chưng cất được",
+        "paint": "    › ● Có  chỉ endpoint có văn bản chưng cất được"
+      }
+    ],
+    "tab_state": {
+      "focused": "SettingsView(classes='settings-view')",
+      "detail": "mặc định: —   providers.openrouter.enforce_distillable_text"
+    },
+    "pane": "nhà cung cấp\n  chưa đăng nhập — /login <pro…\n\nnhóm  tác nhân  (←→)\n  Aida\n    role · packaged · proactive\n    Handing a request to a tea…\n  Architect\n    role · packaged\n    Deciding HOW to build some…\n  Coder\n    role · packaged\n    Writing or changing code:…\n  Copy Reviewer\n    role · packaged\n    Reviewing written copy bef…\n  … còn 8\n\n  chỉ đọc",
+    "config_unchanged": true
+  },
+  {
+    "locale": "fr",
+    "key": "team_bridge.session",
+    "compact": true,
+    "size": [
+      100,
+      30
+    ],
+    "source_label": "Session de la cheffe de cabinet",
+    "source_label_cells": 31,
+    "help": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
+    "detail": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
+    "list_width": 60,
+    "detail_width": 94,
+    "region": "Region(x=1, y=1, width=98, height=23)",
+    "virtual": "Size(width=96, height=21)",
+    "pane_display": true,
+    "first_equal_settled": true,
+    "paint": "Modèle                            nouv. sessions\n    Fournisseur par défaut        —\n    Modèle par défaut             —\n    Effort de raisonnement par d… —\nProtocole de connexion            prise d’effet : immédiat\n    Utiliser le contexte OpenAI…  activé\n    Surface d’API OpenAI          responses\n    Cache 1 h d’Anthropic au-del… 150000\n    TTL 1 h sous-agents Anthropic 0\n    Région Amazon Bedrock         —\n    Authentification Bedrock      —\nRoutage OpenRouter                prise d’effet : immédiat\n    affinité de cache             activé\n    politique de routage          —\n    ordre des hôtes               —\n    hôtes autorisés               —\n    hôtes ignorés                 —\n    replis                        —\n    paramètres requis             —\n    collecte de données           —\n    rétention nulle               —\n    texte distillable             true\n    quantifications               —\n    prix max                      —\n    débit min (tok/s)             0.0\n    latence max (s)               0.0\n    retirer un hôte lent (tok/s)  0.0\nBasculement et réessais           prise d’effet : immédiat\n    Réessayer les appels en échec activé\n    Réessais max                  10\n    Délai de base (ms)            500\n    Réessais de connectivité      15\n    Plafond d’espacement de conn… 60000\n    Repli de modèle               activé\n    Repli selon l’utilisation     désactivé\n    politique de choix du compte  reset-soonest\n    ancien choix selon l’usage    activé\n    Réserve d’utilisation (%)     10\n    Cascade de basculement        0 chaîne\n      aucune cascade configurée\n    + ajouter une chaîne\n    Repli de l’enfant épinglé     cross-family\nApparence                         prise d’effet : immédiat\n    Thème                         dark\n    Animation de reflet           activé\n    Narration en cours de tour    activé\n    Raisonnement du modèle en di… désactivé\n    Filet en marge de l’assistant activé\n    Lignes d’action confortables  désactivé\n    Glyphes Nerd Font             auto\n    Marqueurs de titre            désactivé\n    Titre du terminal             activé\n    Images intégrées              activé\n    Notifications de bureau       activé\n    Noms de session dans les not… activé\n    Format des heures de réveil   12h\n    Langue                        fr\n    Dock des sous-agents          full\n    Masquer le trafic entre sess… désactivé\n    Marquer la réponse du tour    désactivé\n    Bandeau d’état                activé\n    Chevron du prompt             activé\n    Bandeau : modèle              activé\n    Bandeau : répertoire de trav… activé\n    Bandeau : contexte            activé\n    Bandeau : débit de décodage   activé\n    Bandeau : coût de session     activé\n    Bandeau : temps écoulé        activé\n    Bandeau : commande d’état     —\n    Bandeau : cadence d’exécution 30\n    Barre latérale des sessions   désactivé\n    Position de la barre latérale left\n    Couche sous-agents de la bar… désactivé\nSon des notifications             prise d’effet : immédiat\n    Jouer un son                  activé\n    Son                           soft-pulse\n    Volume                        70\nRaccourcis clavier                prise d’effet : immédiat\n    Nouvelle session              ctrl+n\n    Reprendre une session         ctrl+s\n    Envoi rapide                  cmd+alt+shift+space\n    Appuyer pour parler           Right-Option (hold)\n    Démarrer l’enregistrement     cmd+shift+s\nApprobations                      prise d’effet : immédiat\n    Mode d’approbation des outils auto\nStockage des sessions             relancement\n    Enregistrement auto de la co… désactivé\nVos conversations                 relancement\n    Nettoyage des sessions        désactivé\n    ↳ sessions max                0\n    ↳ jours d’inactivité max      0\n    ↳ octets totaux max           0\n    ↳ supprimer les vides         désactivé\n    Supprimer les conversations…  30\nCompression des transcriptions    relancement\n    Compresser les transcriptions activé\n    ↳ compresser après (jours)    30\nScratchpad                        prise d’effet : immédiat\n    Plafond scratchpad (octets)   268435456\nTravail délégué                   relancement\n    Nettoyage du travail délégué  activé\n    ↳ supprimer après (heures)    48\nSous-agents                       prise d’effet : immédiat\n    Tâches d’arrière-plan max     15\n    Alléger les connaissances de… activé\n    Profondeur max d’équipes imb… 3\n    Qui choisit le modèle d’un s… operator\n    Modèle de sous-agent : lo     —\n    Modèle de sous-agent : med    —\n    Modèle de sous-agent : hi     —\nSuggestions intelligentes         nouv. sessions\n    Suggestions intelligentes     activé\n    ↳ fournisseur                 auto\n    ↳ modèle                      —\n    ↳ délai (ms)                  1500\n    ↳ budget d’attente (ms)       50\n    ↳ caractères d’état max       6000\n    ↳ candidats max               12\n    ↳ recommandations max         3\nRadient Saver (bêta)              prise d’effet : immédiat\n    Radient Saver (bêta)          off\nMises en avant                    nouv. sessions\n    Mises en avant                activé\n    ↳ fichiers                    activé\n    ↳ graphiques                  activé\n    ↳ modèle des graphiques       auto\n    ↳ tours max                   2\n    ↳ tokens de sortie max        6000\n    ↳ limite de temps (s)         90\n    ↳ plafond de coût ($)         1.0\n    ↳ fichiers affichés           4\n    ↳ ne jamais lister sous       —\nSurveillances                     nouv. sessions\n    Intervalle par défaut (s)     60\n    Max par session               8\n    Délai d’exécution (ms)        120000\n    Plafond de l’instantané (car… 32768\n    Lignes de delta max           12\n    Budget de delta (caractères)  1200\n    État du classifieur (caractè… 1200\n    Désactiver après échecs cons… 5\n    Livraisons par heure          12\n    Ignorer le bruit des horodat… activé\nRuntime                           prise d’effet : immédiat\n    Continuer après /resume       activé\n    Garder les conversations fer… 300\n    Conversations chaudes max     4\n    Délai des questions en votre… 24\nCompactage                        prise d’effet : immédiat\n    Compactage                    activé\n    Stratégie                     auto\n    Seuil (% de la fenêtre)       0.8\n    Seuil (tokens)                400000\n    Conserver les tokens récents  20000\n    Continuer après le compactage activé\n    Compactage en cours de tour   activé\n    Compactage en veille          activé\n    Seuil en veille (tokens)      200000\n    Croissance min. en veille (t… 60000\n    Rejeu à la reprise            full\n    Limite de taille de requête…  24000000\n    Déclencheur de taille de req… 16000000\nFork                              prise d’effet : immédiat\n    Où un fork s’ouvre            switch\n    Où il s’ouvre sous cmux       workspace\nOutils web                        prise d’effet : immédiat\n    Recherche web                 activé\n    Récupération web              activé\nRecherche web                     prise d’effet : immédiat\n    Équilibrage de charge         round_robin\n    Fournisseurs                  duckduckgo, tavily\n    Fournisseurs exclus           —\n    Délai (s)                     20.0\n    Endpoint SearXNG              —\n    Preuves par page DeepSeek     désactivé\n    Lire depuis la recherche      activé\nRécupération web                  prise d’effet : immédiat\n    Délai (s)                     20.0\n    Plafond de téléchargement (o… 5242880\n    Redirections max              5\n    TTL du cache (s)              900\n    Autoriser les adresses privé… désactivé\n    Moteur de rendu HTML          auto\n    Enrichir avant l’extraction   activé\n    Tentatives par maillon        3\n    Réessai avec profil de navig… activé\nOutils                            prise d’effet : immédiat\n    Interpréteur Bash             —\n    Journaliser les envois non a… désactivé\n    Bloquer les recherches non b… activé\n    …refuser plutôt qu’avertir    activé\n    …élaguer les arborescences v… activé\n    Charger à la demande les sch… activé\nGarde-fous                        prise d’effet : immédiat\n    Règles de garde-fou           activé\n    Revoir suppressions critiques désactivé\n    Délai de vérification (s)     20.0\n    Dossier des règles            —\nHooks                             prise d’effet : immédiat\n    Hooks natifs                  désactivé\n    Transférer les hooks de Clau… désactivé\n    Transférer les hooks de Codex désactivé\nLimite de mémoire des commandes   prise d’effet : immédiat\n    Limite de mémoire des comman… activé\n    Source du plafond             auto\n    Plafond manuel (Mo)           0\n    Seuil d’avertissement         0.8\nFile d’attente des tâches lourdes prise d’effet : immédiat\n    File d’attente des tâches lo… activé\nBudget des requêtes shell         prise d’effet : immédiat\n    Budget des requêtes shell     activé\n    …arrêter plutôt qu’avertir    activé\n    Budget (secondes)             60\nShell de l’agent                  relancement\n    Environnement du shell de l’… inherit\n    …ajouts à la liste d’autoris… —\n    …retirés dans les deux modes  —\nServeurs locaux                   nouv. sessions\n    endpoint LM Studio            http://localhost:1234/v1\n    surcharges de modèle pour LM… {}\n    endpoint Ollama               http://localhost:11434/v1\n    surcharges de modèle pour Ol… {}\n    endpoint vLLM                 http://localhost:8000/v1\n    surcharges de modèle pour vL… {}\n    endpoint llama.cpp            http://localhost:8080/v1\n    surcharges de modèle pour ll… {}\n    endpoint OpenAI-compatible    —\n    surcharges de modèle pour Op… {}\nCapacité de la console            prise d’effet : immédiat\n    Plafond de terminaux actifs   128\n    Terminaux d’agents par conve… 8\n    Emplacements réservés aux te… 16\nApplication de bureau             prise d’effet : immédiat\n    commande de lancement         —\n    cache des fichiers distants…  1073741824\nAccès téléphone                   prise d’effet : immédiat\n    Reconnecter l’accès téléphon… activé\n    Envoyer au téléphone quand j… 120\nAperçus de fichiers               prise d’effet : immédiat\n    Racines d’aperçus supplément… —\nRéseau maillé                     relancement\n    Synchronisation entre pairs   activé\n    Portées à synchroniser        global, session, team, ag…\n    Pairs exclus de la mémoire    —\n    Adresse d’écoute              0.0.0.0\n    Port du maillage              4097\n    Endpoints annoncés            —\n    Taille d’audit par génération 8388608\n    Générations d’audit conservé… 5\n    Plafond d’âge d’audit (jours) 90.0\n    Handshakes simultanés         8\n    Période de calme de synchron… 30.0\n    Intervalle de vérification d… 15.0\n    Durée de vie du login emprun… 900.0\n    Maintien du login emprunté,…  86400.0\n    Dépôts GitHub                 —\nMises à jour du maillage          prise d’effet : immédiat\n    Propager le maillage après u… auto\nDéplacements de session           prise d’effet : immédiat\n    Plafond des fichiers de trav… 268435456\n    Dossiers pouvant recevoir de… ~\nMises à jour                      prise d’effet : immédiat\n    Purge anciennes installations activé\n    Inutilisées conservées        2\nCalcul distant                    prise d’effet : immédiat\n    Calcul distant                désactivé\nAida                              prise d’effet : immédiat\n    Cheffe de cabinet activée     activé\n    Nom affiché                   Aida\n    Heure du point quotidien      08:30\n    Intervalle des points (h)     0\n    Cadence en pause              désactivé\n    Points supplémentaires / jour 2\n    Écart minimal (minutes)       90\n    Intervalle de rappel d’intég… 14\nBibliothécaire                    prise d’effet : immédiat\n    Bibliothécaire activé         activé\n    Nom affiché                   Librarian\n    Heure de la passe quotidienne 03:30\n    Passe quotidienne en pause    désactivé\n    Passes supplémentaires / jour 1\n    Écart minimal (minutes)       720\nAgent Hub                         prise d’effet : immédiat\n    Mises à jour auto des liens…  activé\n    Mise à jour auto des équipes  activé\n    Intervalle de vérification (… 15\nAgents                            relancement\n    Mise à jour auto des rôles i… activé\nProjets                           prise d’effet : immédiat\n    Périmé après (heures)         4\nDéclencheurs de réveil            prise d’effet : immédiat\n    Activé                        activé\n    Réveils de point max par jour 6\n    Écart minimal (minutes)       60\n    Déclencheur de projets périm… activé\nClasse proactive                  prise d’effet : immédiat\n    Attente de patience par défa… 300000\n    Facteur d’espacement de pati… 3\n    Tentatives max de patience    3\n    TTL du cycle de patience (ms) 7200000\n    Attentes en suspens par sess… 4\nVoix                              prise d’effet : immédiat\n    Genre de la voix              auto\n    Tonalité                      warm\n    Expressivité                  medium\n    Rythme                        1.0\n    Langue                        auto\n    Accent                        —\n    Instructions de diction       Speak aloud and pay atten…\n    Nettoyage de la transcription auto\n    fournisseur vocal             auto\nMode vocal                        prise d’effet : immédiat\n    réponse parlée la plus longue 800\nMessages entre agents             prise d’effet : immédiat\n    Activé sur cette machine      désactivé\n  › Session de la cheffe de cabi… —\n    Retenir les demandes de tâche activé\n    Plafond de filtrage / heure   400\n    Plafond non adressés / heure  350\n    Plafond de bavardage / heure  300\n    Plafond d’expéditeur / heure  200\n    Modèle de filtrage            —\nRetirées                          prise d’effet : jamais\n    Longueur de conversation      100\n    Longueur du détail            15\n    Historique max d’apprentissa… 50\n    Avis des suggestions intelli… activé\nMémoire                           prise d’effet : immédiat\n    Mémoire par portée            activé\n    Capture au compactage         activé\n    Localisateurs comme contexte  désactivé\n    Suggestions de rappel         activé\nQuestions                         prise d’effet : immédiat\n    Questions expirées visibles   7d",
+    "config_unchanged": true
+  },
+  {
+    "locale": "fr",
+    "key": "team_bridge.session",
+    "compact": true,
+    "size": [
+      80,
+      24
+    ],
+    "source_label": "Session de la cheffe de cabinet",
+    "source_label_cells": 31,
+    "help": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide = badge uniquement.",
+    "detail": "Session pouvant être réveillée à l’arrivée de nouveaux messages ; vide =\nbadge uniquement.",
+    "list_width": 74,
+    "detail_width": 74,
+    "region": "Region(x=1, y=1, width=78, height=17)",
+    "virtual": "Size(width=76, height=15)",
+    "pane_display": false,
+    "first_equal_settled": true,
+    "paint": "Modèle                            prise d’effet : nouv. sessions\n    Fournisseur par défaut        —\n    Modèle par défaut             —\n    Effort de raisonnement par d… —\nProtocole de connexion            prise d’effet : immédiat\n    Utiliser le contexte OpenAI…  activé\n    Surface d’API OpenAI          responses\n    Cache 1 h d’Anthropic au-del… 150000\n    TTL 1 h sous-agents Anthropic 0\n    Région Amazon Bedrock         —\n    Authentification Bedrock      —\nRoutage OpenRouter                prise d’effet : immédiat\n    affinité de cache             activé\n    politique de routage          —\n    ordre des hôtes               —\n    hôtes autorisés               —\n    hôtes ignorés                 —\n    replis                        —\n    paramètres requis             —\n    collecte de données           —\n    rétention nulle               —\n    texte distillable             true\n    quantifications               —\n    prix max                      —\n    débit min (tok/s)             0.0\n    latence max (s)               0.0\n    retirer un hôte lent (tok/s)  0.0\nBasculement et réessais           prise d’effet : immédiat\n    Réessayer les appels en échec activé\n    Réessais max                  10\n    Délai de base (ms)            500\n    Réessais de connectivité      15\n    Plafond d’espacement de conn… 60000\n    Repli de modèle               activé\n    Repli selon l’utilisation     désactivé\n    politique de choix du compte  reset-soonest\n    ancien choix selon l’usage    activé\n    Réserve d’utilisation (%)     10\n    Cascade de basculement        0 chaîne\n      aucune cascade configurée\n    + ajouter une chaîne\n    Repli de l’enfant épinglé     cross-family\nApparence                         prise d’effet : immédiat\n    Thème                         dark\n    Animation de reflet           activé\n    Narration en cours de tour    activé\n    Raisonnement du modèle en di… désactivé\n    Filet en marge de l’assistant activé\n    Lignes d’action confortables  désactivé\n    Glyphes Nerd Font             auto\n    Marqueurs de titre            désactivé\n    Titre du terminal             activé\n    Images intégrées              activé\n    Notifications de bureau       activé\n    Noms de session dans les not… activé\n    Format des heures de réveil   12h\n    Langue                        fr\n    Dock des sous-agents          full\n    Masquer le trafic entre sess… désactivé\n    Marquer la réponse du tour    désactivé\n    Bandeau d’état                activé\n    Chevron du prompt             activé\n    Bandeau : modèle              activé\n    Bandeau : répertoire de trav… activé\n    Bandeau : contexte            activé\n    Bandeau : débit de décodage   activé\n    Bandeau : coût de session     activé\n    Bandeau : temps écoulé        activé\n    Bandeau : commande d’état     —\n    Bandeau : cadence d’exécution 30\n    Barre latérale des sessions   désactivé\n    Position de la barre latérale left\n    Couche sous-agents de la bar… désactivé\nSon des notifications             prise d’effet : immédiat\n    Jouer un son                  activé\n    Son                           soft-pulse\n    Volume                        70\nRaccourcis clavier                prise d’effet : immédiat\n    Nouvelle session              ctrl+n\n    Reprendre une session         ctrl+s\n    Envoi rapide                  cmd+alt+shift+space\n    Appuyer pour parler           Right-Option (hold)\n    Démarrer l’enregistrement     cmd+shift+s\nApprobations                      prise d’effet : immédiat\n    Mode d’approbation des outils auto\nStockage des sessions             prise d’effet : relancement\n    Enregistrement auto de la co… désactivé\nVos conversations                 prise d’effet : relancement\n    Nettoyage des sessions        désactivé\n    ↳ sessions max                0\n    ↳ jours d’inactivité max      0\n    ↳ octets totaux max           0\n    ↳ supprimer les vides         désactivé\n    Supprimer les conversations…  30\nCompression des transcriptions    prise d’effet : relancement\n    Compresser les transcriptions activé\n    ↳ compresser après (jours)    30\nScratchpad                        prise d’effet : immédiat\n    Plafond scratchpad (octets)   268435456\nTravail délégué                   prise d’effet : relancement\n    Nettoyage du travail délégué  activé\n    ↳ supprimer après (heures)    48\nSous-agents                       prise d’effet : immédiat\n    Tâches d’arrière-plan max     15\n    Alléger les connaissances de… activé\n    Profondeur max d’équipes imb… 3\n    Qui choisit le modèle d’un s… operator\n    Modèle de sous-agent : lo     —\n    Modèle de sous-agent : med    —\n    Modèle de sous-agent : hi     —\nSuggestions intelligentes         prise d’effet : nouv. sessions\n    Suggestions intelligentes     activé\n    ↳ fournisseur                 auto\n    ↳ modèle                      —\n    ↳ délai (ms)                  1500\n    ↳ budget d’attente (ms)       50\n    ↳ caractères d’état max       6000\n    ↳ candidats max               12\n    ↳ recommandations max         3\nRadient Saver (bêta)              prise d’effet : immédiat\n    Radient Saver (bêta)          off\nMises en avant                    prise d’effet : nouv. sessions\n    Mises en avant                activé\n    ↳ fichiers                    activé\n    ↳ graphiques                  activé\n    ↳ modèle des graphiques       auto\n    ↳ tours max                   2\n    ↳ tokens de sortie max        6000\n    ↳ limite de temps (s)         90\n    ↳ plafond de coût ($)         1.0\n    ↳ fichiers affichés           4\n    ↳ ne jamais lister sous       —\nSurveillances                     prise d’effet : nouv. sessions\n    Intervalle par défaut (s)     60\n    Max par session               8\n    Délai d’exécution (ms)        120000\n    Plafond de l’instantané (car… 32768\n    Lignes de delta max           12\n    Budget de delta (caractères)  1200\n    État du classifieur (caractè… 1200\n    Désactiver après échecs cons… 5\n    Livraisons par heure          12\n    Ignorer le bruit des horodat… activé\nRuntime                           prise d’effet : immédiat\n    Continuer après /resume       activé\n    Garder les conversations fer… 300\n    Conversations chaudes max     4\n    Délai des questions en votre… 24\nCompactage                        prise d’effet : immédiat\n    Compactage                    activé\n    Stratégie                     auto\n    Seuil (% de la fenêtre)       0.8\n    Seuil (tokens)                400000\n    Conserver les tokens récents  20000\n    Continuer après le compactage activé\n    Compactage en cours de tour   activé\n    Compactage en veille          activé\n    Seuil en veille (tokens)      200000\n    Croissance min. en veille (t… 60000\n    Rejeu à la reprise            full\n    Limite de taille de requête…  24000000\n    Déclencheur de taille de req… 16000000\nFork                              prise d’effet : immédiat\n    Où un fork s’ouvre            switch\n    Où il s’ouvre sous cmux       workspace\nOutils web                        prise d’effet : immédiat\n    Recherche web                 activé\n    Récupération web              activé\nRecherche web                     prise d’effet : immédiat\n    Équilibrage de charge         round_robin\n    Fournisseurs                  duckduckgo, tavily\n    Fournisseurs exclus           —\n    Délai (s)                     20.0\n    Endpoint SearXNG              —\n    Preuves par page DeepSeek     désactivé\n    Lire depuis la recherche      activé\nRécupération web                  prise d’effet : immédiat\n    Délai (s)                     20.0\n    Plafond de téléchargement (o… 5242880\n    Redirections max              5\n    TTL du cache (s)              900\n    Autoriser les adresses privé… désactivé\n    Moteur de rendu HTML          auto\n    Enrichir avant l’extraction   activé\n    Tentatives par maillon        3\n    Réessai avec profil de navig… activé\nOutils                            prise d’effet : immédiat\n    Interpréteur Bash             —\n    Journaliser les envois non a… désactivé\n    Bloquer les recherches non b… activé\n    …refuser plutôt qu’avertir    activé\n    …élaguer les arborescences v… activé\n    Charger à la demande les sch… activé\nGarde-fous                        prise d’effet : immédiat\n    Règles de garde-fou           activé\n    Revoir suppressions critiques désactivé\n    Délai de vérification (s)     20.0\n    Dossier des règles            —\nHooks                             prise d’effet : immédiat\n    Hooks natifs                  désactivé\n    Transférer les hooks de Clau… désactivé\n    Transférer les hooks de Codex désactivé\nLimite de mémoire des commandes   prise d’effet : immédiat\n    Limite de mémoire des comman… activé\n    Source du plafond             auto\n    Plafond manuel (Mo)           0\n    Seuil d’avertissement         0.8\nFile d’attente des tâches lourdes prise d’effet : immédiat\n    File d’attente des tâches lo… activé\nBudget des requêtes shell         prise d’effet : immédiat\n    Budget des requêtes shell     activé\n    …arrêter plutôt qu’avertir    activé\n    Budget (secondes)             60\nShell de l’agent                  prise d’effet : relancement\n    Environnement du shell de l’… inherit\n    …ajouts à la liste d’autoris… —\n    …retirés dans les deux modes  —\nServeurs locaux                   prise d’effet : nouv. sessions\n    endpoint LM Studio            http://localhost:1234/v1\n    surcharges de modèle pour LM… {}\n    endpoint Ollama               http://localhost:11434/v1\n    surcharges de modèle pour Ol… {}\n    endpoint vLLM                 http://localhost:8000/v1\n    surcharges de modèle pour vL… {}\n    endpoint llama.cpp            http://localhost:8080/v1\n    surcharges de modèle pour ll… {}\n    endpoint OpenAI-compatible    —\n    surcharges de modèle pour Op… {}\nCapacité de la console            prise d’effet : immédiat\n    Plafond de terminaux actifs   128\n    Terminaux d’agents par conve… 8\n    Emplacements réservés aux te… 16\nApplication de bureau             prise d’effet : immédiat\n    commande de lancement         —\n    cache des fichiers distants…  1073741824\nAccès téléphone                   prise d’effet : immédiat\n    Reconnecter l’accès téléphon… activé\n    Envoyer au téléphone quand j… 120\nAperçus de fichiers               prise d’effet : immédiat\n    Racines d’aperçus supplément… —\nRéseau maillé                     prise d’effet : relancement\n    Synchronisation entre pairs   activé\n    Portées à synchroniser        global, session, team, agent\n    Pairs exclus de la mémoire    —\n    Adresse d’écoute              0.0.0.0\n    Port du maillage              4097\n    Endpoints annoncés            —\n    Taille d’audit par génération 8388608\n    Générations d’audit conservé… 5\n    Plafond d’âge d’audit (jours) 90.0\n    Handshakes simultanés         8\n    Période de calme de synchron… 30.0\n    Intervalle de vérification d… 15.0\n    Durée de vie du login emprun… 900.0\n    Maintien du login emprunté,…  86400.0\n    Dépôts GitHub                 —\nMises à jour du maillage          prise d’effet : immédiat\n    Propager le maillage après u… auto\nDéplacements de session           prise d’effet : immédiat\n    Plafond des fichiers de trav… 268435456\n    Dossiers pouvant recevoir de… ~\nMises à jour                      prise d’effet : immédiat\n    Purge anciennes installations activé\n    Inutilisées conservées        2\nCalcul distant                    prise d’effet : immédiat\n    Calcul distant                désactivé\nAida                              prise d’effet : immédiat\n    Cheffe de cabinet activée     activé\n    Nom affiché                   Aida\n    Heure du point quotidien      08:30\n    Intervalle des points (h)     0\n    Cadence en pause              désactivé\n    Points supplémentaires / jour 2\n    Écart minimal (minutes)       90\n    Intervalle de rappel d’intég… 14\nBibliothécaire                    prise d’effet : immédiat\n    Bibliothécaire activé         activé\n    Nom affiché                   Librarian\n    Heure de la passe quotidienne 03:30\n    Passe quotidienne en pause    désactivé\n    Passes supplémentaires / jour 1\n    Écart minimal (minutes)       720\nAgent Hub                         prise d’effet : immédiat\n    Mises à jour auto des liens…  activé\n    Mise à jour auto des équipes  activé\n    Intervalle de vérification (… 15\nAgents                            prise d’effet : relancement\n    Mise à jour auto des rôles i… activé\nProjets                           prise d’effet : immédiat\n    Périmé après (heures)         4\nDéclencheurs de réveil            prise d’effet : immédiat\n    Activé                        activé\n    Réveils de point max par jour 6\n    Écart minimal (minutes)       60\n    Déclencheur de projets périm… activé\nClasse proactive                  prise d’effet : immédiat\n    Attente de patience par défa… 300000\n    Facteur d’espacement de pati… 3\n    Tentatives max de patience    3\n    TTL du cycle de patience (ms) 7200000\n    Attentes en suspens par sess… 4\nVoix                              prise d’effet : immédiat\n    Genre de la voix              auto\n    Tonalité                      warm\n    Expressivité                  medium\n    Rythme                        1.0\n    Langue                        auto\n    Accent                        —\n    Instructions de diction       Speak aloud and pay attention to potent…\n    Nettoyage de la transcription auto\n    fournisseur vocal             auto\nMode vocal                        prise d’effet : immédiat\n    réponse parlée la plus longue 800\nMessages entre agents             prise d’effet : immédiat\n    Activé sur cette machine      désactivé\n  › Session de la cheffe de cabi… —\n    Retenir les demandes de tâche activé\n    Plafond de filtrage / heure   400\n    Plafond non adressés / heure  350\n    Plafond de bavardage / heure  300\n    Plafond d’expéditeur / heure  200\n    Modèle de filtrage            —\nRetirées                          prise d’effet : jamais\n    Longueur de conversation      100\n    Longueur du détail            15\n    Historique max d’apprentissa… 50\n    Avis des suggestions intelli… activé\nMémoire                           prise d’effet : immédiat\n    Mémoire par portée            activé\n    Capture au compactage         activé\n    Localisateurs comme contexte  désactivé\n    Suggestions de rappel         activé\nQuestions                         prise d’effet : immédiat\n    Questions expirées visibles   7d",
+    "config_unchanged": true
+  },
+  {
+    "locale": "hi",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "compact": true,
+    "size": [
+      100,
+      30
+    ],
+    "source_label": "डिस्टिलेशन योग्य टेक्स्ट",
+    "source_label_cells": 15,
+    "help": "'हाँ': सिर्फ़ ऐसे endpoint जिनके टेक्स्ट आउटपुट से मॉडल डिस्टिलेशन की अनुमति हो। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता।",
+    "detail": "enter दबाने तक नहीं सहेजा जाएगा   providers.openrouter.enforce_distillable_text",
+    "list_width": 60,
+    "detail_width": 94,
+    "region": "Region(x=1, y=1, width=98, height=23)",
+    "virtual": "Size(width=96, height=21)",
+    "pane_display": true,
+    "first_equal_settled": true,
+    "paint": "मॉडल                               लागू: नए सत्रों में\n    डिफ़ॉल्ट प्रोवाइडर                   —\n    डिफ़ॉल्ट मॉडल                      —\n    डिफ़ॉल्ट तर्क-प्रयास                 —\nवायर प्रोटोकॉल                         लागू: तुरंत\n    अधिकतम OpenAI संदर्भ इस्तेमाल करें    चालू\n    OpenAI API सरफ़ेस               responses\n    Anthropic 1h कैश इससे ऊपर (टोकन) 150000\n    Anthropic उप-एजेंट 1h कैश सीमा     0\n    Amazon Bedrock क्षेत्र           —\n    Amazon Bedrock प्रमाणीकरण        —\nOpenRouter रूटिंग                    लागू: तुरंत\n    कैश एफ़िनिटी                       चालू\n    रूटिंग नीति                        —\n    होस्ट क्रम                       —\n    अनुमत होस्ट                      —\n    अनदेखे होस्ट                      —\n    फ़ॉलबैक                          —\n    पैरामीटर अनिवार्य करें                —\n    डेटा संग्रह                       —\n    शून्य डेटा रिटेंशन                   —\n    डिस्टिलेशन योग्य टेक्स्ट               true ▾\n      ○ डिफ़ॉल्ट  (डिफ़ॉल्ट)  कोई प्राथमिकता नहीं भेजी जाती\n    › ● हाँ  सिर्फ़ ऐसे endpoint जिनके टेक्स्ट से मॉडल डिस्टिलेशन की अनुमति हो\n    क्वांटाइज़ेशन                       —\n    अधिकतम कीमत                     —\n    न्यूनतम थ्रूपुट (tok/s)            0.0\n    अधिकतम लेटेंसी (s)                 0.0\n    धीमा होस्ट हटाएँ (tok/s)            0.0\nफ़ेलओवर और रीट्राई                     लागू: तुरंत\n    विफल कॉल फिर आज़माएँ                चालू\n    अधिकतम रीट्राई                    10\n    आधार देरी (ms)                   500\n    कनेक्टिविटी रीट्राई                   15\n    कनेक्टिविटी बैकऑफ़ सीमा (ms)           60000\n    मॉडल फ़ॉलबैक                      चालू\n    उपयोग-सजग फ़ॉलबैक                 बंद\n    खाता चयन नीति                     reset-soonest\n    पुराना usage-aware चयन           चालू\n    उपयोग रिज़र्व (%)                 10\n    फ़ेलओवर कैस्केड                    0 चेन\n      कोई कैस्केड कॉन्फ़िगर नहीं है\n    + चेन जोड़ें\n    पिन किए उप-एजेंट का फ़ॉलबैक           cross-family\nदिखावट                              लागू: तुरंत\n    थीम                            dark\n    शिमर एनिमेशन                     चालू\n    टर्न के दौरान वर्णन                चालू\n    मॉडल का लाइव तर्क                 बंद\n    असिस्टेंट मार्जिन रेखा                 चालू\n    आरामदेह एक्शन पंक्तियाँ               बंद\n    Nerd Font ग्लिफ़                 स्वतः\n    शीर्षक मार्कर                     बंद\n    टर्मिनल शीर्षक                    चालू\n    अंतर्निहित छवियाँ                    चालू\n    डेस्कटॉप सूचनाएँ                    चालू\n    सूचना में सत्र नाम                  चालू\n    जागृति समय प्रारूप                  12h\n    भाषा                            fr\n    उप-एजेंट डॉक                     full\n    क्रॉस-सत्र ट्रैफ़िक छिपाएँ              बंद\n    टर्न के उत्तर को चिह्नित करें          बंद\n    स्टेटस बैंड                       चालू\n    प्रॉम्प्ट शेवरॉन                    चालू\n    बैंड: मॉडल                       चालू\n    बैंड: कार्य निर्देशिका                 चालू\n    बैंड: संदर्भ                      चालू\n    बैंड: डिकोड रेट                    चालू\n    बैंड: सत्र लागत                   चालू\n    बैंड: बीता समय                    चालू\n    बैंड: स्टेटस कमांड                  —\n    बैंड: कमांड अंतराल                  30\n    सत्र साइडबार                     बंद\n    साइडबार की जगह                   left\n    साइडबार उप-एजेंट लेयर              बंद\nसूचना की ध्वनि                         लागू: तुरंत\n    ध्वनि बजाएँ                       चालू\n    ध्वनि                           soft-pulse\n    वॉल्यूम                          70\nहॉटकीज़                              लागू: तुरंत\n    नया सत्र                        ctrl+n\n    सत्र फिर शुरू करें                  ctrl+s\n    क्विक सेंड                        cmd+alt+shift+space\n    दबाकर बोलें                       Right-Option (hold)\n    रिकॉर्डिंग शुरू करें                   cmd+shift+s\nस्वीकृतियाँ                             लागू: तुरंत\n    टूल स्वीकृति मोड                    auto\nसत्र भंडारण                          लागू: दोबारा लॉन्च पर\n    बातचीत अपने-आप सहेजें               बंद\nआपकी बातचीत                          लागू: दोबारा लॉन्च पर\n    सत्र सफ़ाई                       बंद\n    ↳ अधिकतम सत्र                   0\n    ↳ अधिकतम निष्क्रिय दिन              0\n    ↳ अधिकतम कुल बाइट                0\n    ↳ खाली हटाएँ                      बंद\n    इतनी देर बाद अस्थायी चैट हटाएँ         30\nट्रांसक्रिप्ट कंप्रेशन                     लागू: दोबारा लॉन्च पर\n    पुरानी ट्रांसक्रिप्ट कंप्रेस करें           चालू\n    ↳ (दिन) बाद कंप्रेस करें             30\nस्क्रैचपैड                            लागू: तुरंत\n    स्क्रैचपैड आकार सीमा (बाइट)           268435456\nसौंपा गया काम                          लागू: दोबारा लॉन्च पर\n    सौंपे काम की सफ़ाई                   चालू\n    ↳ इतने घंटों बाद हटाएँ               48\nउप-एजेंट                            लागू: तुरंत\n    अधिकतम बैकग्राउंड जॉब               15\n    उप-एजेंट का ज्ञान पतला करें           चालू\n    अधिकतम नेस्टेड टीम गहराई            3\n    उप-एजेंट का मॉडल कौन चुने            operator\n    उप-एजेंट मॉडल: lo                —\n    उप-एजेंट मॉडल: med               —\n    उप-एजेंट मॉडल: hi                —\nस्मार्ट संकेत                          लागू: नए सत्रों में\n    स्मार्ट संकेत                      चालू\n    ↳ वेंडर                         auto\n    ↳ मॉडल                         —\n    ↳ डेडलाइन (ms)                  1500\n    ↳ इंतज़ार बजट (ms)               50\n    ↳ अधिकतम स्टेट अक्षर              6000\n    ↳ अधिकतम उम्मीदवार                12\n    ↳ अधिकतम सिफ़ारिशें                  3\nRadient Saver (बीटा)                लागू: तुरंत\n    Radient Saver (बीटा)            off\nहाइलाइट्स                            लागू: नए सत्रों में\n    हाइलाइट्स                        चालू\n    ↳ फ़ाइलें                         चालू\n    ↳ ग्राफ़िक्स                       चालू\n    ↳ ग्राफ़िक्स मॉडल                   auto\n    ↳ अधिकतम टर्न                   2\n    ↳ अधिकतम आउटपुट टोकन             6000\n    ↳ समय सीमा (s)                  90\n    ↳ लागत सीमा ($)                  1.0\n    ↳ दिखाई जाने वाली फ़ाइलें               4\n    ↳ इनके नीचे कभी सूचीबद्ध न करें        —\nमॉनिटर                              लागू: नए सत्रों में\n    डिफ़ॉल्ट अंतराल (s)                 60\n    प्रति सत्र अधिकतम                 8\n    रन टाइमआउट (ms)                120000\n    स्नैपशॉट सीमा (अक्षर)               32768\n    अधिकतम डेल्टा पंक्तियाँ                12\n    डेल्टा बजट (अक्षर)                1200\n    क्लासिफ़ायर स्टेट (अक्षर)             1200\n    कितनी विफलताओं पर बंद करें            5\n    प्रति घंटा डिलीवरी                   12\n    टाइमस्टैम्प उथल-पुथल अनदेखी करें       चालू\nरनटाइम                             लागू: तुरंत\n    /resume के बाद भी काम जारी रखें       चालू\n    बंद बातचीत वॉर्म रखें (s)            300\n    अधिकतम वॉर्म बातचीत                4\n    दूर रहने पर सवाल टाइमआउट (h)      24\nसंपीडन                              लागू: तुरंत\n    संपीडन                          चालू\n    रणनीति                          auto\n    थ्रेशोल्ड (विंडो का %)                0.8\n    थ्रेशोल्ड (टोकन)                   400000\n    हाल के टोकन रखें                   20000\n    संपीडन के बाद जारी रखें               चालू\n    टर्न के दौरान संपीडन                चालू\n    निष्क्रिय-सत्र संपीडन                चालू\n    निष्क्रिय-सत्र थ्रेशोल्ड (टोकन)         200000\n    निष्क्रिय-सत्र न्यूनतम वृद्धि (टोकन)     60000\n    फिर शुरू होने पर रीप्ले               full\n    अनुरोध आकार सीमा (बाइट)             24000000\n    अनुरोध आकार ट्रिगर (बाइट)           16000000\nफ़ोर्क                               लागू: तुरंत\n    फ़ोर्क कहाँ खुलेगा                    switch\n    cmux में कहाँ खुलेगा                 workspace\nवेब टूल                             लागू: तुरंत\n    वेब सर्च                        चालू\n    वेब फ़ेच                         चालू\nवेब सर्च                            लागू: तुरंत\n    लोड बैलेंसिंग                       round_robin\n    प्रोवाइडर                        duckduckgo, tavily\n    बाहर रखे प्रोवाइडर                 —\n    टाइमआउट (s)                    20.0\n    SearXNG endpoint              —\n    DeepSeek पेज साक्ष्य              बंद\n    सर्च से पढ़ें                      चालू\nवेब फ़ेच                             लागू: तुरंत\n    टाइमआउट (s)                    20.0\n    डाउनलोड सीमा (बाइट)                5242880\n    अधिकतम रीडायरेक्ट                  5\n    कैश TTL (s)                    900\n    निजी पते अनुमत करें                 बंद\n    HTML रेंडरर                     auto\n    स्क्रैप से पहले एनरिच करें            चालू\n    प्रति हॉप प्रयास                   3\n    ब्राउज़र-प्रोफ़ाइल रीट्राई              चालू\nटूल                                लागू: तुरंत\n    Bash इंटरप्रेटर                  —\n    बिना-पुष्टि send दर्ज करें            बंद\n    बिना सीमा की सर्च रोकें                चालू\n    …चेतावनी देने के बजाय अस्वीकार करें       चालू\n    …ripgrep के लिए वेंडर ट्री छाँटें       चालू\n    कम इस्तेमाल टूल स्कीमा ज़रूरत पर लोड करें चालू\nसुरक्षा उपाय                          लागू: तुरंत\n    सुरक्षा नियम                      चालू\n    अहम चीज़ें हटाने की समीक्षा             बंद\n    सुरक्षा जाँच टाइमआउट (s)            20.0\n    नियम फ़ोल्डर                      —\nहुक                                लागू: तुरंत\n    नेटिव हुक                        बंद\n    Claude Code हुक फ़ॉरवर्ड करें       बंद\n    Codex हुक फ़ॉरवर्ड करें             बंद\nकमांड मेमोरी सीमा                        लागू: तुरंत\n    कमांड मेमोरी सीमा                    चालू\n    सीमा का स्रोत                      auto\n    ख़ुद तय की गई सीमा (MB)            0\n    सलाह थ्रेशोल्ड                     0.8\nभारी जॉब कतार                         लागू: तुरंत\n    भारी जॉब कतार                     चालू\nशेल क्वेरी बजट                        लागू: तुरंत\n    शेल क्वेरी बजट                    चालू\n    …चेतावनी देने के बजाय रोकें             चालू\n    बजट (सेकंड)                     60\nएजेंट शेल                            लागू: दोबारा लॉन्च पर\n    एजेंट शेल एनवायरनमेंट               inherit\n    …अनुमति-सूची मोड में रखे जाते हैं         —\n    …दोनों मोड में हटाए जाते हैं             —\nस्थानीय सर्वर                         लागू: नए सत्रों में\n    LM Studio endpoint            http://localhost:1234/v1\n    LM Studio मॉडल ओवरराइड          {}\n    Ollama endpoint               http://localhost:11434/v1\n    Ollama मॉडल ओवरराइड             {}\n    vLLM endpoint                 http://localhost:8000/v1\n    vLLM मॉडल ओवरराइड               {}\n    llama.cpp endpoint            http://localhost:8080/v1\n    llama.cpp मॉडल ओवरराइड          {}\n    OpenAI-compatible endpoint    —\n    OpenAI-compatible मॉडल ओवरराइड  {}\nकंसोल क्षमता                          लागू: तुरंत\n    लाइव टर्मिनल सीमा                  128\n    प्रति बातचीत एजेंट टर्मिनल            8\n    उपयोगकर्ता टर्मिनल के लिए आरक्षित स्लॉट  16\nडेस्कटॉप ऐप                          लागू: तुरंत\n    लॉन्च कमांड                       —\n    रिमोट फ़ाइल कैश (बाइट)              1073741824\nफ़ोन एक्सेस                           लागू: तुरंत\n    साइन-इन के बाद फ़ोन एक्सेस फिर से जोड़ना  चालू\n    कंप्यूटर से इतनी देर दूर रहने पर फ़ोन…  120\nफ़ाइल प्रीव्यू                          लागू: तुरंत\n    अतिरिक्त प्रीव्यू रूट                 —\nमेश नेटवर्क                          लागू: दोबारा लॉन्च पर\n    भरोसेमंद पीयर मेमोरी सिंक              चालू\n    सिंक के लिए मेमोरी स्कोप               global, session, team, ag…\n    मेमोरी से बाहर रखे गए पीयर           —\n    सुनने का पता                      0.0.0.0\n    मेश पोर्ट                        4097\n    घोषित endpoint                  —\n    प्रति जनरेशन ऑडिट आकार             8388608\n    रखी जाने वाली ऑडिट जनरेशन            5\n    ऑडिट उम्र सीमा (दिन)               90.0\n    एक साथ हैंडशेक                    8\n    सिंक शांति अवधि (s)                 30.0\n    सिंक जाँच अंतराल (s)                15.0\n    उधार लॉगिन की आयु (s)              900.0\n    मालिक के दूर रहने पर उधार लॉगिन की मोह… 86400.0\n    GitHub रिपॉज़िटरी                  —\nमेश अपडेट                           लागू: तुरंत\n    अपडेट के बाद मेश रोलआउट करें         auto\nसत्र मूव                            लागू: तुरंत\n    प्रति मूव वर्किंग फ़ाइलों की सीमा (बाइट)    268435456\n    वे फ़ोल्डर जो मूव की गई रिपॉज़िटरी पा सकते… ~\nअपडेट                              लागू: तुरंत\n    पुराने इंस्टॉल हटाएँ                  चालू\n    रखे जाने वाले अप्रयुक्त इंस्टॉल          2\nरिमोट कंप्यूट                          लागू: तुरंत\n    रिमोट कंप्यूट                      बंद\nAida                              लागू: तुरंत\n    चीफ़ ऑफ़ स्टाफ़ चालू                  चालू\n    प्रदर्शित नाम                     Aida\n    रोज़ का चेक-इन समय                08:30\n    चेक-इन अंतराल (घंटे)               0\n    कैडेंस रुका हुआ                     बंद\n    अतिरिक्त चेक-इन / दिन              2\n    न्यूनतम अंतराल (मिनट)              90\n    इंटीग्रेशन याद दिलाने का अंतराल (दिन)     14\nलाइब्रेरियन                           लागू: तुरंत\n    लाइब्रेरियन सक्षम                  चालू\n    प्रदर्शित नाम                     Librarian\n    दैनिक पास का समय                  03:30\n    दैनिक पास रोका गया                  बंद\n    अतिरिक्त पास / दिन                 1\n    न्यूनतम अंतर (मिनट)               720\nAgent Hub                         लागू: तुरंत\n    एजेंट/कौशल लिंक स्वतः अपडेट करें        चालू\n    टीमें अपने-आप अपडेट करें             चालू\n    जाँच अंतराल (मिनट)                 15\nएजेंट                               लागू: दोबारा लॉन्च पर\n    बिल्ट-इन रोल अपने-आप अपडेट करें      चालू\nप्रोजेक्ट                             लागू: तुरंत\n    इतने घंटों बाद पुराना                 4\nजागृति ट्रिगर                          लागू: तुरंत\n    चालू                            चालू\n    प्रति दिन अधिकतम चेक-इन जागृतियाँ       6\n    न्यूनतम अंतराल (मिनट)              60\n    प्रोजेक्ट पुराना होने का ट्रिगर           चालू\nप्रोऐक्टिव क्लास                        लागू: तुरंत\n    डिफ़ॉल्ट धैर्य-इंतज़ार (ms)            300000\n    धैर्य बैकऑफ़ गुणक                  3\n    धैर्य अधिकतम प्रयास                3\n    धैर्य चक्र TTL (ms)              7200000\n    प्रति सत्र लंबित इंतज़ार              4\nबोलने की आवाज़                         लागू: तुरंत\n    आवाज़ का लिंग                      auto\n    टोन                            warm\n    अभिव्यंजकता                       medium\n    गति                            1.0\n    भाषा                            auto\n    लहजा                           —\n    डिलीवरी निर्देश                     Speak aloud and pay atten…\n    ट्रांसक्रिप्ट सफ़ाई                   auto\n    स्पीच प्रोवाइडर                    स्वतः\nवॉइस मोड                            लागू: तुरंत\n    सबसे लंबा बोला गया जवाब              800\nएजेंट संदेश                           लागू: तुरंत\n    इस डिवाइस पर चालू                 बंद\n    CoS सत्र                       —\n    काम के अनुरोध समीक्षा के लिए रोकें        चालू\n    स्क्रीनिंग सीमा प्रति घंटा               400\n    असंबोधित सीमा प्रति घंटा               350\n    गपशप सीमा प्रति घंटा                300\n    हर प्रेषक की सीमा प्रति घंटा           200\n    स्क्रीनिंग मॉडल                     —\nसेवानिवृत्त                            लागू: कभी नहीं\n    बातचीत की लंबाई                    100\n    विवरण की लंबाई                    15\n    लर्निंग्स इतिहास अधिकतम              50\n    स्मार्ट संकेत सूचना                  चालू\nमेमोरी                               लागू: तुरंत\n    स्कोप्ड मेमोरी                      चालू\n    संपीडन कैप्चर                     चालू\n    लोकेटर संदर्भ कैप्चर करें             बंद\n    रीकॉल सुझाव                       चालू\nसवाल                               लागू: तुरंत\n    टाइमआउट हुए सवाल कब तक दिखें        7d",
+    "config_unchanged": true
+  },
+  {
+    "locale": "hi",
+    "key": "providers.openrouter.enforce_distillable_text",
+    "compact": true,
+    "size": [
+      80,
+      24
+    ],
+    "source_label": "डिस्टिलेशन योग्य टेक्स्ट",
+    "source_label_cells": 15,
+    "help": "'हाँ': सिर्फ़ ऐसे endpoint जिनके टेक्स्ट आउटपुट से मॉडल डिस्टिलेशन की अनुमति हो। 'डिफ़ॉल्ट': कुछ नहीं भेजा जाता।",
+    "detail": "enter दबाने तक नहीं सहेजा जाएगा   providers.openrouter.enforce_distillable_text",
+    "list_width": 74,
+    "detail_width": 74,
+    "region": "Region(x=1, y=1, width=78, height=17)",
+    "virtual": "Size(width=76, height=15)",
+    "pane_display": false,
+    "first_equal_settled": true,
+    "paint": "मॉडल                               लागू: नए सत्रों में\n    डिफ़ॉल्ट प्रोवाइडर                   —\n    डिफ़ॉल्ट मॉडल                      —\n    डिफ़ॉल्ट तर्क-प्रयास                 —\nवायर प्रोटोकॉल                         लागू: तुरंत\n    अधिकतम OpenAI संदर्भ इस्तेमाल करें    चालू\n    OpenAI API सरफ़ेस               responses\n    Anthropic 1h कैश इससे ऊपर (टोकन) 150000\n    Anthropic उप-एजेंट 1h कैश सीमा     0\n    Amazon Bedrock क्षेत्र           —\n    Amazon Bedrock प्रमाणीकरण        —\nOpenRouter रूटिंग                    लागू: तुरंत\n    कैश एफ़िनिटी                       चालू\n    रूटिंग नीति                        —\n    होस्ट क्रम                       —\n    अनुमत होस्ट                      —\n    अनदेखे होस्ट                      —\n    फ़ॉलबैक                          —\n    पैरामीटर अनिवार्य करें                —\n    डेटा संग्रह                       —\n    शून्य डेटा रिटेंशन                   —\n    डिस्टिलेशन योग्य टेक्स्ट               true ▾\n      ○ डिफ़ॉल्ट  (डिफ़ॉल्ट)  कोई प्राथमिकता नहीं भेजी जाती\n    › ● हाँ  सिर्फ़ ऐसे endpoint जिनके टेक्स्ट से मॉडल डिस्टिलेशन की अनुमति हो\n    क्वांटाइज़ेशन                       —\n    अधिकतम कीमत                     —\n    न्यूनतम थ्रूपुट (tok/s)            0.0\n    अधिकतम लेटेंसी (s)                 0.0\n    धीमा होस्ट हटाएँ (tok/s)            0.0\nफ़ेलओवर और रीट्राई                     लागू: तुरंत\n    विफल कॉल फिर आज़माएँ                चालू\n    अधिकतम रीट्राई                    10\n    आधार देरी (ms)                   500\n    कनेक्टिविटी रीट्राई                   15\n    कनेक्टिविटी बैकऑफ़ सीमा (ms)           60000\n    मॉडल फ़ॉलबैक                      चालू\n    उपयोग-सजग फ़ॉलबैक                 बंद\n    खाता चयन नीति                     reset-soonest\n    पुराना usage-aware चयन           चालू\n    उपयोग रिज़र्व (%)                 10\n    फ़ेलओवर कैस्केड                    0 चेन\n      कोई कैस्केड कॉन्फ़िगर नहीं है\n    + चेन जोड़ें\n    पिन किए उप-एजेंट का फ़ॉलबैक           cross-family\nदिखावट                              लागू: तुरंत\n    थीम                            dark\n    शिमर एनिमेशन                     चालू\n    टर्न के दौरान वर्णन                चालू\n    मॉडल का लाइव तर्क                 बंद\n    असिस्टेंट मार्जिन रेखा                 चालू\n    आरामदेह एक्शन पंक्तियाँ               बंद\n    Nerd Font ग्लिफ़                 स्वतः\n    शीर्षक मार्कर                     बंद\n    टर्मिनल शीर्षक                    चालू\n    अंतर्निहित छवियाँ                    चालू\n    डेस्कटॉप सूचनाएँ                    चालू\n    सूचना में सत्र नाम                  चालू\n    जागृति समय प्रारूप                  12h\n    भाषा                            fr\n    उप-एजेंट डॉक                     full\n    क्रॉस-सत्र ट्रैफ़िक छिपाएँ              बंद\n    टर्न के उत्तर को चिह्नित करें          बंद\n    स्टेटस बैंड                       चालू\n    प्रॉम्प्ट शेवरॉन                    चालू\n    बैंड: मॉडल                       चालू\n    बैंड: कार्य निर्देशिका                 चालू\n    बैंड: संदर्भ                      चालू\n    बैंड: डिकोड रेट                    चालू\n    बैंड: सत्र लागत                   चालू\n    बैंड: बीता समय                    चालू\n    बैंड: स्टेटस कमांड                  —\n    बैंड: कमांड अंतराल                  30\n    सत्र साइडबार                     बंद\n    साइडबार की जगह                   left\n    साइडबार उप-एजेंट लेयर              बंद\nसूचना की ध्वनि                         लागू: तुरंत\n    ध्वनि बजाएँ                       चालू\n    ध्वनि                           soft-pulse\n    वॉल्यूम                          70\nहॉटकीज़                              लागू: तुरंत\n    नया सत्र                        ctrl+n\n    सत्र फिर शुरू करें                  ctrl+s\n    क्विक सेंड                        cmd+alt+shift+space\n    दबाकर बोलें                       Right-Option (hold)\n    रिकॉर्डिंग शुरू करें                   cmd+shift+s\nस्वीकृतियाँ                             लागू: तुरंत\n    टूल स्वीकृति मोड                    auto\nसत्र भंडारण                          लागू: दोबारा लॉन्च पर\n    बातचीत अपने-आप सहेजें               बंद\nआपकी बातचीत                          लागू: दोबारा लॉन्च पर\n    सत्र सफ़ाई                       बंद\n    ↳ अधिकतम सत्र                   0\n    ↳ अधिकतम निष्क्रिय दिन              0\n    ↳ अधिकतम कुल बाइट                0\n    ↳ खाली हटाएँ                      बंद\n    इतनी देर बाद अस्थायी चैट हटाएँ         30\nट्रांसक्रिप्ट कंप्रेशन                     लागू: दोबारा लॉन्च पर\n    पुरानी ट्रांसक्रिप्ट कंप्रेस करें           चालू\n    ↳ (दिन) बाद कंप्रेस करें             30\nस्क्रैचपैड                            लागू: तुरंत\n    स्क्रैचपैड आकार सीमा (बाइट)           268435456\nसौंपा गया काम                          लागू: दोबारा लॉन्च पर\n    सौंपे काम की सफ़ाई                   चालू\n    ↳ इतने घंटों बाद हटाएँ               48\nउप-एजेंट                            लागू: तुरंत\n    अधिकतम बैकग्राउंड जॉब               15\n    उप-एजेंट का ज्ञान पतला करें           चालू\n    अधिकतम नेस्टेड टीम गहराई            3\n    उप-एजेंट का मॉडल कौन चुने            operator\n    उप-एजेंट मॉडल: lo                —\n    उप-एजेंट मॉडल: med               —\n    उप-एजेंट मॉडल: hi                —\nस्मार्ट संकेत                          लागू: नए सत्रों में\n    स्मार्ट संकेत                      चालू\n    ↳ वेंडर                         auto\n    ↳ मॉडल                         —\n    ↳ डेडलाइन (ms)                  1500\n    ↳ इंतज़ार बजट (ms)               50\n    ↳ अधिकतम स्टेट अक्षर              6000\n    ↳ अधिकतम उम्मीदवार                12\n    ↳ अधिकतम सिफ़ारिशें                  3\nRadient Saver (बीटा)                लागू: तुरंत\n    Radient Saver (बीटा)            off\nहाइलाइट्स                            लागू: नए सत्रों में\n    हाइलाइट्स                        चालू\n    ↳ फ़ाइलें                         चालू\n    ↳ ग्राफ़िक्स                       चालू\n    ↳ ग्राफ़िक्स मॉडल                   auto\n    ↳ अधिकतम टर्न                   2\n    ↳ अधिकतम आउटपुट टोकन             6000\n    ↳ समय सीमा (s)                  90\n    ↳ लागत सीमा ($)                  1.0\n    ↳ दिखाई जाने वाली फ़ाइलें               4\n    ↳ इनके नीचे कभी सूचीबद्ध न करें        —\nमॉनिटर                              लागू: नए सत्रों में\n    डिफ़ॉल्ट अंतराल (s)                 60\n    प्रति सत्र अधिकतम                 8\n    रन टाइमआउट (ms)                120000\n    स्नैपशॉट सीमा (अक्षर)               32768\n    अधिकतम डेल्टा पंक्तियाँ                12\n    डेल्टा बजट (अक्षर)                1200\n    क्लासिफ़ायर स्टेट (अक्षर)             1200\n    कितनी विफलताओं पर बंद करें            5\n    प्रति घंटा डिलीवरी                   12\n    टाइमस्टैम्प उथल-पुथल अनदेखी करें       चालू\nरनटाइम                             लागू: तुरंत\n    /resume के बाद भी काम जारी रखें       चालू\n    बंद बातचीत वॉर्म रखें (s)            300\n    अधिकतम वॉर्म बातचीत                4\n    दूर रहने पर सवाल टाइमआउट (h)      24\nसंपीडन                              लागू: तुरंत\n    संपीडन                          चालू\n    रणनीति                          auto\n    थ्रेशोल्ड (विंडो का %)                0.8\n    थ्रेशोल्ड (टोकन)                   400000\n    हाल के टोकन रखें                   20000\n    संपीडन के बाद जारी रखें               चालू\n    टर्न के दौरान संपीडन                चालू\n    निष्क्रिय-सत्र संपीडन                चालू\n    निष्क्रिय-सत्र थ्रेशोल्ड (टोकन)         200000\n    निष्क्रिय-सत्र न्यूनतम वृद्धि (टोकन)     60000\n    फिर शुरू होने पर रीप्ले               full\n    अनुरोध आकार सीमा (बाइट)             24000000\n    अनुरोध आकार ट्रिगर (बाइट)           16000000\nफ़ोर्क                               लागू: तुरंत\n    फ़ोर्क कहाँ खुलेगा                    switch\n    cmux में कहाँ खुलेगा                 workspace\nवेब टूल                             लागू: तुरंत\n    वेब सर्च                        चालू\n    वेब फ़ेच                         चालू\nवेब सर्च                            लागू: तुरंत\n    लोड बैलेंसिंग                       round_robin\n    प्रोवाइडर                        duckduckgo, tavily\n    बाहर रखे प्रोवाइडर                 —\n    टाइमआउट (s)                    20.0\n    SearXNG endpoint              —\n    DeepSeek पेज साक्ष्य              बंद\n    सर्च से पढ़ें                      चालू\nवेब फ़ेच                             लागू: तुरंत\n    टाइमआउट (s)                    20.0\n    डाउनलोड सीमा (बाइट)                5242880\n    अधिकतम रीडायरेक्ट                  5\n    कैश TTL (s)                    900\n    निजी पते अनुमत करें                 बंद\n    HTML रेंडरर                     auto\n    स्क्रैप से पहले एनरिच करें            चालू\n    प्रति हॉप प्रयास                   3\n    ब्राउज़र-प्रोफ़ाइल रीट्राई              चालू\nटूल                                लागू: तुरंत\n    Bash इंटरप्रेटर                  —\n    बिना-पुष्टि send दर्ज करें            बंद\n    बिना सीमा की सर्च रोकें                चालू\n    …चेतावनी देने के बजाय अस्वीकार करें       चालू\n    …ripgrep के लिए वेंडर ट्री छाँटें       चालू\n    कम इस्तेमाल टूल स्कीमा ज़रूरत पर लोड करें चालू\nसुरक्षा उपाय                          लागू: तुरंत\n    सुरक्षा नियम                      चालू\n    अहम चीज़ें हटाने की समीक्षा             बंद\n    सुरक्षा जाँच टाइमआउट (s)            20.0\n    नियम फ़ोल्डर                      —\nहुक                                लागू: तुरंत\n    नेटिव हुक                        बंद\n    Claude Code हुक फ़ॉरवर्ड करें       बंद\n    Codex हुक फ़ॉरवर्ड करें             बंद\nकमांड मेमोरी सीमा                        लागू: तुरंत\n    कमांड मेमोरी सीमा                    चालू\n    सीमा का स्रोत                      auto\n    ख़ुद तय की गई सीमा (MB)            0\n    सलाह थ्रेशोल्ड                     0.8\nभारी जॉब कतार                         लागू: तुरंत\n    भारी जॉब कतार                     चालू\nशेल क्वेरी बजट                        लागू: तुरंत\n    शेल क्वेरी बजट                    चालू\n    …चेतावनी देने के बजाय रोकें             चालू\n    बजट (सेकंड)                     60\nएजेंट शेल                            लागू: दोबारा लॉन्च पर\n    एजेंट शेल एनवायरनमेंट               inherit\n    …अनुमति-सूची मोड में रखे जाते हैं         —\n    …दोनों मोड में हटाए जाते हैं             —\nस्थानीय सर्वर                         लागू: नए सत्रों में\n    LM Studio endpoint            http://localhost:1234/v1\n    LM Studio मॉडल ओवरराइड          {}\n    Ollama endpoint               http://localhost:11434/v1\n    Ollama मॉडल ओवरराइड             {}\n    vLLM endpoint                 http://localhost:8000/v1\n    vLLM मॉडल ओवरराइड               {}\n    llama.cpp endpoint            http://localhost:8080/v1\n    llama.cpp मॉडल ओवरराइड          {}\n    OpenAI-compatible endpoint    —\n    OpenAI-compatible मॉडल ओवरराइड  {}\nकंसोल क्षमता                          लागू: तुरंत\n    लाइव टर्मिनल सीमा                  128\n    प्रति बातचीत एजेंट टर्मिनल            8\n    उपयोगकर्ता टर्मिनल के लिए आरक्षित स्लॉट  16\nडेस्कटॉप ऐप                          लागू: तुरंत\n    लॉन्च कमांड                       —\n    रिमोट फ़ाइल कैश (बाइट)              1073741824\nफ़ोन एक्सेस                           लागू: तुरंत\n    साइन-इन के बाद फ़ोन एक्सेस फिर से जोड़ना  चालू\n    कंप्यूटर से इतनी देर दूर रहने पर फ़ोन…  120\nफ़ाइल प्रीव्यू                          लागू: तुरंत\n    अतिरिक्त प्रीव्यू रूट                 —\nमेश नेटवर्क                          लागू: दोबारा लॉन्च पर\n    भरोसेमंद पीयर मेमोरी सिंक              चालू\n    सिंक के लिए मेमोरी स्कोप               global, session, team, agent\n    मेमोरी से बाहर रखे गए पीयर           —\n    सुनने का पता                      0.0.0.0\n    मेश पोर्ट                        4097\n    घोषित endpoint                  —\n    प्रति जनरेशन ऑडिट आकार             8388608\n    रखी जाने वाली ऑडिट जनरेशन            5\n    ऑडिट उम्र सीमा (दिन)               90.0\n    एक साथ हैंडशेक                    8\n    सिंक शांति अवधि (s)                 30.0\n    सिंक जाँच अंतराल (s)                15.0\n    उधार लॉगिन की आयु (s)              900.0\n    मालिक के दूर रहने पर उधार लॉगिन की मोह… 86400.0\n    GitHub रिपॉज़िटरी                  —\nमेश अपडेट                           लागू: तुरंत\n    अपडेट के बाद मेश रोलआउट करें         auto\nसत्र मूव                            लागू: तुरंत\n    प्रति मूव वर्किंग फ़ाइलों की सीमा (बाइट)    268435456\n    वे फ़ोल्डर जो मूव की गई रिपॉज़िटरी पा सकते… ~\nअपडेट                              लागू: तुरंत\n    पुराने इंस्टॉल हटाएँ                  चालू\n    रखे जाने वाले अप्रयुक्त इंस्टॉल          2\nरिमोट कंप्यूट                          लागू: तुरंत\n    रिमोट कंप्यूट                      बंद\nAida                              लागू: तुरंत\n    चीफ़ ऑफ़ स्टाफ़ चालू                  चालू\n    प्रदर्शित नाम                     Aida\n    रोज़ का चेक-इन समय                08:30\n    चेक-इन अंतराल (घंटे)               0\n    कैडेंस रुका हुआ                     बंद\n    अतिरिक्त चेक-इन / दिन              2\n    न्यूनतम अंतराल (मिनट)              90\n    इंटीग्रेशन याद दिलाने का अंतराल (दिन)     14\nलाइब्रेरियन                           लागू: तुरंत\n    लाइब्रेरियन सक्षम                  चालू\n    प्रदर्शित नाम                     Librarian\n    दैनिक पास का समय                  03:30\n    दैनिक पास रोका गया                  बंद\n    अतिरिक्त पास / दिन                 1\n    न्यूनतम अंतर (मिनट)               720\nAgent Hub                         लागू: तुरंत\n    एजेंट/कौशल लिंक स्वतः अपडेट करें        चालू\n    टीमें अपने-आप अपडेट करें             चालू\n    जाँच अंतराल (मिनट)                 15\nएजेंट                               लागू: दोबारा लॉन्च पर\n    बिल्ट-इन रोल अपने-आप अपडेट करें      चालू\nप्रोजेक्ट                             लागू: तुरंत\n    इतने घंटों बाद पुराना                 4\nजागृति ट्रिगर                          लागू: तुरंत\n    चालू                            चालू\n    प्रति दिन अधिकतम चेक-इन जागृतियाँ       6\n    न्यूनतम अंतराल (मिनट)              60\n    प्रोजेक्ट पुराना होने का ट्रिगर           चालू\nप्रोऐक्टिव क्लास                        लागू: तुरंत\n    डिफ़ॉल्ट धैर्य-इंतज़ार (ms)            300000\n    धैर्य बैकऑफ़ गुणक                  3\n    धैर्य अधिकतम प्रयास                3\n    धैर्य चक्र TTL (ms)              7200000\n    प्रति सत्र लंबित इंतज़ार              4\nबोलने की आवाज़                         लागू: तुरंत\n    आवाज़ का लिंग                      auto\n    टोन                            warm\n    अभिव्यंजकता                       medium\n    गति                            1.0\n    भाषा                            auto\n    लहजा                           —\n    डिलीवरी निर्देश                     Speak aloud and pay attention to potent…\n    ट्रांसक्रिप्ट सफ़ाई                   auto\n    स्पीच प्रोवाइडर                    स्वतः\nवॉइस मोड                            लागू: तुरंत\n    सबसे लंबा बोला गया जवाब              800\nएजेंट संदेश                           लागू: तुरंत\n    इस डिवाइस पर चालू                 बंद\n    CoS सत्र                       —\n    काम के अनुरोध समीक्षा के लिए रोकें        चालू\n    स्क्रीनिंग सीमा प्रति घंटा               400\n    असंबोधित सीमा प्रति घंटा               350\n    गपशप सीमा प्रति घंटा                300\n    हर प्रेषक की सीमा प्रति घंटा           200\n    स्क्रीनिंग मॉडल                     —\nसेवानिवृत्त                            लागू: कभी नहीं\n    बातचीत की लंबाई                    100\n    विवरण की लंबाई                    15\n    लर्निंग्स इतिहास अधिकतम              50\n    स्मार्ट संकेत सूचना                  चालू\nमेमोरी                               लागू: तुरंत\n    स्कोप्ड मेमोरी                      चालू\n    संपीडन कैप्चर                     चालू\n    लोकेटर संदर्भ कैप्चर करें             बंद\n    रीकॉल सुझाव                       चालू\nसवाल                               लागू: तुरंत\n    टाइमआउट हुए सवाल कब तक दिखें        7d",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ur",
+    "key": "shell_environment.mode",
+    "compact": true,
+    "size": [
+      100,
+      30
+    ],
+    "source_label": "ایجنٹ شیل ماحول",
+    "source_label_cells": 15,
+    "help": "'موجودہ ماحول اپنائیں' ایجنٹ کی چلائی ہوئی کمانڈ کو آپ کے ماحول تک رسائی دیتا ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'اجازت کی فہرست' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتا ہے، اس لیے سیشن شروع کرتے وقت استعمال ہونے والی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھا جاتا ہے: تبدیلی اگلے آغاز پر لاگو ہوتی ہے۔",
+    "detail": "⁧⁦enter⁩ دبانے تک محفوظ نہیں⁩   shell_environment.mode",
+    "list_width": 60,
+    "detail_width": 94,
+    "region": "Region(x=1, y=1, width=98, height=23)",
+    "virtual": "Size(width=96, height=21)",
+    "pane_display": true,
+    "first_equal_settled": true,
+    "paint": "ماڈل                              ⁧اطلاق: نئے سیشنز پر⁩\n    ڈیفالٹ پرووائیڈر              —\n    ڈیفالٹ ماڈل                   —\n    ڈیفالٹ استدلال کی شدت         —\nترسیلی پروٹوکول                   ⁧اطلاق: فوراً⁩\n    زیادہ سے زیادہ OpenAI سیاق و… ⁧آن⁩\n    OpenAI API سرفیس              responses\n    Anthropic 1h کیشے حد (ٹوکنز)  150000\n    Anthropic ذیلی ایجنٹ 1h کیشے  0\n    Amazon Bedrock ریجن           —\n    Amazon Bedrock تصدیق          —\nOpenRouter روٹنگ                  ⁧اطلاق: فوراً⁩\n    کیشے وابستگی                  ⁧آن⁩\n    روٹنگ پالیسی                  —\n    ہوسٹ ترتیب                    —\n    اجازت یافتہ ہوسٹس             —\n    نظر انداز ہوسٹس               —\n    فال بیکس                      —\n    پیرامیٹرز لازم کریں           —\n    ڈیٹا جمع کرنا                 —\n    صفر ڈیٹا ریٹینشن              —\n    ڈسٹل ہونے والا متن            true\n    کوانٹائزیشنز                  —\n    زیادہ سے زیادہ قیمت           —\n    کم از کم تھراپٹ (tok/s)       0.0\n    زیادہ سے زیادہ لیٹنسی (s)     0.0\n    سست ہوسٹ ریٹائر کریں (tok/s)  0.0\nفیل اوور اور دوبارہ کوشش          ⁧اطلاق: فوراً⁩\n    ناکام کالوں پر دوبارہ کوشش    ⁧آن⁩\n    زیادہ سے زیادہ دوبارہ کوششیں  10\n    بنیادی تاخیر (ms)             500\n    کنیکٹیوٹی دوبارہ کوششیں       15\n    کنیکٹیوٹی بیک آف حد (ms)      60000\n    ماڈل فال بیک                  ⁧آن⁩\n    استعمال کے حساب سے فال بیک    ⁧آف⁩\n    اکاؤنٹ انتخاب کی پالیسی       reset-soonest\n    پرانی usage-aware پک          ⁧آن⁩\n    استعمال کا ذخیرہ (%)          10\n    فیل اوور کیسکیڈ               ⁧0 چینز⁩\n      ⁧کوئی کیسکیڈ کنفیگر نہیں⁩\n    ⁧+ چین شامل کریں⁩\n    پن شدہ ذیلی ایجنٹ فال بیک     cross-family\nظاہری انداز                       ⁧اطلاق: فوراً⁩\n    تھیم                          dark\n    چمک کی اینیمیشن               ⁧آن⁩\n    ٹرن کے دوران بیان             ⁧آن⁩\n    ماڈل کا براہ راست استدلال     ⁧آف⁩\n    اسسٹنٹ گٹر ریل                ⁧آن⁩\n    کلک آسان قطاریں               ⁧آف⁩\n    Nerd Font گلفس                ⁧auto⁩\n    سرخی کے نشانات                ⁧آف⁩\n    ٹرمینل عنوان                  ⁧آن⁩\n    ان لائن تصاویر                ⁧آن⁩\n    ڈیسک ٹاپ اطلاعات              ⁧آن⁩\n    اطلاعات میں سیشن کے نام       ⁧آن⁩\n    بیداری کے وقت کا انداز        12h\n    زبان                          fr\n    ذیلی ایجنٹ ڈاک                full\n    سیشنز کے درمیان ٹریفک پوشیدہ  ⁧آف⁩\n    ٹرن کے جواب کا نشان           ⁧آف⁩\n    اسٹیٹس بینڈ                   ⁧آن⁩\n    پرامپٹ شیوران                 ⁧آن⁩\n    بینڈ: ماڈل                    ⁧آن⁩\n    بینڈ: ورکنگ ڈائریکٹری         ⁧آن⁩\n    بینڈ: سیاق و سباق             ⁧آن⁩\n    بینڈ: ڈیکوڈ رفتار             ⁧آن⁩\n    بینڈ: سیشن لاگت               ⁧آن⁩\n    بینڈ: گزرا وقت                ⁧آن⁩\n    بینڈ: اسٹیٹس کمانڈ            —\n    بینڈ: کمانڈ وقفہ              30\n    سیشن سائڈبار                  ⁧آف⁩\n    سائڈبار کی جگہ                left\n    سائڈبار ذیلی ایجنٹ تہہ        ⁧آف⁩\nاطلاع کی آواز                     ⁧اطلاق: فوراً⁩\n    آواز بجائیں                   ⁧آن⁩\n    آواز                          soft-pulse\n    آواز کی سطح                   70\nہاٹ کیز                           ⁧اطلاق: فوراً⁩\n    نیا سیشن                      ctrl+n\n    سیشن جاری رکھیں               ctrl+s\n    فوری پیغام بھیجیں             cmd+alt+shift+space\n    دبا کر بولیں                  Right-Option (hold)\n    ریکارڈنگ شروع کریں            cmd+shift+s\nمنظوریاں                          ⁧اطلاق: فوراً⁩\n    ٹول منظوری موڈ                auto\nسیشن اسٹوریج                      ⁧اطلاق: نئے لانچ پر⁩\n    گفتگو خودکار محفوظ کریں       ⁧آف⁩\nآپ کی گفتگوئیں                    ⁧اطلاق: نئے لانچ پر⁩\n    سیشن صفائی                    ⁧آف⁩\n    ↳ زیادہ سے زیادہ سیشنز        0\n    ↳ زیادہ سے زیادہ غیر فعال دن  0\n    ↳ کل بائٹس کی حد              0\n    ↳ خالی ہٹائیں                 ⁧آف⁩\n    اتنی دیر بعد عارضی چیٹس حذف…  30\nٹرانسکرپٹ کمپریشن                 ⁧اطلاق: نئے لانچ پر⁩\n    پرانے ٹرانسکرپٹس کمپریس کریں  ⁧آن⁩\n    ↳ اتنے دن بعد کمپریس کریں     30\nعارضی فائلیں                      ⁧اطلاق: فوراً⁩\n    عارضی فائلوں کی حد (بائٹس)    268435456\nسونپا گیا کام                     ⁧اطلاق: نئے لانچ پر⁩\n    سونپے گئے کام کی صفائی        ⁧آن⁩\n    ↳ اتنے گھنٹے بعد ہٹائیں       48\nذیلی ایجنٹس                       ⁧اطلاق: فوراً⁩\n    زیادہ سے زیادہ پس منظر جاب    15\n    ذیلی ایجنٹ کا علم مختصر کریں  ⁧آن⁩\n    نیسٹڈ ٹیم کی زیادہ سے زیادہ…  3\n    ذیلی ایجنٹ کا ماڈل کون منتخب… operator\n    ذیلی ایجنٹ ماڈل: lo           —\n    ذیلی ایجنٹ ماڈل: med          —\n    ذیلی ایجنٹ ماڈل: hi           —\nذہین اشارے                        ⁧اطلاق: نئے سیشنز پر⁩\n    ذہین اشارے                    ⁧آن⁩\n    ↳ وینڈر                       auto\n    ↳ ماڈل                        —\n    ↳ مہلت (ms)                   1500\n    ↳ انتظار بجٹ (ms)             50\n    ↳ حالت کے زیادہ سے زیادہ حروف 6000\n    ↳ زیادہ سے زیادہ امیدوار      12\n    ↳ زیادہ سے زیادہ تجاویز       3\nRadient Saver (بیٹا)              ⁧اطلاق: فوراً⁩\n    Radient Saver (بیٹا)          off\nنمایاں حصے                        ⁧اطلاق: نئے سیشنز پر⁩\n    نمایاں حصے                    ⁧آن⁩\n    ↳ فائلیں                      ⁧آن⁩\n    ↳ گرافکس                      ⁧آن⁩\n    ↳ گرافکس ماڈل                 auto\n    ↳ زیادہ سے زیادہ ٹرن          2\n    ↳ زیادہ سے زیادہ آؤٹ پٹ ٹوکنز 6000\n    ↳ وقت حد (s)                  90\n    ↳ لاگت حد ($)                 1.0\n    ↳ دکھائی گئی فائلیں           4\n    ↳ ان کے نیچے کبھی فہرست نہ ک… —\nنگرانی                            ⁧اطلاق: نئے سیشنز پر⁩\n    ڈیفالٹ وقفہ (s)               60\n    فی سیشن زیادہ سے زیادہ        8\n    رن کی مہلت (ms)               120000\n    سنیپ شاٹ حد (حروف)            32768\n    زیادہ سے زیادہ ڈیلٹا سطریں    12\n    ڈیلٹا بجٹ (حروف)              1200\n    کلاسیفائر حالت (حروف)         1200\n    ناکامیوں پر بند کریں          5\n    فی گھنٹہ ڈیلیوریز             12\n    ٹائم اسٹیمپ تبدیلیاں نظر اند… ⁧آن⁩\nرن ٹائم                           ⁧اطلاق: فوراً⁩\n    /resume کے بعد کام جاری رکھیں ⁧آن⁩\n    بند گفتگوئیں وارم رکھیں (s)   300\n    زیادہ سے زیادہ وارم گفتگوئیں  4\n    بلا نگرانی سوال کی مہلت (h)   24\nکمپریشن                           ⁧اطلاق: فوراً⁩\n    کمپریشن                       ⁧آن⁩\n    حکمت عملی                     auto\n    حد (ونڈو کا %)                0.8\n    حد (ٹوکنز)                    400000\n    حالیہ ٹوکنز رکھیں             20000\n    کمپریشن کے بعد جاری رکھیں     ⁧آن⁩\n    ٹرن کے دوران کمپریشن          ⁧آن⁩\n    فارغ سیشن کمپریشن             ⁧آن⁩\n    فارغ سیشن کی حد (ٹوکنز)       200000\n    فارغ سیشن کم از کم اضافہ (ٹو… 60000\n    دوبارہ شروع پر ری پلے         full\n    درخواست کے حجم کی حد (بائٹس)  24000000\n    درخواست محرک (بائٹس)          16000000\nفورک                              ⁧اطلاق: فوراً⁩\n    فورک کہاں کھلے                switch\n    cmux میں کہاں کھلے            workspace\nویب ٹولز                          ⁧اطلاق: فوراً⁩\n    ویب تلاش                      ⁧آن⁩\n    ویب فیچ                       ⁧آن⁩\nویب تلاش                          ⁧اطلاق: فوراً⁩\n    لوڈ بیلنسنگ                   round_robin\n    پرووائیڈرز                    duckduckgo, tavily\n    مستثنیٰ پرووائیڈرز             —\n    ٹائم آؤٹ (s)                  20.0\n    SearXNG بیس URL               —\n    DeepSeek صفحہ کا ثبوت         ⁧آف⁩\n    تلاش سے پڑھیں                 ⁧آن⁩\nویب فیچ                           ⁧اطلاق: فوراً⁩\n    ٹائم آؤٹ (s)                  20.0\n    ڈاؤن لوڈ حد (بائٹس)           5242880\n    زیادہ سے زیادہ ری ڈائریکٹس    5\n    کیشے TTL (s)                  900\n    نجی ایڈریسز کی اجازت          ⁧آف⁩\n    HTML رینڈرر                   auto\n    اسکریپ سے پہلے بہتر بنائیں    ⁧آن⁩\n    فی ہاپ کوششیں                 3\n    براؤزر پروفائل سے دوبارہ کوشش ⁧آن⁩\nٹولز                              ⁧اطلاق: فوراً⁩\n    Bash انٹرپریٹر                —\n    غیر تصدیق شدہ send اندراجات…  ⁧آف⁩\n    لامحدود تلاشیں روکیں          ⁧آن⁩\n    ...انتباہ کے بجائے مسترد کریں ⁧آن⁩\n    ...وینڈر فولڈر ripgrep کی تل… ⁧آن⁩\n    کم استعمال ٹول اسکیما ضرورت…  ⁧آن⁩\nحفاظتی انتظامات                   ⁧اطلاق: فوراً⁩\n    حفاظتی اصول                   ⁧آن⁩\n    اہم چیزیں حذف کرنے کا جائزہ   ⁧آف⁩\n    حفاظتی جانچ کی مہلت (سیکنڈ)   20.0\n    اصولوں کا فولڈر               —\nہکس                               ⁧اطلاق: فوراً⁩\n    مقامی ہکس                     ⁧آف⁩\n    Claude Code ہکس فارورڈ کریں   ⁧آف⁩\n    Codex ہکس فارورڈ کریں         ⁧آف⁩\nکمانڈ میموری حد                   ⁧اطلاق: فوراً⁩\n    کمانڈ میموری حد               ⁧آن⁩\n    حد کا ماخذ                    auto\n    دستی حد (MB)                  0\n    انتباہ حد                     0.8\nبھاری جاب قطار                    ⁧اطلاق: فوراً⁩\n    بھاری جاب قطار                ⁧آن⁩\nشیل کوئری کا بجٹ                  ⁧اطلاق: فوراً⁩\n    شیل کوئری کا بجٹ              ⁧آن⁩\n    ...انتباہ کے بجائے روکیں      ⁧آن⁩\n    بجٹ (سیکنڈ)                   60\nایجنٹ شیل                         ⁧اطلاق: نئے لانچ پر⁩\n    ایجنٹ شیل ماحول               inherit ▾\n    › ● موجودہ ماحول اپنائیں⁧  (ڈیفالٹ)⁩  آپ کا ماحول، جیسا آ…\n      ○ اجازت کی فہرست  محفوظ سیٹ اور نیچے کی فہرستیں، اور …\n    …allowlist موڈ میں رکھے گئے   —\n    …دونوں موڈز میں نکالے گئے     —\nمقامی سرورز                       ⁧اطلاق: نئے سیشنز پر⁩\n    LM Studio بیس URL             http://localhost:1234/v1\n    LM Studio ماڈل اووررائیڈس     {}\n    Ollama بیس URL                http://localhost:11434/v1\n    Ollama ماڈل اووررائیڈس        {}\n    vLLM بیس URL                  http://localhost:8000/v1\n    vLLM ماڈل اووررائیڈس          {}\n    llama.cpp بیس URL             http://localhost:8080/v1\n    llama.cpp ماڈل اووررائیڈس     {}\n    OpenAI-compatible بیس URL     —\n    OpenAI-compatible ماڈل اوورر… {}\nکنسول کی گنجائش                   ⁧اطلاق: فوراً⁩\n    لائیو ٹرمینل کی بالائی حد     128\n    فی گفتگو ایجنٹ ٹرمینلز        8\n    صارف ٹرمینلز کے لیے مخصوص سل… 16\nڈیسک ٹاپ ایپ                      ⁧اطلاق: فوراً⁩\n    لانچ کمانڈ                    —\n    ریموٹ فائلوں کا کیش (بائٹس)   1073741824\nفون رسائی                         ⁧اطلاق: فوراً⁩\n    سائن اِن کے بعد فون رسائی دوب… ⁧آن⁩\n    جب میں اتنی دیر کمپیوٹر سے د… 120\nفائلوں کے پیش نظارے               ⁧اطلاق: فوراً⁩\n    اضافی پیش نظارہ روٹس          —\nمیش نیٹ ورک                       ⁧اطلاق: نئے لانچ پر⁩\n    قابلِ اعتماد پیئروں کے ساتھ ی… ⁧آن⁩\n    ہم آہنگی کے لیے یادداشت کے د… global, session, team, ag…\n    یادداشت سے خارج پیئر          —\n    کنکشن قبول کرنے کا ایڈریس     0.0.0.0\n    میش پورٹ                      4097\n    اعلان شدہ اینڈ پوائنٹس        —\n    فی جنیریشن آڈٹ سائز           8388608\n    محفوظ آڈٹ جنیریشنز            5\n    آڈٹ عمر حد (دن)               90.0\n    ہم وقت ہینڈ شیکس              8\n    سنک خاموش مدت (s)             30.0\n    سنک جانچ وقفہ (s)             15.0\n    عارضی لاگ اِن مدت (s)          900.0\n    مالک کی غیر موجودگی میں عارض… 86400.0\n    GitHub ریپوزیٹریز             —\nمیش اپ ڈیٹس                       ⁧اطلاق: فوراً⁩\n    اپ ڈیٹ کے بعد میش رول کریں    auto\nسیشن منتقلی                       ⁧اطلاق: فوراً⁩\n    فی منتقلی ورکنگ فائلوں کی حد… 268435456\n    وہ فولڈر جو منتقل شدہ ریپوزٹ… ~\nاپ ڈیٹس                           ⁧اطلاق: فوراً⁩\n    پرانی انسٹالیشنز صاف کریں     ⁧آن⁩\n    غیر مستعمل انسٹالیشنز رکھیں   2\nریموٹ کمپیوٹ                      ⁧اطلاق: فوراً⁩\n    ریموٹ کمپیوٹ                  ⁧آف⁩\nAida                              ⁧اطلاق: فوراً⁩\n    چیف آف اسٹاف فعال             ⁧آن⁩\n    ظاہری نام                     Aida\n    روزانہ رابطے کا وقت           08:30\n    چیک اِن کا وقفہ (گھنٹے)        0\n    کیڈنس روکی ہوئی               ⁧آف⁩\n    اضافی روابط / دن              2\n    کم از کم وقفہ (منٹ)           90\n    انضمام یاد دہانی وقفہ (دن)    14\nلائبریرین                         ⁧اطلاق: فوراً⁩\n    لائبریرین فعال                ⁧آن⁩\n    ظاہری نام                     Librarian\n    روزانہ جائزے کا وقت           03:30\n    روزانہ جائزہ روکا ہوا         ⁧آف⁩\n    اضافی جائزے / دن              1\n    کم از کم وقفہ (منٹ)           720\nAgent Hub                         ⁧اطلاق: فوراً⁩\n    ایجنٹ/مہارت لنکس کی خودکار ا… ⁧آن⁩\n    ٹیمیں خودکار اپ ڈیٹ کریں      ⁧آن⁩\n    جانچ وقفہ (منٹ)               15\nایجنٹس                            ⁧اطلاق: نئے لانچ پر⁩\n    بلٹ اِن کردار خودکار اپ ڈیٹ ک… ⁧آن⁩\nپروجیکٹس                          ⁧اطلاق: فوراً⁩\n    پرانا ہونے کی حد (گھنٹے)      4\nبیداری کے محرکات                  ⁧اطلاق: فوراً⁩\n    فعال                          ⁧آن⁩\n    روزانہ رابطے کی زیادہ سے زیا… 6\n    کم از کم وقفہ (منٹ)           60\n    پروجیکٹ کی پرانی پیش رفت کا…  ⁧آن⁩\nپیش قدم قسم                       ⁧اطلاق: فوراً⁩\n    ڈیفالٹ صبر انتظار (ms)        300000\n    صبر کے بیک آف کا عنصر         3\n    صبر کی زیادہ سے زیادہ کوششیں  3\n    صبر کے چکر کی TTL (ms)        7200000\n    فی سیشن زیر التوا انتظار      4\nتقریر کی آواز                     ⁧اطلاق: فوراً⁩\n    آواز کی جنس                   auto\n    لہجہ                          warm\n    اظہاریت                       medium\n    رفتار                         1.0\n    زبان                          auto\n    لہجہ                          —\n    ڈیلیوری کی ہدایات             Speak aloud and pay atten…\n    ٹرانسکرپٹ کی صفائی            auto\n    اسپیچ پرووائیڈر               ⁧auto⁩\nوائس موڈ                          ⁧اطلاق: فوراً⁩\n    سب سے لمبا بولا جانے والا جو… 800\nایجنٹ پیغامات                     ⁧اطلاق: فوراً⁩\n    اس مشین پر فعال               ⁧آف⁩\n    CoS سیشن                      —\n    کام کی درخواستیں روکیں        ⁧آن⁩\n    اسکریننگ کی فی گھنٹہ حد       400\n    غیر مخاطب کی فی گھنٹہ حد      350\n    بات چیت کی فی گھنٹہ حد        300\n    بھیجنے والے کی فی گھنٹہ حد    200\n    اسکریننگ ماڈل                 —\nفرسودہ                            ⁧اطلاق: کبھی نہیں⁩\n    گفتگو کی لمبائی               100\n    تفصیل کی لمبائی               15\n    سیکھے ہوئے نکات کی زیادہ سے…  50\n    ذہین اشاروں کا نوٹس           ⁧آن⁩\nیادداشت                           ⁧اطلاق: فوراً⁩\n    دائرہ وار یادداشت             ⁧آن⁩\n    کمپریشن کے بعد محفوظ کرنا     ⁧آن⁩\n    لوکیٹر سیاق و سباق محفوظ کریں ⁧آف⁩\n    یاد آوری کی تجاویز            ⁧آن⁩\nسوالات                            ⁧اطلاق: فوراً⁩\n    وقت ختم سوالات دکھائیں        7d",
+    "config_unchanged": true
+  },
+  {
+    "locale": "ur",
+    "key": "shell_environment.mode",
+    "compact": true,
+    "size": [
+      80,
+      24
+    ],
+    "source_label": "ایجنٹ شیل ماحول",
+    "source_label_cells": 15,
+    "help": "'موجودہ ماحول اپنائیں' ایجنٹ کی چلائی ہوئی کمانڈ کو آپ کے ماحول تک رسائی دیتا ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'اجازت کی فہرست' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتا ہے، اس لیے سیشن شروع کرتے وقت استعمال ہونے والی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھا جاتا ہے: تبدیلی اگلے آغاز پر لاگو ہوتی ہے۔",
+    "detail": "⁧⁦enter⁩ دبانے تک محفوظ نہیں⁩   shell_environment.mode",
+    "list_width": 74,
+    "detail_width": 74,
+    "region": "Region(x=1, y=1, width=78, height=17)",
+    "virtual": "Size(width=76, height=15)",
+    "pane_display": false,
+    "first_equal_settled": true,
+    "paint": "ماڈل                              ⁧اطلاق: نئے سیشنز پر⁩\n    ڈیفالٹ پرووائیڈر              —\n    ڈیفالٹ ماڈل                   —\n    ڈیفالٹ استدلال کی شدت         —\nترسیلی پروٹوکول                   ⁧اطلاق: فوراً⁩\n    زیادہ سے زیادہ OpenAI سیاق و… ⁧آن⁩\n    OpenAI API سرفیس              responses\n    Anthropic 1h کیشے حد (ٹوکنز)  150000\n    Anthropic ذیلی ایجنٹ 1h کیشے  0\n    Amazon Bedrock ریجن           —\n    Amazon Bedrock تصدیق          —\nOpenRouter روٹنگ                  ⁧اطلاق: فوراً⁩\n    کیشے وابستگی                  ⁧آن⁩\n    روٹنگ پالیسی                  —\n    ہوسٹ ترتیب                    —\n    اجازت یافتہ ہوسٹس             —\n    نظر انداز ہوسٹس               —\n    فال بیکس                      —\n    پیرامیٹرز لازم کریں           —\n    ڈیٹا جمع کرنا                 —\n    صفر ڈیٹا ریٹینشن              —\n    ڈسٹل ہونے والا متن            true\n    کوانٹائزیشنز                  —\n    زیادہ سے زیادہ قیمت           —\n    کم از کم تھراپٹ (tok/s)       0.0\n    زیادہ سے زیادہ لیٹنسی (s)     0.0\n    سست ہوسٹ ریٹائر کریں (tok/s)  0.0\nفیل اوور اور دوبارہ کوشش          ⁧اطلاق: فوراً⁩\n    ناکام کالوں پر دوبارہ کوشش    ⁧آن⁩\n    زیادہ سے زیادہ دوبارہ کوششیں  10\n    بنیادی تاخیر (ms)             500\n    کنیکٹیوٹی دوبارہ کوششیں       15\n    کنیکٹیوٹی بیک آف حد (ms)      60000\n    ماڈل فال بیک                  ⁧آن⁩\n    استعمال کے حساب سے فال بیک    ⁧آف⁩\n    اکاؤنٹ انتخاب کی پالیسی       reset-soonest\n    پرانی usage-aware پک          ⁧آن⁩\n    استعمال کا ذخیرہ (%)          10\n    فیل اوور کیسکیڈ               ⁧0 چینز⁩\n      ⁧کوئی کیسکیڈ کنفیگر نہیں⁩\n    ⁧+ چین شامل کریں⁩\n    پن شدہ ذیلی ایجنٹ فال بیک     cross-family\nظاہری انداز                       ⁧اطلاق: فوراً⁩\n    تھیم                          dark\n    چمک کی اینیمیشن               ⁧آن⁩\n    ٹرن کے دوران بیان             ⁧آن⁩\n    ماڈل کا براہ راست استدلال     ⁧آف⁩\n    اسسٹنٹ گٹر ریل                ⁧آن⁩\n    کلک آسان قطاریں               ⁧آف⁩\n    Nerd Font گلفس                ⁧auto⁩\n    سرخی کے نشانات                ⁧آف⁩\n    ٹرمینل عنوان                  ⁧آن⁩\n    ان لائن تصاویر                ⁧آن⁩\n    ڈیسک ٹاپ اطلاعات              ⁧آن⁩\n    اطلاعات میں سیشن کے نام       ⁧آن⁩\n    بیداری کے وقت کا انداز        12h\n    زبان                          fr\n    ذیلی ایجنٹ ڈاک                full\n    سیشنز کے درمیان ٹریفک پوشیدہ  ⁧آف⁩\n    ٹرن کے جواب کا نشان           ⁧آف⁩\n    اسٹیٹس بینڈ                   ⁧آن⁩\n    پرامپٹ شیوران                 ⁧آن⁩\n    بینڈ: ماڈل                    ⁧آن⁩\n    بینڈ: ورکنگ ڈائریکٹری         ⁧آن⁩\n    بینڈ: سیاق و سباق             ⁧آن⁩\n    بینڈ: ڈیکوڈ رفتار             ⁧آن⁩\n    بینڈ: سیشن لاگت               ⁧آن⁩\n    بینڈ: گزرا وقت                ⁧آن⁩\n    بینڈ: اسٹیٹس کمانڈ            —\n    بینڈ: کمانڈ وقفہ              30\n    سیشن سائڈبار                  ⁧آف⁩\n    سائڈبار کی جگہ                left\n    سائڈبار ذیلی ایجنٹ تہہ        ⁧آف⁩\nاطلاع کی آواز                     ⁧اطلاق: فوراً⁩\n    آواز بجائیں                   ⁧آن⁩\n    آواز                          soft-pulse\n    آواز کی سطح                   70\nہاٹ کیز                           ⁧اطلاق: فوراً⁩\n    نیا سیشن                      ctrl+n\n    سیشن جاری رکھیں               ctrl+s\n    فوری پیغام بھیجیں             cmd+alt+shift+space\n    دبا کر بولیں                  Right-Option (hold)\n    ریکارڈنگ شروع کریں            cmd+shift+s\nمنظوریاں                          ⁧اطلاق: فوراً⁩\n    ٹول منظوری موڈ                auto\nسیشن اسٹوریج                      ⁧اطلاق: نئے لانچ پر⁩\n    گفتگو خودکار محفوظ کریں       ⁧آف⁩\nآپ کی گفتگوئیں                    ⁧اطلاق: نئے لانچ پر⁩\n    سیشن صفائی                    ⁧آف⁩\n    ↳ زیادہ سے زیادہ سیشنز        0\n    ↳ زیادہ سے زیادہ غیر فعال دن  0\n    ↳ کل بائٹس کی حد              0\n    ↳ خالی ہٹائیں                 ⁧آف⁩\n    اتنی دیر بعد عارضی چیٹس حذف…  30\nٹرانسکرپٹ کمپریشن                 ⁧اطلاق: نئے لانچ پر⁩\n    پرانے ٹرانسکرپٹس کمپریس کریں  ⁧آن⁩\n    ↳ اتنے دن بعد کمپریس کریں     30\nعارضی فائلیں                      ⁧اطلاق: فوراً⁩\n    عارضی فائلوں کی حد (بائٹس)    268435456\nسونپا گیا کام                     ⁧اطلاق: نئے لانچ پر⁩\n    سونپے گئے کام کی صفائی        ⁧آن⁩\n    ↳ اتنے گھنٹے بعد ہٹائیں       48\nذیلی ایجنٹس                       ⁧اطلاق: فوراً⁩\n    زیادہ سے زیادہ پس منظر جاب    15\n    ذیلی ایجنٹ کا علم مختصر کریں  ⁧آن⁩\n    نیسٹڈ ٹیم کی زیادہ سے زیادہ…  3\n    ذیلی ایجنٹ کا ماڈل کون منتخب… operator\n    ذیلی ایجنٹ ماڈل: lo           —\n    ذیلی ایجنٹ ماڈل: med          —\n    ذیلی ایجنٹ ماڈل: hi           —\nذہین اشارے                        ⁧اطلاق: نئے سیشنز پر⁩\n    ذہین اشارے                    ⁧آن⁩\n    ↳ وینڈر                       auto\n    ↳ ماڈل                        —\n    ↳ مہلت (ms)                   1500\n    ↳ انتظار بجٹ (ms)             50\n    ↳ حالت کے زیادہ سے زیادہ حروف 6000\n    ↳ زیادہ سے زیادہ امیدوار      12\n    ↳ زیادہ سے زیادہ تجاویز       3\nRadient Saver (بیٹا)              ⁧اطلاق: فوراً⁩\n    Radient Saver (بیٹا)          off\nنمایاں حصے                        ⁧اطلاق: نئے سیشنز پر⁩\n    نمایاں حصے                    ⁧آن⁩\n    ↳ فائلیں                      ⁧آن⁩\n    ↳ گرافکس                      ⁧آن⁩\n    ↳ گرافکس ماڈل                 auto\n    ↳ زیادہ سے زیادہ ٹرن          2\n    ↳ زیادہ سے زیادہ آؤٹ پٹ ٹوکنز 6000\n    ↳ وقت حد (s)                  90\n    ↳ لاگت حد ($)                 1.0\n    ↳ دکھائی گئی فائلیں           4\n    ↳ ان کے نیچے کبھی فہرست نہ ک… —\nنگرانی                            ⁧اطلاق: نئے سیشنز پر⁩\n    ڈیفالٹ وقفہ (s)               60\n    فی سیشن زیادہ سے زیادہ        8\n    رن کی مہلت (ms)               120000\n    سنیپ شاٹ حد (حروف)            32768\n    زیادہ سے زیادہ ڈیلٹا سطریں    12\n    ڈیلٹا بجٹ (حروف)              1200\n    کلاسیفائر حالت (حروف)         1200\n    ناکامیوں پر بند کریں          5\n    فی گھنٹہ ڈیلیوریز             12\n    ٹائم اسٹیمپ تبدیلیاں نظر اند… ⁧آن⁩\nرن ٹائم                           ⁧اطلاق: فوراً⁩\n    /resume کے بعد کام جاری رکھیں ⁧آن⁩\n    بند گفتگوئیں وارم رکھیں (s)   300\n    زیادہ سے زیادہ وارم گفتگوئیں  4\n    بلا نگرانی سوال کی مہلت (h)   24\nکمپریشن                           ⁧اطلاق: فوراً⁩\n    کمپریشن                       ⁧آن⁩\n    حکمت عملی                     auto\n    حد (ونڈو کا %)                0.8\n    حد (ٹوکنز)                    400000\n    حالیہ ٹوکنز رکھیں             20000\n    کمپریشن کے بعد جاری رکھیں     ⁧آن⁩\n    ٹرن کے دوران کمپریشن          ⁧آن⁩\n    فارغ سیشن کمپریشن             ⁧آن⁩\n    فارغ سیشن کی حد (ٹوکنز)       200000\n    فارغ سیشن کم از کم اضافہ (ٹو… 60000\n    دوبارہ شروع پر ری پلے         full\n    درخواست کے حجم کی حد (بائٹس)  24000000\n    درخواست محرک (بائٹس)          16000000\nفورک                              ⁧اطلاق: فوراً⁩\n    فورک کہاں کھلے                switch\n    cmux میں کہاں کھلے            workspace\nویب ٹولز                          ⁧اطلاق: فوراً⁩\n    ویب تلاش                      ⁧آن⁩\n    ویب فیچ                       ⁧آن⁩\nویب تلاش                          ⁧اطلاق: فوراً⁩\n    لوڈ بیلنسنگ                   round_robin\n    پرووائیڈرز                    duckduckgo, tavily\n    مستثنیٰ پرووائیڈرز             —\n    ٹائم آؤٹ (s)                  20.0\n    SearXNG بیس URL               —\n    DeepSeek صفحہ کا ثبوت         ⁧آف⁩\n    تلاش سے پڑھیں                 ⁧آن⁩\nویب فیچ                           ⁧اطلاق: فوراً⁩\n    ٹائم آؤٹ (s)                  20.0\n    ڈاؤن لوڈ حد (بائٹس)           5242880\n    زیادہ سے زیادہ ری ڈائریکٹس    5\n    کیشے TTL (s)                  900\n    نجی ایڈریسز کی اجازت          ⁧آف⁩\n    HTML رینڈرر                   auto\n    اسکریپ سے پہلے بہتر بنائیں    ⁧آن⁩\n    فی ہاپ کوششیں                 3\n    براؤزر پروفائل سے دوبارہ کوشش ⁧آن⁩\nٹولز                              ⁧اطلاق: فوراً⁩\n    Bash انٹرپریٹر                —\n    غیر تصدیق شدہ send اندراجات…  ⁧آف⁩\n    لامحدود تلاشیں روکیں          ⁧آن⁩\n    ...انتباہ کے بجائے مسترد کریں ⁧آن⁩\n    ...وینڈر فولڈر ripgrep کی تل… ⁧آن⁩\n    کم استعمال ٹول اسکیما ضرورت…  ⁧آن⁩\nحفاظتی انتظامات                   ⁧اطلاق: فوراً⁩\n    حفاظتی اصول                   ⁧آن⁩\n    اہم چیزیں حذف کرنے کا جائزہ   ⁧آف⁩\n    حفاظتی جانچ کی مہلت (سیکنڈ)   20.0\n    اصولوں کا فولڈر               —\nہکس                               ⁧اطلاق: فوراً⁩\n    مقامی ہکس                     ⁧آف⁩\n    Claude Code ہکس فارورڈ کریں   ⁧آف⁩\n    Codex ہکس فارورڈ کریں         ⁧آف⁩\nکمانڈ میموری حد                   ⁧اطلاق: فوراً⁩\n    کمانڈ میموری حد               ⁧آن⁩\n    حد کا ماخذ                    auto\n    دستی حد (MB)                  0\n    انتباہ حد                     0.8\nبھاری جاب قطار                    ⁧اطلاق: فوراً⁩\n    بھاری جاب قطار                ⁧آن⁩\nشیل کوئری کا بجٹ                  ⁧اطلاق: فوراً⁩\n    شیل کوئری کا بجٹ              ⁧آن⁩\n    ...انتباہ کے بجائے روکیں      ⁧آن⁩\n    بجٹ (سیکنڈ)                   60\nایجنٹ شیل                         ⁧اطلاق: نئے لانچ پر⁩\n    ایجنٹ شیل ماحول               inherit ▾\n    › ● موجودہ ماحول اپنائیں⁧  (ڈیفالٹ)⁩  آپ کا ماحول، جیسا آج (ڈیفالٹ)\n      ○ اجازت کی فہرست  محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں\n    …allowlist موڈ میں رکھے گئے   —\n    …دونوں موڈز میں نکالے گئے     —\nمقامی سرورز                       ⁧اطلاق: نئے سیشنز پر⁩\n    LM Studio بیس URL             http://localhost:1234/v1\n    LM Studio ماڈل اووررائیڈس     {}\n    Ollama بیس URL                http://localhost:11434/v1\n    Ollama ماڈل اووررائیڈس        {}\n    vLLM بیس URL                  http://localhost:8000/v1\n    vLLM ماڈل اووررائیڈس          {}\n    llama.cpp بیس URL             http://localhost:8080/v1\n    llama.cpp ماڈل اووررائیڈس     {}\n    OpenAI-compatible بیس URL     —\n    OpenAI-compatible ماڈل اوورر… {}\nکنسول کی گنجائش                   ⁧اطلاق: فوراً⁩\n    لائیو ٹرمینل کی بالائی حد     128\n    فی گفتگو ایجنٹ ٹرمینلز        8\n    صارف ٹرمینلز کے لیے مخصوص سل… 16\nڈیسک ٹاپ ایپ                      ⁧اطلاق: فوراً⁩\n    لانچ کمانڈ                    —\n    ریموٹ فائلوں کا کیش (بائٹس)   1073741824\nفون رسائی                         ⁧اطلاق: فوراً⁩\n    سائن اِن کے بعد فون رسائی دوب… ⁧آن⁩\n    جب میں اتنی دیر کمپیوٹر سے د… 120\nفائلوں کے پیش نظارے               ⁧اطلاق: فوراً⁩\n    اضافی پیش نظارہ روٹس          —\nمیش نیٹ ورک                       ⁧اطلاق: نئے لانچ پر⁩\n    قابلِ اعتماد پیئروں کے ساتھ ی… ⁧آن⁩\n    ہم آہنگی کے لیے یادداشت کے د… global, session, team, agent\n    یادداشت سے خارج پیئر          —\n    کنکشن قبول کرنے کا ایڈریس     0.0.0.0\n    میش پورٹ                      4097\n    اعلان شدہ اینڈ پوائنٹس        —\n    فی جنیریشن آڈٹ سائز           8388608\n    محفوظ آڈٹ جنیریشنز            5\n    آڈٹ عمر حد (دن)               90.0\n    ہم وقت ہینڈ شیکس              8\n    سنک خاموش مدت (s)             30.0\n    سنک جانچ وقفہ (s)             15.0\n    عارضی لاگ اِن مدت (s)          900.0\n    مالک کی غیر موجودگی میں عارض… 86400.0\n    GitHub ریپوزیٹریز             —\nمیش اپ ڈیٹس                       ⁧اطلاق: فوراً⁩\n    اپ ڈیٹ کے بعد میش رول کریں    auto\nسیشن منتقلی                       ⁧اطلاق: فوراً⁩\n    فی منتقلی ورکنگ فائلوں کی حد… 268435456\n    وہ فولڈر جو منتقل شدہ ریپوزٹ… ~\nاپ ڈیٹس                           ⁧اطلاق: فوراً⁩\n    پرانی انسٹالیشنز صاف کریں     ⁧آن⁩\n    غیر مستعمل انسٹالیشنز رکھیں   2\nریموٹ کمپیوٹ                      ⁧اطلاق: فوراً⁩\n    ریموٹ کمپیوٹ                  ⁧آف⁩\nAida                              ⁧اطلاق: فوراً⁩\n    چیف آف اسٹاف فعال             ⁧آن⁩\n    ظاہری نام                     Aida\n    روزانہ رابطے کا وقت           08:30\n    چیک اِن کا وقفہ (گھنٹے)        0\n    کیڈنس روکی ہوئی               ⁧آف⁩\n    اضافی روابط / دن              2\n    کم از کم وقفہ (منٹ)           90\n    انضمام یاد دہانی وقفہ (دن)    14\nلائبریرین                         ⁧اطلاق: فوراً⁩\n    لائبریرین فعال                ⁧آن⁩\n    ظاہری نام                     Librarian\n    روزانہ جائزے کا وقت           03:30\n    روزانہ جائزہ روکا ہوا         ⁧آف⁩\n    اضافی جائزے / دن              1\n    کم از کم وقفہ (منٹ)           720\nAgent Hub                         ⁧اطلاق: فوراً⁩\n    ایجنٹ/مہارت لنکس کی خودکار ا… ⁧آن⁩\n    ٹیمیں خودکار اپ ڈیٹ کریں      ⁧آن⁩\n    جانچ وقفہ (منٹ)               15\nایجنٹس                            ⁧اطلاق: نئے لانچ پر⁩\n    بلٹ اِن کردار خودکار اپ ڈیٹ ک… ⁧آن⁩\nپروجیکٹس                          ⁧اطلاق: فوراً⁩\n    پرانا ہونے کی حد (گھنٹے)      4\nبیداری کے محرکات                  ⁧اطلاق: فوراً⁩\n    فعال                          ⁧آن⁩\n    روزانہ رابطے کی زیادہ سے زیا… 6\n    کم از کم وقفہ (منٹ)           60\n    پروجیکٹ کی پرانی پیش رفت کا…  ⁧آن⁩\nپیش قدم قسم                       ⁧اطلاق: فوراً⁩\n    ڈیفالٹ صبر انتظار (ms)        300000\n    صبر کے بیک آف کا عنصر         3\n    صبر کی زیادہ سے زیادہ کوششیں  3\n    صبر کے چکر کی TTL (ms)        7200000\n    فی سیشن زیر التوا انتظار      4\nتقریر کی آواز                     ⁧اطلاق: فوراً⁩\n    آواز کی جنس                   auto\n    لہجہ                          warm\n    اظہاریت                       medium\n    رفتار                         1.0\n    زبان                          auto\n    لہجہ                          —\n    ڈیلیوری کی ہدایات             Speak aloud and pay attention to potent…\n    ٹرانسکرپٹ کی صفائی            auto\n    اسپیچ پرووائیڈر               ⁧auto⁩\nوائس موڈ                          ⁧اطلاق: فوراً⁩\n    سب سے لمبا بولا جانے والا جو… 800\nایجنٹ پیغامات                     ⁧اطلاق: فوراً⁩\n    اس مشین پر فعال               ⁧آف⁩\n    CoS سیشن                      —\n    کام کی درخواستیں روکیں        ⁧آن⁩\n    اسکریننگ کی فی گھنٹہ حد       400\n    غیر مخاطب کی فی گھنٹہ حد      350\n    بات چیت کی فی گھنٹہ حد        300\n    بھیجنے والے کی فی گھنٹہ حد    200\n    اسکریننگ ماڈل                 —\nفرسودہ                            ⁧اطلاق: کبھی نہیں⁩\n    گفتگو کی لمبائی               100\n    تفصیل کی لمبائی               15\n    سیکھے ہوئے نکات کی زیادہ سے…  50\n    ذہین اشاروں کا نوٹس           ⁧آن⁩\nیادداشت                           ⁧اطلاق: فوراً⁩\n    دائرہ وار یادداشت             ⁧آن⁩\n    کمپریشن کے بعد محفوظ کرنا     ⁧آن⁩\n    لوکیٹر سیاق و سباق محفوظ کریں ⁧آف⁩\n    یاد آوری کی تجاویز            ⁧آن⁩\nسوالات                            ⁧اطلاق: فوراً⁩\n    وقت ختم سوالات دکھائیں        7d",
+    "config_unchanged": true
+  }
+]

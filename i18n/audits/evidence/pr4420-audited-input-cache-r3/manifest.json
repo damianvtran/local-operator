@@ -1,0 +1,16 @@
+{
+  "head": "e1d7a0fa0d8a62d43dccdc7d1d6053ea9b7c1e2c",
+  "previous_head": "2c282261f27b66390061563359f9cf72f2520538",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_sha256": "697cd28a1ebab12ce0c9709d954c118ab819666c4749ed7bf115a1e6700249d8",
+  "cache_sha256": "7fca42b9a44bd227ebd5ebb51c1c4b16898dd22420dbb9110760a67f110b7668",
+  "canonical_map_sha256": "0f18cb9d9ef052190e17a1d9bfaa5e481f52b705b4b65a9ae2d1ef2fe0b3128b",
+  "keys": 277,
+  "changed_keys": [
+    "tui.info.status.bound_held"
+  ],
+  "english_capture": "i18n/audits/evidence/pr4420-audited-input-cache/en.json",
+  "english_invariant": "Original approved tool capture remains exact current EN; verify original manifest cache/canonical hashes and source file SHA. No raw-file prose fallback.",
+  "policy": "New zh map solely from read_public_copy; API canonical digest equals pinned actual catalogue; immutable original R2 cache is untouched. No semantic clearance."
+}

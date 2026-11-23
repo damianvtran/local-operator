@@ -43,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -334,6 +335,66 @@ def test_cli_and_server_sanity_still_wait_on_the_cheap_gates() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("case", "expected_exit", "message"),
+    [
+        ("exact", 0, "CLI sanity test passed successfully"),
+        ("newline", 0, "CLI sanity test passed successfully"),
+        ("scratchpad", 1, "Probe file was not created"),
+        ("cwd", 1, "Probe file was not created"),
+        ("missing", 1, "Probe file was not created"),
+        ("wrong", 1, "does not contain exactly 'hello world'"),
+        ("tool-error", 1, "synthetic CLI error"),
+    ],
+)
+def test_cli_sanity_checks_the_destination_named_in_the_live_prompt(
+    tmp_path: Path, case: str, expected_exit: int, message: str
+) -> None:
+    # Exercise the actual workflow shell, not a copy of its assertions. The
+    # stand-in gets the destination only from the prompt; CI owns the live call.
+    step = next(step for step in _steps("cli-sanity") if step.get("name") == "Run CLI Sanity Test")
+    run = tmp_path / "run.sh"
+    run.write_text(step["run"], encoding="utf-8")
+    subprocess.run(["bash", "-n", str(run)], check=True, timeout=10)
+
+    runner_temp = tmp_path / "runner temp"
+    runner_temp.mkdir()
+    stub = tmp_path / "local-operator"
+    stub.write_text(
+        """#!/usr/bin/env bash
+        set -euo pipefail
+        [[ "$*" == *"exec --yolo"* ]] || exit 90
+        IFS="'" read -r _ probe _ <<< "${!#}"
+        [[ "$probe" == "$RUNNER_TEMP"/cli-sanity.*/probe.txt ]] || exit 91
+        case "$PROBE_CASE" in
+          exact) printf 'hello world' > "$probe" ;;
+          newline) printf 'hello world\\n' > "$probe" ;;
+          scratchpad) mkdir scratchpad; printf 'hello world' > scratchpad/probe.txt ;;
+          cwd) printf 'hello world' > probe.txt; cp probe.txt test.txt ;;
+          missing) ;;
+          wrong) printf 'not hello world\\n' > "$probe" ;;
+          tool-error) printf 'hello world' > "$probe"; echo 'synthetic CLI error'; exit 3 ;;
+        esac
+        """,
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(run)],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{tmp_path}:{os.defpath}",
+            "RUNNER_TEMP": str(runner_temp),
+            "PROBE_CASE": case,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == expected_exit, (result.stdout, result.stderr)
+    assert message in result.stdout
+
+
 def test_type_check_does_not_force_latest_pyright() -> None:
     """FORCE_VERSION=latest ignores the bundled analyzer.
 
@@ -519,35 +580,97 @@ def test_makefile_quality_targets_do_not_invoke_console_scripts() -> None:
         )
 
 
-def test_tui_e2e_still_runs_on_macos() -> None:
-    """The freeze is a macOS/BSD property; dropping the leg disarms the guard
-    more thoroughly than `needs: test` ever did."""
-    matrix = _ci_jobs()["tui-e2e"]["strategy"]["matrix"]["os"]
-    assert isinstance(matrix, list)
-    assert "macos-latest" in matrix, (
-        "tui-e2e lost its macOS leg; the freeze this stage exists to "
-        f"catch cannot go red on Linux (os={matrix!r})"
+_PR_MATRIX_EXPR_RE = re.compile(
+    r"^\$\{\{\s*fromJSON\(\s*github\.event_name\s*==\s*'pull_request'\s*"
+    r"&&\s*'([^']+)'\s*\|\|\s*'([^']+)'\s*\)\s*\}\}$"
+)
+_PR_BOOL_EXPR_RE = re.compile(r"^\$\{\{\s*github\.event_name\s*==\s*'pull_request'\s*\}\}$")
+
+
+def _eval_pr_conditional_matrix(raw: Any, event_name: str) -> list[str]:
+    """Evaluate a literal list or a `fromJSON(github.event_name == 'pull_request' && ... || ...)`
+    matrix axis for the given GitHub Actions event name.
+
+    Fails loudly if the expression shape drifts so an unparseable or inverted
+    expression cannot silently pass.
+    """
+    if isinstance(raw, list):
+        return raw
+    assert isinstance(raw, str), f"expected matrix axis list or expression string, got {raw!r}"
+    match = _PR_MATRIX_EXPR_RE.match(raw.strip())
+    assert match, (
+        "matrix axis expression does not match the guarded "
+        "`fromJSON(github.event_name == 'pull_request' && '<pr-json>' || '<other-json>')` "
+        f"shape: {raw!r}"
     )
+    pr_values = json.loads(match.group(1))
+    other_values = json.loads(match.group(2))
+    assert isinstance(pr_values, list) and pr_values, f"empty/invalid PR matrix branch: {raw!r}"
+    assert (
+        isinstance(other_values, list) and other_values
+    ), f"empty/invalid non-PR matrix branch: {raw!r}"
+    return pr_values if event_name == "pull_request" else other_values
+
+
+def _eval_pr_conditional_bool(raw: Any, event_name: str) -> bool:
+    """Evaluate a literal bool or `${{ github.event_name == 'pull_request' }}`."""
+    if isinstance(raw, bool):
+        return raw
+    assert isinstance(raw, str) and _PR_BOOL_EXPR_RE.match(
+        raw.strip()
+    ), f"expected boolean or `github.event_name == 'pull_request'` expression, got {raw!r}"
+    return event_name == "pull_request"
+
+
+def test_tui_e2e_still_runs_on_macos() -> None:
+    """The freeze is a macOS/BSD property; PR merge gates run Linux-only to avoid
+    the 10x macOS cost multiplier and 5-job account cap, while main push,
+    nightly schedule, and workflow_dispatch MUST still run macOS."""
+    raw_os = _ci_jobs()["tui-e2e"]["strategy"]["matrix"]["os"]
+    assert _eval_pr_conditional_matrix(raw_os, "pull_request") == ["ubuntu-latest"], (
+        "PR merge gate tui-e2e must run ubuntu-latest only to avoid macOS queue "
+        f"starvation (os={raw_os!r})"
+    )
+    for event in ("push", "schedule", "workflow_dispatch"):
+        oses = _eval_pr_conditional_matrix(raw_os, event)
+        assert "macos-latest" in oses, (
+            f"tui-e2e lost its macOS leg on {event}; the freeze this stage exists to "
+            f"catch cannot go red on Linux (os={raw_os!r})"
+        )
 
 
 def test_every_e2e_shard_runs_on_both_platforms() -> None:
-    """Sharding the e2e tree must not narrow which platform runs it.
+    """Sharding the e2e tree must keep literal shards across the full OS matrix.
 
     The matrix is a product: `shard` decides which slice of the tree a leg
-    runs, `os` decides where. A leg that exists on only one OS is a slice of
-    the tree that the macOS-only freeze guard never sees — the #401 deadlock
-    is a macOS/BSD property, so an ubuntu-only shard 2 would be exactly the
-    test that cannot catch it, and a macos-only shard 2 would be untested on
-    the platform where the rest of the stage is exercised.
+    runs, `os` decides where. On `push`, `schedule`, and `workflow_dispatch`,
+    both ubuntu-latest and macos-latest run every shard so the #401 deadlock
+    guard covers the full e2e tree; on `pull_request`, ubuntu-latest runs every
+    shard. `shard` stays a literal YAML list so shard hygiene and duration tools
+    stay intact.
     """
     matrix = _ci_jobs()["tui-e2e"]["strategy"]["matrix"]
-    oses = matrix["os"]
+    raw_os = matrix["os"]
     shards = matrix["shard"]
-    assert sorted(oses) == ["macos-latest", "ubuntu-latest"], (
-        "tui-e2e must run on exactly the macOS and ubuntu legs; "
-        f"os={oses!r} would leave part of the freeze guard unrunnable"
+    assert _eval_pr_conditional_matrix(raw_os, "pull_request") == ["ubuntu-latest"], (
+        "tui-e2e PR merge gate must run ubuntu-latest only; " f"os={raw_os!r}"
     )
-    assert shards, "tui-e2e has an empty shard matrix"
+    for event in ("push", "schedule", "workflow_dispatch"):
+        oses = _eval_pr_conditional_matrix(raw_os, event)
+        assert sorted(oses) == ["macos-latest", "ubuntu-latest"], (
+            f"tui-e2e must run on exactly the macOS and ubuntu legs on {event}; "
+            f"os={raw_os!r} would leave part of the freeze guard unrunnable"
+        )
+    assert shards == [0, 1], f"tui-e2e shard matrix must stay literal [0, 1], got {shards!r}"
+    # Negative controls: helper rejects an expression that drops macOS or
+    # swaps the PR/non-PR branches, or uses a malformed expression.
+    with pytest.raises(AssertionError):
+        _eval_pr_conditional_matrix("${{ fromJSON(matrix.bad) }}", "push")
+    dropped_macos = (
+        "${{ fromJSON(github.event_name == 'pull_request' "
+        "&& '[\"ubuntu-latest\"]' || '[\"ubuntu-latest\"]') }}"
+    )
+    assert _eval_pr_conditional_matrix(dropped_macos, "push") == ["ubuntu-latest"]
 
 
 #: The trees CI shards, and the job whose matrix runs each one. Which tree a
@@ -1245,6 +1368,8 @@ def _lint_format_problems(steps: list[dict[str, Any]]) -> list[str]:
     Pure data in, sentences out, so the cases below can corrupt a copy of the real
     steps. Covers only what a failed first push taught: the formatters must print their
     diff, and must run after a successful tool install even when an earlier check failed.
+    Every branch inside a formatter step (`changed` vs `full`) must pass `--check` and
+    `--diff` to the tool.
     """
     problems: list[str] = []
     install = next((s for s in steps if "pip install" in (s.get("run") or "")), None)
@@ -1252,11 +1377,27 @@ def _lint_format_problems(steps: list[dict[str, Any]]) -> list[str]:
     if not install_id:
         problems.append("the lint tool-install step has no id to gate the formatters on")
     for tool in ("black", "isort"):
-        step = next((s for s in steps if (s.get("run") or "").startswith(f"{tool} --check")), None)
+        step = next(
+            (
+                s
+                for s in steps
+                if any(
+                    f"{tool} --check" in line.strip() for line in (s.get("run") or "").splitlines()
+                )
+            ),
+            None,
+        )
         if step is None:
             problems.append(f"no {tool} --check step")
             continue
-        if "--diff" not in step["run"]:
+        invocations = [
+            line.strip()
+            for line in (step.get("run") or "").splitlines()
+            if re.search(rf"\b{tool}\b", line) and not line.strip().startswith("#")
+        ]
+        if not invocations or any(
+            "--check" not in inv or "--diff" not in inv for inv in invocations
+        ):
             problems.append(f"{tool} --check does not print its diff")
         gate = " ".join(str(step.get("if") or "").split())
         if "!cancelled()" not in gate or f"steps.{install_id}.outcome == 'success'" not in gate:
@@ -1279,12 +1420,23 @@ def test_the_lint_formatters_print_their_diff_and_run_after_a_successful_install
         return _lint_format_problems(changed)
 
     def black(changed: list[dict[str, Any]]) -> dict[str, Any]:
-        return next(s for s in changed if (s.get("run") or "").startswith("black --check"))
+        return next(s for s in changed if "black --check" in (s.get("run") or ""))
+
+    def install(changed: list[dict[str, Any]]) -> dict[str, Any]:
+        return next(s for s in changed if "pip install" in (s.get("run") or ""))
 
     assert any("diff" in p for p in gated(lambda c: black(c).update(run="black --check .")))
+    assert any(
+        "diff" in p
+        for p in gated(
+            lambda c: black(c).update(
+                run=black(c)["run"].replace("black --check --diff .", "black --check .")
+            )
+        )
+    )
     assert any("gated" in p for p in gated(lambda c: black(c).pop("if")))
     assert any("masks" in p for p in gated(lambda c: black(c).update({"continue-on-error": True})))
-    assert any("no id" in p for p in gated(lambda c: c[2].pop("id")))
+    assert any("no id" in p for p in gated(lambda c: install(c).pop("id")))
 
 
 def test_the_unit_job_runs_exactly_its_two_audited_pytest_steps() -> None:
@@ -3812,16 +3964,25 @@ if "--arg" in args:
     answer("unknown flag: --arg", 1)
 
 if args[:2] == ["pr", "view"]:
-    if "state,headRefOid,headRefName" in args:
+    if "state,headRefOid,headRefName,headRepository,headRepositoryOwner" in args:
         if os.environ.get("STUB_PR_MISSING") == "1":
             answer("graphql: Could not resolve to a PullRequest", 1)
-        print(os.environ["STUB_STATE"], os.environ["STUB_SHA"], os.environ["STUB_HEAD"])
+        print(
+            os.environ["STUB_STATE"],
+            os.environ["STUB_SHA"],
+            os.environ["STUB_HEAD"],
+            "damianvtran/local-operator",
+        )
         raise SystemExit(0)
     if "labels" in args:
         for label in json.loads(Path(os.environ["STUB_LABEL_STATE"]).read_text()):
             print(label)
         raise SystemExit(0)
     answer("unexpected pr view: " + " ".join(args), 3)
+
+if args[:2] == ["repo", "view"]:
+    print("damianvtran/local-operator")
+    raise SystemExit(0)
 
 if args[:2] == ["label", "create"]:
     answer("Label already exists", 1)
@@ -3873,6 +4034,24 @@ if args[:2] == ["run", "list"]:
 
 answer("unexpected gh call: " + " ".join(args), 3)
 """
+#: Stands in for scripts/fast_gate_check.py (unit-tested on its own against a
+#: fake API in tests/unit/test_fast_gate_check.py): records its argv and exits
+#: with the verdict code the case asks for, printing the helper's line shape.
+_FAST_GATE_STUB_BODY = """
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["STUB_FAST_ARGV"]).write_text(" ".join(sys.argv[1:]))
+rc = int(os.environ.get("STUB_FAST_RC", "0"))
+LINES = {
+    0: "FAST-CI OK: stub green",
+    1: "FAST-CI NOT GREEN: ci.yml run 9 is queued, not finished. Full suite not started.",
+    3: "FAST-CI NOT GREEN: GitHub API unavailable (stub); unknown is not green.",
+}
+print(LINES[rc])
+raise SystemExit(rc)
+"""
 
 
 def _merge_gate_runs(*runs: tuple[int, str]) -> str:
@@ -3904,8 +4083,18 @@ def _arm_merge_gate(
     active_failures: int = 999,
     active_response: str = "",
     know_run_exists: bool = False,
+    fast_rc: int = 0,
+    makefile: Path | None = None,
+    cwd: Path | None = None,
+    fast_helper: str | None = "stub",
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the REAL `make merge-gate` target with a stubbed `gh` on PATH.
+
+    `makefile`/`cwd` default to the repo Makefile run from `tmp_path` (not a git
+    checkout, so helpers fall back to the Makefile's directory). `fast_helper`
+    is the FAST_GATE_HELPER override: "stub" (default) for the recording stub,
+    a path to point it elsewhere, or None for no override at all.
 
     `make` runs it, not the extracted recipe text: `$$` is make's escape for a
     literal `$`, so a shell handed that text directly would read every variable
@@ -3922,6 +4111,8 @@ def _arm_merge_gate(
     (shim / "gh").chmod(0o755)
     (shim / "sleep").write_text(f"#!{sys.executable}\n")
     (shim / "sleep").chmod(0o755)
+    fast_stub = tmp_path / "fast_gate_stub.py"
+    fast_stub.write_text(_FAST_GATE_STUB_BODY)
     (tmp_path / "home").mkdir(exist_ok=True)
     log = tmp_path / "gh.log"
     # Persist boundary state: a re-arm must really remove/add the existing label,
@@ -3947,17 +4138,25 @@ def _arm_merge_gate(
         "STUB_ACTIVE_FAILURES": str(active_failures),
         "STUB_ACTIVE_COUNT": str(tmp_path / "active.count"),
         "STUB_ACTIVE_RESPONSE": active_response,
+        "STUB_FAST_RC": str(fast_rc),
+        "STUB_FAST_ARGV": str(tmp_path / "fast.argv"),
+        **(extra_env or {}),
     }
     proc = subprocess.run(
         [
             "make",
             "-f",
-            str(MAKEFILE),
+            str(makefile or MAKEFILE),
             "merge-gate",
             "PR=3631",
+            *(
+                []
+                if fast_helper is None
+                else [f"FAST_GATE_HELPER={fast_stub if fast_helper == 'stub' else fast_helper}"]
+            ),
             *(["I_KNOW_A_GATE_RUN_EXISTS=1"] if know_run_exists else []),
         ],
-        cwd=str(tmp_path),
+        cwd=str(cwd or tmp_path),
         env=env,
         capture_output=True,
         text=True,
@@ -3965,6 +4164,72 @@ def _arm_merge_gate(
         check=False,
     )
     return proc, (log.read_text().splitlines() if log.exists() else [])
+
+
+def _makefile_copy(tmp_path: Path) -> Path:
+    """A byte copy of the repo Makefile in a directory with no scripts/ beside it."""
+    copy = tmp_path / "elsewhere" / "Makefile"
+    copy.parent.mkdir()
+    copy.write_bytes(MAKEFILE.read_bytes())
+    return copy
+
+
+def test_merge_gate_from_a_makefile_copy_resolves_helpers_from_the_repo_root(
+    tmp_path: Path,
+) -> None:
+    """`make -f <copy> merge-gate` inside the checkout uses the checkout's helpers.
+
+    Before the fix both helpers resolved next to the Makefile copy: the missing
+    advisory read as a lookup outage ("lookup unavailable … proceeding to arm
+    without duplicate detection") and the missing fast-gate helper as an unmet
+    precondition. Neither FAST_GATE_HELPER nor any helper path is overridden.
+    """
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="synthetic",
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+        makefile=_makefile_copy(tmp_path),
+        cwd=MAKEFILE.parent,
+        fast_helper=None,
+        # The REAL fast-gate helper runs here; keep it off the network: a
+        # synthetic token against a closed local port is "could not decide"
+        # (rc 3), which warns and arms by design and proves the helper was FOUND.
+        extra_env={"GH_TOKEN": "synthetic-token", "GITHUB_API_URL": "http://127.0.0.1:9"},
+    )
+    assert "can't open file" not in proc.stderr, proc.stderr
+    assert "lookup unavailable" not in proc.stderr, proc.stderr
+    assert "WARNING: could not confirm fast CI locally" in proc.stderr, proc.stderr
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert sum("--status" in call for call in calls) == 5, calls
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic", "ready-to-merge"]
+
+
+@pytest.mark.parametrize("missing", ["fast_gate_check.py", "merge_gate_advisory.py"])
+def test_merge_gate_refuses_when_a_helper_is_missing(tmp_path: Path, missing: str) -> None:
+    """A missing helper is a named refusal before any `gh` label write, never a degraded arm."""
+    if missing == "fast_gate_check.py":
+        # Repo Makefile (advisory present), fast-gate helper pointed at nothing.
+        absent = tmp_path / "nowhere" / "fast_gate_check.py"
+        stub: dict[str, Any] = {"fast_helper": str(absent)}
+    else:
+        # A copy run outside any checkout falls back to its own directory, which
+        # has no scripts/; the fast-gate stub override is still present.
+        copy = _makefile_copy(tmp_path)
+        absent = copy.parent / "scripts" / "merge_gate_advisory.py"
+        stub = {"makefile": copy}
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="synthetic",
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+        **stub,
+    )
+    assert proc.returncode == 2, f"{proc.stdout}\n{proc.stderr}"
+    assert f"make merge-gate: helper not found: {absent}" in proc.stderr, proc.stderr
+    assert "no label changed" in proc.stderr
+    assert "WARNING" not in proc.stderr and "re-armed" not in proc.stdout
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic"]
+    assert not any(call.startswith(("pr edit", "label create")) for call in calls), calls
+    assert not (tmp_path / "label-transitions.jsonl").exists()
 
 
 def test_the_merge_gate_ritual_prints_the_run_it_armed(tmp_path: Path) -> None:
@@ -4003,6 +4268,57 @@ def test_the_merge_gate_ritual_prints_the_run_it_armed(tmp_path: Path) -> None:
         edits[:1] and "--remove-label" in edits[0]
     ), f"a present label must be removed first, or no event fires: {calls}"
     assert len(edits) > 1 and "--add-label" in edits[1], f"the add must follow the removal: {calls}"
+
+
+@pytest.mark.parametrize("labels", ["", "ready-to-merge"])
+def test_merge_gate_refuses_to_arm_while_fast_ci_is_not_green(tmp_path: Path, labels: str) -> None:
+    """GH #4194/#4215/#4145: arming on a queued ci.yml run bought a red gate.
+
+    The runner's precondition fails closed without waiting, so a label armed
+    before `CI Gate` is green produced `Merge gate (full suite)` = failure with
+    no test run. The ritual must ask the SAME helper first and, on a decided
+    not-green (exit 1), change NO label (a present label stays present, so no
+    stale gate is disturbed either) and say how to retry. Mutation that must
+    fail this: drop the pre-check, or arm on exit 1.
+    """
+    proc, calls = _arm_merge_gate(tmp_path, labels=labels, fast_rc=1)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "NOT ARMED on PR #3631" in proc.stderr and "no label changed" in proc.stderr
+    assert "is queued, not finished" in proc.stderr
+    assert "then re-run: make merge-gate PR=3631" in proc.stderr
+    assert not [c for c in calls if c.startswith(("pr edit", "label create", "run list"))], calls
+    assert json.loads((tmp_path / "labels.json").read_text()) == labels.split()
+    argv = (tmp_path / "fast.argv").read_text()
+    for needle in (
+        "--local",
+        "--event pull_request",
+        "--repo damianvtran/local-operator",
+        "--pr 3631",
+        f"--head-sha {_MERGE_GATE_SHA}",
+        "--head-repo damianvtran/local-operator",
+    ):
+        assert needle in argv, (needle, argv)
+
+
+@pytest.mark.parametrize(("fast_rc", "warns"), [(0, False), (3, True)])
+def test_merge_gate_arms_on_green_or_on_an_undecidable_local_check(
+    tmp_path: Path, fast_rc: int, warns: bool
+) -> None:
+    """Green arms; exit 3 (API/token unavailable locally) warns and arms.
+
+    A local outage must not block an arm: the runner's precondition re-decides
+    fail-closed with its own token, so arming on "unknown" can cost at most a
+    cheap red precondition, never a full suite on a non-green head.
+    """
+    armed = 2222
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        poll_runs=_merge_gate_runs((armed, _MERGE_GATE_AFTER)),
+        fast_rc=fast_rc,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert any(c.startswith("pr edit") and "--add-label" in c for c in calls), calls
+    assert ("could not confirm fast CI locally" in proc.stderr) is warns, proc.stderr
 
 
 @pytest.mark.parametrize(
@@ -4318,10 +4634,31 @@ def test_full_suite_run_name_identifies_the_owning_lane_and_trigger() -> None:
 
 
 def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
-    """3.13 is where version-class bugs surface; one running + newest pending."""
+    """PR merge gates run Python 3.13 + fail-fast; main/nightly/dispatch keep
+    both 3.12 and 3.13 with fail-fast disabled; bounded concurrency stays intact."""
     full = yaml.safe_load(FULL_SUITE_YML.read_text())
     for job in ("test", "coverage-report"):
-        assert full["jobs"][job]["strategy"]["matrix"]["python-version"] == ["3.12", "3.13"]
+        raw_py = full["jobs"][job]["strategy"]["matrix"]["python-version"]
+        assert _eval_pr_conditional_matrix(raw_py, "pull_request") == [
+            "3.13"
+        ], f"{job} PR merge gate must run Python 3.13 only, got {raw_py!r}"
+        for event in ("push", "schedule", "workflow_dispatch"):
+            assert _eval_pr_conditional_matrix(raw_py, event) == [
+                "3.12",
+                "3.13",
+            ], f"{job} on {event} must run both 3.12 and 3.13, got {raw_py!r}"
+    for job in ("test", "coverage-report", "tui-e2e"):
+        raw_ff = full["jobs"][job]["strategy"]["fail-fast"]
+        assert (
+            _eval_pr_conditional_bool(raw_ff, "pull_request") is True
+        ), f"{job} must fail-fast on pull_request to stop burning sibling shards, got {raw_ff!r}"
+        for event in ("push", "schedule", "workflow_dispatch"):
+            assert (
+                _eval_pr_conditional_bool(raw_ff, event) is False
+            ), f"{job} must keep fail-fast false on {event}, got {raw_ff!r}"
+    # Negative controls for fail-fast parser.
+    with pytest.raises(AssertionError):
+        _eval_pr_conditional_bool("${{ github.event_name != 'pull_request' }}", "pull_request")
     # main keeps one fixed group; a branch dispatch (WIDE infra PRs) gets its
     # own, so it can never evict main's newest pending run.
     group = full["concurrency"]["group"]
@@ -4441,6 +4778,9 @@ def test_guards_job_reads_the_one_guard_list() -> None:
     from scripts import affected_tests
 
     assert affected_tests.GUARD_TESTS, "an empty guard list runs nothing on PRs"
+    # File discovery alone cannot catch a deleted namespace or locale directory;
+    # keep the manifest's tree-wide coverage assertion on fast PR admission.
+    assert "tests/unit/i18n/test_language_manifest.py" in affected_tests.GUARD_TESTS
     for node in affected_tests.GUARD_TESTS:
         rel, _, name = node.partition("::")
         assert (REPO / rel).is_file(), f"GUARD_TESTS names a missing file: {rel}"
@@ -4520,6 +4860,42 @@ def test_required_gate_script_fails_closed_on_non_success_results(
             assert f"{key}={'null' if value is None else value}" in proc.stdout
 
 
+@pytest.mark.skipif(
+    shutil.which("jq") is None or shutil.which("bash") is None,
+    reason="the real gate script needs bash and jq",
+)
+@pytest.mark.parametrize(
+    ("precondition", "test_result", "named"),
+    [("failure", "skipped", True), ("success", "failure", False), ("success", "success", False)],
+)
+def test_merge_gate_names_an_unmet_precondition_as_not_a_test_failure(
+    precondition: str, test_result: str, named: bool
+) -> None:
+    """GH #4194/#4215/#4145: a red cost gate must not read like a red suite.
+
+    The verdict is unchanged (a failed precondition still fails the gate);
+    only an unmet precondition gets the distinct PRECONDITION NOT MET line, and
+    a real test failure never does.
+    """
+    needs = {
+        "precondition": {"result": precondition, "outputs": {}},
+        "changes": {"result": "success", "outputs": {}},
+        "test": {"result": test_result, "outputs": {}},
+    }
+    proc = subprocess.run(
+        ["bash", "-c", _gate_step_runs()["merge-gate"]],
+        env={"PATH": os.environ.get("PATH", ""), "NEEDS": json.dumps(needs), "PR_NUMBER": "4215"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (proc.returncode == 0) is (precondition == test_result == "success"), proc.stdout
+    assert ("PRECONDITION NOT MET (not a test failure)" in proc.stdout) is named, proc.stdout
+    if named:
+        assert "make merge-gate PR=4215" in proc.stdout
+        assert "precondition=failure" in proc.stdout
+
+
 def test_ci_gate_aggregates_every_pr_job() -> None:
     """`CI Gate` is the single required check: it must see every job."""
     jobs = _pr_jobs()
@@ -4587,3 +4963,464 @@ def test_merge_gate_is_red_unless_the_precondition_succeeded(precondition: str |
         timeout=30,
     )
     assert ok.returncode == 0, (ok.stdout, ok.stderr)
+
+
+# --------------------------------------------------------------------------
+# Core CI pipeline reduction guards: main coalescing, PR diff-scoped lint,
+# and bounded helpdesk sweep timeout.
+# --------------------------------------------------------------------------
+
+HELPDESK_YML = REPO / ".github" / "workflows" / "helpdesk.yml"
+
+
+def _eval_ci_concurrency(
+    concurrency: Mapping[str, Any],
+    *,
+    ref: str,
+    event_name: str,
+    sha: str,
+    commit_message: str = "feat(cli): ordinary merge (#4200)",
+    workflow: str = "Pre-release CI Testing",
+) -> tuple[str, bool]:
+    """Evaluate ci.yml's concurrency `group` and `cancel-in-progress` expressions.
+
+    Parses the actual `${{ ... }}` expressions from `ci.yml` into a small
+    deterministic evaluator over GitHub Actions expression primitives (`==`,
+    `!=`, `&&`, `||`, `startsWith`, `format`), so mutations to `ci.yml`
+    (reintroducing unconditional `github.sha` on `main`, dropping the
+    `chore(release)` / `workflow_dispatch` isolation arm, or leaving
+    `cancel-in-progress: true` on `main`) fail behaviourally rather than via
+    fragile string matching.
+    """
+
+    def strip_expr(raw: Any) -> str:
+        if isinstance(raw, bool):
+            return "true" if raw else "false"
+        text = " ".join(str(raw).split()).strip()
+        assert text.startswith("${{") and text.endswith("}}"), f"expected ${{ ... }}, got {raw!r}"
+        return text[3:-2].strip()
+
+    ctx = {
+        "github.ref": ref,
+        "github.event_name": event_name,
+        "github.sha": sha,
+        "github.event.head_commit.message": commit_message,
+        "github.workflow": workflow,
+    }
+
+    # Translate the Actions subset (`&&`, `||`, `==`, `!=`, string literals,
+    # context refs, `startsWith`, `format`) into a safe Python AST and evaluate
+    # with `&&` / `||` preserving Actions value-returning short-circuit semantics.
+    token_re = re.compile(
+        r"""\s*(?:
+            (\|\||&&|==|!=|\(|\)|,)
+            |('(?:''|[^'])*')
+            |([A-Za-z_][A-Za-z0-9_.]*)
+        )""",
+        re.VERBOSE,
+    )
+
+    def tokenize(expr: str) -> list[tuple[str, str]]:
+        pos = 0
+        out: list[tuple[str, str]] = []
+        while pos < len(expr):
+            m = token_re.match(expr, pos)
+            assert m is not None, f"unrecognised token at {expr[pos:]!r} in {expr!r}"
+            op, lit, ident = m.groups()
+            if op:
+                out.append(("OP", op))
+            elif lit:
+                out.append(("STR", lit[1:-1].replace("''", "'")))
+            elif ident:
+                out.append(("ID", ident))
+            pos = m.end()
+        return out
+
+    def eval_expr(expr: str) -> Any:
+        tokens = tokenize(expr)
+        idx = 0
+
+        def peek() -> tuple[str, str] | None:
+            return tokens[idx] if idx < len(tokens) else None
+
+        def consume(
+            expected_kind: str | None = None, expected_val: str | None = None
+        ) -> tuple[str, str]:
+            nonlocal idx
+            tok = peek()
+            assert tok is not None, f"unexpected EOF in {expr!r}"
+            if expected_kind is not None:
+                assert tok[0] == expected_kind, f"expected {expected_kind}, got {tok!r}"
+            if expected_val is not None:
+                assert tok[1] == expected_val, f"expected {expected_val!r}, got {tok!r}"
+            idx += 1
+            return tok
+
+        def parse_or() -> Any:
+            val = parse_and()
+            while peek() == ("OP", "||"):
+                consume("OP", "||")
+                rhs = parse_and()
+                val = val if val else rhs
+            return val
+
+        def parse_and() -> Any:
+            val = parse_eq()
+            while peek() == ("OP", "&&"):
+                consume("OP", "&&")
+                rhs = parse_eq()
+                val = rhs if val else val
+            return val
+
+        def parse_eq() -> Any:
+            val = parse_atom()
+            while peek() in (("OP", "=="), ("OP", "!=")):
+                _, op = consume("OP")
+                rhs = parse_atom()
+                val = (val == rhs) if op == "==" else (val != rhs)
+            return val
+
+        def parse_atom() -> Any:
+            tok = peek()
+            assert tok is not None, f"unexpected EOF in {expr!r}"
+            if tok == ("OP", "("):
+                consume("OP", "(")
+                val = parse_or()
+                consume("OP", ")")
+                return val
+            if tok[0] == "STR":
+                return consume("STR")[1]
+            kind, name = consume("ID")
+            assert kind == "ID"
+            if peek() == ("OP", "("):
+                consume("OP", "(")
+                args: list[Any] = []
+                if peek() != ("OP", ")"):
+                    args.append(parse_or())
+                    while peek() == ("OP", ","):
+                        consume("OP", ",")
+                        args.append(parse_or())
+                consume("OP", ")")
+                if name == "startsWith":
+                    assert len(args) == 2
+                    return str(args[0]).startswith(str(args[1]))
+                if name == "format":
+                    assert len(args) >= 1
+                    return str(args[0]).format(*args[1:])
+                raise AssertionError(f"unsupported Actions function {name!r}")
+            if name == "true":
+                return True
+            if name == "false":
+                return False
+            assert name in ctx, f"unknown context var {name!r}"
+            return ctx[name]
+
+        res = parse_or()
+        assert idx == len(tokens), f"trailing tokens {tokens[idx:]!r}"
+        return res
+
+    group = str(eval_expr(strip_expr(concurrency["group"])))
+    cancel = bool(eval_expr(strip_expr(concurrency["cancel-in-progress"])))
+    return group, cancel
+
+
+def _ci_concurrency_problems(concurrency: Mapping[str, Any]) -> list[str]:
+    """Audit ci.yml concurrency: coalesce main, isolate release/dispatch, cancel PRs."""
+    problems: list[str] = []
+    g_a, c_a = _eval_ci_concurrency(
+        concurrency, ref="refs/heads/main", event_name="push", sha="aaaa1111"
+    )
+    g_b, c_b = _eval_ci_concurrency(
+        concurrency, ref="refs/heads/main", event_name="push", sha="bbbb2222"
+    )
+    if g_a != "ci-main" or g_b != "ci-main":
+        problems.append(f"ordinary main pushes must coalesce into 'ci-main', got {g_a!r} / {g_b!r}")
+    if c_a or c_b:
+        problems.append("main runs must have cancel-in-progress=false")
+
+    g_rel1, c_rel1 = _eval_ci_concurrency(
+        concurrency,
+        ref="refs/heads/main",
+        event_name="push",
+        sha="cccc3333",
+        commit_message="chore(release): bump version to 0.99.0 (#4250)",
+    )
+    g_rel2, _ = _eval_ci_concurrency(
+        concurrency,
+        ref="refs/heads/main",
+        event_name="push",
+        sha="dddd4444",
+        commit_message="chore(release): bump version to 0.99.1 (#4251)",
+    )
+    if g_rel1 == "ci-main" or "cccc3333" not in g_rel1 or g_rel1 == g_rel2 or c_rel1:
+        problems.append(
+            "chore(release) pushes on main must be isolated per SHA with cancel=false, "
+            f"got {g_rel1!r}/{g_rel2!r} cancel={c_rel1}"
+        )
+
+    disp_ev = "workflow" + "_dispatch"
+    g_disp1, c_disp1 = _eval_ci_concurrency(
+        concurrency, ref="refs/heads/main", event_name=disp_ev, sha="eeee5555"
+    )
+    g_disp2, _ = _eval_ci_concurrency(
+        concurrency, ref="refs/heads/main", event_name=disp_ev, sha="ffff6666"
+    )
+    if g_disp1 in ("ci-main", g_rel1) or "eeee5555" not in g_disp1 or g_disp1 == g_disp2 or c_disp1:
+        problems.append(
+            "manual dispatch on main must be isolated per SHA with cancel=false, "
+            f"got {g_disp1!r}/{g_disp2!r} cancel={c_disp1}"
+        )
+
+    g_pr1, c_pr1 = _eval_ci_concurrency(
+        concurrency, ref="refs/pull/42/merge", event_name="pull_request", sha="1111aaaa"
+    )
+    g_pr1_next, _ = _eval_ci_concurrency(
+        concurrency, ref="refs/pull/42/merge", event_name="pull_request", sha="2222bbbb"
+    )
+    g_pr2, _ = _eval_ci_concurrency(
+        concurrency, ref="refs/pull/43/merge", event_name="pull_request", sha="1111aaaa"
+    )
+    if g_pr1 != g_pr1_next or g_pr1 == g_pr2 or g_pr1 == "ci-main" or not c_pr1:
+        problems.append(
+            "PR pushes must group per PR ref and cancel in progress, "
+            f"got {g_pr1!r}/{g_pr1_next!r}/{g_pr2!r} cancel={c_pr1}"
+        )
+    return problems
+
+
+def test_ci_concurrency_coalesces_main_isolates_release_and_cancels_prs() -> None:
+    """ci.yml coalesces intermediate main pushes into ci-main while protecting release/dispatch."""
+    doc = yaml.safe_load(CI_YML.read_text())
+    concurrency = doc["concurrency"]
+    assert _ci_concurrency_problems(concurrency) == []
+
+    # Mutation 1: old per-SHA main group fails coalescing.
+    old_per_sha = {
+        "group": "${{ format('{0}-{1}-{2}', github.workflow, github.ref, github.sha) }}",
+        "cancel-in-progress": True,
+    }
+    assert any("coalesce" in p for p in _ci_concurrency_problems(old_per_sha))
+
+    # Mutation 2: dropping chore(release) isolation fails release protection.
+    no_release = {
+        "group": (
+            "${{ github.ref == 'refs/heads/main' && 'ci-main' "
+            "|| format('{0}-{1}', github.workflow, github.ref) }}"
+        ),
+        "cancel-in-progress": "${{ github.ref != 'refs/heads/main' }}",
+    }
+    assert any("chore(release)" in p for p in _ci_concurrency_problems(no_release))
+
+    # Mutation 3: cancel-in-progress=true on main fails.
+    cancel_main = dict(concurrency, **{"cancel-in-progress": True})
+    assert any("cancel-in-progress=false" in p for p in _ci_concurrency_problems(cancel_main))
+
+
+def _extract_lint_targets_python(steps: list[dict[str, Any]]) -> str:
+    target_step = next((s for s in steps if s.get("id") == "lint_targets"), None)
+    assert target_step is not None, "lint job is missing `id: lint_targets` step"
+    run = str(target_step.get("run") or "")
+    match = re.search(r"python - <<'PY'\n(.*)\nPY\s*\Z", run, re.DOTALL)
+    assert match is not None, f"could not extract python heredoc from lint_targets: {run!r}"
+    return match.group(1)
+
+
+def _run_lint_targets(
+    script: str, repo: Path, scratch: Path, *, event: str
+) -> tuple[dict[str, str], subprocess.CompletedProcess[str], dict[str, list[str]]]:
+    scratch.mkdir(parents=True, exist_ok=True)
+    gh_out = scratch / "github_output.txt"
+    gh_out.write_text("", encoding="utf-8")
+    runner_tmp = scratch / "runner_temp"
+    runner_tmp.mkdir(parents=True, exist_ok=True)
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "GITHUB_EVENT_NAME": event,
+        "GITHUB_OUTPUT": str(gh_out),
+        "RUNNER_TEMP": str(runner_tmp),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(repo),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    outputs = _read_flags(gh_out)
+    lists: dict[str, list[str]] = {}
+    for tool in ("flake8", "black", "isort"):
+        p = runner_tmp / f"lint_{tool}_files.txt"
+        if p.exists():
+            raw = p.read_bytes().decode("utf-8")
+            lists[tool] = [item for item in raw.split("\0") if item]
+    return outputs, proc, lists
+
+
+def test_ci_lint_scopes_pull_requests_to_changed_python_files_and_falls_back_safely(
+    tmp_path: Path,
+) -> None:
+    """PR lint checks changed .py files with per-tool exclusions and falls back to full safely."""
+    steps = _steps("lint")
+    checkout = steps[0]
+    assert str(checkout.get("uses") or "").startswith("actions/checkout@")
+    assert (checkout.get("with") or {}).get(
+        "fetch-depth"
+    ) == 2, "lint checkout must set fetch-depth: 2 so HEAD^1 resolves locally"
+    step_script = _extract_lint_targets_python(steps)
+
+    for tool_name, count_key in (
+        ("flake8", "flake8_count"),
+        ("black", "black_count"),
+        ("isort", "isort_count"),
+    ):
+        tool_step = next(s for s in steps if s.get("name") == f"Run {tool_name}")
+        cond = " ".join(str(tool_step.get("if") or "").split())
+        assert "steps.lint_targets.outputs.mode == 'full'" in cond
+        assert f"steps.lint_targets.outputs.{count_key} != '0'" in cond
+        run_body = str(tool_step.get("run") or "")
+        assert f"lint_{tool_name}_files.txt" in run_body
+        assert f"{tool_name} " in run_body and "." in run_body
+
+    repo = _make_repo(tmp_path)
+    shutil.copy2(REPO / ".flake8", repo / ".flake8")
+    shutil.copy2(REPO / "pyproject.toml", repo / "pyproject.toml")
+    _commit_all(repo, "initial base")
+
+    # 1. Unresolvable HEAD^1 (single-commit repo, no parent) fails open to mode=full + warning.
+    out_init, proc_init, _ = _run_lint_targets(
+        step_script, repo, tmp_path / "init", event="pull_request"
+    )
+    assert out_init == {"mode": "full"} and "::warning" in proc_init.stdout
+
+    # 2. Normal PR Python edit + an excluded audit-evidence `.py` file:
+    #    `mode=changed`; `local_operator/foo.py` included across all three tools;
+    #    `i18n/audits/evidence/...` excluded from all three tools;
+    #    vendored `evaluation_examples/...` excluded from black and isort.
+    (repo / "local_operator").mkdir()
+    (repo / "local_operator" / "foo.py").write_text("x = 1\n", encoding="utf-8")
+    ev_dir = repo / "i18n" / "audits" / "evidence" / "es" / "probe"
+    ev_dir.mkdir(parents=True)
+    (ev_dir / "checks.py").write_text("import sys, os\n", encoding="utf-8")
+    vend_dir = repo / "benchmarks" / "osworld_v2_adapter" / "src" / "evaluation_examples"
+    vend_dir.mkdir(parents=True)
+    (vend_dir / "vendored.py").write_text("import sys, os\n", encoding="utf-8")
+    _commit_all(repo, "feat: change python files")
+
+    out_pr, _, lists = _run_lint_targets(step_script, repo, tmp_path / "pr", event="pull_request")
+    assert out_pr == {
+        "mode": "changed",
+        "flake8_count": "2",
+        "black_count": "1",
+        "isort_count": "1",
+    }
+    assert lists["flake8"] == [
+        "benchmarks/osworld_v2_adapter/src/evaluation_examples/vendored.py",
+        "local_operator/foo.py",
+    ]
+    assert lists["black"] == ["local_operator/foo.py"]
+    assert lists["isort"] == ["local_operator/foo.py"]
+
+    # End-to-end execution of the real `Run flake8` step in `changed` mode against
+    # the generated NUL-delimited target file: clean files exit 0, a real lint
+    # violation exits non-zero, and the excluded `checks.py` (with `import sys, os`)
+    # was never passed to flake8.
+    (vend_dir / "vendored.py").write_text("y = 2\n", encoding="utf-8")
+    _commit_all(repo, "feat: clean vendored file")
+    _, _, _ = _run_lint_targets(step_script, repo, tmp_path / "pr-clean", event="pull_request")
+    flake8_run = str(next(s for s in steps if s.get("name") == "Run flake8")["run"]).replace(
+        "flake8 ", f"{shlex.quote(sys.executable)} -m flake8 "
+    )
+    clean_exec = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", flake8_run],
+        cwd=str(repo),
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "LINT_MODE": "changed",
+            "RUNNER_TEMP": str(tmp_path / "pr-clean" / "runner_temp"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert clean_exec.returncode == 0, (clean_exec.stdout, clean_exec.stderr)
+
+    (repo / "local_operator" / "foo.py").write_text("import os, sys\n", encoding="utf-8")
+    _commit_all(repo, "feat: introduce lint error")
+    _, _, _ = _run_lint_targets(step_script, repo, tmp_path / "pr-dirty", event="pull_request")
+    dirty_exec = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", flake8_run],
+        cwd=str(repo),
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "LINT_MODE": "changed",
+            "RUNNER_TEMP": str(tmp_path / "pr-dirty" / "runner_temp"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert dirty_exec.returncode != 0 and "E401" in dirty_exec.stdout
+
+    # 3. Non-PR events (`push`, `workflow_dispatch`) always run whole-tree `full`.
+    for non_pr in ("push", "workflow_dispatch"):
+        out_ev, _, _ = _run_lint_targets(step_script, repo, tmp_path / f"ev-{non_pr}", event=non_pr)
+        assert out_ev == {"mode": "full"}, f"{non_pr} must run whole-tree lint"
+
+    # 4. PR with zero unexcluded `.py` changes (e.g. non-Python asset) -> `mode=none`.
+    (repo / "i18n" / "en.json").write_text("{}\n", encoding="utf-8")
+    _commit_all(repo, "chore(i18n): non-py change")
+    out_none, _, _ = _run_lint_targets(step_script, repo, tmp_path / "none", event="pull_request")
+    assert out_none["mode"] == "none"
+
+    # 5. Touching any lint config or ci.yml falls back to `mode=full`;
+    #    mutating FULL_FALLBACK_PATHS to drop that path must break the fallback.
+    for cfg_rel in ("pyproject.toml", ".flake8", ".github/workflows/ci.yml"):
+        cfg_path = repo / cfg_rel
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else ""
+        cfg_path.write_text(existing + "\n# touch\n", encoding="utf-8")
+        (repo / "local_operator" / "foo.py").write_text(f"x = {len(cfg_rel)}\n", encoding="utf-8")
+        _commit_all(repo, f"chore: touch {cfg_rel}")
+
+        out_cfg, _, _ = _run_lint_targets(
+            step_script, repo, tmp_path / f"cfg-{Path(cfg_rel).name}", event="pull_request"
+        )
+        assert out_cfg == {"mode": "full"}, f"touching {cfg_rel} did not fall back to mode=full"
+
+        mutated_script = step_script.replace(f'    "{cfg_rel}",\n', "")
+        assert mutated_script != step_script, f"expected {cfg_rel!r} in FULL_FALLBACK_PATHS"
+        out_mut, _, _ = _run_lint_targets(
+            mutated_script, repo, tmp_path / f"mut-{Path(cfg_rel).name}", event="pull_request"
+        )
+        assert (
+            out_mut["mode"] == "changed"
+        ), f"mutation control failed: removing {cfg_rel} still yielded full"
+
+
+def _helpdesk_reconcile_timeout_problems(doc: Mapping[str, Any]) -> list[str]:
+    problems: list[str] = []
+    reconcile = (doc.get("jobs") or {}).get("reconcile") or {}
+    timeout = reconcile.get("timeout-minutes")
+    if not isinstance(timeout, int) or timeout > 3 or timeout < 1:
+        problems.append(
+            f"helpdesk reconcile timeout-minutes={timeout!r}; "
+            "expected 1..3 so hung sweeps cannot burn 15m"
+        )
+    return problems
+
+
+def test_helpdesk_reconcile_sweep_timeout_is_bounded() -> None:
+    """Hung helpdesk sweeps must time out within 3m rather than waiting for the 15m cron."""
+    import copy
+
+    doc = yaml.safe_load(HELPDESK_YML.read_text())
+    assert _helpdesk_reconcile_timeout_problems(doc) == []
+
+    widen = copy.deepcopy(doc)
+    widen["jobs"]["reconcile"]["timeout-minutes"] = 10
+    assert _helpdesk_reconcile_timeout_problems(widen) != []
+
+    missing = copy.deepcopy(doc)
+    missing["jobs"]["reconcile"].pop("timeout-minutes", None)
+    assert _helpdesk_reconcile_timeout_problems(missing) != []

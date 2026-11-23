@@ -1854,6 +1854,17 @@ class SubagentTranscriptView(TranscriptView):
         Binding("home", "load_earlier", "Load earlier transcript", show=False, priority=True)
     ]
 
+    def on_mount(self) -> None:
+        # The FULL-PAGE subagent transcript obeys the same stored layout as the
+        # main one: it is a TranscriptView with the same class default, and
+        # nothing else hands it the mode (the app's boot apply reaches only the
+        # main view). Reading the setting here keeps a resumed subagent page
+        # from drawing By turn while `/settings` says By response.
+        from local_operator.tui.settings import transcript_display_mode
+
+        super().on_mount()
+        self.set_display_mode(transcript_display_mode())
+
     def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
         # Focused-widget handlers precede ScrollableContainer bindings. Stop
         # Home here because its native y=0 no-op emits no edge-change signal.

@@ -46,6 +46,7 @@ from local_operator.guardrails import provenance as prov
 from local_operator.guardrails import resolve as resolve_module
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
 from local_operator.guardrails.classify import Risk, classify_bash
+from local_operator.guardrails.preview import BUILTIN_PASS, preview_tool_call
 from local_operator.guardrails.resolve import resolve_command
 from local_operator.resume import mark_session_origin
 
@@ -349,42 +350,78 @@ def test_field_removal_loop_resolves_both_literal_paths(home: Path, infra: Path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ignored", [False, True], ids=["clean", "unwitnessed"])
 async def test_field_case_sibling_cleanup_settles_without_the_judge(
-    home: Path, infra: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, infra: Path, monkeypatch: pytest.MonkeyPatch, ignored: bool
 ) -> None:
-    """The whole field case: K creates by loop, C (K's sibling) removes by loop.
-
-    The parent is live (it is waiting on C) and must not count as an owner.
-    """
+    """A live parent waiting on C is not a holder, but kinship is not a payload witness."""
     _run_recorded(home, FIELD_CREATE, K)
-    for repo in REPOS:
-        _ignore_only(infra / repo / ".worktrees" / "tfc-acm-sbx-auth")
+    if ignored:
+        for repo in REPOS:
+            _ignore_only(infra / repo / ".worktrees" / "tfc-acm-sbx-auth")
     _set_running(monkeypatch, {P: str(home), C: str(home)})
     verdict = _rank(home, FIELD_REMOVE, C)
-    assert verdict.risk is Risk.LOW, [t.reason for t in verdict.targets]
     judge = _Judge()
     outcome = await _check(home, FIELD_REMOVE, C, judge)
-    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    if ignored:
+        reason = "2 ignored entries the guard cannot prove regenerable"
+        assert verdict.risk is Risk.HIGH and len(verdict.targets) == len(REPOS)
+        assert all(t.cleanup_hold and reason in t.reason for t in verdict.targets)
+        assert outcome is not None and outcome.blocked and reason in outcome.text
+    else:
+        assert verdict.risk is Risk.LOW, verdict.reasons
+        assert outcome is None or not outcome.blocked, outcome and outcome.text
     assert judge.prompts == []
 
 
-@pytest.mark.parametrize("force", [False, True], ids=["remove", "remove-force"])
-def test_field_case_cleanup_child_removes_running_parents_tree(
-    home: Path, infra: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("force", "parent_live"),
+    [(False, True), (True, True), (True, False)],
+    ids=["plain-live-parent", "force-live-parent", "force-idle-parent"],
+)
+async def test_field_case_cleanup_child_respects_strict_live_owner_hold(
+    home: Path, infra: Path, monkeypatch: pytest.MonkeyPatch, force: bool, parent_live: bool
 ) -> None:
-    """Field case d5188ee174d4: its cleanup subagent removing ``monitor-lent-env``,
-    which the parent created, was refused "owning session running: <parent>"
-    while the parent waited on it. Re-checked after converging onto #3992's
-    finished-foreign route (a2507222): family ownership is decided first, so
-    the running parent is the delegator, not a conflicting owner — while an
-    unrelated session, with the same parent running, still gets HIGH."""
-    wt = _add_tree(home, infra / "services", P, name="monitor-lent-env")
-    _set_running(monkeypatch, {P: str(home), C: str(home)})
-    verdict = _rank(home, _remove(wt, force=force), C)
-    assert verdict.risk is Risk.LOW, verdict.targets[0].reason
-    assert "owning session running" not in verdict.targets[0].reason
-    foreign = _rank(home, _remove(wt, force=force), U)
-    assert foreign.risk is Risk.HIGH, foreign.targets[0].reason
+    """Field case d5188ee174d4: plain cleanup retains the ancestor exemption.
+
+    The old fixture assumed that exemption also applied to literal force. The
+    pre-existing strict owner scan used for finished-work proof never waived a
+    live creator on lineage alone; exact force now requires that strict proof.
+    """
+    repo = infra / "services"
+    wt = _add_tree(home, repo, P, name="monitor-lent-env")
+    origin = home / "services-origin.git"
+    _git("init", "-q", "--bare", "-b", "main", str(origin), cwd=home)
+    _git("remote", "add", "origin", str(origin), cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    assert _git("rev-parse", "HEAD", cwd=wt) == _git("rev-parse", "refs/heads/main", cwd=origin)
+    _set_running(monkeypatch, {C: str(home), **({P: str(home)} if parent_live else {})})
+    assert prov.worktree_creators(str(wt), strict=True) == {P}
+    assert prov._running_owners(str(wt), C) == ()
+    assert prov._running_owners(str(wt), C, strict=True) == ((P,) if parent_live else ())
+
+    command = _remove(wt, force=force)
+    verdict = _rank(home, command, C)
+    ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=C)
+    report = preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+    judge = _Judge()
+    result = await _check(home, command, C, judge)
+    reason = "another session still holds it; wait for that session to finish"
+    if force and parent_live:
+        assert verdict.risk is Risk.HIGH and verdict.targets[0].cleanup_hold, verdict.reasons
+        assert reason in verdict.targets[0].reason
+        assert report.builtin_effect == "hold-cleanup" and reason in report.render()
+        assert result is not None and result.blocked and reason in result.text
+    else:
+        assert verdict.risk is Risk.LOW, verdict.targets[0].reason
+        assert report.builtin_effect == BUILTIN_PASS, report.render()
+        assert result is None or not result.blocked, result and result.text
+    assert not judge.prompts
+    assert wt.is_dir()  # preview and checkpoint do not dispatch removal
+    if parent_live:
+        foreign = _rank(home, command, U)
+        assert foreign.risk is Risk.HIGH, foreign.targets[0].reason
 
 
 # -- cause 2: ancestors and descendants share ownership ---------------------------
@@ -415,13 +452,15 @@ async def test_family_removes_clean_tree_with_zero_judge_calls(
     assert judge.prompts == []
 
 
-def test_child_removes_parents_tree_holding_only_ignored_files(home: Path, infra: Path) -> None:
+def test_child_cannot_remove_parents_tree_with_unverified_ignored_files(
+    home: Path, infra: Path
+) -> None:
     wt = _add_tree(home, infra / "services", P)
     _ignore_only(wt)
-    assert prov.worktree_state(str(wt)) == "dirty"  # the field's foreign reading
+    assert prov.worktree_state(str(wt), own=True) == "clean"
     verdict = _rank(home, _remove(wt), C)
-    assert verdict.risk is Risk.LOW, verdict.targets[0].reason
-    assert f"ancestor session {P}" in verdict.targets[0].reason
+    assert verdict.risk is Risk.HIGH and verdict.targets[0].cleanup_hold, verdict.reasons
+    assert "ignored entries the guard cannot prove regenerable" in verdict.targets[0].reason
 
 
 def test_child_removes_parents_tree_with_tracked_change_is_high(home: Path, infra: Path) -> None:
@@ -447,15 +486,21 @@ def test_child_removes_parents_tree_with_open_mr_is_critical(
 
 
 def test_rm_rf_of_parents_tree_with_ignored_env_is_judged(home: Path, infra: Path) -> None:
-    """Decision: ``rm -rf`` keeps today's rule for ignored files the caller did
-    not make — an ancestor's ignored ``.env`` is not known to be reproducible —
-    so it is judged; ``git worktree remove`` of the same tree (git's own rule)
-    is LOW, and the same ``rm -rf`` by the creator itself stays LOW."""
+    """Exact plain cleanup holds ignored payloads; raw deletion keeps its legacy ranks."""
     wt = _add_tree(home, infra / "services", P)
     _ignore_only(wt)
     assert _rank(home, f"rm -rf {wt}", C).risk is Risk.HIGH
-    assert _rank(home, _remove(wt), C).risk is Risk.LOW
+    plain = _rank(home, _remove(wt), C)
+    assert plain.risk is Risk.HIGH and plain.targets[0].cleanup_hold, plain.reasons
+    assert "the guard cannot prove regenerable" in plain.targets[0].reason
     assert _rank(home, f"rm -rf {wt}", P).risk is Risk.LOW
+
+
+def test_plain_remove_of_clean_parents_tree_is_low(home: Path, infra: Path) -> None:
+    wt = _add_tree(home, infra / "services", P)
+    assert not _git("status", "--porcelain", "--ignored", cwd=wt).strip()
+    plain = _rank(home, _remove(wt), C)
+    assert plain.risk is Risk.LOW, plain.reasons
 
 
 def test_rm_rf_of_parents_tree_with_regenerable_ignored_output_is_low(
@@ -496,7 +541,6 @@ def test_lineage_never_comes_from_the_environment(
 def test_kin_clean_non_forced_remove_is_low(home: Path, infra: Path, remover: str) -> None:
     creator = K if remover == C else G  # Q (under K) vs G (under C): cousins
     wt = _add_tree(home, infra / "services", creator)
-    _ignore_only(wt)
     verdict = _rank(home, _remove(wt), remover)
     assert verdict.risk is Risk.LOW, verdict.targets[0].reason
     assert f"sibling session {creator}" in verdict.targets[0].reason
@@ -630,7 +674,6 @@ def test_direct_remove_of_a_foreign_tree_names_the_recorded_creator(
 def test_grandchild_sees_an_ancestor_not_a_parent(home: Path, infra: Path) -> None:
     """QA Q2: G is P's grandchild, so P is an ancestor, not its parent."""
     wt = _add_tree(home, infra / "services", P)
-    _ignore_only(wt)
     verdict = _rank(home, _remove(wt), G)
     assert verdict.risk is Risk.LOW, verdict.targets[0].reason
     assert f"ancestor session {P}" in verdict.targets[0].reason

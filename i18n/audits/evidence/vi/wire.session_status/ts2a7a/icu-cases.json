@@ -1,0 +1,236 @@
+[
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_overdue"
+    },
+    "text": "Lỗi — runtime đã dừng để cập nhật sau khi hết thời hạn chờ tiến triển",
+    "cells": 69,
+    "unchanged_from_first": false
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_stall_bound"
+    },
+    "text": "Lỗi — runtime tự kết thúc khi chạm ngưỡng đình trệ",
+    "cells": 50,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_retired"
+    },
+    "text": "Lỗi — đã ngừng để cập nhật",
+    "cells": 26,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_shutdown"
+    },
+    "text": "Lỗi — runtime bị kết thúc trong lượt",
+    "cells": 36,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_update_failed"
+    },
+    "text": "Lỗi — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp",
+    "cells": 59,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "runtime_killed"
+    },
+    "text": "Lỗi — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng",
+    "cells": 70,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "user_stop"
+    },
+    "text": "Lỗi — người dùng đã dừng",
+    "cells": 24,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "other"
+    },
+    "text": "Lỗi",
+    "cells": 3,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.error_cause",
+    "params": {
+      "cause": "synthetic_unknown_cause"
+    },
+    "text": "Lỗi",
+    "cells": 3,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_overdue"
+    },
+    "text": "Lỗi — chưa đọc — runtime đã dừng để cập nhật sau khi hết thời hạn chờ tiến triển",
+    "cells": 80,
+    "unchanged_from_first": false
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_stall_bound"
+    },
+    "text": "Lỗi — chưa đọc — runtime tự kết thúc khi chạm ngưỡng đình trệ",
+    "cells": 61,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_retired"
+    },
+    "text": "Lỗi — chưa đọc — đã ngừng để cập nhật",
+    "cells": 37,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_shutdown"
+    },
+    "text": "Lỗi — chưa đọc — runtime bị kết thúc trong lượt",
+    "cells": 47,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_update_failed"
+    },
+    "text": "Lỗi — chưa đọc — cập nhật chưa hoàn tất; runtime giữ nguyên bản đã nạp",
+    "cells": 70,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "runtime_killed"
+    },
+    "text": "Lỗi — chưa đọc — runtime biến mất mà không thoát đúng cách; không có yêu cầu dừng",
+    "cells": 81,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "user_stop"
+    },
+    "text": "Lỗi — chưa đọc — người dùng đã dừng",
+    "cells": 35,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "other"
+    },
+    "text": "Lỗi — chưa đọc",
+    "cells": 14,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_error_cause",
+    "params": {
+      "cause": "synthetic_unknown_cause"
+    },
+    "text": "Lỗi — chưa đọc",
+    "cells": 14,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.signal_stop",
+    "params": {
+      "command": "none"
+    },
+    "text": "Gián đoạn — đã dừng bằng tín hiệu",
+    "cells": 33,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.signal_stop",
+    "params": {
+      "command": "/stop --all synthetic-opaque-123"
+    },
+    "text": "Gián đoạn — đã dừng bằng tín hiệu qua /stop --all synthetic-opaque-123",
+    "cells": 70,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_signal_stop",
+    "params": {
+      "command": "none"
+    },
+    "text": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu",
+    "cells": 44,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_signal_stop",
+    "params": {
+      "command": "/stop --all synthetic-opaque-123"
+    },
+    "text": "Gián đoạn — chưa đọc — đã dừng bằng tín hiệu qua /stop --all synthetic-opaque-123",
+    "cells": 81,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.forced_kill",
+    "params": {
+      "command": "none"
+    },
+    "text": "Gián đoạn — bị buộc kết thúc",
+    "cells": 28,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.forced_kill",
+    "params": {
+      "command": "/stop --all synthetic-opaque-123"
+    },
+    "text": "Gián đoạn — bị buộc kết thúc qua /stop --all synthetic-opaque-123",
+    "cells": 65,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_forced_kill",
+    "params": {
+      "command": "none"
+    },
+    "text": "Gián đoạn — chưa đọc — bị buộc kết thúc",
+    "cells": 39,
+    "unchanged_from_first": true
+  },
+  {
+    "key": "wire.session_status.unseen_forced_kill",
+    "params": {
+      "command": "/stop --all synthetic-opaque-123"
+    },
+    "text": "Gián đoạn — chưa đọc — bị buộc kết thúc qua /stop --all synthetic-opaque-123",
+    "cells": 76,
+    "unchanged_from_first": true
+  }
+]

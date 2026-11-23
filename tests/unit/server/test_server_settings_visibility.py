@@ -85,14 +85,52 @@ async def test_an_eligible_observation_brings_the_section_and_its_rows_back(api)
     sections, rows = await _team_bridge_view(client)
 
     assert sections == ["team_bridge"]
-    # The two flags, four ceilings in containment order, then the model
-    # preference: an eligible observation must expose the entire section.
+    # The two flags, the owner-release hold switch (PR #4317 registered it
+    # right after ``session``), four ceilings in containment order, then the
+    # model preference: an eligible observation must expose the entire section.
     assert rows == [
         "team_bridge.enabled",
         "team_bridge.session",
+        "team_bridge.hold_release",
         "team_bridge.screening.budget_per_hour",
         "team_bridge.screening.unaddressed_budget_per_hour",
         "team_bridge.screening.ambient_budget_per_hour",
         "team_bridge.screening.sender_budget_per_hour",
         "team_bridge.screening.model",
     ]
+
+
+async def test_the_hold_release_row_is_withheld_without_eligibility(api):
+    """The added row inherits the section gate; it never leaks on its own.
+
+    ``team_bridge.hold_release`` is the first row of this section that names a
+    receiver behaviour (holding new-work requests), so a user with no eligible
+    organization must not see it in any non-eligible state, and must see it
+    once eligible — painted with its row copy, not a bare key. The registry
+    check first keeps the absence assertions from passing vacuously.
+    """
+    from local_operator import settings_io
+
+    assert settings_io.resolve_key("team_bridge.hold_release") is not None
+    client, root = api
+
+    async def keys() -> list[str]:
+        return (await _team_bridge_view(client))[1]
+
+    assert "team_bridge.hold_release" not in await keys()  # never observed
+    availability.record(root, visible=False, state="ready", checked_at=1.0)  # A
+    assert "team_bridge.hold_release" not in await keys()
+    availability.record(root, visible=False, state="unavailable", checked_at=2.0)  # G
+    assert "team_bridge.hold_release" not in await keys()
+
+    availability.record(root, visible=True, state="ready", checked_at=3.0)
+    response = await client.get("/v1/settings")
+    assert response.status_code == 200
+    row = next(
+        r for r in response.json()["result"]["settings"] if r["key"] == "team_bridge.hold_release"
+    )
+    assert row["label"] == "Hold work requests for review"
+
+    # And it withdraws again when eligibility is lost (B -> A), not just on boot.
+    availability.record(root, visible=False, state="ready", checked_at=4.0)
+    assert "team_bridge.hold_release" not in await keys()

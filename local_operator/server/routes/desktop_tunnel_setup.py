@@ -108,6 +108,7 @@ _BLOCKERS = {
     "disabled": "disabled",
     "network": "network",
     "radient_unavailable": "radient_unavailable",
+    "client_update": "client_update",
     "reconnecting": "reconnecting",
 }
 
@@ -142,6 +143,8 @@ _KINDS = {
     "disabled": "open_console",
     "network": "wait_network",
     "radient_unavailable": "wait_radient",
+    # Manual prerequisite: never offer the setup/login action as a protocol fix.
+    "client_update": "update_client",
     # The post-sign-in no-spend run holds `setup.lock` (U10): no button,
     # the desktop polls until it settles.
     "reconnecting": "wait_reconnect",
@@ -192,7 +195,7 @@ def _contract(plan: dict[str, Any], *, local: bool) -> dict[str, Any]:
             # Never `plan["remedy"]`: that is the CLI's sentence and names
             # terminal commands; the desktop renders this text verbatim.
             "text": setup.plain_remedy(plan),
-            "command": plan.get("apply_command"),
+            "command": None if blocker == "client_update" else plan.get("apply_command"),
             # The console is the whole remedy for these two, so the link
             # travels as data rather than only inside the sentence.
             "url": _CONSOLE_URL if blocker in ("disabled", "balance") else None,

@@ -1,0 +1,95 @@
+"""Independent string-only audit; fixture writes stay in this session scratch."""
+import sys, os, json, hashlib, shutil, copy, io, contextlib, re
+from pathlib import Path
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-terminal-status')
+OUT=Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])
+sys.path.insert(0,str(ROOT))
+from scripts.i18n import check
+from local_operator.i18n import catalogues, runtime
+TARGET=Path('/Users/damian/.local-operator/sessions/e9c45b5505eb/scratchpad/wire.session_status.zh-CN.json')
+EN=ROOT/'local_operator/i18n/catalogues/en/wire.session_status.json'
+CTX=EN.with_name('wire.session_status.context.json')
+def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+def strict(p):
+ def pairs(items):
+  out={}
+  for k,v in items:
+   assert k not in out, ('duplicate JSON key',k)
+   out[k]=v
+  return out
+ return json.loads(p.read_text(),object_pairs_hook=pairs)
+en,zh,ctx=strict(EN),strict(TARGET),strict(CTX)
+assert sha(EN)=='52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326'
+assert sha(CTX)=='5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525'
+assert sha(TARGET)=='6461115924a504b57c11d077a0e735cf08af4bdae59b17997e81b4fc5bf4a649'
+assert len(zh)==17 and set(en)==set(zh)==set(ctx)
+fixture=OUT/'catalogue-fixture'
+for locale in ('en','zh-CN'): (fixture/locale).mkdir(parents=True,exist_ok=True)
+shutil.copyfile(EN,fixture/'en'/EN.name)
+shutil.copyfile(CTX,fixture/'en'/CTX.name)
+zt=fixture/'zh-CN'/EN.name
+catalogues._CATALOGUES=fixture
+
+def validate(label,data,expected):
+ zt.write_text(json.dumps(data,ensure_ascii=False))
+ print('\nCASE',label,'COMMAND scripts.i18n.check.main(["--catalogues-only"]) with isolated catalogue root')
+ rc=check.main(['--catalogues-only'])
+ print('ACTUAL_EXIT',rc,'EXPECTED',expected)
+ assert rc==expected
+validate('candidate normal admission',zh,0)
+mut=copy.deepcopy(zh); mut['wire.session_status.dormant']=mut['wire.session_status.dormant'].replace('count','renamed')
+validate('negative renamed plural placeholder',mut,1)
+mut=copy.deepcopy(zh); mut.pop('wire.session_status.complete'); validate('negative missing key',mut,1)
+mut=copy.deepcopy(zh); mut['wire.session_status.extra']='额外'; validate('negative extra key',mut,1)
+mut=copy.deepcopy(zh); mut['wire.session_status.dormant']='已停止（{count, plural, one {#个唤醒已休眠} other {#个唤醒已休眠}}）'; validate('negative forbidden zh-CN one category',mut,1)
+mut=copy.deepcopy(zh); mut['wire.session_status.signal_stop']+='}'; validate('negative malformed ICU',mut,1)
+validate('candidate restored normal admission',zh,0)
+
+def structure(msg):
+ def walk(nodes):
+  return [(n.name,n.kind,tuple((selector,walk(body)) for selector,body in n.parts)) for n in nodes if isinstance(n,runtime._Arg)]
+ return walk(runtime.parse_message(msg))
+for k in en:
+ assert runtime.message_arguments(en[k])==runtime.message_arguments(zh[k]),k
+ if k!='wire.session_status.dormant': assert structure(en[k])==structure(zh[k]),k
+ else: assert runtime.plural_selectors(zh[k])==( ('other',), )
+ # Source has no markup/backtick/code literals; select identifiers checked above.
+ assert '\n' not in zh[k]
+ assert re.findall(r'`[^`]*`|</?\w+[^>]*>',en[k])==re.findall(r'`[^`]*`|</?\w+[^>]*>',zh[k])
+print('\nINDEPENDENT key sets, strict JSON, argument names/types, select-arm parity, markup/code, single logical line: PASS all 17')
+old=strict(ROOT/'local_operator/i18n/catalogues/zh-CN/wire.session_status.json')
+assert zh['wire.session_status.retired_label']==old['wire.session_status.retired_label']
+print('HISTORICAL retired_label unchanged; outside new formatter scope: PASS')
+
+samples=[]
+for k,msg in zh.items():
+ args=dict(runtime.message_arguments(msg))
+ if 'cause' in args:
+  selectors=[s for s,_ in runtime.parse_message(msg)[0].parts]
+  params=[{'cause':s} for s in selectors]+[{'cause':'UNKNOWN_EXTERNAL_CAUSE'}]
+ elif 'command' in args:
+  params=[{'command':s} for s in ('none','/stop --all','/kill --all')]
+ elif 'count' in args: params=[{'count':n} for n in (0,1,2,55)]
+ elif 'base' in args: params=[{'base':'Interrupted'}]
+ else: params=[{}]
+ for p in params:
+  text=runtime.render_message(msg,p,'zh-CN')
+  import unicodedata
+  def wcswidth(value):
+   # These samples contain only ASCII/CJK letters and punctuation, no emoji or
+   # ZWJ clusters; East Asian W/F codepoints occupy two cells, marks zero.
+   return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ('W','F') else 1 for c in value)
+  sample={'message_id':k,'parameters':p,'rendered':text,'cells':wcswidth(text),'chars':len(text)}
+  samples.append(sample)
+  print('RENDER',json.dumps(sample,ensure_ascii=False))
+  if 'command' in p:
+   assert (p['command'] in text) if p['command']!='none' else ('none' not in text and '通过' not in text)
+  if p.get('cause')=='UNKNOWN_EXTERNAL_CAUSE': assert text==('未读：出错' if 'unseen_' in k else '出错')
+  if 'count' in p: assert str(p['count']) in text
+assert all('maxCells' not in v and 'maxChars' not in v for v in ctx.values())
+print('No fixed maxCells/maxChars budget in source context; widths measured, no rendered layout clearance.')
+print('RENDER_CASE_COUNT',len(samples))
+(OUT/'zh-status-first-samples.json').write_text(json.dumps(samples,ensure_ascii=False,indent=2)+'\n')
+paths=[EN,CTX,TARGET,ROOT/'i18n/style-guides/zh-CN.md',ROOT/'i18n/glossary.md',TARGET.with_name('zh-status-translator-receipt.json'),ROOT/'local_operator/i18n/catalogues/zh-CN/wire.session_status.json']
+(OUT/'zh-status-input-hashes.json').write_text(json.dumps([{'path':str(p),'sha256':sha(p)} for p in paths],indent=2)+'\n')
+print('ALL AUDIT ASSERTIONS PASS')

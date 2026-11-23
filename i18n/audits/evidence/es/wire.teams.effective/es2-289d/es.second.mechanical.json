@@ -1,0 +1,97 @@
+{
+  "status": "passed",
+  "key_count": 9,
+  "validator_problems": [],
+  "per_key": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "source": "No team named {role} was found.",
+      "current_text": "No se encontró ningún equipo llamado {role}.",
+      "status": "passed",
+      "placeholder_types": "(('role', 'simple'),)",
+      "chars": 44,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans."
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "source": "The agent registry could not be read. Check the agent definitions and try again.",
+      "current_text": "No se pudo leer el registro de agentes. Revisa las definiciones de los agentes e inténtalo de nuevo.",
+      "status": "passed",
+      "placeholder_types": "()",
+      "chars": 100,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans."
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "source": "The model configuration could not be read. Check your configuration and try again.",
+      "current_text": "No se pudo leer la configuración del modelo. Revisa tu configuración e inténtalo de nuevo.",
+      "status": "passed",
+      "placeholder_types": "()",
+      "chars": 90,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans."
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "source": "The value at subagents.models.{tier} is invalid. Set it to a provider/model selector or a model mapping.",
+      "current_text": "El valor de subagents.models.{tier} no es válido. Usa un selector provider/model o un objeto de configuración de modelo.",
+      "status": "passed",
+      "placeholder_types": "(('tier', 'simple'),)",
+      "chars": 120,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans."
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "source": "The mapping at subagents.models.{tier} is invalid. Set model to a provider/model selector and, optionally, effort to a supported reasoning effort.",
+      "current_text": "El objeto de configuración de subagents.models.{tier} no es válido. Asigna a model un selector provider/model y, opcionalmente, a effort un esfuerzo de razonamiento admitido.",
+      "status": "passed",
+      "placeholder_types": "(('tier', 'simple'),)",
+      "chars": 174,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans."
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "source": "No model is configured at subagents.models.{tier}.",
+      "current_text": "No hay ningún modelo configurado en subagents.models.{tier}.",
+      "status": "passed",
+      "placeholder_types": "(('tier', 'simple'),)",
+      "chars": 60,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans."
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "source": "The model selector at subagents.models.{tier} is invalid. Use the provider/model format.",
+      "current_text": "El selector de modelo de subagents.models.{tier} no es válido. Usa el formato provider/model.",
+      "status": "passed",
+      "placeholder_types": "(('tier', 'simple'),)",
+      "chars": 93,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans."
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "source": "The model {selector} could not be resolved. Check the model selector and provider configuration.",
+      "current_text": "No se pudo resolver el modelo {selector}. Revisa el selector de modelo y la configuración del proveedor.",
+      "status": "passed",
+      "placeholder_types": "(('selector', 'simple'),)",
+      "chars": 104,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans."
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "source": "This team member is unavailable. Check its model configuration and agent definition.",
+      "current_text": "Este miembro del equipo no está disponible. Revisa su configuración de modelo y su definición de agente.",
+      "status": "passed",
+      "placeholder_types": "()",
+      "chars": 104,
+      "maxCells": null,
+      "mechanical": "Exact keys, ICU argument names/kinds and literal configuration syntax; no plural/select expressions, markup or code spans."
+    }
+  ]
+}

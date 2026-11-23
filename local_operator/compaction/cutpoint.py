@@ -29,7 +29,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Container, Sequence
 
-from local_operator.harness.rows import is_harness_injection, is_harness_notice_text
+from local_operator.harness.rows import (
+    is_harness_chrome,
+    is_harness_injection,
+    is_harness_notice_text,
+)
 from local_operator.harness.types import (
     AgentMessage,
     CustomMessage,
@@ -46,11 +50,15 @@ __all__ = [
     "extract_preserved_user_turns",
     "task_boundary_floor",
     "cap_preserved_user_turns",
+    "collapse_relaunch_briefs",
+    "RELAUNCH_ID_PREFIX",
+    "RELAUNCH_ELISION_NOTE",
     "CappedPreservedTurns",
     "elision_notice_text",
     "CARRIED_TIER_ID_PREFIX",
     "CARRIED_TIER_KEY",
     "is_carried_tier",
+    "is_preserved_replay",
     "RESUME_CARD_ID",
     "RESUME_CARD_KEY",
     "is_resume_card",
@@ -191,6 +199,20 @@ def _is_preserved_user_turn(message: AgentMessage) -> bool:
         isinstance(message, Message)
         and bool(message.provider_payload)
         and bool(message.provider_payload.get(PRESERVED_USER_TURN_KEY))
+    )
+
+
+def is_preserved_replay(message: AgentMessage) -> bool:
+    """True for a row the previous pass's marker re-renders on every request.
+
+    A preserved operator turn, or the notice standing in for the ones the cap
+    elided. Both live in the marker payload and are replayed verbatim outside
+    the archive, so a caller deciding what a pass must still CARRY (rather
+    than what is worth cutting, which is :func:`find_cut_point`'s question)
+    can leave them out without losing anything.
+    """
+    return _is_preserved_user_turn(message) or (
+        isinstance(message, Message) and message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
     )
 
 
@@ -799,10 +821,10 @@ def advance_cut_to_wire_band(
     with ~0.4 frame of headroom and fired again one or two tool groups later
     (measured bursts of consecutive passes, each rewriting the prompt prefix,
     so the request after a pass read 27.5% cache-read against ~80% in steady
-    state). The auto-continue gate already defines "real headroom" as
-    ``WIRE_RECOVERY_BAND`` x trigger; this applies that same definition to the
-    cut itself, so a byte-fired pass lands inside the band, not beside the
-    trigger.
+    state). The caller passes its landing target as ``band_bytes``
+    (``thresholds.wire_landing_bytes``: ``WIRE_LANDING_BAND`` x trigger, never
+    above the ``WIRE_RECOVERY_BAND`` line the auto-continue gate accepts), so
+    a byte-fired pass lands with real room under the trigger, not beside it.
 
     ``kept_bytes(i)`` is the CALLER's ruler for what the request would weigh
     if the cut were ``i``. It is a callable, not a ruler imported here,
@@ -1134,7 +1156,8 @@ def elision_notice_text(genuine_dropped: int, injections_dropped: int) -> str | 
             f"{genuine_dropped} older user message(s) you wrote were dropped here to "
             "bound the context. They are still in the session transcript but are no "
             "longer in the model's context. If an earlier instruction seems to be "
-            "missing, ask rather than assuming it was never given."
+            "missing, search them with sessions(op='peek', query=...) on this "
+            "session, or ask, rather than assuming it was never given."
         )
     if injections_dropped > 0:
         parts.append(
@@ -1261,6 +1284,93 @@ def _payload_int(payload: dict[str, object], key: str) -> int:
     return value if isinstance(value, int) and value > 0 else 0
 
 
+#: Id prefix of the user-role turn a SUBAGENT is launched (and re-launched) with.
+#: Minted by ``harness/subagent.py`` and defined once as
+#: ``session.frontend_state.LAUNCH_MESSAGE_ID_PREFIX``; mirrored here as a
+#: literal because this package must not import the session package (the
+#: session imports ``compaction`` lazily so that a missing package degrades to
+#: no compaction). ``tests/unit/compaction/test_cutpoint.py`` pins the two.
+RELAUNCH_ID_PREFIX = "subagent-launch:"
+
+#: The one line an older launch turn gains when lines were removed from it.
+#: Fixed text with no count, so re-collapsing a block the previous pass wrote
+#: is a fixpoint (a count would have to be re-derived from text that no longer
+#: exists, which is how an earlier notice here went 6 -> 7,167 in ten passes).
+RELAUNCH_ELISION_NOTE = (
+    "[launch brief repeated: lines identical to the latest launch brief further on "
+    "are omitted here]"
+)
+
+
+def collapse_relaunch_briefs(turns: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """Carry a re-stamped subagent launch brief ONCE in the preserved block.
+
+    WHY THIS EXISTS. A subagent's launch prompt is ``resume context + role and
+    team preamble + task`` delivered as a user-role turn, and every resume of
+    that child mints a NEW such turn with the whole preamble stamped on again.
+    They are genuine user turns as far as provenance can tell (nobody injected
+    them into a running conversation; they ARE the conversation's prompts), so
+    :func:`extract_preserved_user_turns` rightly preserves each one verbatim.
+    The copies then fill the block: on the live session store, 8 of the 11
+    sessions whose preserved block exceeded 20k tokens were this shape. One
+    held 39 launch turns totalling 128k tokens of which 22.5k were distinct
+    (55 lines common to all 39, 54 of them in the original launch), and
+    :func:`cap_preserved_user_turns` then evicted nine DISTINCT resume notes to
+    keep the copies under the cap -- the opposite of what the cap is for.
+
+    WHAT IT DOES. Among turns whose id carries :data:`RELAUNCH_ID_PREFIX`, the
+    NEWEST is kept verbatim. Each older one keeps only its lines that the
+    newest does not contain (line-exact), followed by
+    :data:`RELAUNCH_ELISION_NOTE`. The newest is the full copy, not the first,
+    so the cap -- which evicts oldest-first -- can never leave a reduced turn
+    pointing at a copy that is gone.
+
+    WHAT IT CANNOT DO. It never touches a turn without the launch prefix: an
+    operator's own messages are byte-for-byte what they typed even when they
+    repeat themselves, because "the user said it twice" is information and
+    this function has no way to know otherwise. It keys on the id the harness
+    minted, never on wording. Nothing is deleted from the block as a whole:
+    every removed line is still present, verbatim, in the newest launch turn.
+
+    IDEMPOTENT, and it has to be: each pass re-harvests the preserved turns the
+    previous pass wrote and runs this again. Re-running on its own output is a
+    fixpoint, and when a newer launch has arrived the previous newest is
+    reduced against it without stacking notes.
+
+    Call it BEFORE :func:`cap_preserved_user_turns`, so the cap budgets the
+    collapsed block. The source is the mint site (``harness/subagent.py``
+    re-stamping the preamble on resume); this is the compaction-side bound that
+    holds whatever the mint site does.
+    """
+    launches = [
+        index
+        for index, turn in enumerate(turns)
+        if str(turn.get("id", "")).startswith(RELAUNCH_ID_PREFIX)
+    ]
+    if len(launches) < 2:
+        return list(turns)
+    newest = launches[-1]
+    latest_lines = {
+        line for line in str(turns[newest].get("text", "")).splitlines() if line.strip()
+    }
+    collapsed: list[Mapping[str, object]] = list(turns)
+    for index in launches[:-1]:
+        lines = str(turns[index].get("text", "")).splitlines()
+        distinct = [
+            line
+            for line in lines
+            if line.strip() and line != RELAUNCH_ELISION_NOTE and line not in latest_lines
+        ]
+        # Blank lines carry no content and are not compared, so "nothing was
+        # removed" is judged on the non-blank lines only; a turn the newest
+        # shares nothing with is returned as the very object it came in as.
+        unchanged = len(distinct) == sum(1 for line in lines if line.strip())
+        if unchanged:
+            continue
+        collapsed[index] = {**turns[index], "text": "\n".join([*distinct, RELAUNCH_ELISION_NOTE])}
+    return collapsed
+
+
 def cap_preserved_user_turns(
     turns: Sequence[Mapping[str, object]],
     *,
@@ -1343,10 +1453,20 @@ def cap_preserved_user_turns(
     # it re-seats the harness's words as a user row. Text is sound evidence at
     # THIS site in a way it is not on a live fold: these are stored copies
     # inside a compaction block, never a row the operator typed in this process.
+    #
+    # Harness CHROME prompts (``harness_chrome_prompts`` / ``is_harness_chrome``:
+    # the "Harness recovery notice: ..." re-asks and the "[system] Your
+    # previous response was cut off ..." connectivity continuation, all minted
+    # in ``harness/chrome_prompts.py``) are shed here too. They stay in the
+    # LIVE context by design (rows.py), but a stored copy inside the preserved
+    # block is the harness's words re-seated as an operator turn on every pass
+    # forever; measured 8 such copies in the chief of staff's 1,297-turn block.
+    # Exact/recogniser match only, never a prefix guess.
     def _is_injection_turn(turn: Mapping[str, object]) -> bool:
         if injection_ids is not None and str(turn.get("id", "")) in injection_ids:
             return True
-        return is_harness_notice_text(str(turn.get("text", "")))
+        text = str(turn.get("text", ""))
+        return is_harness_notice_text(text) or is_harness_chrome(text)
 
     kept_turns = [turn for turn in real_turns if not _is_injection_turn(turn)]
     injections_dropped += len(real_turns) - len(kept_turns)

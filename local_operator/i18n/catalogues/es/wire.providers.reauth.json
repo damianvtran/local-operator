@@ -1,0 +1,6 @@
+{
+  "wire.providers.reauth.sign_in_expired": "Tu inicio de sesión en {label} ha caducado y no se puede renovar automáticamente. Vuelve a iniciar sesión: /login {provider} en la aplicación o lop login {provider} en una terminal.",
+  "wire.providers.reauth.session_policy": "Tu organización de Google Workspace exige un nuevo inicio de sesión en {label} (Control de sesiones de Google Cloud), así que el inicio de sesión no se puede renovar automáticamente. Vuelve a iniciar sesión: /login {provider} en la aplicación o lop login {provider} en una terminal.",
+  "wire.providers.reauth.status_sign_in_required": "requiere iniciar sesión",
+  "wire.providers.reauth.status_session_policy": "requiere iniciar sesión (política de Workspace)"
+}

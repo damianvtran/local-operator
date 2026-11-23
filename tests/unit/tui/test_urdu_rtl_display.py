@@ -805,6 +805,25 @@ def test_real_welcome_tip_and_login_commands_are_ltr_islands(urdu_app_corpus) ->
     assert not any(control in english for control in (RLI, LRI, PDI))
 
 
+def test_model_picker_reauth_clause_keeps_the_login_command_island(urdu_app_corpus) -> None:
+    """Code review R1-3: the `/model` footer reuses the welcome screen's login
+    sentence, so it must resolve it with the SAME command island — a raw ``tr``
+    left `/login` and the provider id as two LTR runs that RTL prose reorders
+    into ``google-vertex /login``."""
+    from local_operator.tui.app import _reauth_status
+
+    set_active_locale("ur")
+    clause = _reauth_status({"google-vertex": "reauth_required"})
+    assert LRI + "/login google-vertex" + PDI in clause, clause
+    assert clause.count(LRI) == 1, clause
+    _assert_balanced(clause)
+
+    set_active_locale("en")
+    assert _reauth_status({"google-vertex": "reauth_required"}) == (
+        "not logged in — /login google-vertex"
+    )
+
+
 @pytest.mark.parametrize("height", [1, 2, 3])
 @pytest.mark.asyncio
 async def test_wrapped_update_group_is_whole_or_absent(height, native_urdu_update) -> None:

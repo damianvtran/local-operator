@@ -1,0 +1,34 @@
+from pathlib import Path
+import json, hashlib
+from local_operator.i18n import runtime
+prior_path = Path('i18n/audits/evidence/ur/cli.serve_readiness/sd3/record.json')
+prior = json.loads(prior_path.read_text())
+paths = {name: Path(item['path']) for name, item in prior['input_hashes'].items()}
+maps = {name: json.loads(path.read_text()) for name, path in paths.items()}
+key = 'cli.serve_readiness.not_this_daemon'
+old = {'en': 'recorded, but another process now holds that PID', 'ur': 'ریکارڈ موجود ہے، مگر اب وہ PID کسی دوسرے عمل کے پاس ہے', 'context': maps['context']['cli.serve_readiness.unproven']['note']}
+new = {'en': 'recorded, but PID reuse was detected', 'ur': 'ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا', 'context': maps['context'][key]['note']}
+for name, path in paths.items():
+    current = path.read_bytes()
+    if name != 'context': assert maps[name][key] == new[name]
+    current_value = json.dumps(new[name], ensure_ascii=False).encode()
+    prior_value = json.dumps(old[name], ensure_ascii=False).encode()
+    assert current.count(current_value) == 1, name
+    reconstructed = current.replace(current_value, prior_value)
+    assert hashlib.sha256(reconstructed).hexdigest() == prior['input_hashes'][name]['sha256'], name
+    print('EXACT_SINGLE_VALUE_DELTA', name, 'current_sha256', hashlib.sha256(current).hexdigest(), 'reconstructed_prior_sha256', hashlib.sha256(reconstructed).hexdigest())
+print('RETAINED: other 14 English/Urdu values and all other context/formatting bytes unchanged from sd3')
+script = Path('i18n/audits/evidence/ur/cli.serve_readiness/sd3/mechanical.py.txt')
+expected = next(a['sha256'] for a in prior['artifacts'] if a['path'] == str(script))
+assert hashlib.sha256(script.read_bytes()).hexdigest() == expected
+exec(compile(script.read_text(), str(script), 'exec'))
+ur = maps['ur']
+key = 'cli.serve_readiness.not_this_daemon'
+for count in (1, 2, 12):
+    reason = runtime.render_message(ur['cli.serve_readiness.pid_reason'], {'count': count, 'pids': '123' if count == 1 else '123, 456', 'reason': ur[key]}, 'ur')
+    if count == 12: reason += ' ' + runtime.render_message(ur['cli.serve_readiness.and_more'], {'count': 10}, 'ur')
+    out = runtime.render_message(ur['cli.serve_readiness.unknown'], {'count': count, 'device': 'node-2', 'reasons': reason}, 'ur')
+    assert 'وہ PID' not in out and ':' not in out
+    assert 'PID کا دوبارہ استعمال پایا گیا' in out
+    print('PID_REUSE_GROUP_RENDER', count, out)
+print('PASS: full 15-key mechanical/render checks retained; new number-neutral PID-reuse reason composes with singular/plural/capped group neighbors. No service or visual RTL execution claimed.')

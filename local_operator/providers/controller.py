@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 import random
 import sqlite3
 import time
@@ -140,6 +141,29 @@ PICKER_TTL_S = 15 * 60
 #: string must never reach a wire (or a screenshot) from here.
 CATALOGUE_FAILURE_REASON = "Model listing unavailable"
 
+#: The listing status a provider gets when its STORED sign-in is dead: the IdP
+#: refused the refresh for good (``auth_store.GRANT_DEAD_AT_KEY``), so the
+#: store hands out no listing token and discovery could only answer
+#: ``unauthenticated`` and fall back to the bundled registry rows.
+#:
+#: WHY a status of its own rather than leaving ``unauthenticated``: that value
+#: means "no credential was ever given" and every surface treats it as silent
+#: (the user never asked for this provider). A dead stored grant is the
+#: opposite case -- the user DID sign in, the rows used to be live, and they
+#: keep looking connected while every turn on them would fail. Only a fresh
+#: ``/login`` fixes it, so the surfaces must say "sign in again" instead of
+#: painting stale bundled rows as a working account.
+#:
+#: Produced ONLY by :meth:`ProviderController.live_catalogue` (discovery never
+#: sees credentials, so it cannot tell the two cases apart) and published,
+#: credential-free, by :meth:`ProviderController.provider_notices`.
+REAUTH_REQUIRED_STATUS = "reauth_required"
+
+#: The listing statuses :meth:`ProviderController.provider_notices` publishes.
+#: Deliberately narrow: only states the user can act on and that no other
+#: field already says. ``stale``/``empty`` stay with ``catalogue_failures``.
+NOTICE_STATUSES = frozenset({REAUTH_REQUIRED_STATUS})
+
 #: Notes for the QwenCloud console-ticket states the user can ACT ON. All are
 #: painted by ``usage_panel.py``'s body builder, which prefixes a two-cell
 #: indent and then truncates to ``_body_content_width()``.
@@ -182,10 +206,11 @@ QWENCLOUD_TICKET_ORPHAN_NOTE = "no ticket — lop qwencloud-ticket set"
 #:
 #: Both remedies were run against a throwaway store rather than assumed:
 #: ``lop secret status`` prints the offending path with its ``chmod 0600``
-#: fix, and ``lop secret broker restart`` exists for version skew and is what
-#: the broker's own mismatch error names.
+#: fix, and ``lop secret broker stop`` clears version skew and is what the
+#: broker's own mismatch error names. Not ``restart``: that is a roll since
+#: PR #4389, and a roll refuses a broker speaking another protocol (CR4).
 QWENCLOUD_TICKET_EXPOSED_NOTE = "unsafe modes — lop secret status"
-QWENCLOUD_TICKET_BROKER_NOTE = "old broker — lop secret broker restart"
+QWENCLOUD_TICKET_BROKER_NOTE = "old broker — lop secret broker stop"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1639,7 +1664,12 @@ class ProviderController:
             from local_operator.aida.profile import record_radient_login
 
             record_radient_login(result, config_dir=self.config_dir)
-        identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
+        # The one label derivation (email -> account_id -> org_name, and an
+        # Amazon Bedrock connection's own label first), so the receipt names a
+        # Bedrock connection "dev · us-east-1", never its storage identity.
+        from local_operator.providers.auth_store import credential_identity
+
+        identity = credential_identity(result) or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
         if storage == "radient":
@@ -3703,6 +3733,23 @@ class ProviderController:
             # also called from the CLI and the server), and fetching on the loop
             # would freeze a TUI's repaint. Providers run concurrently.
             models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
+            if (
+                status == "unauthenticated"
+                and connected
+                and not definition.local_setup
+                and self._stored_grant_dead(definition.id)
+            ):
+                # The provider HAS a stored sign-in, yet no listing token came
+                # out of it because the IdP refused the refresh for good. The
+                # rows discovery fell back to are the bundled registry, not
+                # this account's catalogue, and a turn on them would fail: they
+                # must not be published as connected, and the status must say
+                # what fixes it (see REAUTH_REQUIRED_STATUS). Keyed on the
+                # persisted tombstone, never on ``unauthenticated`` alone: a
+                # transient refresh failure also yields no token, and telling
+                # the user to sign in again for a network blip would be wrong.
+                connected = False
+                status = REAUTH_REQUIRED_STATUS
             if definition.id in {"openai", "meta-muse"}:
                 if definition.id == "meta-muse" and is_oauth and api_key and not account_id:
                     import hashlib
@@ -3785,6 +3832,48 @@ class ProviderController:
                     )
                 )
         return entries, statuses
+
+    def _stored_grant_dead(self, provider: str) -> bool:
+        """Whether ``provider``'s stored OAuth sign-in carries a dead-grant tombstone.
+
+        Read through the store's own :meth:`AuthStore.grant_is_dead` so the
+        verdict is the persisted one (no refresh attempt, no IdP request), and
+        asked DEFENSIVELY: this controller serves stand-in and wrapped stores
+        (the mobile daemon's unreadable-store fallback, mesh views) that predate
+        the capability, and for them "cannot tell" must mean "not dead" -- the
+        pre-existing behaviour -- rather than an exception that empties the
+        provider. A logged-out row is already excluded by ``list_credentials``.
+        """
+        grant_is_dead = getattr(self.auth_store, "grant_is_dead", None)
+        if not callable(grant_is_dead):
+            return False
+        try:
+            rows = self.auth_store.list_credentials(credential_provider_id(provider))
+            return any(row.credential_type == "oauth" and grant_is_dead(row.id) for row in rows)
+        except Exception:  # noqa: BLE001 — an unreadable verdict keeps the old status
+            logger.debug("dead-grant check failed for %s", provider, exc_info=True)
+            return False
+
+    @staticmethod
+    def provider_notices(statuses: Mapping[str, str]) -> dict[str, dict[str, str]]:
+        """Provider id -> ``{"status", "name"}`` for the listing states to act on.
+
+        THE ONE machine-readable spelling every surface shares (desktop
+        ``/v1/desktop/models``, the phone relay's ``/api/models``, the TUI
+        picker footer), built from :meth:`live_catalogue`'s own ``statuses``
+        rather than a second plumbing. Only :data:`NOTICE_STATUSES` are
+        published, and only the provider id, its display name and the status:
+        this map crosses a tunnel to the phone, so nothing about the credential
+        (account, email, token, error text) may ride on it.
+        """
+        notices: dict[str, dict[str, str]] = {}
+        for provider, status in sorted(statuses.items()):
+            if status not in NOTICE_STATUSES:
+                continue
+            definition = get_provider_definition(provider)
+            name = definition.name if definition is not None else provider
+            notices[provider] = {"status": status, "name": name}
+        return notices
 
     async def _listing_credential(self, provider: str) -> tuple[str | None, bool, str | None]:
         # Existing embedded hosts implement the original one-argument store
@@ -3909,6 +3998,22 @@ class ProviderController:
             else await self.auth_store.get_oauth_access(credential_id, **kwargs)
         )
         if access is not None and access.kind == "oauth" and access.access_token:
+            if credential_id == "google-vertex":
+                # Vertex AI's publisher listing requires a GCP quota project in
+                # ``x-goog-user-project``; ``access.account_id`` holds the user's
+                # email, not the project id, so resolve ``project_id`` into the
+                # 3rd slot (not used for OpenAI/Muse account scoping on Vertex).
+                raw_project = (
+                    access.raw.get("project_id") if isinstance(access.raw, Mapping) else None
+                )
+                project_id = (
+                    (str(raw_project).strip() if raw_project else "")
+                    or (access.org_id or "").strip()
+                    or (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+                    or (os.environ.get("VERTEX_PROJECT") or "").strip()
+                    or None
+                )
+                return access.access_token, True, project_id
             return (
                 access.access_token,
                 True,
@@ -4101,14 +4206,40 @@ def _enrich_prices(
             enriched.append(
                 dataclasses.replace(
                     row,
+                    # Fill display name when the provider's listing returned only
+                    # the bare model id (e.g. Vertex AI's ``publisherModels``).
+                    name=row.name or found.name,
                     input_price=found.input_price,
                     output_price=found.output_price,
                     cache_read_price=row.cache_read_price or found.cache_read_price,
                     cache_write_price=row.cache_write_price or found.cache_write_price,
+                    long_context_threshold=(
+                        row.long_context_threshold or found.long_context_threshold
+                    ),
+                    long_context_input_price=(
+                        row.long_context_input_price or found.long_context_input_price
+                    ),
+                    long_context_output_price=(
+                        row.long_context_output_price or found.long_context_output_price
+                    ),
+                    long_context_cache_read_price=(
+                        row.long_context_cache_read_price or found.long_context_cache_read_price
+                    ),
+                    long_context_cache_write_price=(
+                        row.long_context_cache_write_price or found.long_context_cache_write_price
+                    ),
                     # Limits only where the listing gave none: the provider's
                     # own window is the right number for its endpoint.
                     context_window=row.context_window or found.context_window,
                     max_tokens=row.max_tokens or found.max_tokens,
+                    supports_audio_input=(
+                        row.supports_audio_input
+                        if row.supports_audio_input is not None
+                        else found.supports_audio_input
+                    ),
+                    supports_prompt_cache=(
+                        row.supports_prompt_cache or found.supports_prompt_cache
+                    ),
                 )
             )
         result[definition.id] = enriched

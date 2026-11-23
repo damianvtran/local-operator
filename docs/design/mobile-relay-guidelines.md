@@ -167,7 +167,11 @@ static replay, an old screenshot or an intended interaction as current live proo
   `click` callbacks and links are ignored, and the first four series colours are
   distinct in all 31 palettes (a fifth may repeat one).
 - The inline drawing is laid out for the column width (Pele reflows a wide chart
-  top to bottom) and clamped in height behind a fade. It reacts to a tap only:
+  top to bottom). Its height is clamped only when it is genuinely tall: a cap of
+  40 rem plus a 6 rem tolerance (`src/lib/diagram-clip.ts`), so a small chart is
+  always shown whole and never sliced at its last node. A clamped drawing sits
+  behind a fade AND a visible "Full size" pill, besides the footer button, so the
+  cut is not left to a faint gradient. It reacts to a tap only:
   one-finger drags always scroll the transcript. Full size is a viewer on the
   modal layer that scrolls both ways at the author's own pixel size.
 - Pele's SVG is never parsed as HTML. `src/lib/diagram-svg.ts` copies an

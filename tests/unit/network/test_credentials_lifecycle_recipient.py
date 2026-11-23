@@ -487,6 +487,8 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # Advertising the binding promises verification/storage of the signed
         # onboarding proof through this dedicated peer op, not just a wire feature.
         wire.OPERATOR_BINDING_V1: "net_operator_binding",
+        # The working-set move gate rides the existing move op's phases.
+        wire.SESSION_MOVE_WORKSET_V1: "net_session_move",
     }
     pure_features = {
         # Reserved pool feature: no compute-pool op or dispatch contract exists yet.
@@ -503,6 +505,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # and the ask condition only adds ``if_digest`` to that same frame. A peer
         # lacking it keeps receiving full tables. No new dispatchable op.
         wire.MEMBER_LIST_DIGEST_V1,
+        # Diagnostic only: says this build's listener signs its welcome and its dialer
+        # requires that proof (mesh-listener-auth). No op, and never gates anything.
+        "listener-proof-v1",
     }
     assert set(wire.LINK_CAPABILITIES) == set(handlers) | pure_features
     server = relay.RelayServer(root=rig.root, identity=rig.own)

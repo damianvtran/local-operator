@@ -1,0 +1,96 @@
+Actual executions captured by auditor session c736f176af6f.
+UTC 2026-11-16T04:43:19.143006+00:00
+CWD /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade
+Interpreter /home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3
+
+COMMAND ["/usr/bin/python3", "scripts/i18n/check.py", "--catalogues-only"]
+EXIT 1
+STDOUT
+
+STDERR
+Traceback (most recent call last):
+  File "/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/scripts/i18n/check.py", line 56, in <module>
+    import tomllib
+ModuleNotFoundError: No module named 'tomllib'
+
+
+COMMAND ["/home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3", "scripts/i18n/ledger.py", "append", "--help"]
+EXIT 0
+STDOUT
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+STDERR
+
+
+COMMAND ["/home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3", "scripts/i18n/check.py", "--catalogues-only"]
+EXIT 0
+STDOUT
+check.py: catalogue checks: 0 problem(s)
+
+STDERR
+
+
+COMMAND ["/home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3", "-"]
+STDIN_FROM i18n/audits/evidence/ur/cli.serve_readiness/sd1/mechanical.py.txt
+EXIT 0
+STDOUT
+JSON and key/context parity: PASS; key_count=11
+INPUT_SHA256 en local_operator/i18n/catalogues/en/cli.serve_readiness.json 6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e
+INPUT_SHA256 context local_operator/i18n/catalogues/en/cli.serve_readiness.context.json e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693
+INPUT_SHA256 ur local_operator/i18n/catalogues/ur/cli.serve_readiness.json 07c4be789363310c6f1863fd643974ca7741f18c99b7fd6c9404872ed84d9674
+KEY_PASS cli.serve_readiness.unproven args=() plurals=() width_hints={}
+RENDER cli.serve_readiness.unproven count=None ریکارڈ میں درج ہے، مگر اس کے عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)
+KEY_PASS cli.serve_readiness.not_reporting args=() plurals=() width_hints={}
+RENDER cli.serve_readiness.not_reporting count=None ریکارڈ میں درج ہے مگر جواب نہیں دے رہا (اس کی ہارٹ بیٹ رک گئی ہے)
+KEY_PASS cli.serve_readiness.not_this_daemon args=() plurals=() width_hints={}
+RENDER cli.serve_readiness.not_this_daemon count=None ریکارڈ میں درج ہے، مگر اب وہ PID کسی دوسرے عمل کے پاس ہے
+KEY_PASS cli.serve_readiness.unknown_state args=() plurals=() width_hints={}
+RENDER cli.serve_readiness.unknown_state count=None ریکارڈ میں نامعلوم حالت میں درج ہے
+KEY_PASS cli.serve_readiness.install_unknown args=() plurals=() width_hints={}
+RENDER cli.serve_readiness.install_unknown count=None ایسا بلڈ چلاتا ہے جس کا نصب شدہ بلڈ سے موازنہ نہیں کیا جا سکتا
+KEY_PASS cli.serve_readiness.cgroup_unknown args=() plurals=() width_hints={}
+RENDER cli.serve_readiness.cgroup_unknown count=None ایسے cgroup میں چلتا ہے جس کی جگہ یہ جانچ متعین نہیں کر سکتی
+KEY_PASS cli.serve_readiness.recorded_gap args=(('recorded', 'simple'), ('install', 'simple')) plurals=() width_hints={}
+RENDER cli.serve_readiness.recorded_gap count=None ریکارڈ میں درج بلڈ v0.104.0، نصب شدہ بلڈ v0.105.3 (عمل کی شناخت ثابت نہیں)
+KEY_PASS cli.serve_readiness.unknown args=(('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) plurals=(('one', 'other'),) width_hints={}
+RENDER cli.serve_readiness.unknown count=0 node-2 پر `lop serve` ڈیمن: pid 123: ریکارڈ میں درج ہے، مگر اس کے عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+RENDER cli.serve_readiness.unknown count=1 node-2 پر `lop serve` ڈیمن: pid 123: ریکارڈ میں درج ہے، مگر اس کے عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہا ہے اور زیرِ نگرانی ہے یا نہیں
+RENDER cli.serve_readiness.unknown count=2 node-2 پر `lop serve` ڈیمن: pid 123: ریکارڈ میں درج ہے، مگر اس کے عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+KEY_PASS cli.serve_readiness.stale args=(('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) plurals=(('one', 'other'),) width_hints={}
+RENDER cli.serve_readiness.stale count=0 node-2 پر `lop serve` ڈیمن (pid 123, pid 456)، v0.104.0 چلاتے ہیں، مگر نصب شدہ بلڈ v0.105.3 ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+RENDER cli.serve_readiness.stale count=1 node-2 پر `lop serve` ڈیمن (pid 123, pid 456)، v0.104.0 چلاتا ہے، مگر نصب شدہ بلڈ v0.105.3 ہے: اس کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرا بلڈ چلاتے ہیں
+RENDER cli.serve_readiness.stale count=2 node-2 پر `lop serve` ڈیمن (pid 123, pid 456)، v0.104.0 چلاتے ہیں، مگر نصب شدہ بلڈ v0.105.3 ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+KEY_PASS cli.serve_readiness.other_unit args=(('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) plurals=(('one', 'other'),) width_hints={}
+RENDER cli.serve_readiness.other_unit count=0 node-2 پر `lop serve` ڈیمن دوسری سروسز (pid 123 under external.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+RENDER cli.serve_readiness.other_unit count=1 node-2 پر `lop serve` ڈیمن کسی دوسری سروس (pid 123 under external.service) کے تحت ہے، lop serve یونٹ کے تحت نہیں
+RENDER cli.serve_readiness.other_unit count=2 node-2 پر `lop serve` ڈیمن دوسری سروسز (pid 123 under external.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+KEY_PASS cli.serve_readiness.identity_restart args=(('device', 'simple'),) plurals=() width_hints={}
+RENDER cli.serve_readiness.identity_restart count=None node-2 پر ریکارڈ دیکھنے کے لیے `lop services status` چلائیں، پھر ہر عمل کی شناخت درج کرنے کے لیے `lop services restart` چلائیں؛ دوبارہ شروع کرنے کا عمل کارروائی سے پہلے ہر ڈیمن کی جانچ کرتا ہے
+PASS: all 11 keys; all 3 plural messages include Urdu one/other; every branch rendered at count 0/1/2; no manual bidi controls/native digits; backtick and tag parity; no maxCells/maxChars hints. This is raw catalogue parsing/rendering, not terminal/visual bidi evidence.
+
+STDERR
+
+
+COMMAND ["/home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3", "scripts/i18n/ledger.py", "history-sha", "--locale", "ur", "--namespace", "cli.serve_readiness"]
+EXIT 0
+STDOUT
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+
+STDERR
+
+
+COMMAND ["/home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3", "scripts/i18n/ledger.py", "append", "--receipt", "i18n/audits/evidence/ur/cli.serve_readiness/sd1/ledger-receipt.json", "--expected-history-sha", "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "--dry-run"]
+EXIT 0
+STDOUT
+i18n/audit-history/ur/cli.serve_readiness.json
+
+STDERR
+

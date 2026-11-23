@@ -1,0 +1,22 @@
+{
+  "key": "cli.serve_readiness.not_this_daemon",
+  "before": "есть запись, но этот PID теперь принадлежит другому процессу",
+  "after": "есть запись, но обнаружено повторное использование PID",
+  "previous_target_sha256": "246305666d1703c8052e28e396b3a0d0518afa3f31757abfa120cd13952a52cc",
+  "retained_keys": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.stale",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ]
+}

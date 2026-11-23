@@ -1,0 +1,111 @@
+Record reference: i18n/audits/evidence/es/cli.serve_readiness/sd3r/record.json
+Actual execution output on current inputs, not notes.
+
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+STDERR:
+
+EXIT_CODE=0
+
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python i18n/audits/evidence/es/cli.serve_readiness/sd3r/validation.py.txt
+STRICT JSON/context/target parity PASS: 15/15 keys, no duplicates/additions/omissions.
+DELTA PASS: 7 changed / 4 added / 4 retained. HEAD original target hash matches sd1r.
+BYTE-IDENTICAL RETAINED cli.serve_readiness.install_unknown 08fbf325ce4d478624e6350b2878dbe78cb29df104d1eb8152032f3b85fd6c43
+BYTE-IDENTICAL RETAINED cli.serve_readiness.cgroup_unknown de7ca41686a7566bd0a97c93c3fd433c3598741aa5ee8b07fa755d5c256b6a8b
+BYTE-IDENTICAL RETAINED cli.serve_readiness.stale e49a1cc33177782a9e39e0234448bbef6d1e6c4afdb9fafe2d787e429f4d583f
+BYTE-IDENTICAL RETAINED cli.serve_readiness.other_unit 53c8f08e4f89a15a2b794a87fd2a9473e89d9ea4451602441b7ab316f95be232
+KEY PASS cli.serve_readiness.unproven args=() selectors=() width_hints={}
+ RENDER count=1 cells=121 chars=121: hay registro, pero no se puede comprobar la identidad del proceso (no se pudo comparar ninguna marca de tiempo de inicio)
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.not_reporting args=() selectors=() width_hints={}
+ RENDER count=1 cells=75 chars=75: hay registro, pero no hay respuesta (ya no se reciben señales de actividad)
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.not_this_daemon args=() selectors=() width_hints={}
+ RENDER count=1 cells=50 chars=50: hay registro, pero se detectó reutilización de PID
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.unknown_state args=() selectors=() width_hints={}
+ RENDER count=1 cells=31 chars=31: registro con estado desconocido
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.install_unknown args=() selectors=() width_hints={}
+ RENDER count=1 cells=67 chars=67: ejecuta una compilación que no se puede comparar con la instalación
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.cgroup_unknown args=() selectors=() width_hints={}
+ RENDER count=1 cells=61 chars=61: se ejecuta en un cgroup que esta comprobación no puede ubicar
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.recorded_gap args=(('recorded', 'simple'), ('install', 'simple')) selectors=() width_hints={}
+ RENDER count=1 cells=84 chars=84: el registro indica la compilación build-old; está instalada la compilación build-new
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.unknown args=(('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) selectors=(('one', 'many', 'other'),) width_hints={}
+ RENDER count=0 cells=178 chars=178: los daemons `lop serve` en node-1 — identificador de proceso 101 — hay registro, pero no hay respuesta, por lo que no se sabe si coinciden con la instalación y están supervisados
+ RENDER count=1 cells=173 chars=173: el daemon `lop serve` en node-1 — identificador de proceso 101 — hay registro, pero no hay respuesta, por lo que no se sabe si coincide con la instalación y está supervisado
+ RENDER count=2 cells=178 chars=178: los daemons `lop serve` en node-1 — identificador de proceso 101 — hay registro, pero no hay respuesta, por lo que no se sabe si coinciden con la instalación y están supervisados
+ RENDER count=1000000 cells=178 chars=178: los daemons `lop serve` en node-1 — identificador de proceso 101 — hay registro, pero no hay respuesta, por lo que no se sabe si coinciden con la instalación y están supervisados
+ RENDER count=1500000 cells=178 chars=178: los daemons `lop serve` en node-1 — identificador de proceso 101 — hay registro, pero no hay respuesta, por lo que no se sabe si coinciden con la instalación y están supervisados
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.stale args=(('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) selectors=(('one', 'many', 'other'),) width_hints={}
+ RENDER count=0 cells=164 chars=164: los daemons `lop serve` en node-1 (101, 102) ejecutan build-old, pero la instalación es build-new: las sesiones remotas que alojan ejecutan esas otras compilaciones
+ RENDER count=1 cells=156 chars=156: el daemon `lop serve` en node-1 (101, 102) ejecuta build-old, pero la instalación es build-new: las sesiones remotas que aloja ejecutan esa otra compilación
+ RENDER count=2 cells=164 chars=164: los daemons `lop serve` en node-1 (101, 102) ejecutan build-old, pero la instalación es build-new: las sesiones remotas que alojan ejecutan esas otras compilaciones
+ RENDER count=1000000 cells=164 chars=164: los daemons `lop serve` en node-1 (101, 102) ejecutan build-old, pero la instalación es build-new: las sesiones remotas que alojan ejecutan esas otras compilaciones
+ RENDER count=1500000 cells=164 chars=164: los daemons `lop serve` en node-1 (101, 102) ejecutan build-old, pero la instalación es build-new: las sesiones remotas que alojan ejecutan esas otras compilaciones
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.other_unit args=(('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) selectors=(('one', 'many', 'other'),) width_hints={}
+ RENDER count=0 cells=110 chars=110: los daemons `lop serve` en node-1 están a cargo de otros servicios (other.service), no de una unidad lop serve
+ RENDER count=1 cells=105 chars=105: el daemon `lop serve` en node-1 está a cargo de otro servicio (other.service), no de una unidad lop serve
+ RENDER count=2 cells=110 chars=110: los daemons `lop serve` en node-1 están a cargo de otros servicios (other.service), no de una unidad lop serve
+ RENDER count=1000000 cells=110 chars=110: los daemons `lop serve` en node-1 están a cargo de otros servicios (other.service), no de una unidad lop serve
+ RENDER count=1500000 cells=110 chars=110: los daemons `lop serve` en node-1 están a cargo de otros servicios (other.service), no de una unidad lop serve
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.identity_restart args=(('device', 'simple'),) selectors=() width_hints={}
+ RENDER count=1 cells=151 chars=151: en node-1, ejecuta `lop services restart` para pasar el daemon registrado a la compilación instalada; el reinicio comprueba cada daemon antes de actuar
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.pid_reason args=(('count', 'plural'), ('pids', 'simple'), ('reason', 'simple')) selectors=(('one', 'many', 'other'),) width_hints={}
+ RENDER count=0 cells=73 chars=73: identificadores de proceso 101, 102 — hay registro, pero no hay respuesta
+ RENDER count=1 cells=71 chars=71: identificador de proceso 101, 102 — hay registro, pero no hay respuesta
+ RENDER count=2 cells=73 chars=73: identificadores de proceso 101, 102 — hay registro, pero no hay respuesta
+ RENDER count=1000000 cells=73 chars=73: identificadores de proceso 101, 102 — hay registro, pero no hay respuesta
+ RENDER count=1500000 cells=73 chars=73: identificadores de proceso 101, 102 — hay registro, pero no hay respuesta
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.and_more args=(('count', 'plural'),) selectors=(('one', 'many', 'other'),) width_hints={}
+ RENDER count=0 cells=7 chars=7: y 0 más
+ RENDER count=1 cells=7 chars=7: y 1 más
+ RENDER count=2 cells=7 chars=7: y 2 más
+ RENDER count=1000000 cells=15 chars=15: y 1.000.000 más
+ RENDER count=1500000 cells=15 chars=15: y 1.500.000 más
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.identity_no_action args=(('count', 'plural'),) selectors=(('one', 'many', 'other'),) width_hints={}
+ RENDER count=0 cells=171 chars=171: los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+ RENDER count=1 cells=163 chars=163: el registro cuya identidad de proceso no está comprobada coincide con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+ RENDER count=2 cells=171 chars=171: los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+ RENDER count=1000000 cells=171 chars=171: los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+ RENDER count=1500000 cells=171 chars=171: los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+ OPAQUE values byte-preserved PASS
+KEY PASS cli.serve_readiness.identity_restart_manual args=(('device', 'simple'),) selectors=() width_hints={}
+ RENDER count=1 cells=143 chars=143: en node-1, reinicia `lop serve` manualmente para pasar el daemon registrado a la compilación instalada; no puede recargarse en el mismo proceso
+ OPAQUE values byte-preserved PASS
+GROUPED count=1: el daemon `lop serve` en node-1 — identificador de proceso 101 — hay registro, pero no se puede comprobar la identidad del proceso (no se pudo comparar ninguna marca de tiempo de inicio); el registro indica la compilación build-old; está instalada la compilación build-new, por lo que no se sabe si coincide con la instalación y está supervisado
+GROUPED count=1: el daemon `lop serve` en node-1 — identificador de proceso 101 — hay registro, pero no hay respuesta (ya no se reciben señales de actividad), por lo que no se sabe si coincide con la instalación y está supervisado
+GROUPED count=1: el daemon `lop serve` en node-1 — identificador de proceso 101 — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coincide con la instalación y está supervisado
+GROUPED count=1: el daemon `lop serve` en node-1 — identificador de proceso 101 — registro con estado desconocido, por lo que no se sabe si coincide con la instalación y está supervisado
+GROUPED count=2: los daemons `lop serve` en node-1 — identificadores de proceso 101, 102 — hay registro, pero no se puede comprobar la identidad del proceso (no se pudo comparar ninguna marca de tiempo de inicio); el registro indica la compilación build-old; está instalada la compilación build-new, por lo que no se sabe si coinciden con la instalación y están supervisados
+GROUPED count=2: los daemons `lop serve` en node-1 — identificadores de proceso 101, 102 — hay registro, pero no hay respuesta (ya no se reciben señales de actividad), por lo que no se sabe si coinciden con la instalación y están supervisados
+GROUPED count=2: los daemons `lop serve` en node-1 — identificadores de proceso 101, 102 — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+GROUPED count=2: los daemons `lop serve` en node-1 — identificadores de proceso 101, 102 — registro con estado desconocido, por lo que no se sabe si coinciden con la instalación y están supervisados
+OVERFLOW: y 3 más
+NO ACTION: el registro cuya identidad de proceso no está comprobada coincide con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria
+RELOAD: en node-1, ejecuta `lop services restart` para pasar el daemon registrado a la compilación instalada; el reinicio comprueba cada daemon antes de actuar
+MANUAL: en node-1, reinicia `lop serve` manualmente para pasar el daemon registrado a la compilación instalada; no puede recargarse en el mismo proceso
+PASS: 15-key mechanical/render/opaque checks; no declared width caps. Pure copy rendering only, no live service/layout/behavior proof.
+FINAL FOCUSED PID REUSE CHECK
+CURRENT PID REUSE count=1: el daemon `lop serve` en node-1 — identificador de proceso 101 — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coincide con la instalación y está supervisado
+CURRENT PID REUSE count=2: los daemons `lop serve` en node-1 — identificadores de proceso 101, 102 — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+CURRENT PID REUSE count=1000000: los daemons `lop serve` en node-1 — identificadores de proceso 101, 102 — hay registro, pero se detectó reutilización de PID, por lo que no se sabe si coinciden con la instalación y están supervisados
+SD3 RETENTION PROOF PASS en only not_this_daemon value/note changed; all other file bytes unchanged c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10
+SD3 RETENTION PROOF PASS context only not_this_daemon value/note changed; all other file bytes unchanged 40d35aa2e026aa02a96376d4c550023446af21b89456ad0c80cd9540e8a63428
+SD3 RETENTION PROOF PASS es only not_this_daemon value/note changed; all other file bytes unchanged 2ab401d1a191aaf2a40699ed08cb142e097df0f44a5a20131c82f9f2ec061564
+FINAL PASS: all 15 current keys mechanical/render/opaque; 1 changed key + grouped neighbors independently read; other 14 target values/formatting byte-retained from sd3.
+
+STDERR:
+
+EXIT_CODE=0

@@ -1,0 +1,31 @@
+{
+  "locale": "hi",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10",
+  "status": "passed",
+  "translator": {
+    "agent": "task 170903662c6e",
+    "session": "170903662c6e",
+    "original_translator_session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Manager identifies job 170903662c6e as same original translator; original manager-disclosed actual model was openai/gpt-6.1-sol. Translator runtime not independently inspected by auditor.",
+    "fallback": "No new fallback disclosed by manager; not independently inspected."
+  },
+  "auditor": {
+    "agent": "Audit daemon Hindi",
+    "session": "1ee2c984b1e5",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "170903662c6e",
+    "also_independent_from_original_translator_session": "acf0a84cd992",
+    "actual_model_source": "Current host session-state explicitly names openai/gpt-6.1-sol; same auditor session resumed for first audit of newly changed source/targets.",
+    "fallback": {
+      "observed": false,
+      "requested_model": null,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "audit_date": "2026-11-16",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "note": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/record.json; first audit of 7 updated + 4 new keys; 4 unchanged entries proved; 15-key parity/plural/render/opaque checks pass; 0 open blocker/major."
+}

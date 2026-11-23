@@ -8,7 +8,7 @@ import logging
 from pathlib import Path as FilePath
 from typing import TYPE_CHECKING  # Added
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
@@ -29,6 +29,7 @@ from local_operator.server.dependencies import (
     get_job_manager,
     get_scheduler_service,
 )
+from local_operator.server.desktop import desktop_posture, require_desktop
 from local_operator.server.models.schemas import (
     AgentChatRequest,
     AgentEditFileRequest,
@@ -627,6 +628,47 @@ def _read_edit_workspace_file(workspace: str | None, file_path: str) -> tuple[Fi
         raise HTTPException(status_code=500, detail="Error reading file")
 
 
+def _edit_caller_is_unauthenticated_managed(http_request: Request) -> bool:
+    """Whether this inline-edit call is the managed-mode, bearer-less exception.
+
+    ``POST /v1/chat/agents/{agent_id}/edit`` is the one ``/v1/chat*`` route the
+    managed desktop boundary leaves open (``_LEGACY_GATE_EXCEPTIONS`` in
+    ``server/app.py``), because the shipped desktop renderer calls it with a
+    plain ``fetch`` from ``file://`` -- ``Origin: null``, no bearer -- and
+    always sends the live buffer as ``file_content``. The exception exists for
+    exactly that request shape, so a bearer-less caller is narrowed to it:
+
+    * an Origin that is present and is not the opaque ``"null"`` is refused --
+      the renderer never sends one, and every other route of the family already
+      refuses a foreign Origin;
+    * an absent Origin is admitted only from a non-browser caller (no
+      ``Sec-Fetch-Site``, which page script can neither forge nor remove; the
+      same signal as ``desktop._is_non_browser_caller``).
+
+    Returns False for a standalone daemon (posture off: out of this change's
+    scope) and for a request that passes :func:`require_desktop`, so bearer'd
+    desktop callers keep the full route. Raises the 403 for a bearer-less
+    caller outside the renderer's shape.
+    """
+    if not desktop_posture().enabled:
+        return False
+    try:
+        require_desktop(http_request)
+        return False
+    except HTTPException:
+        pass
+    origin = http_request.headers.get("origin")
+    browser_without_origin = origin is None and "sec-fetch-site" in http_request.headers
+    if (origin is not None and origin != "null") or browser_without_origin:
+        raise HTTPException(
+            # i18n: ignore desktop wire refusal; client classifies by status,
+            # never the body
+            403,
+            "This origin cannot access desktop controls.",
+        )
+    return True
+
+
 @router.post(
     "/v1/chat/agents/{agent_id}/edit",
     response_model=CRUDResponse,
@@ -657,13 +699,19 @@ def _read_edit_workspace_file(workspace: str | None, file_path: str) -> tuple[Fi
             },
         },
         400: {"description": "Invalid file path or non-text file"},
-        403: {"description": "Workspace unavailable or file outside the workspace"},
+        403: {
+            "description": (
+                "Workspace unavailable, file outside the workspace, or a managed-mode "
+                "caller without the desktop bearer outside the renderer's request shape"
+            )
+        },
         404: {"description": "Agent or workspace file not found"},
         500: {"description": "Internal Server Error"},
     },
 )
 async def edit_file_with_agent(
     request: AgentEditFileRequest,
+    http_request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
@@ -691,6 +739,19 @@ async def edit_file_with_agent(
     Raises:
         HTTPException: If there's an error retrieving the agent or processing the edit
     """
+    # Decided before the agent lookup so a refused caller learns nothing, not
+    # even whether the agent id exists.
+    unauthenticated = _edit_caller_is_unauthenticated_managed(http_request)
+    if unauthenticated and request.file_content is None:
+        # Without a buffer the route reads the file from the agent's workspace;
+        # the renderer always sends its buffer, so only a caller probing for
+        # workspace contents takes this branch without the bearer.
+        raise HTTPException(
+            # i18n: ignore desktop wire refusal; client classifies by status,
+            # never the body
+            403,
+            "Desktop authorization is required to read workspace files.",
+        )
     try:
         # Retrieve the specific agent from the registry
         try:
@@ -740,7 +801,14 @@ async def edit_file_with_agent(
             },
         )
 
-        processed_attachments = await process_attachments(request.attachments)
+        # `process_attachments` writes `data:` URIs to `<config>/uploads`, and
+        # `invoke_model` never reads `files` (only `content`), so persisting
+        # them buys this route nothing. A bearer-less caller keeps its
+        # references in memory only, so it cannot write bytes to disk.
+        if unauthenticated:
+            processed_attachments = list(request.attachments or [])
+        else:
+            processed_attachments = await process_attachments(request.attachments)
 
         operator.executor.append_to_history(
             ConversationRecord(

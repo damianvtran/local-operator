@@ -1,0 +1,78 @@
+"""Independent B mechanical audit. No global validation, catalogue writes or ledger append.
+Run with the primary checkout Python, isolated HOME/config and PYTHONPATH=worktree.
+Rich wrapping is a string-level risk probe, NOT styled NoticeBlock integration.
+"""
+import hashlib, json, os, re, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+from rich.console import Console
+from rich.text import Text
+from local_operator.i18n import catalogues, runtime
+from scripts.i18n import check, ledger
+ROOT=Path('/Users/damian/local-operator/.worktrees/i18n-model-persist-notice')
+NS='tui.model_persistence'
+B=ROOT/'i18n/audits/evidence/zh-CN/tui.model_persistence/b-fbdc1'
+def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+paths={'en':ROOT/f'local_operator/i18n/catalogues/en/{NS}.json','context':ROOT/f'local_operator/i18n/catalogues/en/{NS}.context.json','zh-CN':ROOT/f'local_operator/i18n/catalogues/zh-CN/{NS}.json'}
+expected=['4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff','b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc','c9fb6447f1e19037cf40808089111d4980f5fd96d3e905d843f797230b9329b0']
+before={k:sha(p) for k,p in paths.items()}
+assert list(before.values())==expected
+print('INPUT_HASHES_BEFORE',json.dumps(before))
+for m in (catalogues,runtime,check,ledger):
+ p=Path(m.__file__).resolve(); assert p.is_relative_to(ROOT); print('MODULE',m.__name__,p)
+assert Path(os.environ['HOME']).is_relative_to(Path('/Users/damian/.local-operator/sessions/fbdc1a799cf0/scratchpad'))
+assert not any(k.startswith('CMUX_') for k in os.environ)
+print('ISOLATION',os.environ['HOME'],os.environ['LOCAL_OPERATOR_CONFIG_DIR'],'CMUX absent')
+# Invoke the actual repo validator with enumeration narrowed, not a surrogate validator.
+with patch.object(catalogues,'namespaces',return_value=(NS,)), patch.object(catalogues,'locales',return_value=('en','zh-CN')):
+ problems=check.check_catalogues()
+print('SCOPED_REPO_VALIDATOR',json.dumps(problems)); assert not problems
+sources={loc:catalogues.load_catalogue(loc,NS) for loc in ('en','zh-CN')}
+order=[NS+'.'+x for x in ('persist','settings','saved','with_model')]
+assert list(sources['en'])==list(sources['zh-CN'])==order
+commands={order[0]:'/model default',order[1]:'/settings',order[2]:'/model saved'}
+for key in order:
+ en=sources['en'][key]; zh=sources['zh-CN'][key]
+ assert runtime.message_arguments(en)==runtime.message_arguments(zh)
+ assert all(kind not in ('plural','select') for _,kind in runtime.message_arguments(zh))
+ assert runtime.plural_selectors(en)==runtime.plural_selectors(zh)==()
+ assert unicodedata.normalize('NFC',zh)==zh
+ assert re.findall(r'<[^>]*>|`[^`]*`',en)==re.findall(r'<[^>]*>|`[^`]*`',zh)==[]
+ if key in commands:
+  cmd=commands[key]; assert en.count(cmd)==zh.count(cmd)==1
+  assert not re.search(r'/model|/settings',zh.replace(cmd,''))
+ else:
+  assert zh.count('{label}')==zh.count('{routes}')==1
+ print('KEY_PASS',key,'args',runtime.message_arguments(zh),'cells',Text(zh).cell_len,'plural_select=0 NFC markup=none')
+# Expand human copy only. This synthetic stress transform is not a native-language verdict.
+def pseudo(s):
+ parts=re.split(r'(/model default|/model saved|/settings|\{label\}|\{routes\})',s)
+ return ''.join(p if re.fullmatch(r'/model default|/model saved|/settings|\{label\}|\{routes\}',p or '') else ''.join(c+'扩' if '\u4e00'<=c<='\u9fff' else c for c in p) for p in parts)
+rows=[]
+for loc in ('en','zh-CN','pseudo'):
+ data=sources['zh-CN'] if loc=='pseudo' else sources[loc]
+ data={k:pseudo(v) if loc=='pseudo' else v for k,v in data.items()}
+ for cmd in commands.values(): assert sum(v.count(cmd) for v in data.values())==1
+ for label in ('openai/gpt-6','provider/model-long-dated-2026-11-22-'+('opaque-id-'*8)):
+  for state, suffixes in [('ordinary',('persist','saved','settings')),('missing-model',('persist','settings')),('absent-hosting',('settings',))]:
+   routes=' · '.join(runtime.render_message(data[NS+'.'+k],{},'zh-CN' if loc=='pseudo' else loc) for k in suffixes)
+   rendered=runtime.render_message(data[NS+'.with_model'],{'label':label,'routes':routes},'zh-CN' if loc=='pseudo' else loc)
+   assert rendered.count(label)==1 and rendered.count(routes)==1
+   if state=='absent-hosting': assert '/model' not in routes  # opaque model labels can themselves contain /model
+   for width in (80,100,120):
+    for family,inset in [('pristine-risk',4),('nonempty-risk',8)]:
+     budget=width-inset
+     lines=Text(rendered).wrap(Console(width=budget),budget)
+     cells=[line.cell_len for line in lines]
+     assert max(cells)<=budget
+     row={'locale':loc,'label':'short' if len(label)<20 else 'long','state':state,'width':width,'family':family,'assumed_inset':inset,'rows':len(lines),'max_cells':max(cells),'lines':[line.plain for line in lines]}
+     rows.append(row)
+print('WRAP_MATRIX',json.dumps(rows,ensure_ascii=False))
+print('WRAP_SUMMARY',len(rows),'Rich string-level probes; assumed insets 4/8, NOT measured NoticeBlock geometry; English same-code controls included; opaque long IDs may fold')
+after={k:sha(p) for k,p in paths.items()}; assert before==after
+print('INPUT_HASHES_AFTER',json.dumps(after))
+receipt=json.loads((B/'receipt.json').read_text())
+ledger._rows({'schema':1,'entries':[receipt]})
+assert len(receipt['note'])<=280
+print('RECEIPT_SCHEMA_PASS note_chars',len(receipt['note']))
+print('PASS 4/4 keys; zero mechanical problems; no global/base checker, native rendering or ledger write')

@@ -1,0 +1,3029 @@
+{
+  "receipt": {
+    "locale": "hi",
+    "namespace": "tui.info",
+    "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+    "translator": {
+      "agent": "i18n-translator / info-hi / session 1b869b8efad8",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21"
+    },
+    "auditor": {
+      "agent": "translation-auditor / info-audit-hi / session e55ba4efabbf",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "result": "failed",
+      "findings": 2
+    },
+    "status": "failed",
+    "note": "Independent full 277/277 key Hindi/English/context audit @ e9e6c3711149cba6899083eab019342d98d5fa55. Two unresolved MAJOR findings HI-1 (lower-bound referent runtimes vs trajectories), HI-2 (hidden descendants mistranslated as levels); MINOR HI-3 grammar and HI-4 measured terse-fit risk. Both translator and auditor actually used openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; distinct sessions. 750 production tr_record cases all source_locale hi; 47 plural nodes/94 count-bearing arms, 23 select nodes and ordered argument/type parity 277. Context-only metadata local JSON fallback after public reader >200000-character size cap, expressly authorized by parent. No native/App/rendered screen, design, CI or ship clearance. Detailed report hi-independent-audit-round1.json and hi-independent-audit-round1.md in auditor scratchpad."
+  },
+  "commit": "e9e6c3711149cba6899083eab019342d98d5fa55",
+  "round": 1,
+  "scope": "ea92d3c2faa7..e9e6c3711149",
+  "keys_read": 277,
+  "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+  "context_sha256": "905690aae095d0ec8fe0b36f6dfe92db05e9c6e3bfdbc0fe87577a37002b9d11",
+  "target_sha256": "76406c8f5c7f42bb71d6fdf872090a7407701531688151c0e96152be25aa0702",
+  "context_canonical_sha256": "bc9693e1f6a11f0d55fff0cf103846b24ce4bbe27fa61472104557168615342e",
+  "context_access": "Public source and target through audited read_public_copy, cached losslessly. Context reader refused >200000-character catalogue; per-key attempts timed out, then parent expressly authorized exact public sidecar local JSON parsing. Metadata dictionary/per-key references decoded equal original object. Entire dictionary, 277 specific entries and placeholder contracts read.",
+  "namespace_verdict": {
+    "tui.info": "FAILED: 2 unresolved major, 2 minor; 273 keys without findings"
+  },
+  "subarea_verdicts": {
+    "heading": {
+      "keys_read": 7,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "label": {
+      "keys_read": 35,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "status": {
+      "keys_read": 9,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "install": {
+      "keys_read": 17,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "latest": {
+      "keys_read": 10,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "kind_of_runtime": {
+      "keys_read": 8,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "import_path": {
+      "keys_read": 6,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "kind": {
+      "keys_read": 7,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "session": {
+      "keys_read": 6,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "approval": {
+      "keys_read": 4,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "redirect": {
+      "keys_read": 3,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "sessions": {
+      "keys_read": 11,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "fleet_caveats": {
+      "keys_read": 1,
+      "major": 1,
+      "minor": 0,
+      "verdict": "FAIL"
+    },
+    "agents": {
+      "keys_read": 38,
+      "major": 0,
+      "minor": 1,
+      "verdict": "PASS_WITH_MINOR"
+    },
+    "env": {
+      "keys_read": 18,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "report": {
+      "keys_read": 3,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "info_hint": {
+      "keys_read": 2,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "action_copy_report": {
+      "keys_read": 2,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "latest_line": {
+      "keys_read": 3,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "not_answering_clause": {
+      "keys_read": 5,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "tree_lines": {
+      "keys_read": 1,
+      "major": 1,
+      "minor": 0,
+      "verdict": "FAIL"
+    },
+    "export": {
+      "keys_read": 60,
+      "major": 0,
+      "minor": 1,
+      "verdict": "PASS_WITH_MINOR"
+    },
+    "count": {
+      "keys_read": 4,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "state": {
+      "keys_read": 12,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "leaving": {
+      "keys_read": 3,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    },
+    "update": {
+      "keys_read": 2,
+      "major": 0,
+      "minor": 0,
+      "verdict": "CLEAN"
+    }
+  },
+  "findings": [
+    {
+      "id": "HI-1",
+      "severity": "major",
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "current": "{count, plural, one {# सत्र पुराना बिल्ड चला रहा है और उप-एजेंट की संख्या नहीं बताता — सभी रनटाइम का कुल आँकड़ा न्यूनतम सीमा है।} other {# सत्र पुराने बिल्ड चला रहे हैं और उप-एजेंट की संख्या नहीं बताते — सभी रनटाइम का कुल आँकड़ा न्यूनतम सीमा है।}}",
+      "proposed": "{count, plural, one {# सत्र पुराना बिल्ड चला रहा है और उप-एजेंट की संख्या नहीं बताता — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।} other {# सत्र पुराने बिल्ड चला रहे हैं और उप-एजेंट की संख्या नहीं बताते — कुल ट्रैजेक्टरी का आँकड़ा न्यूनतम सीमा है।}}",
+      "reason": "The missing terms make active trajectories a lower bound, not the separately measured runtime-process total; Hindi explicitly attaches the caveat to all runtimes.",
+      "evidence": "info/model.py:308–321 defines fleet_trajectories = active session trajectories + running subagents; info_panel.py:1344–1358 uses ≥ for that figure; _fleet_caveats at 1265–1286 emits this key. Production tr_record(count=1) reproduces the incorrect referent with source_locale hi."
+    },
+    {
+      "id": "HI-2",
+      "severity": "major",
+      "key": "tui.info.tree_lines.deeper",
+      "current": "  + {deeper, plural, one {# स्तर और नीचे} other {# स्तर और नीचे}}",
+      "proposed": "  + {deeper, plural, one {# और उप-एजेंट नीचे} other {# और उप-एजेंट नीचे}}",
+      "reason": "स्तर changes a count of hidden descendant nodes into a number of additional depth levels.",
+      "evidence": "collect.build_subagent_tree increments below_cap once per hidden node; independent fixture with four visible ancestors and seven children at the same depth returns max_depth_seen=4 and hidden_nodes=7; actual render._tree_lines prints '+ 7 स्तर और नीचे'."
+    },
+    {
+      "id": "HI-3",
+      "severity": "minor",
+      "key": "tui.info.export.uptime",
+      "current": "  चालू हुए समय      {uptime_s}",
+      "proposed": "  चलने की अवधि      {uptime_s}",
+      "reason": "चालू हुए समय is an unidiomatic/incomplete Hindi phrase; the value is elapsed runtime duration, naturally labelled चलने की अवधि.",
+      "evidence": "Source contract and render.py provide format_duration(process.uptime_s), not a start timestamp."
+    },
+    {
+      "id": "HI-4",
+      "severity": "minor",
+      "key": "tui.info.agents.queued_count_terse",
+      "current": "{fleet_subagents_queued}कतार",
+      "proposed": "Rendered-fit check required; retain the explicit queued meaning rather than silently abbreviating it to an unexplained letter.",
+      "reason": "Production text '3कतार' is 4 terminal cells versus English '3q' at 2, while the direct caller specifically uses this last rung for an approximately 2-cell note budget.",
+      "evidence": "info_panel.py:1493–1518 documents the narrow queued-note ladder; measured with rich.cells.cell_len through actual tr_record. This is a fit risk, not a claim that the screen was observed clipping."
+    }
+  ],
+  "per_key": [
+    {
+      "code": "tui.info.heading.install",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.version",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.install_kind",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.install_path",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.interpreter",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.running_code",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.source",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.built",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.python",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.platform",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.heading.this_session",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.session_id",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.kind",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.model",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.working_dir",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.answering",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.started",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.config_dir",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.cache_dir",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.agent_home",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.log_dir",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.control_port",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.heading.sessions_on_this_machine",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.heading.sessions_unavailable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.heading.agents_and_subagents",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.runtimes",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.trajectories",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.agent_profiles",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.teams",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.subagent_capacity",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.heading.environment",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.terminal",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.theme",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.approvals",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.mcp_servers",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.browser",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.mobile_relay",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.multiplexer",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.guides",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.skills",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.label.credentials",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.heading.could_not_read",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.status.leaving_silent",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.status.leaving_for_build",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.status.no_movement",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.status.leaving",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.status.bound_held",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.status.updating",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.status.updated",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.status.update_failed",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.status.moving_to_a_new_build",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.description",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.full_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.loading",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.unavailable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.shadow_label_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.shadow_label_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.shadow_label_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.shadow_meta_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.shadow_meta_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.shadow_meta_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.source_snapshot",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.source_snapshot_unknown",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.snapshot_note_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.snapshot_note_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.source_wheel",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.build_age",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.install.shadow_explanation",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest.installed_unreadable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest.full_unknown",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest.unknown",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest.never_checked",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest.behind_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest.behind_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest.current",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest.stale",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest.checked_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest.checked_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind_of_runtime.daemon_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind_of_runtime.daemon_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind_of_runtime.daemon_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind_of_runtime.attached_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind_of_runtime.attached_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind_of_runtime.exec_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind_of_runtime.exec_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind_of_runtime.exec_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.import_path.editable_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.import_path.editable_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.import_path.editable_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.import_path.shadowed_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.import_path.shadowed_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.import_path.shadowed_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind.editable_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind.editable_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind.uv_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind.uv_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind.non_editable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind.pip_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.kind.pip_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.session.description",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.session.description_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.session.failover_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.session.failover_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.session.started",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.session.protocol",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.approval.ask_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.approval.ask_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.approval.auto_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.approval.auto_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.redirect.full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.redirect.short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.redirect.terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.loading",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.registry_loading",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.registry_unavailable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.summary_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.not_answering_clause",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.summary_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.empty",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.self",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.pid",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.build_skew",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.sessions.memory_unavailable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.fleet_caveats.lower_bound",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "MAJOR",
+      "finding_ids": [
+        "HI-1"
+      ],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.loading_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.loading_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.loading_mid",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.loading_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.summary_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.unknown_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.unknown_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.queued_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.queued_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.queued_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.quiet_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.quiet_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.runtimes",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.unreported_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.unreported_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.unreported_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.queued_suffix",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.queued_count",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.queued_count_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "MINOR",
+      "finding_ids": [
+        "HI-4"
+      ],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.trajectories_total",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.unreported_suffix",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.roster_unreadable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.session_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.session_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.session_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.retained_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.retained_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.retained_terse",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.capacity",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.capacity_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.capacity_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.roster_failure",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.empty",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.waiting",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.tree_counts",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.tree_legacy",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.description",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.description_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.mcp_connected",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.mcp_connecting_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.mcp_connecting_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.mcp_failed_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.mcp_failed_short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.mcp_empty",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.none",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.mobile_installed",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.mobile_absent",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.mobile_healthy",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.mobile_up",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.credentials_unreadable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.credential_count",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.credentials_more",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.credentials_set",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.env.credentials_empty",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.report.degraded_count",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.report.degraded",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.report.captured",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.info_hint.short",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.info_hint.full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.action_copy_report.loading",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.action_copy_report.redacted",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest_line.installed_unreadable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest_line.never_checked",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.latest_line.checked",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.not_answering_clause.no_rows",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.not_answering_clause.more",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.not_answering_clause.remedy_one",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.not_answering_clause.remedy_many",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.not_answering_clause.full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.tree_lines.deeper",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "MAJOR",
+      "finding_ids": [
+        "HI-2"
+      ],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.heading_install",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.version",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.latest_known",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.install_kind",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.install_path",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.interpreter",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.running_code",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.source",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.build_age",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.python",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.platform",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.heading_session",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.session_id",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.kind",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.pid",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.model",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.effective_model",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.uptime",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "MINOR",
+      "finding_ids": [
+        "HI-3"
+      ],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.working_dir",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.config_dir",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.cache_dir",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.agent_home",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.log_dir",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.control_port",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.protocol",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.heading_sessions",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.sessions_unavailable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.sessions_empty",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.sessions_summary",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.pid_fallback",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.heading_agents",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.runtimes",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.trajectories_unreported",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.queued_suffix",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.trajectories",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.profiles",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.teams",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.roster_unreadable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.session_counts",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.capacity",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.tree_heading",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.tree_unreadable",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.tree_empty",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.tree_counts",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.tree_legacy",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.lower_bound",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.heading_environment",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.terminal",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.multiplexer",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.tty",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.theme",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.approvals",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.browser",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.mobile",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.mcp",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.guides",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.skills",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.credentials",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.heading_degraded",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.count.session",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.count.runtime",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.count.trajectory",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.count.subagent",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.running",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.starting",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.queued",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.pausing",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.paused",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.completed",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.failed",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.cancelled",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.gone",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.live",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.stale",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.state.unknown",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.leaving.signal",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.leaving.build",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.leaving.overdue",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.update.target",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.update.done_target",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.summary_full",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.agents.addends",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    },
+    {
+      "code": "tui.info.export.summary",
+      "read_english": true,
+      "read_hindi": true,
+      "read_context": true,
+      "semantic_result": "PASS",
+      "finding_ids": [],
+      "placeholder_contract": "PASS",
+      "plural_select_contract": "PASS"
+    }
+  ],
+  "mechanical_evidence": "hi-audit-mechanical-independent.json",
+  "raw_output": "hi-audit-mechanical-output.txt",
+  "repro_output": "hi-audit-repro-output.txt",
+  "glossary": "Polite आप; commands polite imperative. सत्र, रनटाइम, उप-एजेंट, स्वीकृतियाँ, कौशल, कैश, फ़ाइल/प्रोफ़ाइल and consistent nukta. Trajectory uses technical transliteration ट्रैजेक्टरी, not live runtime. Terse रन/ट्रैज abbreviations read as diagnostic labels, not prose. समाप्त/ख़त्म are terminal history including failed/cancelled, not success.",
+  "technical_exemptions": "Individually audited all Latin-literal inventory keys in hi-latin-token-inventory.json: Python/PyPI technology names; git command spelling; lop/lop-update,/info,/reload,/stop and flags literal commands; sys.path identifier; MCP acronym; ID,pid,tty standard diagnostic identifiers; v protocol version prefix; esc,q,r,ctrl+r key chords; x terminal geometry separator; N PID metavariable. No English prose stubs found. Duration/age compact units only occur through protected caller-owned duration arguments, individually checked against context contracts; no generic English-runtime-unit exemption.",
+  "width": "Text-cell measurements only; nine expanded short/terse rungs recorded. HI-4 specifically names the final queued-note rung and caller approximately 2-cell budget. Also daemon_terse 9 vs7, auto_short6 vs4, quiet_short with runtimes=5 14 vs10, session_terse with 2/3 10 vs7; production fitting still needs rendered-frame proof. No screen/pixel approval.",
+  "not_run": [
+    "App or native process",
+    "browser",
+    "native Devanagari/Urdu shaping",
+    "screenshots/pixel checks",
+    "suites/full guard",
+    "generation/check-changed",
+    "new dependencies",
+    "CI",
+    "ledger append",
+    "commits/repository edits"
+  ],
+  "negative_control_correction": "Initial scratch expectation that missing one must fail at runtime was disproved: runtime legitimately falls back to other. Read _select_plural and corrected the evidence harness: structural required-category parity rejects missing one; missing other and renamed-argument counterfactuals raise MessageFormatError. No target/catalogue changes.",
+  "provenance": "Actual auditor openai/gpt-6.1-sol; fallback origin anthropic/claude-opus-5-5 quota failure per session model-switch message. Translator same actual model from named mechanical receipt; independent session, not self-audit."
+}

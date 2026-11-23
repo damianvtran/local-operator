@@ -1,0 +1,121 @@
+{
+  "locale": "vi",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "158bf9375e13867021d8efa286dec84b2d9117aade19252633cb8dfc8f0bd121",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20"
+  },
+  "auditor": {
+    "agent": "translation-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "round": 2,
+  "scope": [
+    "tui.settings_view.too_short",
+    "tui.settings_view.editor.contract_unset"
+  ],
+  "keys_read": 11,
+  "changed_keys_read": 2,
+  "unresolved_blocker_major": 0,
+  "findings": [],
+  "evidence": [
+    {
+      "key": "tui.settings_view.too_short",
+      "arguments_parity": true,
+      "en": "terminal too short for settings — make it taller",
+      "vi": "cửa sổ quá thấp để hiện cài đặt — hãy kéo cao thêm",
+      "en_cells": 48,
+      "vi_cells": 50
+    },
+    {
+      "key": "tui.settings_view.editor.contract_unset",
+      "arguments_parity": true,
+      "en": "enter saves · esc cancels · clear to unset",
+      "vi": "enter lưu · esc hủy · để trống để gỡ thiết lập",
+      "en_cells": 42,
+      "vi_cells": 46
+    },
+    {
+      "key": "tui.settings_view.editor.contract",
+      "arguments_parity": true,
+      "en": "enter saves · esc cancels",
+      "vi": "enter lưu · esc hủy",
+      "en_cells": 25,
+      "vi_cells": 19
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_long",
+      "arguments_parity": true,
+      "en": "↑↓ suggestions · tab completes · enter saves · esc",
+      "vi": "↑↓ gợi ý · tab điền · enter lưu · esc",
+      "en_cells": 50,
+      "vi_cells": 37
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_medium",
+      "arguments_parity": true,
+      "en": "↑↓ browse · tab complete · enter saves",
+      "vi": "↑↓ duyệt · tab điền · enter lưu",
+      "en_cells": 38,
+      "vi_cells": 31
+    },
+    {
+      "key": "tui.settings_view.editor.suggest_short",
+      "arguments_parity": true,
+      "en": "↑↓ · tab · enter saves",
+      "vi": "↑↓ · tab · enter lưu",
+      "en_cells": 22,
+      "vi_cells": 20
+    },
+    {
+      "key": "tui.settings_view.section.takes_effect",
+      "arguments_parity": true,
+      "en": "takes effect: ngay lập tức",
+      "vi": "có hiệu lực: ngay lập tức",
+      "en_cells": 26,
+      "vi_cells": 25
+    },
+    {
+      "key": "tui.settings_view.scope.live",
+      "arguments_parity": true,
+      "en": "live",
+      "vi": "ngay lập tức",
+      "en_cells": 4,
+      "vi_cells": 12
+    },
+    {
+      "key": "tui.settings_view.scope.never",
+      "arguments_parity": true,
+      "en": "never",
+      "vi": "không bao giờ",
+      "en_cells": 5,
+      "vi_cells": 13
+    },
+    {
+      "key": "tui.settings_view.scope.new_launch",
+      "arguments_parity": true,
+      "en": "new launch",
+      "vi": "khởi chạy lại",
+      "en_cells": 10,
+      "vi_cells": 13
+    },
+    {
+      "key": "tui.settings_view.scope.new_sessions",
+      "arguments_parity": true,
+      "en": "new sessions",
+      "vi": "phiên mới",
+      "en_cells": 12,
+      "vi_cells": 9
+    }
+  ],
+  "note": "Round 2 delta-only independent audit, not a new full-namespace audit. Read 2 changed keys and 9 composition/fallback neighbours in en/vi plus English context. Current uncommitted catalogue bytes at worktree HEAD 56781d884f27. Accuracy, idiom, register, glossary and NFC pass; no ICU plural or RTL change in delta. contract_unset width exception accepted against real editor.contract fallback (settings_view.py:4444-4470): 46 cells versus English 42; base contract 19 cells plus 2 indent fits 23-cell room. too_short is 50 versus English 48 cells, no material expansion. Preserved technical key names are permitted English exceptions. No provider/model fallback used by this auditor."
+}

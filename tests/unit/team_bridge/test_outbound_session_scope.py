@@ -235,3 +235,14 @@ async def test_regular_writer_admission_cannot_outlive_consent(
     assert calls == (["status"] if revoke_during_fetch else [])
     refusal = outbound_tool_fence(runtime)
     assert refusal is not None and refusal["code"] == "consent_revoked"
+
+
+def test_runtime_captures_resolved_host_display_without_borrowing_endpoint(enrolled):
+    named = bridge_runtime_for_session(
+        config_manager=enrolled, session_id="writer", session_agent_display="Resolved host agent"
+    )
+    unnamed = bridge_runtime_for_session(config_manager=enrolled, session_id="writer")
+    assert named is not None and unnamed is not None
+    assert named.session_agent_display == "Resolved host agent"
+    assert unnamed.session_agent_display is None
+    assert named.owner == unnamed.owner == OWNER

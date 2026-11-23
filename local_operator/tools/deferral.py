@@ -114,14 +114,15 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         # quiet-turns.md §4): the call has NO arguments, so no schema is needed
         # to form it, and calls to tools absent from the array were measured
         # accepted on four wires (see the module docstring). The system-prompt
-        # sentence that will NAME the rule is slice S0b and has not landed yet:
-        # until it does, the only model-visible mention is this set's own
-        # purpose phrase below ("end a turn silently"), so do not read the
-        # adoption probe as already carried by prompt text. Cost avoided:
+        # sentence naming the rule (slice S0b, c938c60759b7, 2026-10-10) renders
+        # with the tool (``has_no_reply`` in ``prompts_api``). Cost avoided:
         # roughly 60 schema tokens per request on every top-level session that
-        # holds it. The named probe guarding this choice (owner S0b): 20
-        # scripted peer-ping turns per arm on one live model; under 80%
-        # adoption removes it from this set (one line — ``network`` and
+        # holds it. Its purpose phrase says "no arguments, call it directly"
+        # because the 7-day ledger to 2026-11-19 showed models still reading
+        # ``tool://no_reply`` ~2.2x per session that used it: a round trip for
+        # a schema that has nothing in it. The named probe guarding this
+        # choice: 20 scripted peer-ping turns per arm on one live model; under
+        # 80% adoption removes it from this set (one line — ``network`` and
         # ``ask_withdraw`` were re-admitted on exactly this signal).
         "no_reply",
         # ``artifact_data`` is deferred on the start-context budget's arithmetic,
@@ -131,6 +132,37 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         # name it, and the purpose phrase below keeps it findable; the first
         # call or ``tool://`` read publishes its schema.
         "artifact_data",
+        # ZERO-USE SCHEMAS (wave 2, 2026-11-19). A read-only 7-day audit of
+        # ``analytics.db`` (380,917 turn calls; tool use counted from 470,471
+        # model tool_calls) found these ten carried ~1.19B schema tokens a week
+        # between them — ~1.15B net of the extra round trip a miss costs —
+        # while being called 0 times each in 7 days, except ``generate_image``
+        # (19) and ``tags`` (2); 30 days: ``generate_image`` 53, every other
+        # one 0-6. Media tools are createIf-gated on a configured provider, so
+        # the sessions paying for them are exactly the configured installs.
+        # A VALID direct call needs no ``read tool://`` (``Session`` dispatches
+        # it from the inventory; an invalid one publishes the schema and points
+        # at the doc), so each purpose phrase below names what the tool does and
+        # its required argument, making the direct call the natural move.
+        # Adoption was measured live per tool family before landing (base vs
+        # head, 5 prompts each; table on the PR); a family under 80%, or more
+        # than one run below base, comes back out of this set — the
+        # ``network``/``ask_withdraw`` precedent above.
+        "generate_image",
+        "generate_video",
+        "video_status",
+        "generate_voiceover",
+        "generate_sound_effect",
+        "generate_music",
+        "modify_music",
+        "music_status",
+        "tags",
+        "harness_import",
+        # ``integrations`` (RFC "Radient Team Integrations" §8.1 R4): org admin
+        # provisioning is rare and its op schema is wide; it is already
+        # createIf-gated to interactive, signed-in sessions, and deferral keeps
+        # even those at the purpose phrase until ``read tool://integrations``.
+        "integrations",
     }
 )
 
@@ -154,8 +186,26 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "profile_proposal": "Agents profile proposals",
     "skill": "author skills",
     "library": "long-term asset catalog",
-    "no_reply": "end a turn silently",
+    "no_reply": "end a turn silently; takes no arguments so call it directly",
     "artifact_data": "claude.ai artifact shared data store",
+    # No commas inside a phrase: the line joins entries with ", ".
+    # Each media generator names its guide HERE as well as in its description:
+    # a valid direct call never publishes the description, so without this the
+    # "read the guide first" pointer was lost on exactly the calls that skip
+    # ``tool://`` (PR #4326 review R4; image "any read first" fell 5/5 -> 4/5).
+    "generate_image": "generate or edit an image from a prompt; guide://image-generation first",
+    "generate_video": "generate a video from a prompt; guide://video-generation first",
+    "video_status": "check a generate_video job",
+    "generate_voiceover": "speak text aloud as a voiceover; guide://sound-generation first",
+    "generate_sound_effect": (
+        "make a sound effect from prompt + duration_s; guide://sound-generation first"
+    ),
+    "generate_music": "compose music from prompt + duration_ms; guide://music-generation first",
+    "modify_music": "rework sections of a generated track; guide://music-generation first",
+    "music_status": "check or cancel a music job",
+    "tags": "list/create/assign session tag categories",
+    "harness_import": "import Claude Code/Codex/omp sessions and memory",
+    "integrations": "Team apps/tokens",
 }
 
 #: ``tools.defer`` — the kill switch. On by default; off publishes every
@@ -214,10 +264,7 @@ def render_deferred_tools_line(names: Collection[str]) -> str:
     for name in sorted(names):
         purpose = DEFERRED_TOOL_PURPOSES.get(name)
         entries.append(f"{name} ({purpose})" if purpose else name)
-    return (
-        "Schema on demand — call these directly by name, or read tool://<name> "
-        "for the parameters: " + ", ".join(entries) + "."
-    )
+    return "Schema on demand — call by name or read tool://<name>: " + ", ".join(entries) + "."
 
 
 __all__ = [

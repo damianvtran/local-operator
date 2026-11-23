@@ -55,12 +55,12 @@ from local_operator.resume import (
     ORIGIN_AGENT_CONFIG,
     ORIGIN_SUBAGENT,
     SessionRow,
+    bind_session_attachment,
     is_user_session,
     mark_session_origin,
     read_session_attachment,
     session_origin,
     session_preview,
-    write_session_attachment,
 )
 from local_operator.server.models.desktop_sessions import AdmissionStatus, MoveReceipt
 from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
@@ -96,7 +96,11 @@ from local_operator.session.attached import (
     AttachedSession,
 )
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
-from local_operator.session.attention import AttentionStore, acknowledge_session_receipt
+from local_operator.session.attention import (
+    BULK_RECEIPT_SESSION_ID_RE,
+    AttentionStore,
+    acknowledge_session_receipt,
+)
 from local_operator.session.catalog import (
     DECORATION_ATTENTION,
     CatalogueScope,
@@ -153,6 +157,12 @@ from local_operator.session.retention import (
     DESKTOP_PURPOSE_KEY,
     read_desktop_purpose,
     session_activity,
+)
+from local_operator.session.row_clip import (
+    bound_history_entries,
+    canonical_row_bytes,
+    resolve_ref,
+    row_range,
 )
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
@@ -660,6 +670,17 @@ def _wire_entries(entries: Sequence[Any]) -> list[dict[str, Any]]:
     return visible_transcript_rows(
         [{**json.loads(row.to_json()), "ts_source": "entry"} for row in entries]
     )
+
+
+def _bounded_page(
+    entries: Sequence[Any], session_id: str, anchor_id: str | None = None
+) -> tuple[list[Mapping[str, Any]], bool, bool]:
+    """A bare page's rows clipped and bounded, for the event loop's thread.
+
+    ``_wire_entries`` is the expensive half (a JSON round trip per row, tens of
+    ms on a fat page), so both it and the clip stay off the loop.
+    """
+    return bound_history_entries(_wire_entries(entries), session_id=session_id, anchor_id=anchor_id)
 
 
 def _own_wire_state(shared: dict[str, Any]) -> dict[str, Any]:
@@ -2172,8 +2193,18 @@ class DesktopSessionBridge:
             "verified_at": verified_at,
         }
 
-    async def acquire(self, *, read: bool = False) -> AttachedSession:
+    async def acquire(
+        self,
+        *,
+        read: bool = False,
+        control_only: bool = False,
+        ingress_trace: open_trace.DesktopEventsIngressTrace | None = None,
+    ) -> AttachedSession:
         """Take one reference on this bridge, binding the owner if it is cold.
+
+        ``control_only`` reserves the same reference without binding display
+        state. Durable ask controls own their authenticated one-shot connection;
+        transient epoch-bound gates must keep the normal acquisition path.
 
         ``read`` is the READ envelope, and it is a property of the ROUTE rather
         than of the facade: reading state must never be able to fail because an
@@ -2206,12 +2237,17 @@ class DesktopSessionBridge:
         (see :meth:`_read_attach_settled`).
         """
         tracing = open_trace.enabled()
+        trace_id = uuid.uuid4().hex if tracing else None
+        if ingress_trace is not None:
+            # Join the existing acquisition diagnostics without copying their
+            # session field into the new, payload-free request trace. Keep this
+            # extra write outside the existing acquire/witness duration.
+            ingress_trace.mark("desktop.events.acquire", acquire_id=trace_id)
         trace_at = time.monotonic() if tracing else 0.0
         # Nested spans, not additive: birth/cold belong to facade, facade to
         # held. Missing fields mean the phase was skipped or did not finish.
         # Pass this call's metadata explicitly; readers share the bridge/task.
         phases: dict[str, float] | None = {} if tracing else None
-        trace_id = uuid.uuid4().hex if tracing else None
         loop_handle: asyncio.Handle | None = None
         loop_delay_ms: float | None = None
         if tracing:
@@ -2289,7 +2325,11 @@ class DesktopSessionBridge:
                         attach_landed = bool(done)
                         if not done:
                             self.read_attach_outran.add(task)
-                else:
+                elif not control_only:
+                    # A durable ask is validated by ID at its owner, independently
+                    # of display epochs. Do not require a canonical snapshot before
+                    # delivering it: older owners can exceed the snapshot line cap
+                    # while their control socket remains fully operational.
                     await remote.attach_existing(control_budget=DESKTOP_CONTROL_ATTACH_S)
             except BaseException:
                 # SHIELDED, the shape the routes' ``_give_the_bridge_back`` settled in
@@ -4703,6 +4743,17 @@ class DesktopSessionBridge:
                 "has_more": False,
                 "cursor_missing": bool(before_id or through_id or around_id),
             }
+        # THE BARE PAGE IS BOUNDED TOO (``session.row_clip``): it is what the
+        # snapshot embeds when the renderer did not ask for ``open_frame``, and
+        # what every in-band resync re-reads, and it used to serve rows whole —
+        # one 10.59 MB ``frontend_state_checkpoint_v1`` row made a 12.13 MB
+        # snapshot the renderer's 8 MiB per-record cap refused. Each row is
+        # clipped to 1.5 MiB (a checkpoint is withheld, not cut) and the page
+        # to 4 MiB (wire bytes), newest rows first — or outward from
+        # ``around_id``, which is always kept; the full rows stay one ref away.
+        entries, capped_older, capped_newer = await asyncio.to_thread(
+            _bounded_page, page.entries, self.session_id, around_id
+        )
         answer = {
             # EVERY ROW HERE IS A JOURNAL ENTRY, so its ``ts`` is the entry time by
             # construction — the ``entry`` value of the closed vocabulary, and the
@@ -4712,10 +4763,12 @@ class DesktopSessionBridge:
             # Encoded in a thread: a page of fat rows (whole tool results) is
             # tens of ms of JSON round trip, and the snapshot asks for one on
             # every open (serve stall, 2026-11-15 real-path sampler).
-            "entries": await asyncio.to_thread(_wire_entries, page.entries),
-            "has_more": page.has_more,
+            "entries": entries,
+            # A cap that left rows out on a side means there is more on that
+            # side even when the journal page itself reached its end.
+            "has_more": page.has_more or capped_older,
             "cursor_missing": page.reconciled,
-            "has_newer": page.has_newer,
+            "has_newer": True if capped_newer else page.has_newer,
         }
         answer = await self._with_peer_cycle_records(answer, [page])
         return (
@@ -4723,6 +4776,44 @@ class DesktopSessionBridge:
             if journal_order
             else answer
         )
+
+    async def history_row(self, *, ref: str, offset: int, limit: int) -> dict[str, Any]:
+        """One byte range of the FULL row a clipped ``truncated.ref`` names.
+
+        The content is the row's desktop wire form (:meth:`_wire_rows`, the one
+        spelling every local read serves) in ``row_clip.canonical_row_bytes``,
+        so the ranges reassemble to exactly ``truncated.bytes_total`` bytes.
+
+        THREAT MODEL (``session.row_clip.row_ref``): the caller already passed
+        the same door ``/history`` uses (bearer auth, session placement, read
+        admission), so the ref only has to stop a CROSS-SESSION read. A ref
+        that is malformed, minted for another session, or minted by an earlier
+        serve process answers ``KeyError`` — the route's ordinary 404, the same
+        answer as a row that no longer exists, so the status is no oracle for
+        which of those it was. A peer session's rows live on its owner and
+        this device has no mesh lane that fetches one, so refs are never minted
+        for them (the owner's frame clips with no ref) and this refuses.
+        """
+        row_id = resolve_ref(self.session_id, ref)
+        if row_id is None:
+            raise KeyError(ref)
+        if self.remote_row is not None:
+            raise ValueError("full rows are served for local sessions only")
+        try:
+            page = await load_transcript_page(
+                self.root / "sessions" / self.session_id,
+                around_id=row_id,
+                before=0,
+                after=0,
+                limit=1,
+            )
+        except FileNotFoundError:
+            raise KeyError(ref) from None
+        rows = [row for row in self._wire_rows(page.entries) if row.get("id") == row_id]
+        if not rows:
+            raise KeyError(ref)
+        content = await asyncio.to_thread(canonical_row_bytes, rows[0])
+        return row_range(content, offset=offset, limit=limit)
 
     async def _open_frame_history(
         self,
@@ -4815,6 +4906,7 @@ class DesktopSessionBridge:
             )
             result = build_frame(
                 anchored,
+                session_id=self.session_id,
                 supplements=supplements,
                 diff_bindings=binding_view,
                 memo=StripMemo(supplements=supplements, diff_bindings=binding_view),
@@ -5050,6 +5142,7 @@ class DesktopSessionBridge:
         )
         result = build_frame(
             kept,
+            session_id=self.session_id,
             supplements=supplements,
             memo=strip_memo,
             diff_bindings=binding_view,
@@ -5163,8 +5256,16 @@ class DesktopSessionBridge:
             )
             return resident if source == expected else None
         step = _OpenFrameSteps(self.session_id)
+        # Large journals also accept a companion the journal has grown past by
+        # run-neutral rows (``index_read_model._prefix_tail``; see
+        # ``_journal_order_page``'s "LARGE JOURNALS STAY ON THE COMPANION").
         finished, projected = await _bounded_frame_read(
-            paint_deadline, index_read_model.summary, self.root, self.session_id, source
+            paint_deadline,
+            index_read_model.summary,
+            self.root,
+            self.session_id,
+            source,
+            prefix_ok=transcript_index.companion_first(self.root, self.session_id),
         )
         if not finished:
             step("frame_source.summary", state="deadline")
@@ -5213,6 +5314,7 @@ class DesktopSessionBridge:
                 reaches_eof=reaches_eof,
                 order_ids=order_ids,
                 source=source,
+                prefix_ok=transcript_index.companion_first(self.root, self.session_id),
             )
             if not finished:
                 return None, None
@@ -5367,11 +5469,28 @@ class DesktopSessionBridge:
         worker (a thread cannot be cancelled) and ``_bounded_frame_read`` retrieves
         its outcome; it is not retried here. A standalone ``/history``
         (``paint_deadline=None``) still waits for the companion in full.
+
+        LARGE JOURNALS STAY ON THE COMPANION (``transcript_index.companion_first``,
+        ADR ``docs/design/transcript-index-off-process.md`` step 2). Two changes,
+        both only above ``COMPANION_FIRST_MIN_BYTES``:
+
+        * the companion may answer for a journal that has GROWN since it was
+          published (``prefix_ok``, the append-prefix rule in
+          ``index_read_model._extends``) whenever every row asked about lies in
+          the covered prefix; a page reaching an appended row still falls to (3);
+        * a companion answer does NOT arm the resident scan. For these journals
+          that "warm" is a whole-index hydration on serve's GIL (~1.1 s for the
+          808 MB anchor) that the 4-slot resident LRU evicts again as soon as the
+          operator switches across more than four large conversations -- so it
+          was re-paid on most opens. Re-opening the companion is the cheaper
+          steady state (a page-bounded SQLite read), which is the trade the
+          25/25-reopen measurement above did NOT have to weigh at 36.5 MB.
         """
         ids = list(dict.fromkeys(ids))
         source = index_read_model.page_source(pages)
         if self._apply_journal_order(answer, source, ids):
             return answer
+        large = transcript_index.companion_first(self.root, self.session_id)
         finished, projected = await _bounded_frame_read(
             paint_deadline,
             index_read_model.order_facts,
@@ -5380,12 +5499,14 @@ class DesktopSessionBridge:
             collected_ids=[row["id"] for row in answer["entries"]],
             order_ids=ids,
             source=source,
+            prefix_ok=large,
         )
         if not finished:
             _OpenFrameSteps(self.session_id)("journal_order.companion", state="deadline")
             return self._journal_page(answer, pages, ids)
         if projected.state == "ready" and index_read_model.apply_order(answer, projected.value):
-            self._warm_resident_scan()
+            if not large:
+                self._warm_resident_scan()
             return answer
         # A missing, stale, corrupt or unsupported projection is NOT an error: the
         # policy below is exactly what an absent companion answered before this
@@ -5464,6 +5585,11 @@ class DesktopSessionBridge:
 
             async def correct() -> None:
                 try:
+                    if (
+                        transcript_index.companion_first(self.root, self.session_id)
+                        and await self._companion_order_correction()
+                    ):
+                        return
                     task, _ = transcript_index.start_refresh(self.root, self.session_id)
                     await asyncio.shield(task)
                     if self._closing:
@@ -5511,6 +5637,91 @@ class DesktopSessionBridge:
 
             self._order_correction = asyncio.create_task(correct())
         return answer
+
+    async def _companion_order_correction(self) -> bool:
+        """Publish the pending journal-order coordinates from the companion.
+
+        ``True`` when every pending row was answered (events published, rows
+        consumed); ``False`` leaves ``_order_pending`` untouched for base's
+        resident correction, which then runs exactly as before.
+
+        WHY, MEASURED (ADR ``docs/design/transcript-index-off-process.md`` step
+        2; real-path rig on this PR, 6 x 70 MB journals at load 40-100): on a
+        loaded host the 120 ms first-frame budget is spent before the companion
+        reads start, so most opens of a large journal answered ``building`` and
+        this correction's ``start_refresh`` re-hydrated the whole index on
+        serve's GIL -- 6 ``index.refresh_start`` per six-session pass, every
+        pass, because the 4-slot resident LRU evicts across the switch. The
+        correction is after paint and owes no deadline, so it can afford the
+        page-bounded SQLite read the frame could not.
+
+        THE SAME ORDINALS AS THE RESIDENT PATH, NOT ALWAYS THE SAME EVENTS
+        (review round 1, m2). Pending rows are grouped by the page source they
+        were read under, each group is answered by
+        ``index_read_model.order_selection`` under the append-prefix rule, and
+        the batches come from the one existing
+        ``journal_order_correction_batches``. For a group read under the
+        current source the events match the resident path's. For a group read
+        under an OLDER source of the same append-only journal the resident path
+        publishes ``reconcile`` (its ``original != expected`` rule against one
+        index) while this one publishes that group's ``journal_seq`` rows: the
+        values are the ones a reconcile would re-fetch, because an append never
+        renumbers a covered row. A group the companion cannot prove -- missing,
+        stale past a visible append, corrupt -- fails the attempt and the
+        caller falls to the resident path for what is still pending.
+
+        ROWS ADDED WHILE THIS AWAITS ARE ANSWERED TOO (review round 1, m1). A
+        page that queues pending rows while this task is in flight starts no
+        task of its own (``_order_correction`` is not done), so this loops
+        until a pass finds nothing new. Each pass consumes only the entries it
+        answered; a later pass that cannot prove its group returns ``False``,
+        leaving exactly the unanswered entries to the resident path.
+        """
+        answered_before = False
+        while True:
+            pending = dict(self._order_pending)
+            if not pending:
+                return answered_before
+            groups: dict[Any, list[str]] = {}
+            for id_, (_descriptor, original) in pending.items():
+                if original is None:
+                    return False
+                groups.setdefault(original, []).append(id_)
+            answered: list[tuple[Any, list[dict[str, Any]]]] = []
+            for original, ids in groups.items():
+                result = await asyncio.to_thread(
+                    index_read_model.order_selection,
+                    self.root,
+                    self.session_id,
+                    order_ids=ids,
+                    source=original,
+                    prefix_ok=True,
+                )
+                if result.state != "ready" or not result.value.journal_generation:
+                    return False
+                selection = result.value
+                rows = [
+                    {**pending[id_][0], "journal_seq": selection.journal_rows[id_]}
+                    for id_ in ids
+                    if id_ in selection.journal_rows
+                ]
+                answered.append((selection, rows))
+            if self._closing:
+                return True
+            for id_, value in pending.items():
+                if self._order_pending.get(id_) is value:
+                    del self._order_pending[id_]
+            for selection, rows in answered:
+                for batch in transcript_index.journal_order_correction_batches(selection, rows):
+                    self.publish(
+                        "event",
+                        {
+                            "type": JOURNAL_ORDER_EVENT,
+                            "journal_generation": selection.journal_generation,
+                            "rows": batch,
+                        },
+                    )
+            answered_before = True
 
     async def _peer_source_read(
         self,
@@ -9223,12 +9434,10 @@ class DesktopSessions:
             outcomes: list[tuple[str, dict[str, Any] | None]] = [("unknown", None) for _ in items]
             batched: list[int] = []
             for index, (session_id, token) in enumerate(items):
+                if not BULK_RECEIPT_SESSION_ID_RE.fullmatch(session_id):
+                    continue
                 path = self.root / "sessions" / session_id
-                if (
-                    not SESSION_ID.fullmatch(session_id)
-                    or not path.is_dir()
-                    or not is_user_session(path)
-                ):
+                if not path.is_dir() or not is_user_session(path):
                     continue
                 batched.append(index)
             verdicts = store.acknowledge_many(
@@ -9419,6 +9628,36 @@ class DesktopSessions:
         if isinstance(result, _OnPeer):
             return await self._peer_file(session_id, digest, member_id=session_id)
         return result
+
+    async def bridge_card_body(self, session_id: str, entry_id: str) -> dict[str, Any]:
+        """The admitted body behind one inbound Team Bridge card (bridge-body §4).
+
+        Outside :meth:`session` for :meth:`attachment`'s reason: viewing a past
+        card must not start a runtime. The session gate is the same durable
+        user-session namespace check; the resolver then answers only for a
+        ``team_bridge_message`` row in that conversation, whose validated
+        receipt names the live owner (``other_account`` otherwise). A peer's
+        conversation has no local journal here and reads as unknown (404) —
+        the phone/desktop keep today's copy for it.
+
+        ``KeyError`` (404) for an unknown session or a row that is not a card.
+        """
+        from local_operator.team_bridge.card_body import (
+            CardBodyNotFound,
+            resolve_card_body,
+        )
+
+        if not SESSION_ID.fullmatch(session_id):
+            raise KeyError("Unknown session")
+        path = self.root / "sessions" / session_id
+        if not await asyncio.to_thread(lambda: path.is_dir() and is_user_session(path)):
+            raise KeyError("Unknown session")
+        try:
+            return await resolve_card_body(
+                self.root, session_id, entry_id, sessions_root=self.root / "sessions"
+            )
+        except CardBodyNotFound as missing:
+            raise KeyError("Unknown bridge card") from missing
 
     async def attachment_waveform(self, session_id: str, digest: str) -> dict[str, Any]:
         """The waveform payload ``{version, bars, peaks}`` for one attachment.
@@ -9929,13 +10168,9 @@ class DesktopSessions:
                         "not created. Retry after checking storage."
                     )
             if target:
-                write_session_attachment(path, **binding, goal="")
-                stored = read_session_attachment(path)
-                if (
-                    stored is None
-                    or stored.agent != binding["agent"]
-                    or stored.team != binding["team"]
-                ):
+                # Shared with the relay's start route (``resume.bind_session_attachment``)
+                # so the two creators cannot disagree on what a bound session is.
+                if not bind_session_attachment(path, agent=binding["agent"], team=binding["team"]):
                     # Never publish desktop.json after a best-effort writer lost
                     # the attachment. No possibly admitted work is deleted.
                     raise ValueError(
@@ -11121,9 +11356,19 @@ class DesktopSessions:
 
     @contextlib.asynccontextmanager
     async def session(
-        self, session_id: str, *, read: bool = False, allow_draft: bool = False
+        self,
+        session_id: str,
+        *,
+        read: bool = False,
+        allow_draft: bool = False,
+        control_only: bool = False,
+        ingress_trace: open_trace.DesktopEventsIngressTrace | None = None,
     ) -> AsyncIterator[DesktopSessionBridge]:
         """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
+
+        ``control_only`` skips only display attachment at acquisition, not
+        lookup, draft exclusion, retirement, or the bridge reference lifetime.
+        The durable ask transport authenticates separately against its owner.
 
         ``read`` says the caller is READING state (``snapshot``, ``history``,
         ``events``, the ``/watch`` presence beat), and it is threaded down to
@@ -11210,6 +11455,8 @@ class DesktopSessions:
         takes 2453 ms and **24** requests complete inside it (median 70 ms, worst
         308 ms). See ``docs/evidence/session-load-central-cache``.
         """
+        if ingress_trace is not None:
+            ingress_trace.mark("desktop.events.pool")
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
         await self._refuse_deleted_temporary(session_id)
@@ -11421,7 +11668,14 @@ class DesktopSessions:
                             )
                             self.bridges[session_id] = bridge
             assert bridge is not None  # resolved above: either found or built
-            await bridge.acquire(read=read)
+            if ingress_trace is not None:
+                await bridge.acquire(
+                    read=read, control_only=control_only, ingress_trace=ingress_trace
+                )
+            elif control_only:
+                await bridge.acquire(read=read, control_only=True)
+            else:
+                await bridge.acquire(read=read)
         finally:
             # The window closes when acquire() returns, success or failure: from
             # here on the bridge is an ordinary resident one, and ``users`` (which

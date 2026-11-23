@@ -37,6 +37,7 @@ from local_operator.network.types import MemberRecord, NetworkRecord
 from local_operator.providers.auth_store import AuthStore
 from local_operator.remote_compute import cli as remote_cli
 from local_operator.remote_compute import config as config_module
+from local_operator.remote_compute import repo as repo_module
 from local_operator.remote_compute.arguments import LOCAL_ONLY_FLAGS
 
 _t = tr("wire.remote_compute")
@@ -998,7 +999,10 @@ def test_a_conflict_names_the_key_flag(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    origin.responses.append(httpx.Response(409, json={"error": "conflict"}))
+    # THE CODED CONFLICT, because that is the only reading that names the flag:
+    # a 409 with no code could be a run limit or a busy lease, and telling that
+    # operator to change the key was the bug M3a fixes.
+    origin.responses.append(httpx.Response(409, json={"code": "idempotency_conflict"}))
     assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
     assert "--idempotency-key" in capsys.readouterr().err
 
@@ -1592,3 +1596,80 @@ def test_a_poll_for_another_run_stops_the_watch_without_reporting_it(
     assert exit_code == 1
     assert "finished" not in out
     assert "run_OTHER" not in out
+
+
+# ---------------------------------------------------------------------------
+# A 409 is four refusals; the sentence must be the one that names the remedy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (409, {"code": "run_limit"}, _t(_wr.run_limit())),
+        (409, {"error": {"code": "workload_limit"}}, _t(_wr.run_limit())),
+        (409, {"code": "run_busy"}, _t(_wr.run_busy())),
+        (409, {"code": "workload_busy"}, _t(_wr.run_busy())),
+        (409, {"code": "name_claimed"}, _t(_wr.refusal_conflict())),
+        (409, {"msg": "conflict"}, _t(_wr.refusal_conflict())),
+        (
+            409,
+            {"msg": "This idempotency key was already used with a different request body."},
+            _t(_wr.conflict()),
+        ),
+    ],
+)
+def test_a_conflict_says_which_conflict_it_was(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status: int,
+    body: dict[str, Any],
+    expected: str,
+) -> None:
+    """The bug this replaces: a run limit reported as an idempotency conflict."""
+    origin.responses.append(httpx.Response(status, json=body))
+    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    assert expected in capsys.readouterr().err
+
+
+def test_the_idempotency_sentence_is_not_used_for_a_run_limit(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    origin.responses.append(httpx.Response(409, json={"code": "run_limit"}))
+    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    err = capsys.readouterr().err
+    assert _t(_wr.run_limit()) in err
+    assert _t(_wr.conflict()) not in err
+
+
+# ---------------------------------------------------------------------------
+# The repository refusals carry their own remedy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (repo_module.REASON_NOT_HTTPS, _t(_wr.repo_not_https_remote())),
+        (repo_module.REASON_UNPUSHED, _t(_wr.repo_unpushed_commit(detail="abc123 (main)"))),
+        (repo_module.REASON_NO_REMOTE, _t(_wr.repo_no_remote())),
+        ("something_else", _t(_wr.repo_no_remote())),
+    ],
+)
+def test_a_repository_refusal_names_its_reason(
+    capsys: pytest.CaptureFixture[str], reason: str, expected: str
+) -> None:
+    from local_operator.remote_compute.errors import UnusableRepo
+
+    detail = "abc123 (main)" if reason == repo_module.REASON_UNPUSHED else "/work/repo"
+    assert remote_cli._report(UnusableRepo(reason, detail=detail)) == 1
+    assert expected in capsys.readouterr().err

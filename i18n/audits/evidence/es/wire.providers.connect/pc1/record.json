@@ -1,0 +1,88 @@
+{
+  "locale": "es",
+  "namespace": "wire.providers.connect",
+  "source_sha256": "6277c0656675f9e4cfe3704cd2d62035b49f11e717aab2bd8c8e392438fd7959",
+  "target_sha256": "040a458aa481fdd4a7e7e39f9ecc64598b7fc5260eab328829632f136490fcaa",
+  "context_sha256": "c4dbbb698f0cc7c17f5f19434146b46de2376c93e5c89b8dc2368cc38dd2ab38",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": null
+  },
+  "auditor": {
+    "agent": "translation-auditor/conn-audit-es",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "verdict": "clean",
+  "keys_read": 5,
+  "findings": [],
+  "note": "Independent read-only audit of all five English/Spanish keys and English context. Translator identity comes from delegator's brief; translator date was not supplied. Auditor used openai/gpt-6.1-sol; no fallback. Accuracy, neutral Spanish idiom, tú address, sentence case, API/HTTP preservation and glossary match pass. Shipped Spanish auth key_rejected and Bedrock check_unverified establish the same clave de API/comprobar/Se guardó sin verificar terminology. Automático is an appropriate masculine modelo display adjective, not a translation of the machine id auto. UI Spanish Auto (recomendado), French Auto (recommandé) and Chinese 自动（推荐）are model-group headings, not identical English-source display-name keys; no drift finding. No plurals, number/date skeletons, markup or RTL content in these five strings. No repo edits or ledger append. String rendering is verified; no browser geometry/overflow certification claimed.",
+  "scope": {
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-backend-english",
+    "head": "b5bb56079c5067fd2efc81d6d223ac0283171142",
+    "target_state": "uncommitted",
+    "source_path": "local_operator/i18n/catalogues/en/wire.providers.connect.json",
+    "target_path": "local_operator/i18n/catalogues/es/wire.providers.connect.json",
+    "context_path": "local_operator/i18n/catalogues/en/wire.providers.connect.context.json"
+  },
+  "checks": [
+    {
+      "command": "PYTHONPATH=<worktree> ~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only",
+      "isolation": "env -i, scratch HOME and LOCAL_OPERATOR_CONFIG_DIR",
+      "exit_code": 0,
+      "actual": "check.py: catalogue checks: 0 problem(s)"
+    },
+    {
+      "check": "message_arguments exact tuple parity, including first-appearance order",
+      "actual": "5/5 pass; key_unverified: ((label, simple), (status, simple)); key_rejected/key_unreachable: ((label, simple),); remaining two empty"
+    },
+    {
+      "check": "render_message(es source, params, es) == messages.render(key, params, locale=es)",
+      "actual": "5/5 pass; label OpenAI, status string 429 preserved as HTTP 429"
+    },
+    {
+      "check": "real consumers with LOP_LANG=es",
+      "actual": "invalid_characters_reason returns Spanish; classify(openai,401,invalid_api_key) => valid=False, Spanish rejection; classify(openai,429,rate limited) => valid=None, Spanish saved-unverified; suggested_model_for(radient) => SuggestedModel(id=auto, name=Automático)"
+    },
+    {
+      "check": "consumer read",
+      "actual": "providers/key_check.py classification/unreachable branch, model/defaults.py suggested_model_for/_KEYED_NAMES, server/routes/auth.py key storage refusal/saved response and suggested-model payload, server/routes/models.py suggestedModel payload read"
+    }
+  ],
+  "fit_observations": {
+    "measure": "Unicode codepoint count (these source/target literals contain only single-cell characters); no fixed maxCells in source context",
+    "lengths": [
+      {
+        "key": "wire.providers.connect.key_invalid_characters",
+        "english_codepoints": 78,
+        "spanish_codepoints": 99
+      },
+      {
+        "key": "wire.providers.connect.key_rejected",
+        "english_codepoints": 54,
+        "spanish_codepoints": 69
+      },
+      {
+        "key": "wire.providers.connect.key_unreachable",
+        "english_codepoints": 79,
+        "spanish_codepoints": 84
+      },
+      {
+        "key": "wire.providers.connect.key_unverified",
+        "english_codepoints": 96,
+        "spanish_codepoints": 94
+      },
+      {
+        "key": "wire.providers.connect.suggested_automatic",
+        "english_codepoints": 9,
+        "spanish_codepoints": 10
+      }
+    ],
+    "non_gating_render_check": "key_invalid_characters is 99 vs 78 (+27%); key_rejected is 69 vs 54 (+28%). Both are full error sentences rather than narrow control labels. Check normal wrapping in downstream rendered QA; no demonstrated clipping. If a tight surface needs compression, possible alternatives are Esta clave de API contiene caracteres no válidos. Cópiala de nuevo y vuelve a intentarlo. and {label} rechazó esta clave de API. Compruébala e inténtalo de nuevo."
+  },
+  "probe_recovery": "First consumer probe failed before executing assertions due to nonexistent providers.definitions import; corrected to actual providers.registry and reran successfully."
+}

@@ -132,6 +132,7 @@ def test_the_vocabulary_is_the_one_agreed_set() -> None:
             "approve",
             "unattended",
             "update",
+            "workset_import",
         }
     )
     for rejected in ("broker:request", "broker:grant", "member:admin", "trust"):
@@ -155,7 +156,9 @@ def test_roles_are_the_documented_sets() -> None:
     assert types.ROLE_CAPABILITIES["read"] == frozenset({"list", "view"})
     assert "prompt" not in types.ROLE_CAPABILITIES["read"]
     assert "admin" in types.ROLE_CAPABILITIES["admin"]
-    assert types.ROLE_CAPABILITIES["admin"] == types.CAPABILITIES
+    # Everything but ``workset_import`` (security-lead ruling, #4245): accepting a
+    # peer's working files is granted per member on the receiving device, never by role.
+    assert types.ROLE_CAPABILITIES["admin"] == types.CAPABILITIES - {"workset_import"}
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +372,21 @@ def test_a_stray_inner_frame_cannot_launder_the_outer_session_id(op: str) -> Non
         viewer, {"op": op, "req": 2, "session_id": "s_local", "frame": {"session_id": "x"}}
     )
     assert granted.session_id == "s_local"
+
+
+@pytest.mark.parametrize("shape", [{"head": 1}, {"query": "q", "regex": True}, {"digest": True}])
+def test_remote_peek_shapes_need_view_and_an_owned_session(shape: dict[str, Any]) -> None:
+    authorizer, _audit = make(state=FakeState(sessions={"s_local"}))
+    frame = {"op": "net_session_peek", "req": 1, "session_id": "s_local", **shape}
+    with pytest.raises(types.Refusal) as no_view:
+        authorizer.check(link(capabilities={"list"}), frame)
+    assert no_view.value.code == "not_authorised"
+
+    viewer = link(capabilities={"list", "view"})
+    with pytest.raises(types.Refusal) as wrong_owner:
+        authorizer.check(viewer, {**frame, "session_id": "s_elsewhere"})
+    assert wrong_owner.value.code == "not_authorised"
+    assert authorizer.check(viewer, frame).session_id == "s_local"
 
 
 def test_a_stream_send_is_still_scoped_by_the_frame_it_carries() -> None:

@@ -1,0 +1,57 @@
+{
+  "locale": "zh-CN",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+  "status": "passed",
+  "date": "2026-11-16",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9d590e061719",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-16",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Host session metadata: Model openai/gpt-6.1-sol; no provider fallback observed",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requesting task identifies translator task and actual model; not independently queried"
+  },
+  "note": "Record i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1r/record.json; 11-key retained coverage; ZH-SD1-01 fixed; no open findings; actual openai/gpt-6.1-sol, no fallback.",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "fixed_finding_ids": [
+    "ZH-SD1-01"
+  ],
+  "audit_record": {
+    "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1r/record.json",
+    "sha256": "3b6484ec1f7e367983bffc3c15df212d7ae5af5e47061b316687a83cc71d85d3"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1r/report.md",
+      "sha256": "244ef43fbdef0dbbba0fd9639bbe11bd7bc507b33dc0c1c06e4d649f606e7f35"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1r/audit.log",
+      "sha256": "81d666d938923596fe16a1f024b4a59daca3ff04e155a46d502d86a3c1487c7c"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1r/verify.py.txt",
+      "sha256": "419b39fa817ab5de30787792d1a2a68c6bc219fc3b60c08e73a426ede87d2fed"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  }
+}

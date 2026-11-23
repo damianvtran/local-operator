@@ -13,5 +13,6 @@
   "tui.chrome.remote_park.approval_hint_there": "s’exécute sur {device} — autoriser là-bas ; refus possible ici",
   "tui.chrome.remote_park.approval_hint_floor": "s’exécute sur {device}",
   "tui.chrome.remote_park.ask_hint_answer": "s’exécute sur {device} — répondre d’ici",
-  "tui.chrome.remote_park.ask_hint_floor": "s’exécute sur {device}"
+  "tui.chrome.remote_park.ask_hint_floor": "s’exécute sur {device}",
+  "tui.chrome.remote_park.ask_agent_started": "s’exécute sur {device} · lancée par un agent sur {agent_device}"
 }

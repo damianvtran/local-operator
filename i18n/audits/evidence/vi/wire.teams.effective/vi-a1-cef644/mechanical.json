@@ -1,0 +1,121 @@
+{
+  "key_count": 9,
+  "rows": [
+    {
+      "key": "wire.teams.effective.team_missing",
+      "arguments": [
+        [
+          "role",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{role}"
+      ],
+      "characters": 34,
+      "NFC": true,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.registry_unreadable",
+      "arguments": [],
+      "placeholder_sequence": [],
+      "characters": 78,
+      "NFC": true,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.config_unreadable",
+      "arguments": [],
+      "placeholder_sequence": [],
+      "characters": 62,
+      "NFC": true,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_value",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{tier}"
+      ],
+      "characters": 128,
+      "NFC": true,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_mapping",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{tier}"
+      ],
+      "characters": 168,
+      "NFC": true,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.tier_unconfigured",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{tier}"
+      ],
+      "characters": 50,
+      "NFC": true,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.tier_invalid_selector",
+      "arguments": [
+        [
+          "tier",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{tier}"
+      ],
+      "characters": 96,
+      "NFC": true,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.model_unresolvable",
+      "arguments": [
+        [
+          "selector",
+          "simple"
+        ]
+      ],
+      "placeholder_sequence": [
+        "{selector}"
+      ],
+      "characters": 98,
+      "NFC": true,
+      "mechanical": "passed"
+    },
+    {
+      "key": "wire.teams.effective.unavailable",
+      "arguments": [],
+      "placeholder_sequence": [],
+      "characters": 109,
+      "NFC": true,
+      "mechanical": "passed"
+    }
+  ],
+  "validator_exit_code": 0,
+  "plural_select": "absent in all 9 source and target strings; vi other category not invoked"
+}

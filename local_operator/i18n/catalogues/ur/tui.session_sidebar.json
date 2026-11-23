@@ -1,0 +1,23 @@
+{
+  "tui.session_sidebar.footer.asks_note": "سوالات: {count}",
+  "tui.session_sidebar.footer.hub_note": "ہب: {count}",
+  "tui.session_sidebar.footer.opening": "کھل رہا ہے…",
+  "tui.session_sidebar.footer.refresh_failed": "ریفریش نہیں ہو سکا",
+  "tui.session_sidebar.pinned_overflow": "{count, plural, one {+{shown} مزید پن شدہ — اسکرول} other {+{shown} مزید پن شدہ — اسکرول}}",
+  "tui.session_sidebar.row.untitled": "بلا عنوان گفتگو",
+  "tui.session_sidebar.section.active": "فعال سیشنز",
+  "tui.session_sidebar.section.pinned": "پن شدہ",
+  "tui.session_sidebar.section.previous": "پچھلے سیشنز",
+  "tui.session_sidebar.section.subagent": "ذیلی ایجنٹ رنز",
+  "tui.session_sidebar.state.empty": "ابھی کوئی گفتگو نہیں",
+  "tui.session_sidebar.state.error": "گفتگوئیں لوڈ نہیں ہو سکیں",
+  "tui.session_sidebar.state.loading": "گفتگوئیں لوڈ ہو رہی ہیں…",
+  "tui.session_sidebar.title": "سیشنز",
+  "tui.session_sidebar.tooltip.location": "{device} پر",
+  "tui.session_sidebar.tooltip.location_network": "{device} پر · {network}",
+  "tui.session_sidebar.tooltip.location_network_stale": "{device} پر · {network} (آخری معلوم حالت)",
+  "tui.session_sidebar.tooltip.location_stale": "{device} پر (آخری معلوم حالت)",
+  "tui.session_sidebar.tooltip.status_wedged": "{status} · اگر یہ خاموش رہے تو {command} چلائیں",
+  "tui.session_sidebar.tooltip.unnamed_device": "بے نام ڈیوائس",
+  "tui.session_sidebar.tooltip.unreachable": "رابطہ ممکن نہیں · {reason}"
+}

@@ -1,0 +1,7 @@
+{
+  "wire.community.post_card_audience": "受众：{channel}的所有成员 · 在任何人看到之前，会先由社区版主审核。",
+  "wire.community.post_card_each_time": "每条帖子都会询问你；目前还没有长期权限。",
+  "wire.community.post_card_label": "将显示为你本人的帖子：此服务器暂时无法标记智能体发布的帖子，所以其他人看不出它来自你的智能体。",
+  "wire.community.post_card_tainted": "你的智能体在此会话中读过社区帖子，因此在开始新会话之前，任何长期权限都不适用；只有你的回答才能发布这条帖子。",
+  "wire.community.post_card_title": "以你的身份发帖到{channel}（{community}）？"
+}

@@ -1,5 +1,5 @@
 import { contentDir } from "../lib/content-direction";
-import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { HttpError, getSubagentDetail, getSubagentHistory } from "../api";
 import { AgentsSheet } from "../components/agents-sheet";
 import {
@@ -16,6 +16,7 @@ import { DetailRequestCoordinator } from "../detail-loader";
 import { cn } from "../lib/cn";
 import { formatEffort } from "../lib/format";
 import { navigate, navigateUp } from "../router";
+import { projectionRevealEpoch } from "../store";
 import type {
 	SessionProjection,
 	SubagentDetail,
@@ -501,21 +502,32 @@ const SUBAGENT_TRANSCRIPT_POLL_MS = 1500;
  * Older pages are still paged in by ``<Transcript>`` itself via the same
  * endpoint as the user scrolls up; this hook only owns the newest tail.
  */
-/** Cheap equality for two transcript tails: same length and, per row, same id
- * and same text length. A streaming assistant row grows its text, so comparing
- * text length (not full text) catches live growth without an O(chars) compare,
- * while a settled poll that returns the identical page short-circuits the
- * setState and preserves array identity (U3). */
+/** Keep identical polls out of React without hiding same-length corrections. */
 function sameTail(a: TranscriptEntry[], b: TranscriptEntry[]): boolean {
-	if (a.length !== b.length) return false;
-	for (let i = 0; i < a.length; i++) {
-		if (a[i].id !== b[i].id || a[i].text.length !== b[i].text.length) return false;
-	}
-	return true;
+	return a.length === b.length && a.every((row, i) =>
+		row.id === b[i].id && row.text === b[i].text && row.kind === b[i].kind &&
+		row.final === b[i].final && row.tool_state === b[i].tool_state &&
+		row.summary === b[i].summary && row.error === b[i].error,
+	);
 }
+
+function journalArrivals(previous: TranscriptEntry[], next: TranscriptEntry[]): ReadonlySet<string> | undefined {
+	const tail = previous.at(-1);
+	if (tail?.id === next.at(-1)?.id) return;
+	const seam = tail ? next.findIndex((row) => row.id === tail.id) : -1;
+	// A replaced window with no overlap cannot prove that rows were just born.
+	if (tail && seam < 0) return;
+	const seen = new Set(previous.map((row) => row.id));
+	const ids = new Set(next.slice(seam + 1).filter((row) => !seen.has(row.id) &&
+		(row.kind === "tool" || (row.kind === "assistant" && row.final && row.text))).map((row) => row.id));
+	return ids.size > 0 ? ids : undefined;
+}
+
+type JournalPage = { entries: TranscriptEntry[]; source?: object; owner?: string; arrivals?: ReadonlySet<string> };
 
 interface LazyTranscript {
 	entries: TranscriptEntry[];
+	arrivals?: ReadonlySet<string>;
 	/** A fetch is in flight and nothing has landed yet: the body shows its
 	 * loading affordance instead of a blank window (U2). */
 	loading: boolean;
@@ -547,12 +559,14 @@ function useLazySubagentTranscript(
 	jobId: string,
 	detail: SubagentDetail,
 	connected: boolean,
+	journalEpoch?: object,
 ): LazyTranscript {
 	// A daemon that still inlines the transcript wins outright: never fetch. This
 	// gates the fetch effect below (in its dep list) so legacy payloads render
 	// straight from the wire with no network round trip.
 	const inlined = detail.transcript.length > 0;
-	const [fetched, setFetched] = useState<TranscriptEntry[]>([]);
+	const owner = JSON.stringify([sessionId, jobId]);
+	const [fetched, setFetched] = useState<JournalPage>({ entries: [] });
 	const [loading, setLoading] = useState(!inlined);
 	const [failed, setFailed] = useState(false);
 	// Terminal 404 (see ``LazyTranscript.unavailable``). Held apart from
@@ -566,7 +580,7 @@ function useLazySubagentTranscript(
 	useEffect(() => {
 		// Reset when the addressed child changes so a stale page never flashes
 		// under a newly-opened sibling before its own fetch lands.
-		setFetched([]);
+		setFetched({ entries: [] });
 		setLoading(true);
 		setFailed(false);
 		setUnavailable(false);
@@ -575,28 +589,35 @@ function useLazySubagentTranscript(
 		if (inlined) return;
 		let alive = true;
 		let controller: AbortController | null = null;
+		// Only consecutive accepted newest pages in this running child's current
+		// parent source can prove an arrival. This is journal polling, not tokens.
+		const source = connected && running ? journalEpoch : undefined;
+		let previous: TranscriptEntry[] | undefined;
+		let hadRows = false;
 		const pull = async () => {
 			controller?.abort();
-			controller = new AbortController();
+			const request = new AbortController();
+			controller = request;
 			try {
 				const { entries } = await getSubagentHistory(
 					sessionId,
 					jobId,
 					null,
 					SUBAGENT_TRANSCRIPT_TAIL,
-					controller.signal,
+					request.signal,
 				);
-				if (alive) {
-					// Keep the previous array identity when a poll tick returns the
-					// same tail (id + text length unchanged), so a long-running
-					// child does not re-diff/re-render the whole window every
-					// 1.5s for no visible change (U3). A genuine growth or edit
-					// still swaps in the fresh array.
-					setFetched((prev) => (sameTail(prev, entries) ? prev : entries));
-					setLoading(false);
-					setFailed(false);
-					setUnavailable(false);
-				}
+				if (!alive || request.signal.aborted) return;
+				const arrivals = source && previous && (previous.length || !hadRows)
+					? journalArrivals(previous, entries) : undefined;
+				previous = entries;
+				hadRows ||= entries.length > 0;
+				setFetched((prev) => {
+					const tail = sameTail(prev.entries, entries) ? prev.entries : entries;
+					return tail === prev.entries && !prev.arrivals && !arrivals ? prev : { entries: tail, source, owner, arrivals };
+				});
+				setLoading(false);
+				setFailed(false);
+				setUnavailable(false);
 			} catch (err) {
 				/* An aborted request is a teardown/replacement, not a failure:
 				   the successor pull owns the state. A real drop for a RUNNING
@@ -606,7 +627,9 @@ function useLazySubagentTranscript(
 				   terminal and must surface a retry (U1). The flag describes the
 				   LAST fetch for both; ``transientCard`` owns the rendering side
 				   of that distinction. */
-				if (!alive || (err instanceof DOMException && err.name === "AbortError")) return;
+				if (!alive || request.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
+				previous = undefined;
+				setFetched((prev) => prev.arrivals ? { ...prev, arrivals: undefined } : prev);
 				setLoading(false);
 				/* A 404 is the daemon saying this child has no transcript to serve
 				   (its route resolved no session dir). No amount of retrying changes
@@ -641,7 +664,7 @@ function useLazySubagentTranscript(
 		// ``connected`` is a dep so a restored link re-pulls a settled child that
 		// missed its one fetch while offline — the detail loader already retries
 		// on reconnect this way (U1); ``attempt`` covers the manual retry button.
-	}, [sessionId, jobId, inlined, running, connected, attempt]);
+	}, [sessionId, jobId, owner, inlined, running, connected, journalEpoch, attempt]);
 	const retry = () => {
 		setLoading(true);
 		setFailed(false);
@@ -658,7 +681,12 @@ function useLazySubagentTranscript(
 			retry,
 		};
 	}
-	return { entries: fetched, loading, failed, unavailable, running, retry };
+	return {
+		entries: fetched.entries,
+		arrivals: running && connected && !failed && !unavailable && fetched.source === journalEpoch &&
+			fetched.owner === owner ? fetched.arrivals : undefined,
+		loading, failed, unavailable, running, retry,
+	};
 }
 
 /** The body shown when the child's own transcript is not on screen, whether
@@ -735,6 +763,8 @@ export function AgentConversation({
 	projection,
 	connected,
 	detail,
+	revealEpoch,
+	journalEpoch,
 	initialAgentsOpen = false,
 }: {
 	sessionId: string;
@@ -742,6 +772,8 @@ export function AgentConversation({
 	projection: SessionProjection;
 	connected: boolean;
 	detail: SubagentDetail;
+	revealEpoch?: object;
+	journalEpoch?: object;
 	initialAgentsOpen?: boolean;
 }) {
 	const [agentsOpen, setAgentsOpen] = useState(initialAgentsOpen);
@@ -750,13 +782,8 @@ export function AgentConversation({
 	const parentPath = detail.parent_job_id
 		? agentPath(sessionId, detail.parent_job_id)
 		: rootPath;
-	const { entries: transcript, loading, failed, unavailable, running, retry } =
-		useLazySubagentTranscript(
-		sessionId,
-		jobId,
-		detail,
-		connected,
-	);
+	const { entries: transcript, arrivals, loading, failed, unavailable, running, retry } =
+		useLazySubagentTranscript(sessionId, jobId, detail, connected, journalEpoch);
 	// ``agentConversationEntries`` reads ``detail.transcript``; feed it the
 	// lazily-fetched tail when the wire no longer carries one. Identity-stable
 	// via useMemo so the transcript array only rebuilds when its inputs change.
@@ -844,6 +871,8 @@ export function AgentConversation({
 				jobId={jobId}
 				entries={entries}
 				streaming={detail.status === "running"}
+				revealEpoch={detail.transcript.length > 0 ? revealEpoch : undefined}
+				journalArrivals={arrivals}
 				peerCycles={projection?.peer_cycles === 1}
 				tailContent={
 					<>
@@ -894,11 +923,22 @@ export function AgentScreen({
 		terminal: boolean;
 	} | null>(null);
 	const loaderRef = useRef<DetailRequestCoordinator | null>(null);
+	const currentEpoch = projectionRevealEpoch(projection, connected);
+	const activeEpoch = useRef(currentEpoch);
+	const detailEpochs = useRef(new WeakMap<SubagentDetail, object>());
+	useLayoutEffect(() => { activeEpoch.current = currentEpoch; }, [currentEpoch]);
 	useEffect(() => {
 		setDetail(detailCache.get(key) ?? null);
 		setFailure(null);
 		const loader = new DetailRequestCoordinator(
-			() => getSubagentDetail(sessionId, jobId),
+			async () => {
+				// A fetch begun on the previous SSE leg must not animate a
+				// response accepted after reconnect. Cache reads are baselines too.
+				const epoch = activeEpoch.current;
+				const next = await getSubagentDetail(sessionId, jobId);
+				if (epoch) detailEpochs.current.set(next, epoch);
+				return next;
+			},
 			(next) => {
 				cacheDetail(key, next);
 				setDetail((current) => !current || next.version >= current.version ? next : current);
@@ -982,6 +1022,8 @@ export function AgentScreen({
 			projection={projection}
 			connected={connected}
 			detail={detail}
+			revealEpoch={detailEpochs.current.get(detail) === currentEpoch ? currentEpoch : undefined}
+			journalEpoch={currentEpoch}
 		/>
 	);
 }

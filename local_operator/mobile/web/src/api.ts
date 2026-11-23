@@ -623,10 +623,16 @@ function recordingFilename(blob: Blob): string {
 
     `signal` is for U5's cancel: the composer's status row aborts an in-flight
     transcription rather than only hiding the wait; a fetch aborted through it
-    rejects with an AbortError, which the caller already treats as a discard. */
+    rejects with an AbortError, which the caller already treats as a discard.
+
+    `client`/`sessionId` are DIAGNOSTIC fields, not routing: the daemon logs
+    which surface a refusal happened on and which conversation it belonged to,
+    so a report ("transcription failed") can be found in `mobile.log` and the
+    request log's `reason` stops being blank. The daemon drops anything that is
+    not its own session-id shape, so a value from an unexpected route is safe. */
 export function transcribeAudio(
 	blob: Blob,
-	signal?: AbortSignal,
+	options: { signal?: AbortSignal; sessionId?: string } = {},
 ): Promise<{
 	text: string;
 	provider: string;
@@ -635,13 +641,15 @@ export function transcribeAudio(
 }> {
 	const form = new FormData();
 	form.append("audio", blob, recordingFilename(blob));
+	form.append("client", "web");
+	if (options.sessionId) form.append("session_id", options.sessionId);
 	// The daemon normalises this to an ISO-639-1 code before it reaches Radient
 	// or the client rules; an unmapped tag (e.g. fil-PH -> fil) is omitted, not
 	// guessed. English-only cleanup on a Tagalog take is the failure direction
 	// the cleanup design refuses.
 	const language = typeof navigator !== "undefined" ? navigator.language : "";
 	if (language) form.append("language", language);
-	return fetch("/api/transcribe", { method: "POST", body: form, signal }).then(async (res) => {
+	return fetch("/api/transcribe", { method: "POST", body: form, signal: options.signal }).then(async (res) => {
 		if (res.status === 401) {
 			handleUnauthorized();
 			throw new Error("unauthorized");
@@ -987,6 +995,19 @@ export function supplementRestart(
 	job: string,
 ): Promise<CommandReceipt> {
 	return sendCommand(sessionId, { op: "supplement_restart", anchor, job });
+}
+
+/** The admitted body (or held/refused/pending state) behind one inbound Team
+    Bridge card, keyed by the transcript row the phone already reads (design
+    §4; `lib/bridge-card-body.ts` parses it). Ask only when the relay advertises
+    `features.team_bridge_card_body`. The route answers `private, no-store` and
+    this client keeps no copy either: a revoked body must disappear on the
+    next read. */
+export function getBridgeCardBody(sessionId: string, entryId: string, signal?: AbortSignal): Promise<unknown> {
+	return request(
+		`/api/sessions/${encodeURIComponent(sessionId)}/bridge-cards/${encodeURIComponent(entryId)}/body`,
+		{ signal, cache: "no-store" },
+	);
 }
 
 /** Older transcript entries for lazy loading. ``before`` is the id of the

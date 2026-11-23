@@ -1,0 +1,149 @@
+{
+  "locale": "hi",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "key_count": 4,
+  "audit_kind": "independent_A_same_history_round_2",
+  "source_audit_revision": "912e165fd76e217b5cd5d212a59e7e1e906fa6fd",
+  "scope": "61b98804881432cfaca9a7f84ef78d81183e2083..912e165fd76e217b5cd5d212a59e7e1e906fa6fd",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "29fd3d454da2",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "independent_from_source_author_session": true,
+    "actual_model_source": "Current resumed-run host Model declaration; no current-run fallback event supplied",
+    "fallback": {
+      "used": false,
+      "scope": "current resumed A round 2 only; old A recorded GPT quota fallback remains historical"
+    },
+    "date": "2026-11-22",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "finding_ids": []
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": false,
+    "actual_model_source": "Parent message: wait(job9b5a2af8589d) completion and hub list both report served model openai/gpt-6.1-sol; auditor did not independently read those host snapshots",
+    "fallback": {
+      "used": "unknown_for_repair",
+      "reason": "No fresh repair fallback telemetry supplied; historical original authorship fallback is not evidence of a repair fallback reason"
+    },
+    "date": "2026-11-22",
+    "provenance_scope": "saved repair only; original remaining three keys authored by original_translator below",
+    "original_translator": {
+      "agent": "i18n-translator",
+      "session": "fdf96049990f",
+      "model": "openai/gpt-6.1-sol",
+      "independent_from_translator_session": false,
+      "actual_model_source": "Host model-switch telemetry: provider failure: quota; fallback from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol before Hindi authorship",
+      "fallback": {
+        "used": true,
+        "from": "anthropic/claude-opus-5-5",
+        "to": "openai/gpt-6.1-sol",
+        "reason": "provider failure: quota"
+      }
+    },
+    "source_records": [
+      "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/record.json",
+      "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/record.json"
+    ],
+    "author_self_reported_model": "anthropic/claude-opus-5-5",
+    "author_self_report_source": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/record.json; resumed context, not verified served telemetry",
+    "model_provenance_qualification": "Conflict retained: parent host-completion/Hub metadata versus author context self-report; root retains snapshots. Claude actual not verified."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/tui.model_persistence.json",
+      "sha256": "fe5174ef5f6cd8ea96d751c6722707d58a6a9108d17922d9b411b9a6b6799967"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/a29r2/report.md",
+      "sha256": "5f48099dae4814b21f0ea3bf18918eedcd32fe7a8c40d6ac062adeb24a1fd97f"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/a29r2/script.py.txt",
+      "sha256": "0d1843636887ce8b35269b2e080f81ccb905f89cf9f8e95e612e0b03d1631d5f"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/a29r2/audit.log",
+      "sha256": "d568f08fbc2b6252401f80b7645decba836c35b3c4609d68c265c3a434ea8d64"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/a29r2/receipt.json",
+      "sha256": "4c2cc81df6cf857467d1237270480d3d774de0b1e1b976c54fa17f312c2b7ce0"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "resolved_finding_ids": [
+      "HI-A1",
+      "B-HI-1"
+    ],
+    "resolution_authority": "A assessment only; fresh B separate"
+  },
+  "changed_keys": [
+    "tui.model_persistence.saved"
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "before_after_hashes_immutable": true,
+  "preserved_prior_evidence_history_count": 17,
+  "preserved_prior_evidence_history_hashes": {
+    "i18n/audits/evidence/hi/tui.model_persistence/B-a776/record.json": "4ede38b78183d6a0dd5e01c4299a53223b719adc11593601a3c14cfb699c98e0",
+    "i18n/audits/evidence/hi/tui.model_persistence/B-a776/report.md": "77d6afc960f430a4f585a24807ea19878994c23730a0c542f252f6b9dcebd11d",
+    "i18n/audits/evidence/hi/tui.model_persistence/B-a776/script.py.txt": "1c96bd9dd820612ab0345498b5eadc64c18e049141554e2d27994a120e91c471",
+    "i18n/audits/evidence/hi/tui.model_persistence/B-a776/audit.log": "a744d9a0dcc16636846518f4b1274f66fd6b8fe3deea676f3999e8ea4f82720a",
+    "i18n/audits/evidence/hi/tui.model_persistence/B-a776/receipt.json": "bc738b061d9f074e25dd8b88cff0c71f5f0a93447483aa30b9778f94d43672a3",
+    "i18n/audits/evidence/hi/tui.model_persistence/a29fd/record.json": "bd327b9852c66e475741e92338c86662d6981029fb7b667196136d5ef43b2a25",
+    "i18n/audits/evidence/hi/tui.model_persistence/a29fd/report.md": "a5a5c8786744195a289eb62293224c750856d538c8c4f1630bcc48f583a920f8",
+    "i18n/audits/evidence/hi/tui.model_persistence/a29fd/script.py.txt": "dcd882715d2167ae43b95df4dd6a73c1bd98b832ee7aa8823256c18089ba4a37",
+    "i18n/audits/evidence/hi/tui.model_persistence/a29fd/audit.log": "210277cbb72e7f72b66101451ca08ac996d100c9cd033430a2146a288fd82445",
+    "i18n/audits/evidence/hi/tui.model_persistence/a29fd/receipt.json": "36e0e4c02cce4ad4fe9060344e5ac9861ec20f46e31027f805250ec27786f17d",
+    "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/record.json": "a5cee43a196c261c0896e7d5921f3c637a180330866cfb84a93316724969bd8e",
+    "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/initial-attempt.log": "fe2e1bb54cfd5d652f1d3d044895893430c5644577eb0d73ff0e4bdd5551aabb",
+    "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/audit.log": "4ac41baf6debac4ed0523132656d89d6444d83516525f10483698fda65d22c60",
+    "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/validator.py.txt": "0dc66292dabeba398d0c62464480d77bee1e82fdce73b03bcff7250ec675c485",
+    "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/notes.md": "06e7324edd9edc13d76f35313d8df75528e388fc87958e96082d1e76c486b34c",
+    "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9/receipt.json": "f4a261eeca3ae7078bdd8419425a85652511308ed79a0bd4420c0acba9d23287",
+    "i18n/audit-history/hi/tui.model_persistence.json": "51f168e3aff7e8bdded1e0374df86ed3f7f34b9f4142d528d84a9c1f8f23499c"
+  },
+  "audit_notes_not_execution_log": [
+    "i18n/audits/evidence/hi/tui.model_persistence/a29r2/report.md"
+  ],
+  "actual_execution_logs": [
+    "i18n/audits/evidence/hi/tui.model_persistence/a29r2/audit.log"
+  ],
+  "executions": [
+    {
+      "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-a29r2-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-a29r2-home/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=\"$PWD\" /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/hi/tui.model_persistence/a29r2/script.py.txt > i18n/audits/evidence/hi/tui.model_persistence/a29r2/audit.log 2>&1",
+      "cwd": "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice",
+      "exit_code": 0,
+      "log": "i18n/audits/evidence/hi/tui.model_persistence/a29r2/audit.log"
+    }
+  ],
+  "clearance": {
+    "independent_A_current_namespace": true,
+    "independent_B": false,
+    "native_font_shaping": false,
+    "styled_NoticeBlock": false,
+    "whole_UI": false,
+    "release": false,
+    "ledger_applied": false
+  },
+  "retention_status": "new repo-local canonical evidence, untracked pending manager commit"
+}

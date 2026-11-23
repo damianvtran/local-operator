@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "record_reference": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/record.json",
+  "locale": "fr",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3r",
+  "auditor": {
+    "agent": "Audit daemon French (i18n-auditor)",
+    "session": "19f657b90086",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "7f2b030d2636",
+    "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol",
+    "fallback": {
+      "observed": false,
+      "reported": false,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/report.md",
+      "sha256": "5c0d682ed79ff900d96767a4506b2a63774e306cd85de31a3b6d1c78b0ff8e45"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/audit.log",
+      "sha256": "4988670ac9943fbbc8ab4e6d9695ad97a04380ed2c63ddb93be27b1c86ecc428"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/verify.py.txt",
+      "sha256": "a75b6370865843d49e2a88a983694160af7920b9d8a5a101256e4eefc34f3481"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/ledger-receipt.json",
+      "sha256": "f904a59c2e4e2e05c0b9c0706243a0aa22dbb7365a1e4d65b1c568ad1b6bc298"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/ledger-dry-run.log",
+      "sha256": "7966f0daa98ba19ebed13dc9f049a429129ed41f8401f7bfb15b5c28233fb791"
+    }
+  ],
+  "ledger_receipt": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/ledger-receipt.json",
+  "purpose": "Companion hash manifest; append-ready row is ledger-receipt.json; path-only record reference avoids circular hashes."
+}

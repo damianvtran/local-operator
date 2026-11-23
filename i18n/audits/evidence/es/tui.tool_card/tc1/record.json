@@ -1,0 +1,80 @@
+{
+  "locale": "es",
+  "namespace": "tui.tool_card",
+  "date": "2026-11-20",
+  "agent": "translation-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "instance": "e51bfe9eb48e",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "provenance": "delegation brief; not independently verified"
+  },
+  "en": {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-tool-card/local_operator/i18n/catalogues/en/tui.tool_card.json",
+    "sha256": "2c61b650b3da412991c5e4ceddc9be075a3235caf781a24300c60cc53333ce37"
+  },
+  "target": {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-tool-card/local_operator/i18n/catalogues/es/tui.tool_card.json",
+    "sha256": "04e151afffeed0a56cc9c0d2f3f4ea18f129e7a4df41ae59a2c8a4a33d9a927c"
+  },
+  "context": {
+    "path": "/Users/damian/local-operator/.worktrees/i18n-tool-card/local_operator/i18n/catalogues/en/tui.tool_card.context.json",
+    "sha256": "a9cbcc046351c00800a255e9049227b1feb03c4f7fcef8babd70dffd36089087"
+  },
+  "keys_read": 16,
+  "findings": {
+    "blocker": [],
+    "major": [
+      {
+        "id": "ES1",
+        "severity": "major",
+        "key": "tui.tool_card.status.stop_unconfirmed",
+        "current": "detención dudosa",
+        "proposed": "paro sin confirmar",
+        "reason": "Unconfirmed is a pending confirmation state, not a doubtful stop; preserve the shipped sin confirmar term (wire.tool_rows.bridge.outcome.unconfirmed and outcome_short.unconfirmed). Proposed wording is 18 cells, within maxCells 18."
+      },
+      {
+        "id": "ES2",
+        "severity": "major",
+        "key": "tui.tool_card.more.diff_lines",
+        "current": "{count, plural, one {{shown} línea más del diff} many {{shown} de líneas más del diff} other {{shown} líneas más del diff}}",
+        "proposed": "{count, plural, one {{shown} línea más de cambios} many {{shown} de líneas más de cambios} other {{shown} líneas más de cambios}}",
+        "reason": "diff remains untranslated English prose; neither glossary.md lines 19–30 and 118–126 nor es.md lines 22–29 sanction it. Violates the operator no-English requirement."
+      }
+    ],
+    "minor": [
+      {
+        "id": "ES3",
+        "severity": "minor",
+        "keys": [
+          "tui.tool_card.fetch.final",
+          "tui.tool_card.imagegen.requests_ahead"
+        ],
+        "current": [
+          "(destino final: {url})",
+          "{count, plural, one {{shown} petición por delante} many {{shown} de peticiones por delante} other {{shown} peticiones por delante}}"
+        ],
+        "proposed": [
+          "(final: {url})",
+          "Retain semantic queue wording pending a narrow rendered check; do not shorten by dropping ahead."
+        ],
+        "reason": "Material width expansion without declared caps: final URL sample 28→36 cells; queued 2 requests 16→24 cells (million branch 22→33). Shorten final as proposed and check the queue row in a narrow rendered card. No rendered evidence was produced in this read-only audit."
+      }
+    ],
+    "nit": []
+  },
+  "verdict": "fail",
+  "checks": {
+    "key_parity": "16/16",
+    "argument_parity": "16/16 via runtime.message_arguments",
+    "plural_categories": "all six plural keys exactly one/many/other; no =N selectors",
+    "renders": "runtime.render_message; plural counts 0,1,2,5,21,1000000; url https://example.com; state miss; chord ctrl+c",
+    "maxCells": "all five bounded keys pass via rich.cells.cell_len: chip 3/4; collapse 8/10; expand 8/10; interrupt 23/24; stop 16/18",
+    "terminology": "tui.small.spend.unpriced_failed_wide uses petición; bridge outcome.unconfirmed and outcome_short.unconfirmed use sin confirmar; caché endorsed es.md 37–43; tú register es.md 8–15; Latin miss and ctrl+c are explicitly literal context parameters",
+    "rtl": "not applicable to es; no manual bidi controls in target",
+    "rendered_visual_check": "not performed; width finding needs rendered verification"
+  },
+  "unresolved_blocker_major_count": 2,
+  "notes": "Read-only independent audit. No repository files changed. No provider/model fallback used."
+}

@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "tui.session_sidebar",
+  "history_sha256": "1e698ed079fba841cc958b8faa5ad4d22bfe8c142b920b0a4ba1ada3a9fdb5e5",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "tui.session_sidebar",
+      "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+      "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+      "target_sha256": "1c500f171037e1a37c07d997a67d5ac1fe1a6721aea4efa4d4725ac3c973ee3a",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "3aa33693f9a6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "HI-1"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent full audit (round 1) of the new tui.session_sidebar namespace (21 keys), source commit c8343f3a6087. Auditor 3aa33693f9a6 (openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 0 nit (HI-1). Superseded: target_sha256 is the round-1 file; the translator then revised it and a round-2 audit (row sb2) covers the current bytes. Record: i18n/audits/evidence/hi/tui.session_sidebar/sb1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/hi/tui.session_sidebar/sb1/record.json",
+      "round": "sb1"
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.session_sidebar",
+      "source_sha256": "55f8a8e1d22045c6e5cecb989b3e4291c243dffd30a5c61565d6d4feac82a69a",
+      "context_sha256": "698e8f0e151fee53d52a533bc51d7edcc600ce6964d74cdb024888238161f6e0",
+      "target_sha256": "4e8685ac2f9dcf6a5b443b6dab7e8601f9ac511871ec5deef662adb610cdffa5",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator')",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20",
+        "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev independent auditor subagent), not the translator; did not edit values",
+        "session": "6ea7075eb29e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-20",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own receipt (model field)"
+      },
+      "status": "passed",
+      "note": "Independent full audit (round 2 (delta re-audit after the round-1 fixes)) of the new tui.session_sidebar namespace (21 keys), source commit c8343f3a6087. Auditor 6ea7075eb29e (openai/gpt-6.1-sol) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. Record: i18n/audits/evidence/hi/tui.session_sidebar/sb2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/hi/tui.session_sidebar/sb2/record.json",
+      "round": "sb2"
+    }
+  ]
+}

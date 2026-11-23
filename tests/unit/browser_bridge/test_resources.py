@@ -559,6 +559,48 @@ async def test_teardown_closes_every_still_owned_surface(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ownership", [True, False], ids=["owner-aware", "legacy"])
+@pytest.mark.parametrize("pause_after", [0, 1], ids=["before-first", "after-first"])
+async def test_terminal_pause_leaves_unattempted_stranded_closes_owed(
+    tmp_path: Path,
+    bridge: BridgeFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    ownership: bool,
+    pause_after: int,
+) -> None:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    await _lose_the_handle_through_recover(resource, bridge)
+    resource.remember("bridge:9:second")
+    resource.remember("bridge:10:live")
+    monkeypatch.setattr(resource, "ownership_mode", lambda: ownership)
+    owed = ["bridge:8:first", "bridge:9:second"]
+
+    # The fake peer records admission before it answers, so the callback sees
+    # a pause that lands by the time the first close comes back.
+    def closes() -> list[str]:
+        return [params["tab"] for method, params in bridge.calls if method == "close"]
+
+    skipped = await resource.finish(
+        resource.generation,
+        "completed",
+        close_allowed=lambda: len(closes()) < pause_after,
+    )
+    assert skipped.state == "pending"
+    assert skipped.admission_skipped
+    assert closes() == owed[:pause_after]
+    assert not any(method == "owner_finish" for method, _ in bridge.calls)
+    saved = json.loads(resource.path.read_text())
+    assert saved["state"] == "cleanup_pending"
+    assert saved["surface_id"] == "bridge:10:live"
+    assert [entry["surface"] for entry in saved["stranded_surfaces"]] == owed[pause_after:]
+
+    settled = await resource.finish(resource.generation, "completed", close_allowed=lambda: True)
+    assert settled.state == "closed"
+    assert closes() == (owed if ownership else [*owed, "bridge:10:live"])
+    assert "stranded_surfaces" not in json.loads(resource.path.read_text())
+
+
+@pytest.mark.asyncio
 async def test_a_stranded_tab_already_gone_is_settled(
     tmp_path: Path, bridge: BridgeFixture
 ) -> None:

@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "audit_id": "pc1",
+  "locale": "hi",
+  "namespace": "wire.providers.connect",
+  "record": "i18n/audits/evidence/hi/wire.providers.connect/pc1/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable receipt, copied byte-for-byte from its session scratchpad (~/.local-operator/sessions/1ee13fe7dc4d/scratchpad/conn-audit-hi.receipt.json)",
+  "record_sha256": "66f481caa85a669a3a962005273659f7391f1e53461800c3ff451adc6033b175",
+  "source_sha256": "6277c0656675f9e4cfe3704cd2d62035b49f11e717aab2bd8c8e392438fd7959",
+  "context_sha256": "c4dbbb698f0cc7c17f5f19434146b46de2376c93e5c89b8dc2368cc38dd2ab38",
+  "target_sha256": "851391b5bae38f480050904cd1f6785a3aa446a4a2b634a3430bec0d97f05009",
+  "shipped_target_sha256": "851391b5bae38f480050904cd1f6785a3aa446a4a2b634a3430bec0d97f05009",
+  "verdict": "passed",
+  "commit_audited": "b5bb56079c50 (worktree head; locale bytes uncommitted at audit time)",
+  "auditor": {
+    "agent": "translation-auditor (lopdev independent auditor subagent), not the translator",
+    "session": "1ee13fe7dc4d",
+    "model": "openai/gpt-6.1-sol"
+  },
+  "ledger_receipt": {
+    "locale": "hi",
+    "namespace": "wire.providers.connect",
+    "source_sha256": "6277c0656675f9e4cfe3704cd2d62035b49f11e717aab2bd8c8e392438fd7959",
+    "context_sha256": "c4dbbb698f0cc7c17f5f19434146b46de2376c93e5c89b8dc2368cc38dd2ab38",
+    "target_sha256": "851391b5bae38f480050904cd1f6785a3aa446a4a2b634a3430bec0d97f05009",
+    "translator": {
+      "agent": "translator (lopdev task subagent, profile 'translator')",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-21",
+      "provenance": "identity and model as supplied in the delegation brief to the integrating coder; translator instance not independently observed by the coder"
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev independent auditor subagent), not the translator",
+      "session": "1ee13fe7dc4d",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-11-21",
+      "result": "clean",
+      "findings": 0,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "finding_ids": [],
+      "fallback_used": false,
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own receipt (model field); manager brief: actual model openai/gpt-6.1-sol, no fallback"
+    },
+    "status": "passed",
+    "note": "Independent full audit (round 1) of the new wire.providers.connect namespace (5 keys: 4 key-check verdicts + suggested_automatic), audited at worktree head b5bb56079c50 (rebased to 18a93a76a0c0, range-diff '='; English source hash unchanged). Auditor 1ee13fe7dc4d (openai/gpt-6.1-sol, no fallback) verdict clean: 0 blocker, 0 major, 0 minor, 0 nit. Record: i18n/audits/evidence/hi/wire.providers.connect/pc1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/hi/wire.providers.connect/pc1/record.json",
+    "round": "pc1"
+  }
+}

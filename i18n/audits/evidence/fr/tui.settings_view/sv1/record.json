@@ -1,0 +1,184 @@
+{
+  "locale": "fr",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "59e06a7db2d67505cecd10d5287d6215149309915b17d8561f7f6da9ecbf15bf",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Delegation supplied; not independently observed"
+  },
+  "auditor": {
+    "agent": "translation-auditor/settings-audit-fr",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "result": "clean-with-findings",
+    "findings": 3,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "verdict": "clean-with-findings",
+  "keys_read": 21,
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "minor",
+      "key": "tui.settings_view.editor.suggest_short",
+      "current": "{browse_keys} · {complete_key} · {save_key} sauver",
+      "proposed": "{browse_keys} · {complete_key} · {save_key} enreg.",
+      "reason": "Save changes from enregistrer in the two longer hints and editor.contract to sauver in the shortest; enreg. preserves the established term within the same 23-cell budget. French style guide lines 14–18."
+    },
+    {
+      "id": "F2",
+      "severity": "minor",
+      "key": "tui.settings_view.row.add_hop",
+      "current": "+ ajouter un maillon",
+      "proposed": "+ ajouter une étape",
+      "reason": "The same selectable hop is called étape in adjacent shipped tui.small.settings_view.hop_count and hop_row_hint. wire.settings.retry_fallbackchains.help uses maillons, so inherited terminology already differs; prefer étape here to match the immediately adjacent row/count, not a blocker."
+    },
+    {
+      "id": "F3",
+      "severity": "minor",
+      "key": "tui.settings_view.too_short",
+      "current": "terminal trop court pour les paramètres — agrandissez-le",
+      "proposed": "terminal trop bas pour les paramètres — augmentez sa hauteur",
+      "reason": "Trop court and agrandissez-le do not specify height; the source/context explicitly require more rows, not a wider terminal. Existing wording remains actionable but loses the directional instruction."
+    }
+  ],
+  "checks": {
+    "key_placeholder_parity": "21/21 passed using message_arguments",
+    "plural_categories": [
+      "many",
+      "one",
+      "other"
+    ],
+    "plural_renders": {
+      "0": "… 0 de plus",
+      "1": "… 1 de plus",
+      "2": "… 2 de plus",
+      "5": "… 5 de plus",
+      "21": "… 21 de plus",
+      "1000000": "… 1000000 de plus"
+    },
+    "explicit_numeric_plural_branches": false,
+    "bidi_controls": false,
+    "rtl": "Not applicable: French LTR",
+    "unsanctioned_English": "None. enter/esc/tab, arrows and /team are literal runtime inputs; glossary lines 43–50, French guide 24–38. agents/suggestions/sessions are French words.",
+    "widths": {
+      "tui.settings_view.editor.contract": {
+        "en": 25,
+        "fr": 31,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.contract_unset": {
+        "en": 42,
+        "fr": 52,
+        "maxCells": 23
+      },
+      "tui.settings_view.editor.suggest_long": {
+        "en": 50,
+        "fr": 56,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.suggest_medium": {
+        "en": 38,
+        "fr": 48,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.suggest_short": {
+        "en": 22,
+        "fr": 23,
+        "maxCells": 23
+      },
+      "tui.settings_view.pane.agents_empty": {
+        "en": 20,
+        "fr": 21,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.empty_hint": {
+        "en": 29,
+        "fr": 30,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.more": {
+        "en": 8,
+        "fr": 11,
+        "maxCells": 16
+      },
+      "tui.settings_view.pane.providers_empty": {
+        "en": 22,
+        "fr": 22,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.providers_header": {
+        "en": 9,
+        "fr": 12,
+        "maxCells": 20
+      },
+      "tui.settings_view.pane.tab_agents": {
+        "en": 6,
+        "fr": 6,
+        "maxCells": 10
+      },
+      "tui.settings_view.pane.tab_teams": {
+        "en": 5,
+        "fr": 7,
+        "maxCells": 10
+      },
+      "tui.settings_view.pane.teams_empty": {
+        "en": 19,
+        "fr": 24,
+        "maxCells": 38
+      },
+      "tui.settings_view.row.add_chain": {
+        "en": 13,
+        "fr": 20,
+        "maxCells": null
+      },
+      "tui.settings_view.row.add_hop": {
+        "en": 11,
+        "fr": 20,
+        "maxCells": null
+      },
+      "tui.settings_view.scope.live": {
+        "en": 4,
+        "fr": 8,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.never": {
+        "en": 5,
+        "fr": 6,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.new_launch": {
+        "en": 10,
+        "fr": 11,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.new_sessions": {
+        "en": 12,
+        "fr": 14,
+        "maxCells": 14
+      },
+      "tui.settings_view.section.takes_effect": {
+        "en": 22,
+        "fr": 24,
+        "maxCells": null
+      },
+      "tui.settings_view.too_short": {
+        "en": 48,
+        "fr": 56,
+        "maxCells": null
+      }
+    },
+    "hint_ladder_cells": [
+      56,
+      48,
+      23
+    ],
+    "rendered_frame": "Not performed; string-level rendering only"
+  },
+  "note": "Read all 21 English/French values and context entries. Reference terms: wire.settings.retry_fallbackchains.help, wire.settings.web_fetch_max_attempts.label, tui.small.settings_view.hop_count/hop_row_hint/chain_row_hint. Explicit maxCells budgets pass except contract_unset, a documented nonbinding 23-cell case: 52-cell French form falls back to 31-cell contract (English 42→25). Source fallback verified in widgets/settings_view.py. Longer uncapped strings use fit/drop or crop paths; no pixel-fit claim. Formal vous and French typography otherwise conform. No repository changes."
+}

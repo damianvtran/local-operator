@@ -29,7 +29,6 @@ import json
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -52,6 +51,7 @@ from local_operator.i18n.keys import (
 )
 from local_operator.i18n.messages import Msg, render_resolved
 from local_operator.paths import CONFIG_DIR_ENV
+from local_operator.resume import SessionRow
 from local_operator.session import catalog as catalog_mod
 from local_operator.stt import cascade as stt_cascade  # noqa: F401
 from local_operator.tts import cascade as tts_cascade  # noqa: F401
@@ -213,7 +213,7 @@ ENGLISH_PARITY: list[tuple[str, Msg, str]] = [
     ),
 ]
 
-#: The ten hotkey rows' copy: ``(action id, label, help)`` exactly as
+#: The hotkey rows' copy: ``(action id, label, help)`` exactly as
 #: ``keymap.KEY_ACTIONS`` (and so origin/main's settings rows) carried them.
 KEYMAP_ENGLISH = {
     "keymap.new_session": ("New session", "Starts a fresh conversation, the same as /new."),
@@ -229,6 +229,46 @@ KEYMAP_ENGLISH = {
     "keymap.start_recording": (
         "Start recording",
         "Starts speech-to-text recording in the desktop window.",
+    ),
+    "keymap.command_palette": (
+        "Command palette",
+        "Searches every command, setting and conversation from one box.",
+    ),
+    "keymap.toggle_sidebar": (
+        "Sessions list",
+        "Shows or hides the session sidebar; /sidebar does the same.",
+    ),
+    "keymap.focus_sidebar": (
+        "Focus sessions",
+        "Moves the keys into the sessions list; esc returns to the composer.",
+    ),
+    "keymap.aside": ("Aside", "Asks a side question without spending the composer's draft."),
+    "keymap.fork_aside": (
+        "Fork aside",
+        "Promotes the open aside exchange into the conversation.",
+    ),
+    "keymap.toggle_todos": ("Todo panel", "Expands or collapses the dock's todo list."),
+    "keymap.toggle_subagents": (
+        "Subagent panel",
+        "Cycles the dock's subagent panel: full, summary, hidden.",
+    ),
+    "keymap.toggle_pin": (
+        "Pin session",
+        "Pins or unpins the row under the pointer, else the sidebar's cursor.",
+    ),
+    "keymap.toggle_asks": ("Queued asks", "Opens or collapses the questions waiting on an answer."),
+    "keymap.prev_session": (
+        "Previous session",
+        "Switches to the previous conversation in the sidebar.",
+    ),
+    "keymap.next_session": ("Next session", "Switches to the next conversation in the sidebar."),
+    "keymap.cycle_effort": (
+        "Reasoning effort",
+        "Cycles the reasoning effort level; /effort sets one directly.",
+    ),
+    "keymap.clear_transcript": (
+        "Clear transcript",
+        "Clears the transcript view; the stored history stays.",
     ),
 }
 
@@ -278,13 +318,18 @@ def test_the_video_route_reasons_keep_their_english() -> None:
 
 
 def test_the_retired_row_label_keeps_its_english() -> None:
-    entry = SimpleNamespace(completion_kind="retired", completion_reason="")
-    stop_label = catalog_mod.CatalogEntry._stop_label
-    expected = "Interrupted — retired for an update"
-    assert stop_label(entry, "Interrupted") == expected  # type: ignore[arg-type]
-    assert stop_label(entry, "Unseen interruption") == (  # type: ignore[arg-type]
-        "Unseen interruption — retired for an update"
-    )
+    # Backend labels resolve config, not the TUI's active-locale binding. Use
+    # the public row path: the retired helper no longer accepts English bases.
+    text.set_active_locale("fr")
+    row = SessionRow("synthetic-retired", 1.0, "Synthetic session")
+    for unseen, expected in (
+        (False, "Interrupted — retired for an update"),
+        (True, "Unseen interruption — retired for an update"),
+    ):
+        entry = catalog_mod.CatalogEntry(
+            row, unseen=unseen, completion_kind="retired", completion_token="synthetic-token"
+        )
+        assert (entry.status_code, entry.status) == ("interrupted", expected)
 
 
 def test_an_unkeyed_import_detail_stays_the_english_diagnostic() -> None:
@@ -414,10 +459,18 @@ def test_backend_composed_display_text_follows_the_configured_language(
     assert render_resolved(wire_wakes_supervisor.shared_unit_mismatch()) == (
         marker_fr + "this store is not the one the shared unit serves; launchd cannot supervise it"
     )
-    entry = SimpleNamespace(completion_kind="retired", completion_reason="")
-    assert catalog_mod.CatalogEntry._stop_label(entry, "Interrupted") == (  # type: ignore[arg-type]
-        marker_fr + "Interrupted — retired for an update"
-    )
+    # Deliberately oppose the TUI locale: backend-rendered strings belong to
+    # the configured language, and complete-message keys own both prefixes.
+    text.set_active_locale("en")
+    row = SessionRow("synthetic-retired", 1.0, "Synthetic session")
+    for unseen, expected in (
+        (False, "Interrupted — retired for an update"),
+        (True, "Unseen interruption — retired for an update"),
+    ):
+        entry = catalog_mod.CatalogEntry(
+            row, unseen=unseen, completion_kind="retired", completion_token="synthetic-token"
+        )
+        assert (entry.status_code, entry.status) == ("interrupted", marker_fr + expected)
 
 
 @pytest.mark.asyncio

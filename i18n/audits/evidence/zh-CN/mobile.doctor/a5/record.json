@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "audit_id": "a5",
+  "audit_kind": "independent_translation_audit_new_keys",
+  "locale": "zh-CN",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-18",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #4216: 4 changed + 2 new mobile.doctor.watches keys judged side by side with English and en/mobile.doctor.context.json; other keys unchanged from the base and not re-audited",
+  "key_count": 37,
+  "keys_audited": 6,
+  "changed_keys": [
+    "mobile.doctor.watches.ok",
+    "mobile.doctor.watches.near",
+    "mobile.doctor.watches.at_limit",
+    "mobile.doctor.watches.unknown",
+    "mobile.doctor.watches.instances_near",
+    "mobile.doctor.watches.instances_at_limit"
+  ],
+  "source_sha256": "322230f946a1ac493499986fba909735071e13415791de3dbbbb1c686e83c9fb",
+  "target_sha256": "dd8d652e9f41b6231f919aff9e05fb52bafa17fb310ea701267b2450356b5ae2",
+  "source_audit_revision": "4e6a954306b5bf8e42778e24b389007ced2ca6ae",
+  "branch": "fix/inotify-followups",
+  "worktree": "~/local-operator/.worktrees/inotify-followups",
+  "translator": {
+    "agent": "coder subagent of PR #4216 (commit 4e6a95430; wrote the English source and all 7 translations)",
+    "model": "not reported in the commit; served model of the coder child unverified",
+    "date": "2026-11-18"
+  },
+  "auditor": {
+    "agent": "copy-reviewer acting as independent i18n auditor, lopdev team member (`task` subagent), session 760414253f82; did not write the translations; corrected the values listed in findings",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-18",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "322230f946a1ac493499986fba909735071e13415791de3dbbbb1c686e83c9fb",
+    "context": "95ebf1639cad50331de63d0401956a13535d7ae1ad0e9cd11ba959dae1397ce5",
+    "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "style_guide": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "ZH-W2",
+      "severity": "minor",
+      "keys": [
+        "near",
+        "at_limit",
+        "instances_near",
+        "instances_at_limit"
+      ],
+      "change": "请运行{command}重启它 → 请运行 {command} 重启它: {command} is a literal shell command; all 12 sibling mobile.doctor rows space a literal command (请运行 lop mobile restart), and unspaced it rendered 'lop services restart重启它', losing the command boundary",
+      "status": "corrected in catalogue"
+    }
+  ],
+  "checks": [
+    "placeholder multiset identical to English for all 6 keys (runtime message_arguments)",
+    "{how} select parsed by local_operator.i18n.runtime and rendered in both arms (command, other) with synthetic params; no unrendered braces",
+    "fs.inotify.max_user_watches / fs.inotify.max_user_instances, {command} and the OS errors “No space left on device” / “Too many open files” byte-identical English inside the locale's quotation marks, as the existing #4193 rows treat them",
+    "'file watch' term unchanged from #4193; 'watch handle' term used identically in ok, instances_near and instances_at_limit and distinct from it",
+    "NFC, no bidi control characters",
+    "copy_scan.py (design-qa): 0 findings"
+  ],
+  "limits": "LLM audit, same model family as the translator (disclosed); no native-speaker pass and no rendered terminal/desktop frame claimed."
+}

@@ -23,6 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -73,6 +76,69 @@ def _wait_for(path: Path, count: int, timeout: float = 15.0) -> list[dict[str, A
             return rows
         time.sleep(0.05)
     return _read(path)
+
+
+async def _wait_for_async(path: Path, count: int, timeout: float = 15.0) -> list[dict[str, Any]]:
+    """Keep the app's pending debounce/commit callbacks runnable while polling.
+
+    A detached player can progress during the synchronous helper, but an app
+    callback that has not spawned it yet cannot. Keep the same receipt predicate,
+    deadline and poll interval; only yield instead of blocking the app loop.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rows = _read(path)
+        if len(rows) >= count:
+            return rows
+        await asyncio.sleep(0.05)
+    return _read(path)
+
+
+@pytest.mark.asyncio
+async def test_receipt_wait_yields_to_pending_callback(tmp_path: Path) -> None:
+    path = tmp_path / "pending.jsonl"
+    row = '{"sound_id":"felt-marimba","backend":"null"}\n'
+    loop = asyncio.get_running_loop()
+    loop.call_soon(path.write_text, row)
+    # Forced ordering, not a claim that every CI miss had this cause: the old
+    # observer cannot let even an already-ready callback produce its receipt.
+    assert _wait_for(path, 1, timeout=0.05) == []
+    rows = await _wait_for_async(path, 1, timeout=1.0)
+    assert [item["sound_id"] for item in rows] == ["felt-marimba"]
+    assert rows[0]["backend"] == "null"
+
+
+@pytest.mark.asyncio
+async def test_receipt_wait_still_refuses_missing_receipts(tmp_path: Path) -> None:
+    path = tmp_path / "missing.jsonl"
+    assert _wait_for(path, 1, timeout=0.05) == []
+    assert await _wait_for_async(path, 1, timeout=0.05) == []
+
+
+@pytest.mark.asyncio
+async def test_receipt_wait_observes_already_spawned_child(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    path = tmp_path / "child.jsonl"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("
+            '\'{"sound_id":"felt-marimba","backend":"null"}\\n\')',
+            str(path),
+        ]
+    )
+    try:
+        sync_rows = _wait_for(path, 1)
+        async_rows = await _wait_for_async(path, 1)
+        assert sync_rows == async_rows == [{"sound_id": "felt-marimba", "backend": "null"}]
+        assert await asyncio.to_thread(child.wait, timeout=15.0) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
 
 
 def _values(tmp_path: Path) -> dict[str, Any]:
@@ -189,9 +255,97 @@ def _open_sound_list(app: Any) -> Any:
     return view
 
 
+async def _assert_preview_exits(
+    players: list[subprocess.Popen[bytes]], superseded: set[int]
+) -> None:
+    for child in players:
+        status = await asyncio.to_thread(child.wait, timeout=15.0)
+        # A receipt precedes process exit. Only an observed application stop of
+        # this exact earlier child explains SIGTERM; the final audition must
+        # finish successfully even if some unrelated stop was observed for it.
+        allowed = (
+            (0, -signal.SIGTERM) if child is not players[-1] and child.pid in superseded else (0,)
+        )
+        assert status in allowed, (child.pid, status, allowed)
+
+
 @pytest.mark.asyncio
-async def test_browsing_the_sound_list_plays_one_sound_per_settle(receipts: Path) -> None:
+@pytest.mark.parametrize(
+    ("held_receipt", "terminate_final"),
+    [(False, False), (True, False), (True, True)],
+    ids=["null", "receipt-before-exit", "unexpected-final-sigterm"],
+)
+async def test_browsing_the_sound_list_plays_one_sound_per_settle(
+    receipts: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    held_receipt: bool,
+    terminate_final: bool,
+) -> None:
     app = _app()
+    scheduled = []
+    players: list[subprocess.Popen[bytes]] = []
+    superseded: set[int] = set()
+    original_schedule = app._schedule_sound_preview
+    original_spawn = sound._start_preview_child
+    original_stop = sound.stop_preview
+
+    def schedule(*args, **kwargs):
+        scheduled.append(kwargs.get("browsing", False))
+        return original_schedule(*args, **kwargs)
+
+    def spawn(plan):
+        if held_receipt:
+            # Run the real NULL player and receipt writer, then hold it at the
+            # receipt/exit boundary until stdin closes. This forces the CI race
+            # without audio, timing luck, or a fabricated playback receipt.
+            script = (
+                "import sys; sys.path.insert(0, sys.argv.pop(1)); "
+                "from local_operator.notifications import play; "
+                "write = play._write_receipt; "
+                "play._write_receipt = lambda row: (write(row), sys.stdin.buffer.read(1)); "
+                "raise SystemExit(play.main(sys.argv[1:]))"
+            )
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    script,
+                    str(Path(sound.__file__).resolve().parents[2]),
+                    *sound.player_argv(plan, leg="preview")[4:],
+                ],
+                stdin=subprocess.PIPE,
+                start_new_session=True,
+            )
+        else:
+            child = original_spawn(plan)
+        if child is not None:
+            players.append(child)
+        return child
+
+    def stop():
+        child = sound._PREVIEW_CHILD
+        live = child is not None and child.poll() is None
+        stopped = original_stop()
+        if live and stopped and child in players:
+            superseded.add(child.pid)
+        return stopped
+
+    monkeypatch.setattr(app, "_schedule_sound_preview", schedule)
+    monkeypatch.setattr(sound, "_start_preview_child", spawn)
+    monkeypatch.setattr(sound, "stop_preview", stop)
+
+    def cleanup():
+        for child in players:
+            if child.stdin is not None:
+                child.stdin.close()
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=15.0)
+
+    request.addfinalizer(cleanup)
     async with app.run_test(size=(120, 32)) as pilot:
         await pilot.pause()
         view = _open_sound_list(app)
@@ -201,7 +355,7 @@ async def test_browsing_the_sound_list_plays_one_sound_per_settle(receipts: Path
         assert view._expanded == "notifications.sound.id"
         assert view._preview_before is None, "a sound must never arm the theme capture"
         # Opening plays nothing: the user has not moved yet.
-        assert _wait_for(receipts, 1, timeout=1.0) == []
+        assert await _wait_for_async(receipts, 1, timeout=1.0) == []
 
         # A burst of five arrows inside the debounce window: one sound, the
         # row the cursor LANDED on.
@@ -210,16 +364,46 @@ async def test_browsing_the_sound_list_plays_one_sound_per_settle(receipts: Path
             await pilot.pause()
         landed = view._current().choice.value
         await _settle(pilot, 0.6)
-        rows = _wait_for(receipts, 1)
+        rows = await _wait_for_async(receipts, 1)
         assert [row["sound_id"] for row in rows] == [landed]
         assert rows[0]["leg"] == "preview" and rows[0]["backend"] == "null"
 
         # Enter on that same row: the commit restarts the shared debounce, so
         # browse + commit is still ONE more sound, not two.
         view.action_activate()
+        assert not view._error
+        assert view._expanded is None
+        assert _values(tmp_path)["notifications"]["sound"]["id"] == landed
         await _settle(pilot, 0.6)
-        rows = _wait_for(receipts, 2)
+        rows = await _wait_for_async(receipts, 2)
         assert len(rows) == 2 and rows[1]["sound_id"] == landed
+        assert rows[1]["leg"] == "preview" and rows[1]["backend"] == "null"
+        assert scheduled[-1] is False, "commit preview must survive the collapsed list"
+        assert len(players) == 2
+        if held_receipt:
+            assert players[0].pid in superseded
+            assert await asyncio.to_thread(players[0].wait, timeout=15.0) == -signal.SIGTERM
+            assert players[-1].poll() is None, "final receipt must precede exit in this regression"
+            if terminate_final:
+                # Deliberately NOT through the app's stop observer: even with
+                # both valid receipts, unexplained final SIGTERM must fail.
+                players[-1].terminate()
+                assert await asyncio.to_thread(players[-1].wait, timeout=15.0) == -signal.SIGTERM
+            assert players[-1].stdin is not None
+            players[-1].stdin.close()
+            # The same earlier SIGTERM must be rejected without the observed
+            # application-owned supersession, despite its valid receipt.
+            with pytest.raises(
+                AssertionError, match=rf"\({players[0].pid}, -{signal.SIGTERM}, \(0,\)\)"
+            ):
+                await _assert_preview_exits(players, set())
+        if terminate_final:
+            with pytest.raises(
+                AssertionError, match=rf"\({players[-1].pid}, -{signal.SIGTERM}, \(0,\)\)"
+            ):
+                await _assert_preview_exits(players, superseded)
+        else:
+            await _assert_preview_exits(players, superseded)
         await _settle(pilot, 0.4)
         assert len(_read(receipts)) == 2
 
@@ -249,10 +433,10 @@ async def test_sound_volume_commit_plays_the_current_sound_at_the_new_gain(
         await pilot.pause()
         app._run_slash_command("/sound use felt-marimba")
         await _settle(pilot, 0.5)
-        _wait_for(receipts, 1)
+        await _wait_for_async(receipts, 1)
         app._run_slash_command("/sound volume 40")
         await _settle(pilot, 0.5)
-        rows = _wait_for(receipts, 2)
+        rows = await _wait_for_async(receipts, 2)
         assert rows[-1]["sound_id"] == "felt-marimba"
         assert rows[-1]["gain"] == pytest.approx(0.16)
         assert _values(tmp_path)["notifications"]["sound"]["volume"] == 40

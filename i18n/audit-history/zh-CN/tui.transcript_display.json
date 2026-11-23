@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.transcript_display",
+  "history_sha256": "91ae8f97c3e04f895cc07ea5da8bd4008447c2da7e02cf1365611d231f66dce8",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.transcript_display",
+      "source_sha256": "b4d1a0536b39409bdafda847212fea6ce2648e7ef7592b586d362dc11870fba4",
+      "context_sha256": "e5ac925968617f233000373b4ac6e93f36b38dacbcf41677216704636911f4b1",
+      "target_sha256": "2971ecd1eb30f5a8493252878fc948a71069e1402a10a38b032bc95b1027c6d7",
+      "translator": {
+        "agent": "i18n-translator (lopdev task subagent, session label i18n-translator-fold; lop job 02522f8c98ed)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "model_kind": "actual served model, as reported by the translator's own hand-off (no provider fallback)"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent lopdev task subagent, session label i18n-auditor-fold; resumed lop job 265a7273c213); distinct instance and model from the translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-22",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 2
+        },
+        "independent_from_translator": true,
+        "model_kind": "actual served model, as reported by the auditor's own round-2 report (no provider fallback)"
+      },
+      "status": "passed",
+      "keys": [
+        "tui.transcript_display.save_failed",
+        "tui.transcript_display.set",
+        "tui.transcript_display.slash",
+        "tui.transcript_display.unknown",
+        "tui.transcript_display.usage"
+      ],
+      "note": "Independent audit round 2 at HEAD 3db30d25b over this locale's three new namespaces: all 21 (locale, namespace) pairs passed, 0 blocker / 0 major unresolved. MINOR A8 (ru tui.transcript_fold.failed, count-last under tail truncation) and NIT A13/R2-1 skipped by decision: recorded in the PR thread as deferred, never fixed. Provenance is as relayed in the integrating coder's brief and the auditor's own report (i18n-audit-fold.md round 2) and the translator's hand-off (i18n-translator-handoff.md); the coder inspected no harness route log and reports no provider fallback. The audited values are the committed values."
+    }
+  ]
+}

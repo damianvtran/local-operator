@@ -1,0 +1,28 @@
+{
+ "slot": "independent slot 2",
+ "round": 3,
+ "pr": 4378,
+ "head": "70878bbaf42c537b0b591349388a8d052681e382",
+ "scope": "71cbd4d79..70878bbaf",
+ "locale": "fr",
+ "namespace": "cli.sessions_move_workset",
+ "source_sha256": "b7035a7cb1a90ea2227bb8617f5a4825b58a40e58149e16ad4264854843b6ceb",
+ "context_sha256": "31a1b4e5147f7a9786e3e78da498ce2d9db3275d6e5c6402cad4dddcc2abf2d4",
+ "target_sha256": "41f1b440b491663c9993c08c68f5f88e15058a48488e6b84e02646898932f03b",
+ "values_read_this_round": [
+  "deps_header"
+ ],
+ "byte_identical_to_71cbd4d79": 106,
+ "byte_identical_to_base_814293edd": 87,
+ "carried_round2_slot2_findings": [],
+ "round3_findings": {},
+ "blocker": 0,
+ "major": 0,
+ "verdict": "PASS",
+ "auditor": {
+  "agent": "translation-auditor (lopdev) slot 2, session 6fd346121602",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none"
+ },
+ "limits": "no native-speaker review; no rendered terminal frame; agent-independent only (same model family)"
+}

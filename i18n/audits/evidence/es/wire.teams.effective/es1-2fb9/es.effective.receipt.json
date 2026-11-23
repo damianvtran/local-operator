@@ -1,0 +1,61 @@
+{
+  "locale": "es",
+  "namespace": "wire.teams.effective",
+  "source_sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "8fba0458db34",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Runtime session model declaration in developer context",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed in this session. No translation service/API/SDK used.",
+    "date": "2026-11-19"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "2fb9f8e55f96",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-19",
+    "actual_model_source": "Runtime model declaration in developer context of session 2fb9f8e55f96",
+    "fallback_used": false,
+    "fallback_note": "No fallback observed or used in this audit session",
+    "independent_from_translator_session": "8fba0458db34",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "Record: /Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/es.effective.record.json. 9/9 linguistic+scoped mechanical pass; second independent error-copy audit and rendered/pseudo evidence pending.",
+  "audit_date": "2026-11-19",
+  "key_count": 9,
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.json",
+      "sha256": "fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/local_operator/i18n/catalogues/en/wire.teams.effective.context.json",
+      "sha256": "01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417"
+    },
+    "es": {
+      "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.json",
+      "sha256": "aad6efce35fa6fccc25573506b0ec3d3ee042f6e23f6e52d5440d2289a519e25"
+    },
+    "provenance": {
+      "path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.translator-provenance.json",
+      "sha256": "ce95251a453698bb6421eff617e1711c529222a091d11945a6b39751e666be75"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-effective-reasons/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "record_sha256": "bff1dd757dc6e4a28058d0f15de784e2463b52557992520a8dc63c2e023b39ee",
+  "audit_scope": "translation_only",
+  "second_independent_audit_required": true,
+  "rendered_evidence_executed": false
+}

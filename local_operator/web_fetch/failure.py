@@ -612,8 +612,22 @@ def attempt_summary(attempts: int, profiles: Sequence[str]) -> str:
     """
     if attempts <= 1:
         return ""
+    labels = attempt_profile_labels(profiles)
+    if labels:
+        return f"{attempts} attempts ({', '.join(labels)})"
+    return f"{attempts} attempts"
+
+
+def attempt_profile_labels(profiles: Sequence[str]) -> list[str]:
+    """The identity sequence :func:`attempt_summary` prints, or ``[]`` when it
+    prints none (a single identity, D10).
+
+    Public so the TUI card can paint the same sequence inside its OWN localized
+    count (``tui.tool_card.extra.fetch.attempts_profiles``) while this module's
+    English sentence stays the model-facing copy: the collapse rule lives here
+    once, and only the words around it are per-surface.
+    """
     collapsed = _collapsed(profiles) if profiles else []
     if len(collapsed) > 1:
-        names = ", ".join(_profile_label(p) for p in collapsed)
-        return f"{attempts} attempts ({names})"
-    return f"{attempts} attempts"
+        return [_profile_label(p) for p in collapsed]
+    return []

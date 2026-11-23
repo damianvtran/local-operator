@@ -33,6 +33,7 @@ import fnmatch
 import functools
 import os
 import re
+import sqlite3
 import stat
 import sys
 import time
@@ -44,8 +45,10 @@ from local_operator.guardrails.resolve import (
     Creation,
     Target,
     kernel_path,
+    lex,
     physical_path,
     resolve_command,
+    scan,
 )
 
 if TYPE_CHECKING:
@@ -88,10 +91,25 @@ class RankedTarget:
     #: matches were vouched for, the matches — not the directory the glob
     #: lives in, which read as though ``$HOME`` itself were owned (QA Q5).
     shown: str = ""
+    cleanup_hold: bool = False
+    #: Which preservation condition a ``cleanup_hold`` failed (``HOLD_*`` below);
+    #: empty = the general hold. Display only: ``cleanup_hold_text`` picks its
+    #: guidance from it so an ignored-files hold is never worded like the
+    #: unpushed-work one. Rank and branch never read it.
+    hold_conditions: tuple[str, ...] = ()
 
     @property
     def path(self) -> str:
         return self.target.path or "<unresolved>"
+
+
+#: Exact plain ``git worktree remove`` found ignored entries it cannot prove
+#: regenerable (Git would delete them).
+HOLD_IGNORED_UNVERIFIED = "ignored-unverified"
+#: The strict status read behind that check failed, so nothing was proven.
+HOLD_IGNORED_UNREADABLE = "ignored-unreadable"
+#: Tracked or untracked changes sit beside the ignored payload.
+HOLD_CHANGES = "changes"
 
 
 @dataclass
@@ -1265,6 +1283,7 @@ def _rank(
     # ``globstar`` — truthy, so ``foreign`` was silently None and a foreign
     # row ranked LOW. A keyword-only parameter makes that mix-up a TypeError.
     foreign: ForeignCreations | None = None,
+    exact_cleanup: bool = False,
 ) -> RankedTarget:
     if target.landings:
         # An unpinned ``..``: rank the landing its missing and re-linked parts
@@ -1349,6 +1368,12 @@ def _rank(
         return RankedTarget(target, Risk.LOW, "fresh temporary path ($(mktemp))")
     if notes and not in_own_pad:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes))
+    forced_cleanup = exact_cleanup and target.worktree_remove and target.forced
+    barred_cleanup = forced_cleanup and _finished_route_barred(path, prot)
+    if forced_cleanup and not barred_cleanup:
+        strict = _exact_linked_cleanup(target, path, prot, session_id, foreign)
+        if strict is not None:
+            return strict
     if target.worktree_remove and target.pattern is None:
         # ``git worktree remove`` without --force: git refuses tracked or
         # untracked changes itself, but deletes IGNORED files and a detached
@@ -1359,6 +1384,7 @@ def _rank(
         # unknown ranks HIGH with that state named (the one fact the agent can
         # act on); not-linked takes the ordinary ranking below.
         from local_operator.guardrails.provenance import (
+            plain_cleanup_ignored_inventory,
             state_phrase,
             worktree_activity,
             worktree_state,
@@ -1382,22 +1408,22 @@ def _rank(
         # ``--force``, any other delete and every write keep a sibling's tree
         # foreign.
         #
-        # IGNORED FILES follow git's own rule for a non-forced removal by the
-        # family (``git worktree remove`` deletes them without ``--force``;
-        # measured with git 2.55 on a throwaway repo: ignored ``.terraform/``
-        # plus ``.env`` removed, rc 0). A FORCED removal of an ancestor's or
-        # sibling's tree keeps the stricter rule — an ignored ``.env`` the
-        # caller never made is not known to be reproducible.
+        # The legacy family state below treats ignored entries like Git does.
+        # Plain removal must preserve payload at the resolved linked checkout
+        # regardless of its spelling or creator. Unlike exact-path consent,
+        # these checks can only add a hold, not authorize a removal.
         own = _owned_by_session(target, path, prot, session_id, kin=not target.forced)
         relation = own[2] if own is not None else ""
         # A hidden pid with no evidence is ignored for the PLAIN removal only
         # (git itself still refuses untracked content); ``--force`` keeps the
         # strict rule (review M1, PR #4161).
+        plain_payload: dict[str, bool] | None = None if target.forced else {}
         state = worktree_state(
             path,
             own=own is not None and (relation == "" or not target.forced),
             session_id=session_id,
             hidden_blocks=target.forced,
+            facts=plain_payload,
         )
         # Never a bare "busy" (operator directive 2026-11-14): the reason names
         # each holder (pid, command, session) or why the inventory failed.
@@ -1431,6 +1457,59 @@ def _rank(
                     f"branch {activity.branch} has open {activity.pr_ref}; "
                     f"finish or close it first ({facts})",
                 )
+            if barred_cleanup:
+                return RankedTarget(
+                    target,
+                    Risk.HIGH,
+                    f"a git repository root; linked worktree state: {state_text}; {facts}; "
+                    "protected location; cleanup is not permitted",
+                    cleanup_hold=True,
+                )
+            # Plain removal keeps the branch ref and follows the established
+            # ownership/status policy. A checkout with tracked deletions needs
+            # a separate verified recovery decision; plain Git cannot remove it.
+            if plain_payload and plain_payload.get("tracked_deletions"):
+                return RankedTarget(
+                    target,
+                    Risk.HIGH,
+                    "linked worktree state: tracked deletions remain; only preview can verify "
+                    "a planned literal --force removal",
+                    cleanup_hold=True,
+                )
+            if plain_payload is not None:
+                inventory = plain_cleanup_ignored_inventory(path)
+                if inventory is None:
+                    return RankedTarget(
+                        target,
+                        Risk.HIGH,
+                        "linked worktree state: could not verify ignored files",
+                        cleanup_hold=True,
+                        hold_conditions=(HOLD_IGNORED_UNREADABLE,),
+                    )
+                if inventory.unverified_ignored:
+                    # Same hold as before; only the words changed (operator
+                    # follow-up 2026-11-21): the reason counts what Git would
+                    # delete, never lists it, and says whether real changes
+                    # sit beside it so the refusal can tell the two apart.
+                    n = inventory.unverified_ignored
+                    reason = (
+                        f"{n} ignored {'entry' if n == 1 else 'entries'} the guard "
+                        "cannot prove regenerable"
+                    )
+                    conditions: tuple[str, ...] = (HOLD_IGNORED_UNVERIFIED,)
+                    if inventory.changes:
+                        c = inventory.changes
+                        reason += (
+                            f"; {c} tracked or untracked " f"{'change' if c == 1 else 'changes'}"
+                        )
+                        conditions += (HOLD_CHANGES,)
+                    return RankedTarget(
+                        target,
+                        Risk.HIGH,
+                        f"linked worktree state: {reason}",
+                        cleanup_hold=True,
+                        hold_conditions=conditions,
+                    )
             idle = activity.pr_state == "none" and not activity.owners_running
             # OWN + CLEAN does not need the forge (operator escalation
             # 2026-11-11, session 99c51054bdbd): ``git worktree remove --force``
@@ -1545,6 +1624,10 @@ def _rank(
             # ranking applies, but the state stays in whatever reason it gives.
             worktree_note = f"linked worktree state: {state_text}; {facts}"
             notes.append(worktree_note)
+    if barred_cleanup:
+        return RankedTarget(
+            target, Risk.HIGH, "protected location; cleanup is not permitted", cleanup_hold=True
+        )
     scratch_facts: list[str] = []
     if not target.worktree_remove and target.op == "delete" and not target.selected:
         reached = _reached_worktrees(
@@ -2050,6 +2133,188 @@ def _finished_rig_reason(
     return prov.finished_rig(path, session_id)
 
 
+def _literal_worktree_remove(command: str, targets: Sequence[Target]) -> bool:
+    """The new allowance is for one literal command, not a shell program."""
+    if len(targets) != 1:
+        return False
+    target = targets[0]
+    if not target.worktree_remove or not target.path or target.landings or target.empty:
+        return False
+    # Use the resolver's parser, but do not fold anything that bash expands.
+    # Checking the original segment as well excludes comments and operators
+    # that lex would otherwise discard, including a trailing background '&'.
+    text = command.strip(" \t")
+    parsed = lex(text)
+    if parsed.open or parsed.segments != [(text, False, "")]:
+        return False
+    words, redirects = scan(text)
+    if redirects:
+        return False
+    argv = []
+    for word in words:
+        if word.broken or any(
+            part.kind not in ("sq", "dq")
+            and (part.kind != "bare" or not re.fullmatch(r"[a-zA-Z0-9_./-]+", part.text))
+            for part in word.parts
+        ):
+            return False
+        arg = "".join(part.text for part in word.parts)
+        if not arg or any(ord(ch) < 32 or ch == "\x7f" for ch in arg):
+            return False
+        argv.append(arg)
+    if not argv or argv.pop(0) != "git":
+        return False
+    if argv[:1] == ["-C"]:
+        if len(argv) < 2 or not os.path.isabs(argv[1]):
+            return False
+        del argv[:2]
+    if argv[:2] != ["worktree", "remove"]:
+        return False
+    del argv[:2]
+    if argv and argv[0] in ("-f", "--force"):
+        del argv[0]
+    if argv[:1] == ["--"]:
+        del argv[0]
+    if len(argv) != 1 or not os.path.isabs(argv[0]):
+        return False
+    raw = argv[0]
+    return raw == os.path.normpath(raw) == os.path.realpath(raw) == target.path and not (
+        target.pattern or target.opaque or target.climbs or target.unpinned
+    )
+
+
+def _exact_linked_cleanup(
+    target: Target, path: str, prot: _Protected, session_id: str, foreign: ForeignCreations | None
+) -> RankedTarget | None:
+    from local_operator.guardrails import provenance as prov
+
+    own = _owned_by_session(target, path, prot, session_id)
+    if own is not None and own[2] == "kin":
+        own = None
+    # Don't replace the separate, narrowly located detached-scratch policy.
+    if own is not None and _scratch_location(path) and prov.own_detached_scratch(path):
+        return None
+    identity = prov.cleanup_identity(path)
+    payload: dict[str, bool] = {}
+
+    def read_state(facts: dict[str, bool]) -> str:
+        return prov.worktree_state(
+            path,
+            own=own is not None,
+            session_id=session_id,
+            hidden_blocks=True,
+            interrupted_cleanup=True,
+            facts=facts,
+        )
+
+    state = read_state(payload)
+    # Leave the prior consent/ranking paths for foreign work that is outside
+    # this narrow recovery route, but never fall back with unknown ignored data.
+    if own is None and state in ("clean", "dirty", "locked", "busy") and not payload.get("ignored"):
+        return None
+
+    def hold(reason: str) -> RankedTarget:
+        return RankedTarget(
+            target, Risk.HIGH, f"linked worktree state: {reason}", cleanup_hold=True
+        )
+
+    if state == "not-linked":
+        return hold(
+            "not a registered linked checkout; verify the exact path and Git registration. "
+            "This route excludes unregistered residue: it cannot verify durable prior "
+            "registration, a reachable preserved commit, and preservation of current work"
+        )
+    if state == "busy":
+        return hold(prov.state_phrase(path, state, session_id, hidden_blocks=True))
+    if state == "locked":
+        return hold("locked; have the holder finish and unlock it")
+    if state not in ("clean", "deletions-only", "dirty"):
+        return hold("could not verify the checkout; inspect the exact path and Git registration")
+
+    def check_open(activity: WorktreeActivity) -> RankedTarget | None:
+        if activity.pr_state == "open":
+            return RankedTarget(
+                target,
+                Risk.CRITICAL,
+                f"branch {activity.branch} has open {activity.pr_ref}; finish it first",
+            )
+        return None
+
+    activity = prov.worktree_activity(path, session_id)
+    if opened := check_open(activity):
+        return opened
+    if activity.owners_running:
+        return hold(f"another session still holds it; {activity.facts()}")
+    if state == "dirty":
+        return hold(
+            "preservation check failed; stash or commit changes and preserve unverified "
+            "files separately, including ignored output"
+        )
+    if identity is None:
+        return hold("checkout, Git registration, branch, HEAD or origin could not be verified")
+    try:
+        creators = prov.worktree_creators(path)
+        if prov._running_owners(path, session_id, strict=True):
+            return hold("another session still holds it; wait for that session to finish")
+    except (OSError, ValueError, sqlite3.Error):
+        return hold("ownership could not be verified")
+    if not prov.cleanup_activity_known(identity, activity):
+        return hold("branch activity could not be verified; check for an open PR or MR")
+    if own is None:
+        proof = _no_ledger_inside(
+            foreign,
+            path,
+            prov.finished_foreign_worktree(
+                path, session_id, activity=activity, interrupted_cleanup=True, identity=identity
+            ),
+        )
+        if not proof.safe:
+            return hold(
+                f"finished work not proven ({', '.join(proof.reasons)}); "
+                "check the origin branch and wait for any owning session to finish"
+            )
+        reason = "a finished, merged linked git worktree"
+    else:
+        if not prov.pushed_worktree_head(path, identity.head, identity.ref):
+            return hold("HEAD is not confirmed on origin; verify the remote or push your commits")
+        reason = f"{own[0]}; HEAD preserved on origin"
+
+    # Remote/forge I/O creates a window in which the same path or commit can
+    # represent a different checkout. Recheck from the pinned registration,
+    # then check the new payload and local activity before granting LOW.
+    changed = "checkout changed during verification; inspect its registration, branch and status"
+    if prov.cleanup_identity(path) != identity:
+        return hold(changed)
+    again_activity = prov.worktree_activity(path, session_id)
+    if opened := check_open(again_activity):
+        return opened
+    if again_activity.owners_running or not prov.cleanup_activity_known(identity, again_activity):
+        return hold("activity changed or could not be verified; check for an open PR, MR or owner")
+    again: dict[str, bool] = {}
+    if read_state(again) != state or again != payload:
+        return hold(changed)
+    try:
+        if prov.worktree_creators(path) != creators or prov._running_owners(
+            path, session_id, strict=True
+        ):
+            return hold(changed)
+        # Ledger reads cached for ordinary ranking do not prove what is
+        # present after the network wait (and a failed read is not empty).
+        fresh = prov.ForeignCreations(session_id)
+        try:
+            if fresh.foreign_under(path, strict=True) is not None:
+                return hold("another session has recorded work inside the checkout")
+        finally:
+            fresh.close()
+    except (OSError, ValueError, sqlite3.Error):
+        return hold("ownership could not be verified")
+    if _owned_by_session(target, path, prot, session_id) != own or (
+        prov.cleanup_identity(path) != identity
+    ):
+        return hold(changed)
+    return RankedTarget(target, Risk.LOW, f"{reason}; verified removal payload ({state})")
+
+
 def _finished_route_barred(root: str, prot: _Protected) -> bool:
     """True when a foreign tree sits where a plain directory already ranks HIGH.
 
@@ -2284,6 +2549,7 @@ def classify_targets(
     created: Sequence[Creation] = (),
     blind: Sequence[str] = (),
     globstar: bool = False,
+    exact_cleanup: bool = False,
 ) -> Verdict:
     prot = _protected(env, scratchpad, session_id) if (targets or touched or created) else None
     evidence_hits: list[RankedTarget] = []
@@ -2355,7 +2621,10 @@ def classify_targets(
     # only if some target reaches the LOW fallbacks in ``_rank``).
     foreign = ForeignCreations(session_id)
     try:
-        ranked = [_rank(t, prot, session_id, globstar, foreign=foreign) for t in targets]
+        ranked = [
+            _rank(t, prot, session_id, globstar, foreign=foreign, exact_cleanup=exact_cleanup)
+            for t in targets
+        ]
     finally:
         foreign.close()
     # An alternate parse's word (GNU sed's reading of ``-i ''``) counts only
@@ -2453,4 +2722,5 @@ def classify_bash(
         created=resolution.created,
         blind=resolution.blind,
         globstar=resolution.globstar,
+        exact_cleanup=_literal_worktree_remove(command, resolution.targets),
     )

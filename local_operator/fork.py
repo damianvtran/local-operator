@@ -195,7 +195,11 @@ COPIED_SIDECARS: tuple[str, ...] = (
 #:   A fork is RETAINED: branching a conversation is a deliberate act of keeping
 #:   it, and inheriting the mark would schedule the new branch for deletion
 #:   without the user ever having asked for that on it.
+# Live file proofs belong to the original owner/session incarnation. Transcript
+# receipt rows may travel as history, but never their private issuing witnesses.
 EXCLUDED_SIDECARS: tuple[str, ...] = (
+    ".file-provenance",
+    ".file-provenance.initialized.json",
     ".session.pid",
     "subagent-roster.v1.json",
     "origin-scan.json",
@@ -782,6 +786,8 @@ def _rewrite_fork_goal_judge(fork_dir: Path) -> None:
     payload = read_goal_record(fork_dir)
     if payload is None:
         return
+    # Cloning is not authorization to run a second unattended goal chain.
+    payload["recover"] = False
     judge = payload.get("judge")
     payload["judge"] = {
         **(judge if isinstance(judge, dict) else {}),

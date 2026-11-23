@@ -70,6 +70,11 @@ class MoveTo:
     #: a conversation that owns session roles refuses a move by default because
     #: v1 does not carry them; this flag moves it and leaves them here.
     drop_session_roles: bool = False
+    #: ``--without-working-set`` (review D2/U2, round 1): move the conversation and
+    #: leave its working files where they are — the escape the owner's gate accepts
+    #: for an ``unknown`` / ``unsupported`` working set, which the card and the
+    #: refusal copy both name. Accepted here so the copy is true in this surface too.
+    without_working_set: bool = False
     error: str = ""
 
 
@@ -112,6 +117,7 @@ def parse_move_to(arg: str) -> MoveTo | None:
     # request build reads this name on every ``--to`` form, including the ones
     # that never mention the flag.
     drop_session_roles = False
+    without_working_set = False
     words: list[str] = []
     index = 0
     while index < len(tokens):
@@ -132,6 +138,8 @@ def parse_move_to(arg: str) -> MoveTo | None:
             queue = True
         elif token == "--drop-session-roles":
             drop_session_roles = True
+        elif token == "--without-working-set":
+            without_working_set = True
         elif token.startswith("-"):
             if token == "--wait" or token.startswith("--wait="):
                 # THE OTHER HALF OF THE BUSY PAPERCUT (``mobility._busy_sentence``):
@@ -158,6 +166,7 @@ def parse_move_to(arg: str) -> MoveTo | None:
         keep=keep,
         queue=queue,
         drop_session_roles=drop_session_roles,
+        without_working_set=without_working_set,
     )
 
 
@@ -168,6 +177,8 @@ def run_session_move(
     keep: bool = False,
     queue: bool = False,
     drop_session_roles: bool = False,
+    confirm_working_set: str = "",
+    without_working_set: bool = False,
 ) -> dict[str, Any]:
     """Run ``lop sessions move … --json`` and return its contract document.
 
@@ -189,7 +200,57 @@ def run_session_move(
         argv.append("--queue")
     if drop_session_roles:
         argv.append("--drop-session-roles")
+    if confirm_working_set:
+        # The scope digest the user approved in the working-set card (design §11.3);
+        # the owner refuses ``working_set_changed`` if the scope moved since.
+        argv.extend(["--confirm-working-set", confirm_working_set])
+    elif without_working_set:
+        # The explicit "leave them where they are" (card action or typed flag).
+        argv.append("--without-working-set")
     argv.append("--json")
+    return _run_cli_json(session_id, to, argv)
+
+
+def run_session_move_preflight(session_id: str, to: str) -> dict[str, Any]:
+    """Run ``lop sessions move <id> --to <to> --dry-run --json``: the working set, nothing moved.
+
+    The answer is ``{ok, dry_run, session_id, confirmation_required, working_set}``, or
+    a refusal in the contract's shape. Blocking; the caller runs it off the loop. Most
+    refusals here are not a reason to stop: the move itself is asked next and the
+    owner's gate is the authority, so the caller proceeds and reports whatever it
+    answers. The one exception is ``relay_restart_required`` (review R9): this
+    device's relay cannot run the gate at all, so the caller stops before the leave.
+    """
+    argv = python_argv(
+        "-m",
+        "local_operator.cli",
+        "sessions",
+        "move",
+        session_id,
+        "--to",
+        to,
+        "--dry-run",
+        "--json",
+    )
+    return _run_cli_json(session_id, to, argv)
+
+
+def stale_relay_message() -> str:
+    """The ``relay_restart_required`` sentence when this device's relay predates the
+    working-set gate, else "" (``mobility.stale_relay_message``).
+
+    For the path that runs NO preflight — ``/move --without-working-set`` (review M1,
+    round 3) — so it too refuses before the leave instead of after it. Same process
+    environment as the CLI child, so it reads the same relay record. Blocking (a
+    file read); the caller runs it off the loop.
+    """
+    from local_operator.network.mobility import stale_relay_message as _stale
+
+    return _stale()
+
+
+def _run_cli_json(session_id: str, to: str, argv: list[str]) -> dict[str, Any]:
+    """One bounded, group-reaped CLI run whose stdout is a JSON document."""
     env = dict(os.environ)
     env.pop("FORCE_COLOR", None)
     try:

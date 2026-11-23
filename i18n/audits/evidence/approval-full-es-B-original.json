@@ -1,0 +1,925 @@
+{
+  "locale": "es",
+  "side": "B",
+  "namespace": "wire.settings",
+  "round": 1,
+  "status": "failed",
+  "whole_namespace_verdict": "FAIL — inherited untranslated human copy remains; new approval-mode labels semantically pass",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "target_sha256": "e1026565e8003ddb8985c82e0b23de028a7ac4e01b5fbd5e4b6a3294660c64a5",
+  "head": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+  "scope": "fa4fb006..a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa",
+  "translator": {
+    "agent": "approval-labels-author-es",
+    "model": "openai/gpt-6.1-sol",
+    "source": "i18n/audits/evidence/approval-choice-translator-es.json",
+    "scope": "approval-label candidate: preguntar retained, automático newly authored; other 893 original authors unknown"
+  },
+  "auditor": {
+    "agent": "translation-auditor approval-full-es-B-cached",
+    "session_id": "bdbb1a53f92b",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_provenance": "Host model-switch message: fallback from anthropic/claude-opus-5-5 due provider quota before audit catalogue reads. No semantic audit authored under initial model.",
+    "findings": [
+      {
+        "id": "ES-B-01",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+        "source": "default",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-02",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+        "source": "default",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-03",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+        "source": "default",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-04",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+        "source": "default",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-05",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+        "source": "default",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-06",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+        "source": "default",
+        "current": "default",
+        "proposed": "predeterminado",
+        "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-07",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+        "source": "false",
+        "current": "false",
+        "proposed": "no",
+        "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-08",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+        "source": "allow",
+        "current": "allow",
+        "proposed": "permitir",
+        "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-09",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+        "source": "deny",
+        "current": "deny",
+        "proposed": "impedir",
+        "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-10",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+        "source": "true",
+        "current": "true",
+        "proposed": "sí",
+        "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-11",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+        "source": "true",
+        "current": "true",
+        "proposed": "sí",
+        "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-12",
+        "severity": "major",
+        "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+        "source": "true",
+        "current": "true",
+        "proposed": "sí",
+        "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-13",
+        "severity": "major",
+        "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+        "source": "allowlist",
+        "current": "allowlist",
+        "proposed": "lista de permitidos",
+        "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-14",
+        "severity": "major",
+        "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+        "source": "inherit",
+        "current": "inherit",
+        "proposed": "heredar",
+        "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-15",
+        "severity": "major",
+        "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+        "source": "client",
+        "current": "client",
+        "proposed": "cliente",
+        "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-16",
+        "severity": "major",
+        "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+        "source": "off",
+        "current": "off",
+        "proposed": "desactivada",
+        "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-17",
+        "severity": "major",
+        "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+        "source": "provider",
+        "current": "provider",
+        "proposed": "proveedor",
+        "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-18",
+        "severity": "major",
+        "key": "wire.settings.speech_voice_gender.choice.female.label",
+        "source": "female",
+        "current": "female",
+        "proposed": "femenina",
+        "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-19",
+        "severity": "major",
+        "key": "wire.settings.speech_voice_gender.choice.male.label",
+        "source": "male",
+        "current": "male",
+        "proposed": "masculina",
+        "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-20",
+        "severity": "major",
+        "key": "wire.settings.web_search_strategy.choice.ordered.label",
+        "source": "ordered",
+        "current": "ordered",
+        "proposed": "por orden",
+        "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-21",
+        "severity": "major",
+        "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+        "source": "round_robin",
+        "current": "round_robin",
+        "proposed": "rotación",
+        "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-22",
+        "severity": "major",
+        "key": "wire.settings.session_scratchpad.title",
+        "source": "Scratchpad",
+        "current": "Scratchpad",
+        "proposed": "Borrador",
+        "reason": "Human section heading names the session scratch area, not the literal scratchpad:// URI; existing Spanish description already calls it área de borrador.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-23",
+        "severity": "major",
+        "key": "wire.settings.session_scratchpad_max_bytes.help",
+        "source": "Bytes a session's scratchpad may hold: 16 MiB to 8 GiB. Default 256 MiB.",
+        "current": "Bytes que puede guardar el scratchpad de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB.",
+        "proposed": "Bytes que puede guardar el borrador de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB.",
+        "reason": "Human description retains untranslated scratchpad; use the same native term as its section and preserve bounds and units.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-24",
+        "severity": "major",
+        "key": "wire.settings.session_scratchpad_max_bytes.label",
+        "source": "Scratchpad size cap (bytes)",
+        "current": "Límite de scratchpad (bytes)",
+        "proposed": "Límite del borrador (bytes)",
+        "reason": "Human numeric row label retains scratchpad, unlike the translated explanation área de borrador; the URI scheme itself remains unchanged.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-25",
+        "severity": "major",
+        "key": "wire.settings.subagents_models_hi.help",
+        "source": "Bills at that model's rates; 'default': session; empty removes the tier",
+        "current": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+        "proposed": "Se factura a las tarifas de ese modelo; 'default': sesión; vacío elimina el nivel",
+        "reason": "The word after the literal default token explains the session model; session here is human explanatory prose, not an enum token.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-26",
+        "severity": "major",
+        "key": "wire.settings.subagents_models_lo.help",
+        "source": "Bills at that model's rates; 'default': session; empty removes the tier",
+        "current": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+        "proposed": "Se factura a las tarifas de ese modelo; 'default': sesión; vacío elimina el nivel",
+        "reason": "The word after the literal default token explains the session model; session here is human explanatory prose, not an enum token.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      },
+      {
+        "id": "ES-B-27",
+        "severity": "major",
+        "key": "wire.settings.subagents_models_med.help",
+        "source": "Bills at that model's rates; 'default': session; empty removes the tier",
+        "current": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+        "proposed": "Se factura a las tarifas de ese modelo; 'default': sesión; vacío elimina el nivel",
+        "reason": "The word after the literal default token explains the session model; session here is human explanatory prose, not an enum token.",
+        "scope": "inherited namespace issue",
+        "group": "inherited-untranslated-human-copy"
+      }
+    ],
+    "unresolved_blocker_count": 0,
+    "unresolved_major_count": 27,
+    "minor_count": 6
+  },
+  "fresh_keys_read": 895,
+  "retained_semantic_keys": 0,
+  "context_entries_read": 104,
+  "perkey_subgroups": [
+    {
+      "start": 1,
+      "end": 130,
+      "count": 130,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 131,
+      "end": 195,
+      "count": 65,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 196,
+      "end": 255,
+      "count": 60,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 256,
+      "end": 320,
+      "count": 65,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 321,
+      "end": 380,
+      "count": 60,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 381,
+      "end": 440,
+      "count": 60,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 441,
+      "end": 500,
+      "count": 60,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 501,
+      "end": 560,
+      "count": 60,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 561,
+      "end": 620,
+      "count": 60,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 621,
+      "end": 680,
+      "count": 60,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 681,
+      "end": 745,
+      "count": 65,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 746,
+      "end": 805,
+      "count": 60,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 806,
+      "end": 865,
+      "count": 60,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    },
+    {
+      "start": 866,
+      "end": 895,
+      "count": 30,
+      "read": "complete source and Spanish pairs; elided output expanded through spill reads"
+    }
+  ],
+  "findings": [
+    {
+      "id": "ES-B-01",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "source": "default",
+      "current": "default",
+      "proposed": "predeterminado",
+      "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-02",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "source": "default",
+      "current": "default",
+      "proposed": "predeterminado",
+      "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-03",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "source": "default",
+      "current": "default",
+      "proposed": "predeterminado",
+      "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-04",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "source": "default",
+      "current": "default",
+      "proposed": "predeterminado",
+      "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-05",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "source": "default",
+      "current": "default",
+      "proposed": "predeterminado",
+      "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-06",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "source": "default",
+      "current": "default",
+      "proposed": "predeterminado",
+      "reason": "This is independently localized Choice.label shown to a person, not the stable enum value; English default remains untranslated.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-07",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "source": "false",
+      "current": "false",
+      "proposed": "no",
+      "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-08",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "source": "allow",
+      "current": "allow",
+      "proposed": "permitir",
+      "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-09",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "source": "deny",
+      "current": "deny",
+      "proposed": "impedir",
+      "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-10",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "source": "true",
+      "current": "true",
+      "proposed": "sí",
+      "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-11",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "source": "true",
+      "current": "true",
+      "proposed": "sí",
+      "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-12",
+      "severity": "major",
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "source": "true",
+      "current": "true",
+      "proposed": "sí",
+      "reason": "English machine-token spelling leaked into the independently localized human selector label; preserve Choice.value, translate only the display text.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-13",
+      "severity": "major",
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "source": "allowlist",
+      "current": "allowlist",
+      "proposed": "lista de permitidos",
+      "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-14",
+      "severity": "major",
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "source": "inherit",
+      "current": "inherit",
+      "proposed": "heredar",
+      "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-15",
+      "severity": "major",
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "source": "client",
+      "current": "client",
+      "proposed": "cliente",
+      "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-16",
+      "severity": "major",
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "source": "off",
+      "current": "off",
+      "proposed": "desactivada",
+      "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-17",
+      "severity": "major",
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "source": "provider",
+      "current": "provider",
+      "proposed": "proveedor",
+      "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-18",
+      "severity": "major",
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "source": "female",
+      "current": "female",
+      "proposed": "femenina",
+      "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-19",
+      "severity": "major",
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "source": "male",
+      "current": "male",
+      "proposed": "masculina",
+      "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-20",
+      "severity": "major",
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "source": "ordered",
+      "current": "ordered",
+      "proposed": "por orden",
+      "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-21",
+      "severity": "major",
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "source": "round_robin",
+      "current": "round_robin",
+      "proposed": "rotación",
+      "reason": "Consumer constructs Choice(machine value, localized label, localized description); this untranslated English label is human-facing, not a parser input or a brand.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-22",
+      "severity": "major",
+      "key": "wire.settings.session_scratchpad.title",
+      "source": "Scratchpad",
+      "current": "Scratchpad",
+      "proposed": "Borrador",
+      "reason": "Human section heading names the session scratch area, not the literal scratchpad:// URI; existing Spanish description already calls it área de borrador.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-23",
+      "severity": "major",
+      "key": "wire.settings.session_scratchpad_max_bytes.help",
+      "source": "Bytes a session's scratchpad may hold: 16 MiB to 8 GiB. Default 256 MiB.",
+      "current": "Bytes que puede guardar el scratchpad de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB.",
+      "proposed": "Bytes que puede guardar el borrador de una sesión: de 16 MiB a 8 GiB. Predeterminado: 256 MiB.",
+      "reason": "Human description retains untranslated scratchpad; use the same native term as its section and preserve bounds and units.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-24",
+      "severity": "major",
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "source": "Scratchpad size cap (bytes)",
+      "current": "Límite de scratchpad (bytes)",
+      "proposed": "Límite del borrador (bytes)",
+      "reason": "Human numeric row label retains scratchpad, unlike the translated explanation área de borrador; the URI scheme itself remains unchanged.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-25",
+      "severity": "major",
+      "key": "wire.settings.subagents_models_hi.help",
+      "source": "Bills at that model's rates; 'default': session; empty removes the tier",
+      "current": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+      "proposed": "Se factura a las tarifas de ese modelo; 'default': sesión; vacío elimina el nivel",
+      "reason": "The word after the literal default token explains the session model; session here is human explanatory prose, not an enum token.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-26",
+      "severity": "major",
+      "key": "wire.settings.subagents_models_lo.help",
+      "source": "Bills at that model's rates; 'default': session; empty removes the tier",
+      "current": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+      "proposed": "Se factura a las tarifas de ese modelo; 'default': sesión; vacío elimina el nivel",
+      "reason": "The word after the literal default token explains the session model; session here is human explanatory prose, not an enum token.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-27",
+      "severity": "major",
+      "key": "wire.settings.subagents_models_med.help",
+      "source": "Bills at that model's rates; 'default': session; empty removes the tier",
+      "current": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+      "proposed": "Se factura a las tarifas de ese modelo; 'default': sesión; vacío elimina el nivel",
+      "reason": "The word after the literal default token explains the session model; session here is human explanatory prose, not an enum token.",
+      "scope": "inherited namespace issue",
+      "group": "inherited-untranslated-human-copy"
+    },
+    {
+      "id": "ES-B-28",
+      "severity": "minor",
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "source": "Today's constant.",
+      "current": "La constante actual.",
+      "proposed": "La expresividad habitual.",
+      "reason": "La constante actual is a literal calque that sounds mathematical and does not naturally describe the existing standard delivery identified by the context note.",
+      "scope": "inherited namespace issue",
+      "group": "idiom"
+    },
+    {
+      "id": "ES-B-29",
+      "severity": "minor",
+      "key": "wire.settings.librarian_cadence_at.help",
+      "source": "Local wall-clock HH:MM. An invalid value falls back to 03:30 at the next arm.",
+      "current": "Hora local HH:MM. Un valor no válido vuelve a 03:30 en el próximo armado.",
+      "proposed": "Hora local HH:MM. Un valor no válido vuelve a 03:30 en la siguiente programación.",
+      "reason": "Armado is a scheduling calque; sibling aida_cadence_at.help uses the native programación for the same operation.",
+      "scope": "inherited namespace issue",
+      "group": "glossary-idiom"
+    },
+    {
+      "id": "ES-B-30",
+      "severity": "minor",
+      "key": "wire.settings.librarian_cadence_paused.help",
+      "source": "Pausing removes her scheduled rows; resuming re-arms the next pass. The desktop and /librarian write the same key.",
+      "current": "Pausar elimina sus filas programadas; reanudar arma la siguiente pasada. El escritorio y /librarian escriben la misma clave.",
+      "proposed": "Pausar elimina sus filas programadas; reanudar programa la siguiente pasada. El escritorio y /librarian escriben la misma clave.",
+      "reason": "Arma la siguiente pasada is unnatural scheduling language and drifts from the sibling programar terminology.",
+      "scope": "inherited namespace issue",
+      "group": "glossary-idiom"
+    },
+    {
+      "id": "ES-B-31",
+      "severity": "minor",
+      "key": "wire.settings.tools_defer.label",
+      "source": "Load rarely used tool schemas on demand",
+      "current": "Cargar los esquemas de herramientas poco usadas a demanda",
+      "proposed": "Cargar esquemas bajo demanda",
+      "reason": "The native label is 57 cells versus English 39; materially expanded relative to the documented 29-cell settings label column. Shorten or perform a rendered fit check; no clipping was observed here.",
+      "scope": "inherited namespace issue",
+      "group": "width-risk-not-rendered"
+    },
+    {
+      "id": "ES-B-32",
+      "severity": "minor",
+      "key": "wire.settings.runtime_keep_alive_seconds.label",
+      "source": "Keep closed conversations warm (s)",
+      "current": "Mantener en caliente las conversaciones cerradas (s)",
+      "proposed": "Conservar al cerrar (s)",
+      "reason": "The native label is 52 cells versus English 34; materially expanded relative to the documented 29-cell settings label column. Shorten or perform a rendered fit check; no clipping was observed here.",
+      "scope": "inherited namespace issue",
+      "group": "width-risk-not-rendered"
+    },
+    {
+      "id": "ES-B-33",
+      "severity": "minor",
+      "key": "wire.settings.mesh_move_working_set_roots.label",
+      "source": "Folders that may receive moved repositories",
+      "current": "Carpetas que pueden recibir repositorios movidos",
+      "proposed": "Destinos de repositorios",
+      "reason": "The native label is 48 cells versus English 43; materially expanded relative to the documented 29-cell settings label column. Shorten or perform a rendered fit check; no clipping was observed here.",
+      "scope": "inherited namespace issue",
+      "group": "width-risk-not-rendered"
+    }
+  ],
+  "counts": {
+    "blocker": 0,
+    "major": 27,
+    "minor": 6,
+    "nit": 0,
+    "distinct_finding_keys": 33,
+    "keys_without_reported_findings": 862
+  },
+  "new_two_labels": {
+    "status": "passed semantic and literal controls, no unconditional authorization claim",
+    "keys": {
+      "wire.settings.tool_approval_mode.choice.ask.label": {
+        "source": "Ask",
+        "current": "preguntar",
+        "arguments": 0,
+        "plural_categories": "N/A",
+        "safety": "Names a mode only; does not promise prompting on all tools, guardrail bypass or authorization.",
+        "cells": 9,
+        "english_cells": 3
+      },
+      "wire.settings.tool_approval_mode.choice.auto.label": {
+        "source": "Automatic",
+        "current": "automático",
+        "arguments": 0,
+        "plural_categories": "N/A",
+        "safety": "Names a mode only; does not promise prompting on all tools, guardrail bypass or authorization.",
+        "cells": 10,
+        "english_cells": 9
+      }
+    },
+    "width": "preguntar 9 vs Ask 3; automático 10 vs Automatic 9. Compact, but no real renderer check."
+  },
+  "passed_vs_uncleared": {
+    "semantic_read_complete": 895,
+    "whole_namespace_passed": false,
+    "uncleared_major_keys": [
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "wire.settings.shell_environment_mode.choice.inherit.label",
+      "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "wire.settings.speech_voice_gender.choice.female.label",
+      "wire.settings.speech_voice_gender.choice.male.label",
+      "wire.settings.web_search_strategy.choice.ordered.label",
+      "wire.settings.web_search_strategy.choice.round_robin.label",
+      "wire.settings.session_scratchpad.title",
+      "wire.settings.session_scratchpad_max_bytes.help",
+      "wire.settings.session_scratchpad_max_bytes.label",
+      "wire.settings.subagents_models_hi.help",
+      "wire.settings.subagents_models_lo.help",
+      "wire.settings.subagents_models_med.help"
+    ],
+    "minor_findings_non_gating": true,
+    "new_two_semantic_pass": true
+  },
+  "inputs": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/6448acb16e8d/scratchpad/approval-full-en-A-approved-capture.json",
+      "envelope_sha256": "9ff37d2efa1d9c367ce7dcc9a01f1fa9f60f74601daf20dbb9d86c85698bf096",
+      "canonical_map_sha256": "f621866fb5e74c1b617e29e17d02008cb42dce6574aa3624ff9a557e1ef2a7b6",
+      "details_verified": true,
+      "repository": "damianvtran/local-operator",
+      "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/i18n/audits/evidence/approval-full-inputs/es-approved-envelope.json",
+      "envelope_sha256": "ba48ba9c815b8a17b106c6b7d31248ca3d9dc41e1a8a7fd024e396f0011e5c3d",
+      "canonical_map_sha256": "f23f987795b13044ef9107441dbe55ab37db9221c6198dfaa19a381056ddcbd8",
+      "details_verified": true,
+      "repository": "damianvtran/local-operator",
+      "commit": "a7c126c387c2dd71f61067c0b2fa37dbc6f95cfa"
+    }
+  ],
+  "source_binding": "Envelope public_copy/repository_verified, repository/root, commit and checkout_head inspected; original EN/ES and context SHA computed metadata-only and match pins. Tool details.sha256 is formatted tool text, not original file digest.",
+  "controls": {
+    "consumer_read": "settings_io.py Choice constructors inspected for OpenRouter fallback, shell environment, voice gender, transcription cleanup and web search strategy. Independent labels distinct from machine value.",
+    "parse_and_signature": "All 895 source/target pairs parsed using pinned worktree runtime; recursive argument names/kinds/skeletons/select branches matched: 0 mismatches. Module origin asserted.",
+    "argument_keys": [
+      "wire.settings.local_providers.base_url.label",
+      "wire.settings.local_providers.models.label"
+    ],
+    "missing_argument_negative": "Both argument-bearing targets rejected empty params with MessageFormatError.",
+    "plural_messages": 0,
+    "CLDR_es_samples": {
+      "0": "other",
+      "1": "one",
+      "2": "other",
+      "1000000": "many",
+      "1500000": "other"
+    },
+    "NFC": "895/895 targets NFC",
+    "bidi": "0 authored directional controls across 895; Spanish LTR, native RTL layout N/A",
+    "pseudo": "Both new labels wrapped in literal RLI/PDI + bracket/tilde expansion and rendered byte-identically by pinned pure parser; synthetic text only, not UI or RTL-fit evidence.",
+    "width": "All 104 sidecar entries inspected; no declared maxCells exceeded. 63 other numeric/setting labels exceed generic 29-cell column heuristically, including some English sources; three substantial expansion examples reported as non-rendered risks. No measured clipping claim.",
+    "error_recovery": "First CLDR invocation used reversed arguments and failed after signature/missing-arg outputs; read signature and reran corrected CLDR + pseudo controls successfully. No catalogue defect inferred from auditor invocation error."
+  },
+  "named_exceptions": {
+    "Spanish_cognates": [
+      "manual is native Spanish",
+      "auto is an idiomatic Spanish abbreviation permitted by style guide",
+      "neutral source translated neutro"
+    ],
+    "technical_labels": {
+      "wire.settings.compaction_strategy.choice.context_full.label": "named compaction mechanism context-full",
+      "wire.settings.compaction_strategy.choice.snapcompact.label": "named compaction mechanism snapcompact",
+      "wire.settings.providers_openai_api.choice.chat_completions.label": "OpenAI API surface identifier",
+      "wire.settings.providers_openai_api.choice.responses.label": "Responses API surface name",
+      "wire.settings.web_fetch_render_backend.choice.stdlib.label": "named renderer stdlib",
+      "wire.settings.subagents_models_hi.label": "hi is the actual tier token; surrounding text localized",
+      "wire.settings.subagents_models_lo.label": "lo is the actual tier token; surrounding text localized",
+      "wire.settings.subagents_models_med.label": "med is the actual tier token; surrounding text localized"
+    },
+    "product_or_style_names": {
+      "wire.settings.aida.title": "Aida persona name",
+      "wire.settings.hub.title": "Agent Hub product name",
+      "wire.settings.hooks.title": "hooks explicitly kept English in es style guide",
+      "wire.settings.runtime.title": "runtime explicitly kept English in es style guide",
+      "wire.settings.classification_vendor.choice.openrouter.label": "provider name",
+      "wire.settings.classification_vendor.choice.radient.label": "provider name",
+      "wire.settings.classification_vendor.choice.typesafe.label": "provider name"
+    },
+    "embedded_literals": "Commands, paths, URLs, provider/model IDs, time examples, env-var names, JSON property names and dangerous-delete rule identifier retained as technical tokens; no blanket exemption for human enum labels."
+  },
+  "limits": [
+    "Not a real-renderer or whole-UI clearance; no browser/native app launched.",
+    "No repository edits, generated files, ledger changes, git/ref moves, testsuites, services or credentials.",
+    "No partner audit opinions read; translator receipt used only to attribute candidate author/model.",
+    "Spanish loanwords judged using locale style guide; no assertion that original 893 keys were newly authored.",
+    "JSON API-envelope parse only for product text; original product files used for hashes only.",
+    "Receipt is an explicitly authorized new scratch write, not a repository modification."
+  ]
+}

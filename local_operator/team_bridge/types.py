@@ -65,6 +65,7 @@ __all__ = [
     "validate_send_recipient",
     "SCREENING_CATEGORIES",
     "ACK_TARGETS",
+    "RECEIPT_ACK_TARGETS",
     "AckTarget",
     "ConversationFeedRef",
     "FeedSeq",
@@ -108,10 +109,21 @@ CONVERSATION_FEED_KIND = "conversation_id"
 CONVERSATION_FEED_TYPE = "message_available"
 
 #: §6.2's closed ack states for ONE recipient advancing their own delivery:
-#: unread→read (with an allow verdict) or unread/held→blocked (with a reject
-#: verdict). working/done are NOT H2 acks (no automatic progression exists).
-ACK_TARGETS = ("read", "blocked")
-AckTarget = Literal["read", "blocked"]
+#: unread→read (with an allow verdict), unread/held→blocked (with a reject
+#: verdict), then read→working→done. The connector posts only the first two
+#: (automatic, screening-gated); working/done are posted by the receiving
+#: agent itself through ``bridge(op="ack")`` so the hub's append-only
+#: ``state_events`` audit shows the request being worked and finished (Team
+#: Bridge requirements #2/#4). Before this they were a local SQLite claim only
+#: and the hub row stayed at ``read`` forever.
+ACK_TARGETS = ("read", "blocked", "working", "done")
+AckTarget = Literal["read", "blocked", "working", "done"]
+#: The targets that carry (and must carry) a screening verdict. working/done
+#: carry none: the hub gates working on the allow verdict it already STORED at
+#: read (agent-server ``bridge_ack_service.go``), so re-sending a tuple would
+#: only add a way to disagree with the record. Kept distinct from
+#: ``ACK_TARGETS`` so the store's receipt rule cannot widen by accident.
+RECEIPT_ACK_TARGETS = ("read", "blocked")
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)$")
@@ -197,11 +209,14 @@ RECIPIENT_NAME_SHAPE = '{"name": "<display name>"}'
 #: reach for (``scripts/bench_context_budget.py``).
 SEND_RECIPIENT_DESCRIPTION = (
     f"Who receives it: {RECIPIENT_ACCOUNT_SHAPE} or {RECIPIENT_ENDPOINT_SHAPE}, "
+    # Trimmed in PR #4239 to pay for the emoji shortcode hint under the context
+    # budget: "WHOLE name" (the shape just before already says display name) and
+    # "directory op" (this text only ever renders inside the bridge tool).
     f"the bare account id, or {RECIPIENT_NAME_SHAPE} — trimmed, case-insensitive, "
-    f"WHOLE display name (no handle, email or substring). A name resolves "
+    f"WHOLE name (no handle, email or substring). A name resolves "
     f"in its op's scope: channel_post in the room's active members, "
     f"send/reply in your send allowlist. One match delivers; none or several "
-    f"refuse. Ids: the bridge directory. dm takes ids only, in to OR "
+    f"refuse. Ids: directory op. dm takes ids only, in to OR "
     f"top-level endpoint_id/account_id."
 )
 
@@ -964,6 +979,14 @@ class ConversationFeedRef:
     #: which is exactly today's behaviour. ``False`` = absent (an older hub) or a mention,
     #: which is never passive (the parser drops the bit beside ``mention``).
     passive: bool = False
+    #: Whether ``thread_root_id is None`` is a FACT ("this message is a thread
+    #: root") or merely absent. A ref parsed from the hub feed knows: the hub
+    #: stamps a reply's root. A ref REBUILT from a body reservation does not —
+    #: the reservation row stores no root (PR #4177, QA round 3), so a ``None``
+    #: there would claim a reply is a root and default thread placement would
+    #: post under the reply itself, which the hub refuses (``invalid_root``).
+    #: In-memory only: never encoded, so the persisted ref grammar is unchanged.
+    thread_root_known: bool = True
 
     def validated(self) -> "ConversationFeedRef":
         """Refuse a ref the parser could not read back (never guess)."""

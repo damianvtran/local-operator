@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "note": "Byte-identical originals; original provenance and verdict unchanged. Retention mapping is not an audit.",
+  "files": [
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.teams.effective/es1-2fb9/es.effective.receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/es.effective.receipt.json",
+      "sha256": "4094a8200d93a19e12257a40955961b004a316777dea76d6cefc4b3efe9871f6"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.teams.effective/es1-2fb9/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/es.effective.record.json",
+      "sha256": "bff1dd757dc6e4a28058d0f15de784e2463b52557992520a8dc63c2e023b39ee"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.teams.effective/es1-2fb9/es.wire.teams.effective.translator-provenance.json",
+      "original_path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.translator-provenance.json",
+      "sha256": "ce95251a453698bb6421eff617e1711c529222a091d11945a6b39751e666be75"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.teams.effective/es1-2fb9/target.json",
+      "original_path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.json",
+      "sha256": "aad6efce35fa6fccc25573506b0ec3d3ee042f6e23f6e52d5440d2289a519e25"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.teams.effective/es1-2fb9/es.wire.teams.effective.json",
+      "original_path": "/Users/damian/.local-operator/sessions/8fba0458db34/scratchpad/es.wire.teams.effective.json",
+      "sha256": "aad6efce35fa6fccc25573506b0ec3d3ee042f6e23f6e52d5440d2289a519e25"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.teams.effective/es1-2fb9/es.effective.report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/es.effective.report.md",
+      "sha256": "a41d4654d99d7c0f88be967f60bf901823e3c05c8d57093aca3c22159227b406"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.teams.effective/es1-2fb9/es.effective.mechanical.json",
+      "original_path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/es.effective.mechanical.json",
+      "sha256": "4658dfa869d2e27dbf24dd5b5b4618cf7b52eb1469fac167b08fa3a7a71072ee"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.teams.effective/es1-2fb9/es.effective.audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/es.effective.audit.log",
+      "sha256": "4658dfa869d2e27dbf24dd5b5b4618cf7b52eb1469fac167b08fa3a7a71072ee"
+    },
+    {
+      "retained_path": "i18n/audits/evidence/es/wire.teams.effective/es1-2fb9/audit_es_effective.py",
+      "original_path": "/Users/damian/.local-operator/sessions/2fb9f8e55f96/scratchpad/audit_es_effective.py",
+      "sha256": "c26589da6cd21bb43c1954a0dc120ea43658b5a6ad8f5261cef1370a9e79aa38"
+    }
+  ]
+}

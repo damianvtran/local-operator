@@ -1,0 +1,30 @@
+{
+  "record_reference": "i18n/audits/evidence/ru/tui.provider_state/ruA22/record.json",
+  "provenance": "All companions have auditor identity/provenance via record_reference; audit.log and ledger-cli.log contain actual execution, report.md contains notes",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/audit.log",
+      "sha256": "16cacb2dde241b07b074c83f2221d7839d480d9117a23a9300744539146d3557"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/directCLIledger-receipt.json",
+      "sha256": "a3e1d31ea9405884399b267efebfb9b412864fef8287c463b1d584cd551d1847"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/ledger-cli.log",
+      "sha256": "b8ca57ea3095e2df04b6272f6abd34a0b5966f4c7a6c16290aaee144026d12e1"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/record.json",
+      "sha256": "44db46ac2ed3c9524c637b039d64bbab7646694de27a0b76e2f71eae649aa0a1"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/report.md",
+      "sha256": "b85f1979ebfe3a1e8855aae7ba49f0b02a22819d47960e285a81530616e77355"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ruA22/script.py.txt",
+      "sha256": "c780fb6c0942128b9a4b979048a08f54d39257eee9a6a063a499c7ab5dcf5695"
+    }
+  ]
+}

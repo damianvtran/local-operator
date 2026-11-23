@@ -1,0 +1,20 @@
+{
+  "tui.tool_card.status.cut_off": "کٹ گئی",
+  "tui.tool_card.status.error": "خرابی",
+  "tui.tool_card.status.interrupted": "روکی گئی",
+  "tui.tool_card.status.not_run": "کبھی نہیں چلی",
+  "tui.tool_card.status.partial": "جزوی",
+  "tui.tool_card.status.queued": "قطار",
+  "tui.tool_card.status.running": "جاری",
+  "tui.tool_card.status.send.delivery_unconfirmed": "ترسیل کی تصدیق نہیں",
+  "tui.tool_card.status.send.no_new_wake": "پھر نہیں جگایا",
+  "tui.tool_card.status.send.not_delivered": "نہیں پہنچا",
+  "tui.tool_card.status.send.receipt_reused": "پچھلی رسید",
+  "tui.tool_card.status.send.wake_unconfirmed": "بیداری غیر مصدقہ",
+  "tui.tool_card.status.session_reset": "سیشن ری سیٹ",
+  "tui.tool_card.status.switch.partial": "تبدیل ہوا (خرابی)",
+  "tui.tool_card.status.switch.pending": "زیرِ التوا",
+  "tui.tool_card.status.switch.switched": "تبدیل ہو گیا",
+  "tui.tool_card.status.switch.unchanged": "کوئی تبدیلی نہیں",
+  "tui.tool_card.status.waiting": "منتظر"
+}

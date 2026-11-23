@@ -1,0 +1,257 @@
+"""Host prerequisites for verified evaluators that hide tool failures.
+
+Pinned OSWorld V2.1 ``task_025`` runs host ``tesseract`` from ``_ocr_region``
+and turns a missing or failing binary into empty OCR fields, which the judge
+then scores as a valid grade. Here that fault is a refusal at ``reset_start``,
+before a provider or guest exists. Upstream files, outputs and scores stay
+untouched; the task is never imported or executed.
+
+Entries are keyed by exact task bytes plus release manifest, so an edited task
+or another release keeps today's behaviour. Future convergence: the pending
+FreeCAD scorer preflight (#4327) should move into this module and reuse the same
+trusted search path, rather than add a second hook.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import os
+import selectors
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from contextlib import ExitStack, suppress
+from pathlib import Path
+
+from lop_osworld_v2_adapter.provisioning import ProvisioningError
+from lop_osworld_v2_adapter.vendor_bridge import effective_evaluator_path
+
+# Release manifest and exact task bytes from the OSWorld V2.1 task-hash pin.
+_V21_RELEASE_SHA256 = "978686683bdf9f946703c1d316cbbd29c0e3ea97396e48d940ee92c597806ecf"
+_TASK_025_SOURCE_SHA256 = "57b62cfb8e574a946e50e73530297a07ccde9e4a3233d8cc2a90785fb420fe32"
+
+# Pillow-generated 128x64 white RGB PNG, the same input format as _ocr_region.
+# Blank pixels check engine/language/format, not recognition accuracy. Embed
+# the bytes to keep Pillow out of pre-allocation and stdin below POSIX PIPE_BUF.
+_OCR_SAMPLE = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAIAAAABACAIAAABdtOgoAAAApklEQVR4nO3TMREAMAwDsbT8OScwfpEIePjz292h"
+    "88NtBOh5QEyAmAAxAWICxASICRATICZATICYADEBYgLEBIgJEBMgJkBMgJgAMQFiAsQEiAkQEyAmQEyAmAAxAWIC"
+    "xASICRATICZATICYADEBYgLEBIgJEBMgJkBMgJgAMQFiAsQEiAkQEyAmQEyAmAAxAWICxASICRATICZATICYADEBY"
+    "gJM6wAbzgN9G7i4LgAAAABJRU5ErkJggg=="
+)
+# TessTsvRenderer + GetTSVText emit the header and one page row for a blank
+# image. Bound stdout to that contract, not to the size of a task's real OCR.
+_TSV_SAMPLE = (
+    "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+    "left\ttop\twidth\theight\tconf\ttext\n"
+    "1\t1\t0\t0\t0\t0\t0\t0\t128\t64\t-1\t\n"
+)
+_OCR_OUTPUT_LIMIT = len(_TSV_SAMPLE.encode("utf-8"))
+_OCR_TIMEOUT_SECONDS = 20  # The pinned scorer's deadline, not a new tuning knob.
+
+
+class _OCRProbeOutputLimit(Exception):
+    pass
+
+
+class _OCRProbeCleanupError(Exception):
+    pass
+
+
+class _OCRProbeGuardStartupError(Exception):
+    pass
+
+
+# The guard leads the probe's group in the worker's session. Only the worker
+# owns the write end: normal unwinding and even supervisor SIGKILL both close
+# it. The guard stays alive to signal its OWN group, even if tesseract already
+# exited and a helper is all that remains. This also avoids signaling a dead
+# group leader (Darwin can report EPERM for a zombie-only group).
+_OCR_GUARD_READY = b"R"
+_OCR_GROUP_GUARD = f"""
+import os
+import signal
+
+read_lease = os.read
+kill_group = os.killpg
+pgid = os.getpid()
+sigkill = signal.SIGKILL
+os.write(1, {_OCR_GUARD_READY!r})
+while read_lease(0, 1):
+    pass
+kill_group(pgid, sigkill)
+"""
+
+
+def _run_ocr_probe(tool: str, env: dict[str, str]) -> bytes:
+    argv = [tool, "stdin", "stdout", "-l", "eng", "--psm", "6", "tsv"]
+    deadline = time.monotonic() + _OCR_TIMEOUT_SECONDS
+    read_fd, write_fd = os.pipe()
+    child: subprocess.Popen[bytes] | None = None
+    ready = False
+    with os.fdopen(write_fd, "wb") as lease, ExitStack() as streams:
+        with os.fdopen(read_fd, "rb") as owner:
+            guard = subprocess.Popen(
+                [sys.executable, "-I", "-S", "-c", _OCR_GROUP_GUARD],
+                stdin=owner,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env={},
+                cwd="/",
+                process_group=0,
+            )
+        try:
+            # Popen only confirms exec. Joining the group is safe only after
+            # the guard has initialized its lease watcher, within the same
+            # time budget the OCR command gets.
+            assert guard.stdout is not None
+            with guard.stdout, selectors.DefaultSelector() as selector:
+                selector.register(guard.stdout, selectors.EVENT_READ)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise subprocess.TimeoutExpired(argv, _OCR_TIMEOUT_SECONDS)
+                if os.read(guard.stdout.fileno(), 1) != _OCR_GUARD_READY:
+                    raise _OCRProbeGuardStartupError
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(argv, _OCR_TIMEOUT_SECONDS)
+            ready = True
+            child = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                cwd="/",
+                process_group=guard.pid,
+            )
+            assert child.stdin is not None and child.stdout is not None
+            output = bytearray()
+            # Leave stdout open until group cleanup; closing it on overflow
+            # instead would race the guard with a broken pipe in the tool.
+            streams.enter_context(child.stdout)
+            # The whole sample fits even if the tool never reads stdin.
+            # If it already exited, keep its exit status.
+            with suppress(BrokenPipeError), child.stdin:
+                child.stdin.write(_OCR_SAMPLE)
+            with selectors.DefaultSelector() as selector:
+                selector.register(child.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise subprocess.TimeoutExpired(argv, _OCR_TIMEOUT_SECONDS)
+                    chunk = os.read(child.stdout.fileno(), _OCR_OUTPUT_LIMIT + 1 - len(output))
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    if len(output) > _OCR_OUTPUT_LIMIT:
+                        raise _OCRProbeOutputLimit
+            returncode = child.wait(timeout=max(0, deadline - time.monotonic()))
+        finally:
+            lease.close()
+            # Reap within one probe-sized budget. Before readiness no OCR
+            # process joined the group. Kill just the guard: startup may have
+            # stalled before it could notice the closed lease.
+            reap_deadline = time.monotonic() + _OCR_TIMEOUT_SECONDS
+            try:
+                if not ready:
+                    guard.kill()
+                status = guard.wait(timeout=max(0, reap_deadline - time.monotonic()))
+                if child is not None:
+                    child.wait(timeout=max(0, reap_deadline - time.monotonic()))
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise _OCRProbeCleanupError from exc
+            if ready and status != -signal.SIGKILL:
+                raise _OCRProbeCleanupError
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, argv)
+    return bytes(output)
+
+
+def validate_evaluator_dependencies(
+    *,
+    task_id: str,
+    source: bytes,
+    workspace_root: Path,
+    tool_directories: tuple[str, ...] | None,
+    forbidden_roots: tuple[Path, ...],
+) -> None:
+    # OCR is a fallback for ink without extractable text, not optional for a
+    # comparable score: an OCR failure supplies empty fields to the judge.
+    # Match bytes, not a task name or imports guessed from untrusted sources.
+    if task_id != "task_025" or hashlib.sha256(source).hexdigest() != _TASK_025_SOURCE_SHA256:
+        return
+    try:
+        release = (workspace_root / "benchmark_release.json").read_bytes()
+    except OSError:
+        return
+    if hashlib.sha256(release).hexdigest() == _V21_RELEASE_SHA256:
+        _require_tesseract(tool_directories, forbidden_roots)
+
+
+def _require_tesseract(
+    tool_directories: tuple[str, ...] | None, forbidden_roots: tuple[Path, ...]
+) -> None:
+    def refuse(reason: str) -> ProvisioningError:
+        return ProvisioningError(
+            f"OSWorld V2.1 task_025 evaluator needs host tesseract with English OCR and TSV "
+            f"support: {reason}. Install it on the scoring worker and, if outside the default "
+            "search path, pass --infra EVALUATOR_TOOL_PATH=<dir> for its trusted host directory."
+        )
+
+    roots = {
+        candidate
+        for forbidden in forbidden_roots
+        for candidate in (forbidden.absolute(), Path(os.path.realpath(forbidden)))
+    }
+
+    def inside_episode(path: Path) -> bool:
+        resolved = Path(os.path.realpath(path))
+        return any(path.is_relative_to(root) or resolved.is_relative_to(root) for root in roots)
+
+    search_path = effective_evaluator_path(tool_directories)
+    trusted = {*os.defpath.split(os.pathsep), *(tool_directories or ())}
+    entries = search_path.split(os.pathsep)
+    # A host wrapper also uses PATH to look up helpers. Validate the complete
+    # path before handing it to the child, not just the winning binary.
+    if any(not os.path.isabs(entry) for entry in entries):
+        raise refuse("the evaluator search path is empty or contains a relative entry")
+    if any(entry not in trusted or inside_episode(Path(entry)) for entry in entries):
+        raise refuse(
+            "the evaluator search path includes a directory outside the trusted host tool locations"
+        )
+    tool = shutil.which("tesseract", path=search_path)
+    if tool is None:
+        raise refuse("no runnable executable on the evaluator search path")
+    if inside_episode(Path(tool)):
+        raise refuse("the first matching executable is outside the trusted host tool locations")
+    if not Path(tool).is_file():
+        raise refuse("the first matching executable is not a regular file")
+
+    # PATH is the only declared worker setting needed for host tool lookup.
+    # Keep it absent if scoring uses exec's default; never forward ambient
+    # settings (including TESSDATA_PREFIX), credentials, or child diagnostics.
+    env = {"PATH": search_path} if tool_directories is not None or "PATH" in os.environ else {}
+    try:
+        result = _run_ocr_probe(tool, env).decode("utf-8")
+    except subprocess.TimeoutExpired:
+        raise refuse("the OCR readiness check timed out") from None
+    except _OCRProbeOutputLimit:
+        raise refuse("the OCR readiness check exceeded the blank-image TSV response size") from None
+    except _OCRProbeGuardStartupError:
+        raise refuse("the OCR readiness check could not start its host process guard") from None
+    except _OCRProbeCleanupError:
+        raise refuse("the OCR readiness check could not confirm host process cleanup") from None
+    except subprocess.CalledProcessError as exc:
+        raise refuse(
+            f"the OCR readiness check failed (status {exc.returncode}); "
+            "check that tesseract --list-langs includes eng"
+        ) from None
+    except OSError:
+        raise refuse("the OCR readiness check could not run the host executable") from None
+    except UnicodeDecodeError:
+        raise refuse("the OCR readiness check did not return UTF-8 TSV") from None
+    if result != _TSV_SAMPLE:
+        raise refuse("the OCR readiness check did not return TSV for the blank image")

@@ -1,0 +1,72 @@
+"""Bounded catalogue-only audit reproduction; no providers or process probes.
+Provenance reference: i18n/audits/evidence/ru/cli.serve_readiness/sd1/record.json
+"""
+import json
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[6]
+sys.path.insert(0, str(ROOT))
+from local_operator.i18n import runtime
+from rich.cells import cell_len
+
+NS = 'cli.serve_readiness'
+BASE = ROOT / 'local_operator/i18n/catalogues'
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        assert key not in result, f'duplicate JSON key: {key}'
+        result[key] = value
+    return result
+
+def load(path):
+    return json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=unique_object)
+
+en = load(BASE / 'en' / f'{NS}.json')
+ru = load(BASE / 'ru' / f'{NS}.json')
+context = load(BASE / 'en' / f'{NS}.context.json')
+assert len(en) == len(ru) == 11
+assert en.keys() == ru.keys() == context.keys()
+print('PASS strict JSON, duplicate rejection, exact source/target/context key parity: 11/11')
+print('Note: independent explicit category check supplements repo validator, which rejects invalid categories but need not require every category.')
+params = dict(device='node-1', pids='123, 456', holders='custom.service', builds='build-A', install='build-B', recorded='build-A', reasons='pid 123: зарегистрирован в неизвестном состоянии')
+for key in en:
+    source, target = en[key], ru[key]
+    args = runtime.message_arguments(source)
+    assert args == runtime.message_arguments(target), key
+    categories = runtime.plural_selectors(target)
+    for selectors in categories:
+        assert set(selectors) == {'one', 'few', 'many', 'other'}, (key, selectors)
+    assert set(re.findall(r'`[^`]+`', source)) == set(re.findall(r'`[^`]+`', target)), key
+    assert re.findall(r'</?[A-Za-z][^>]*>', source) == re.findall(r'</?[A-Za-z][^>]*>', target), key
+    assert re.findall(r'\[/?[A-Za-z][^\]]*\]', source) == re.findall(r'\[/?[A-Za-z][^\]]*\]', target), key
+    assert not any(unicodedata.category(c) == 'Cf' for c in target), key
+    assert not any(unicodedata.combining(c) for c in target), key
+    counts = [0, 1, 2, 5, 11, 21, 22, 25, 101, 1.5] if categories else [None]
+    widths = []
+    for count in counts:
+        data = dict(params)
+        if count is not None:
+            data['count'] = count
+        rendered = runtime.render_message(target, data, 'ru')
+        english = runtime.render_message(source, data, 'en')
+        assert set(re.findall(r'`[^`]+`', rendered)) == set(re.findall(r'`[^`]+`', english)), key
+        for name, kind in args:
+            if kind == 'simple':
+                assert str(data[name]) in rendered, (key, name)
+        if count is not None:
+            singular = count in (1, 21, 101)
+            assert rendered.startswith('демон ' if singular else 'демоны '), (key, count, rendered)
+        widths.append(cell_len(rendered))
+        hints = context[key]
+        if 'maxCells' in hints:
+            assert cell_len(rendered) <= hints['maxCells'], key
+        if 'maxChars' in hints:
+            assert len(rendered) <= hints['maxChars'], key
+        if count in (1, 2, 5, 1.5):
+            print(f'RENDER {key} count={count}: {rendered}')
+    print(f'PASS {key}: args={args!r}; plural={categories!r}; rendered cells={min(widths)}..{max(widths)}; width hints={ {k: context[key][k] for k in ("maxCells", "maxChars") if k in context[key]} }')
+print('PASS 11/11 mechanical checks; 3 plural messages exercised at 0,1,2,5,11,21,22,25,101,1.5. Plain-text width measurements only, not rendered UI or wrapping proof.')

@@ -1,0 +1,19 @@
+HASH PASS en fa6fe7ce2807a00786dc71449a586ef4e2336ce11dbd199122f794dd82c0a501
+HASH PASS context 01dbb15b434691a77d3417860fbf3e5cc91f243046906d4d77d7c9402b0fd417
+HASH PASS ru 82486a592ce66624c8d7b1c0b45e05ba5f1b49d811d652f65f1ac6d784dc02e1
+HASH PASS translator_receipt 71261e4589b0bbacce7d1605a841f5a7fe5f1fed54c64f5ca413b89eb5cfb35b
+check.py: catalogue checks: 0 problem(s)
+KEY PASS wire.teams.effective.team_missing arguments=(('role', 'simple'),) chars=37
+KEY PASS wire.teams.effective.registry_unreadable arguments=() chars=87
+KEY PASS wire.teams.effective.config_unreadable arguments=() chars=83
+KEY PASS wire.teams.effective.tier_invalid_value arguments=(('tier', 'simple'),) chars=118
+KEY PASS wire.teams.effective.tier_invalid_mapping arguments=(('tier', 'simple'),) chars=173
+KEY PASS wire.teams.effective.tier_unconfigured arguments=(('tier', 'simple'),) chars=46
+KEY PASS wire.teams.effective.tier_invalid_selector arguments=(('tier', 'simple'),) chars=95
+KEY PASS wire.teams.effective.model_unresolvable arguments=(('selector', 'simple'),) chars=95
+KEY PASS wire.teams.effective.unavailable arguments=() chars=86
+ru/wire.teams.effective: wire.teams.effective.team_missing: arguments (('wrong', 'simple'),) != en's (('role', 'simple'),): argument 1 is 'wrong', en's is 'role' (renamed or reordered)
+check.py: catalogue checks: 1 problem(s)
+NEGATIVE CONTROL PASS: renamed role rejected
+check.py: catalogue checks: 0 problem(s)
+PASS: 9/9 strict JSON/key/context/argument/token checks; no plural/select arms; no bidi controls; fixture restored

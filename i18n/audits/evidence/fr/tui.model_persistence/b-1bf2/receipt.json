@@ -1,0 +1,47 @@
+{
+  "locale": "fr",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "1bf2a3e4c433",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "1ca940cf73ba",
+    "independent_from_A_auditor_session": "0ecda03",
+    "independent_from_source_author_session": "a97c7f76d5ee",
+    "actual_model_source": "Host [model switch] message before copy assessment: provider failure: quota; switched from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "record_reference": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/record.json",
+  "record_sha256": "f208355e14183cce22f8efb1f32f540c0cd5bfaa5334e68a83e5b523399aa1c3",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/audit.log",
+      "sha256": "91efd711c1d941c091454f00394d36ae31a52a8f9adf044c21f7673b0e4e44e7"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/current-ledger.json",
+      "sha256": "3ca6c1008407286ea87bff53c312b9ac5dd9a5eac1879c5029fed1fe1d0dc603"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/execution.json",
+      "sha256": "2bcd0e9201538d91b12851ec2350e10c3b73f4ffe25c1e5672228a2895d57d40"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/report.md",
+      "sha256": "536953436547b930badd2485f3050b12ccb63c0a606a5e99a675276785dcb951"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/script.py.txt",
+      "sha256": "8e0952f313d606fac1c5829e46a58b3085f5315b644d80eba0cd9dfde6559392"
+    }
+  ],
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": []
+}

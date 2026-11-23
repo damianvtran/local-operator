@@ -231,11 +231,16 @@ def test_model_hold_raises_no_notice_and_deliver_admits(
     assert held["action"] == "hold" and held["code"] == "model_hold"
     decision = store.work_scope_decision(owner, MESSAGE_ID)
     assert decision is not None and decision["hold_code"] == "model_hold" and decision["eligible"]
-    # Operator report 2026-11-10: no inbox row at all for a review hold — not the
-    # per-message notice and not the keyed long-hold rollup (the badge is enough).
+    # Operator report 2026-11-10: no per-message inbox row for a review hold, and
+    # the keyed long-hold rollup counts it only once it is a day old (holds triage
+    # 2026-11-18, finding b: no holds list ships, so the rollup is its only alert).
     assert _all_notifications(config_dir) == []
     assert decision["notified_at"] is None
-    assert store.long_holds_readonly(owner, older_than_s=0.0, now=10**12)["count"] == 0
+    import time
+
+    now = time.time()
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=now + 3600.0)["count"] == 0
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=now + 49 * 3600.0)["count"] == 1
 
     from local_operator.server.utils import desktop_team_bridge_holds as holds
 
@@ -948,12 +953,14 @@ def test_the_connector_loop_retires_on_start_and_survives_a_failure(tmp_path, mo
     assert calls == [(owner.endpoint_id, tmp_path)] and len(polls) == 1
 
 
-# --- the long-hold rollup and the overflow count ignore review holds -------------
+# --- the long-hold rollup counts review holds daily; the overflow count ignores them
 #
 # Operator report 2026-11-10: "the sidebar badge is sufficient", at most ONE daily
 # rollup. The keyed long-hold alert re-revisions (and is bannerable again) on every
-# count change, so a review flood past 60 minutes still re-notified; review holds
-# with a Deliver/Discard row now leave that count entirely.
+# count change, so a review flood past 60 minutes re-notified. Holds triage
+# 2026-11-18 (finding b): no holds list ships, so leaving review holds out entirely
+# hid them from every alert for up to 18 days. A review hold with a decision row
+# now enters the rollup at the first UTC midnight a full day after it was held.
 
 
 def _tick_late(config_dir, owner, *, hours: float = 2.0, stamp: float = 1000.0) -> str:
@@ -979,14 +986,18 @@ def _fresh_alert_state():
     hold_alert._raised.clear()
 
 
-def test_a_review_only_burst_past_the_threshold_raises_no_long_hold_alert(
+def test_a_review_only_burst_raises_the_long_hold_alert_only_after_a_day(
     rig, _fresh_alert_state  # noqa: F811 — imported fixture
 ) -> None:
+    from local_operator.team_bridge import hold_alert
+
     config_dir, store, owner = rig
     _review_burst(config_dir, store, owner)
     assert _tick_late(config_dir, owner) == "none_held"
-    assert _tick_late(config_dir, owner, hours=30.0, stamp=10**6) == "none_held"
     assert _all_notifications(config_dir) == []
+    assert _tick_late(config_dir, owner, hours=49.0, stamp=10**6) == "raised"
+    rows = [r for r in _all_notifications(config_dir) if r["dismissed_at"] is None]
+    assert [r["key"] for r in rows] == [hold_alert._key(owner.endpoint_id)]
 
 
 def test_mixed_holds_alert_counts_only_work_scope_and_screening_failures(

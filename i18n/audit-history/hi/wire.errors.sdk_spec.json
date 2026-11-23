@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.errors.sdk_spec",
+  "history_sha256": "8a3661b67fc82d0b02aac572dae2e646b3150931450a6e52d4b298409f22d88e",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "aa91c5029e2807e1fd8aaf53a1b068d06eb23a314624ecc7171acea6325298eb",
+      "translator": {
+        "agent": "coder (lopdev)",
+        "session": "22b4da040af8",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (task)",
+        "session": "75e71b9bd834",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #4349: independent audit of the new mcp_ready_timeout_invalid diagnostic at cac0388a5296; all 21 carried messages unchanged from the prior passed source. Mathematical परिमित संख्या is exact in this technical diagnostic; the relative clause preserves the bound. Both technical identifiers are byte-identical, no placeholders or ICU, finite with inclusive lower bound zero. Target catalogue_sha256 = 3c10555834f3f64c474eb11e2a6a025148a36061817eb05546d9d4313c7f83e7. No native terminal shaping claim."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "aa91c5029e2807e1fd8aaf53a1b068d06eb23a314624ecc7171acea6325298eb",
+      "translator": {
+        "agent": "coder (lopdev)",
+        "session": "22b4da040af8",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (task)",
+        "session": "75e71b9bd834",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-20",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #4349: independent audit of the new mcp_ready_timeout_invalid diagnostic at cac0388a5296; all 21 carried messages unchanged from the prior passed source. Mathematical परिमित संख्या is exact in this technical diagnostic; the relative clause preserves the bound. Both technical identifiers are byte-identical, no placeholders or ICU, finite with inclusive lower bound zero. Target catalogue_sha256 = 3c10555834f3f64c474eb11e2a6a025148a36061817eb05546d9d4313c7f83e7. No native terminal shaping claim. Evidence-only follow-up: exact English and target bytes at the audited revision reverified against the current checkout. Evidence: i18n/audits/evidence/hi/wire.errors.sdk_spec/sdk-mcp-ready-timeout-r1/record.json"
+    }
+  ]
+}

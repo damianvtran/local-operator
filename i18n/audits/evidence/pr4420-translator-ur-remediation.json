@@ -1,0 +1,654 @@
+{
+  "locale": "ur",
+  "namespace": "tui.info",
+  "stage": "LLM author remediation only; NOT independent audit or native/rendered clearance",
+  "agent": "translator / info-remediate-ur",
+  "session": "efc432b4d171",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback_from": "anthropic/claude-opus-5-5",
+  "fallback_reason": "explicit host model-switch notice: provider failure quota",
+  "head": "8f1e45a3a98ca9f8b7312b6707c36e21b758966d",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "target_before_sha256": "87aa9c70a1f3e8bd55454f4ca4fa304a88846f35c5d129fc47a6fef4db8b692d",
+  "target_sha256": "ccc8fd0eca869fbd1f70785b070e0d2ff59578241393d75477a84e5cce2efc03",
+  "key_count": 277,
+  "changed_keys": [
+    "tui.info.label.answering",
+    "tui.info.fleet_caveats.lower_bound",
+    "tui.info.env.credentials_set",
+    "tui.info.export.build_age",
+    "tui.info.export.uptime"
+  ],
+  "unrelated_bytes_and_key_order_preserved": true,
+  "source_contract": "i18n/audits/evidence/pr4420-source-remediation-fc9fd773c06f.json",
+  "finding_authority": "i18n/audits/evidence/pr4420-initial-native-ur-r1.json",
+  "findings_addressed": {
+    "UR1": "fleet lower bound now qualifies trajectory total, never runtime count",
+    "UR2": "answering label مؤثر ماڈل matches effective_model",
+    "UR3": "credentials_set محفوظ means stored, not appointed"
+  },
+  "brief_discrepancy": "Parent corrected shorthand; actual JSON is authority. No speculative provider-success/held/retry edits.",
+  "glossary_choices": {
+    "effective_model": "مؤثر ماڈل",
+    "stored": "محفوظ",
+    "trajectory_plural": "ٹریجیکٹریز (existing namespace loanword)",
+    "missing_build_age": "بلڈ کی عمر        نامعلوم",
+    "missing_uptime": "دورانیۂ اجرا       نامعلوم"
+  },
+  "new_terms_invented": [],
+  "placeholder_signature_structure_parity": "PASS for all five changed keys against pinned English; unmeasured/other and nested simple interpolation retained",
+  "cldr_categories": [
+    "one",
+    "other"
+  ],
+  "mechanical_failures": [],
+  "failed_probe_setup": "Initial scratch-only negative test expected parse_message to reject a missing-other branch, but this parser defers that failure to formatting. Corrected scratch probe to render an unmatched selector/count 2, which raises MessageFormatError. No catalogue change or suppressed error; final controls passed.",
+  "checker_interpreter": "/Users/damian/local-operator/.venv/bin/python (primary venv; PYTHONPATH explicitly points to worktree)",
+  "final_control_exit_code": 0,
+  "bidi_controls": [],
+  "outputs": [
+    {
+      "key": "tui.info.label.answering",
+      "params": {},
+      "text": "مؤثر ماڈل",
+      "source_locale": "ur",
+      "cldr_category": null
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 0
+      },
+      "text": "0 سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 1
+      },
+      "text": "1 سیشن پرانی بلڈ چلا رہا ہے اور ذیلی ایجنٹس کی تعداد نہیں بتاتا — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔",
+      "source_locale": "ur",
+      "cldr_category": "one"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 2
+      },
+      "text": "2 سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 5
+      },
+      "text": "5 سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 11
+      },
+      "text": "11 سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 21
+      },
+      "text": "21 سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 1000
+      },
+      "text": "1,000 سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 0
+      },
+      "text": "0 محفوظ",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 1
+      },
+      "text": "1 محفوظ",
+      "source_locale": "ur",
+      "cldr_category": "one"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 2
+      },
+      "text": "2 محفوظ",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 5
+      },
+      "text": "5 محفوظ",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 11
+      },
+      "text": "11 محفوظ",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 21
+      },
+      "text": "21 محفوظ",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 1000
+      },
+      "text": "1,000 محفوظ",
+      "source_locale": "ur",
+      "cldr_category": "other"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "params": {
+        "build_age_s": "unmeasured"
+      },
+      "text": "  بلڈ کی عمر        نامعلوم",
+      "source_locale": "ur",
+      "cldr_category": null
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "params": {
+        "build_age_s": "0 سیکنڈ"
+      },
+      "text": "  بلڈ کی عمر        0 سیکنڈ",
+      "source_locale": "ur",
+      "cldr_category": null
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "params": {
+        "build_age_s": "21 منٹ"
+      },
+      "text": "  بلڈ کی عمر        21 منٹ",
+      "source_locale": "ur",
+      "cldr_category": null
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "params": {
+        "build_age_s": "DURATION_SENTINEL"
+      },
+      "text": "  بلڈ کی عمر        DURATION_SENTINEL",
+      "source_locale": "ur",
+      "cldr_category": null
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "params": {
+        "uptime_s": "unmeasured"
+      },
+      "text": "  دورانیۂ اجرا       نامعلوم",
+      "source_locale": "ur",
+      "cldr_category": null
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "params": {
+        "uptime_s": "0 سیکنڈ"
+      },
+      "text": "  دورانیۂ اجرا       0 سیکنڈ",
+      "source_locale": "ur",
+      "cldr_category": null
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "params": {
+        "uptime_s": "21 منٹ"
+      },
+      "text": "  دورانیۂ اجرا       21 منٹ",
+      "source_locale": "ur",
+      "cldr_category": null
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "params": {
+        "uptime_s": "DURATION_SENTINEL"
+      },
+      "text": "  دورانیۂ اجرا       DURATION_SENTINEL",
+      "source_locale": "ur",
+      "cldr_category": null
+    }
+  ],
+  "negative_controls": [
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "control": "missing_argument",
+      "detected": true,
+      "error": "message argument 'count' was not supplied (have: none)"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "control": "renamed_argument",
+      "detected": true
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "control": "missing_argument",
+      "detected": true,
+      "error": "message argument 'count' was not supplied (have: none)"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "control": "renamed_argument",
+      "detected": true
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "control": "missing_argument",
+      "detected": true,
+      "error": "message argument 'build_age_s' was not supplied (have: none)"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "control": "renamed_argument",
+      "detected": true
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "control": "missing_argument",
+      "detected": true,
+      "error": "message argument 'uptime_s' was not supplied (have: none)"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "control": "renamed_argument",
+      "detected": true
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "control": "lost_other",
+      "detected": true,
+      "error": "select value 'UNMATCHED_SELECTOR' matched nothing (no 'other' branch)"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "control": "lost_other",
+      "detected": true,
+      "error": "select value 'UNMATCHED_SELECTOR' matched nothing (no 'other' branch)"
+    }
+  ],
+  "pseudo_control": "In-memory AST literal expansion only, production ICU walker; not screen-fit proof",
+  "pseudo_outputs": [
+    {
+      "key": "tui.info.label.answering",
+      "params": {},
+      "expanded_output": "⟦مؤثر ماڈل ~~~⟧"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 0
+      },
+      "expanded_output": "0⟦ سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔ ~~~⟧"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 1
+      },
+      "expanded_output": "1⟦ سیشن پرانی بلڈ چلا رہا ہے اور ذیلی ایجنٹس کی تعداد نہیں بتاتا — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔ ~~~⟧"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 2
+      },
+      "expanded_output": "2⟦ سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔ ~~~⟧"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 5
+      },
+      "expanded_output": "5⟦ سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔ ~~~⟧"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 11
+      },
+      "expanded_output": "11⟦ سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔ ~~~⟧"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 21
+      },
+      "expanded_output": "21⟦ سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔ ~~~⟧"
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "params": {
+        "count": 1000
+      },
+      "expanded_output": "1,000⟦ سیشنز پرانی بلڈ چلا رہے ہیں اور ذیلی ایجنٹس کی تعداد نہیں بتاتے — ٹریجیکٹریز کا مجموعہ کم از کم معلوم تعداد ہے۔ ~~~⟧"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 0
+      },
+      "expanded_output": "0⟦ محفوظ ~~~⟧"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 1
+      },
+      "expanded_output": "1⟦ محفوظ ~~~⟧"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 2
+      },
+      "expanded_output": "2⟦ محفوظ ~~~⟧"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 5
+      },
+      "expanded_output": "5⟦ محفوظ ~~~⟧"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 11
+      },
+      "expanded_output": "11⟦ محفوظ ~~~⟧"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 21
+      },
+      "expanded_output": "21⟦ محفوظ ~~~⟧"
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "params": {
+        "count": 1000
+      },
+      "expanded_output": "1,000⟦ محفوظ ~~~⟧"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "params": {
+        "build_age_s": "unmeasured"
+      },
+      "expanded_output": "⟦  بلڈ کی عمر        نامعلوم ~~~⟧"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "params": {
+        "build_age_s": "0 سیکنڈ"
+      },
+      "expanded_output": "⟦  بلڈ کی عمر         ~~~⟧0 سیکنڈ"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "params": {
+        "build_age_s": "21 منٹ"
+      },
+      "expanded_output": "⟦  بلڈ کی عمر         ~~~⟧21 منٹ"
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "params": {
+        "build_age_s": "DURATION_SENTINEL"
+      },
+      "expanded_output": "⟦  بلڈ کی عمر         ~~~⟧DURATION_SENTINEL"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "params": {
+        "uptime_s": "unmeasured"
+      },
+      "expanded_output": "⟦  دورانیۂ اجرا       نامعلوم ~~~⟧"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "params": {
+        "uptime_s": "0 سیکنڈ"
+      },
+      "expanded_output": "⟦  دورانیۂ اجرا        ~~~⟧0 سیکنڈ"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "params": {
+        "uptime_s": "21 منٹ"
+      },
+      "expanded_output": "⟦  دورانیۂ اجرا        ~~~⟧21 منٹ"
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "params": {
+        "uptime_s": "DURATION_SENTINEL"
+      },
+      "expanded_output": "⟦  دورانیۂ اجرا        ~~~⟧DURATION_SENTINEL"
+    }
+  ],
+  "width_risks_carried_from_initial_audit": [
+    {
+      "message_id": "tui.info.label.config_dir",
+      "ur_cells": 20,
+      "en_cells": 10,
+      "delta": 10
+    },
+    {
+      "message_id": "tui.info.label.log_dir",
+      "ur_cells": 13,
+      "en_cells": 7,
+      "delta": 6
+    },
+    {
+      "message_id": "tui.info.status.leaving",
+      "ur_cells": 11,
+      "en_cells": 7,
+      "delta": 4
+    },
+    {
+      "message_id": "tui.info.status.bound_held",
+      "ur_cells": 24,
+      "en_cells": 10,
+      "delta": 14
+    },
+    {
+      "message_id": "tui.info.status.updating",
+      "ur_cells": 13,
+      "en_cells": 8,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.status.updated",
+      "ur_cells": 13,
+      "en_cells": 7,
+      "delta": 6
+    },
+    {
+      "message_id": "tui.info.latest.stale",
+      "ur_cells": 13,
+      "en_cells": 8,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_full",
+      "ur_cells": 56,
+      "en_cells": 41,
+      "delta": 15
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_short",
+      "ur_cells": 24,
+      "en_cells": 15,
+      "delta": 9
+    },
+    {
+      "message_id": "tui.info.kind_of_runtime.daemon_terse",
+      "ur_cells": 12,
+      "en_cells": 7,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.session.failover_short",
+      "ur_cells": 16,
+      "en_cells": 8,
+      "delta": 8
+    },
+    {
+      "message_id": "tui.info.redirect.short",
+      "ur_cells": 29,
+      "en_cells": 17,
+      "delta": 12
+    },
+    {
+      "message_id": "tui.info.fleet_caveats.lower_bound",
+      "ur_cells": 116,
+      "en_cells": 93,
+      "delta": 23
+    },
+    {
+      "message_id": "tui.info.agents.queued_count_terse",
+      "ur_cells": 11,
+      "en_cells": 7,
+      "delta": 4
+    },
+    {
+      "message_id": "tui.info.agents.tree_counts",
+      "ur_cells": 116,
+      "en_cells": 99,
+      "delta": 17
+    },
+    {
+      "message_id": "tui.info.agents.tree_legacy",
+      "ur_cells": 143,
+      "en_cells": 119,
+      "delta": 24
+    },
+    {
+      "message_id": "tui.info.env.mcp_connecting_full",
+      "ur_cells": 25,
+      "en_cells": 16,
+      "delta": 9
+    },
+    {
+      "message_id": "tui.info.env.none",
+      "ur_cells": 9,
+      "en_cells": 4,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.env.mobile_healthy",
+      "ur_cells": 15,
+      "en_cells": 7,
+      "delta": 8
+    },
+    {
+      "message_id": "tui.info.env.mobile_up",
+      "ur_cells": 6,
+      "en_cells": 2,
+      "delta": 4
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.remedy_one",
+      "ur_cells": 287,
+      "en_cells": 263,
+      "delta": 24
+    },
+    {
+      "message_id": "tui.info.not_answering_clause.remedy_many",
+      "ur_cells": 302,
+      "en_cells": 271,
+      "delta": 31
+    },
+    {
+      "message_id": "tui.info.tree_lines.deeper",
+      "ur_cells": 21,
+      "en_cells": 12,
+      "delta": 9
+    },
+    {
+      "message_id": "tui.info.export.sessions_empty",
+      "ur_cells": 11,
+      "en_cells": 6,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.export.lower_bound",
+      "ur_cells": 88,
+      "en_cells": 71,
+      "delta": 17
+    },
+    {
+      "message_id": "tui.info.state.pausing",
+      "ur_cells": 12,
+      "en_cells": 7,
+      "delta": 5
+    },
+    {
+      "message_id": "tui.info.state.gone",
+      "ur_cells": 13,
+      "en_cells": 4,
+      "delta": 9
+    }
+  ],
+  "width_note": "No native RTL fit or shaping claimed. Existing width-risk rows retained; no semantic truncation. Longer effective-model label and trajectory caveat require parent rendered assessment.",
+  "technical_token_exceptions": "Existing product names, Python/Node/PyPI/MCP, command names/flags/paths, model/provider IDs, PID/SHA and key chords remain exact. No changed key introduces an external technical Latin token; ICU unmeasured/other remain nonrendered selector codes. Human duration units remain localized by existing audited wire.session_status keys.",
+  "not_run": [
+    "pytest",
+    "App/TUI/browser/native/rendered frames",
+    "build",
+    "full checks",
+    "generation",
+    "ledger append",
+    "independent translation audit",
+    "commit/stage/push/rebase"
+  ],
+  "command": "env -i HOME=<own scratch>/ur-control-home LOCAL_OPERATOR_CONFIG_DIR=<own scratch>/ur-control-config PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-info-readout /Users/damian/local-operator/.venv/bin/python <own scratch>/ur_remediation_controls.py"
+}

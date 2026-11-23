@@ -1,0 +1,23 @@
+{
+  "tui.settings_view.editor.contract": "{save_key} सहेजें · {cancel_key} रद्द करें",
+  "tui.settings_view.editor.contract_unset": "{save_key} सहेजें · {cancel_key} रद्द · खाली करके हटाएँ",
+  "tui.settings_view.editor.suggest_long": "{browse_keys} सुझाव · {complete_key} पूरा करें · {save_key} सहेजें · {cancel_key}",
+  "tui.settings_view.editor.suggest_medium": "{browse_keys} देखें · {complete_key} पूरा करें · {save_key} सहेजें",
+  "tui.settings_view.editor.suggest_short": "{browse_keys} · {complete_key} · {save_key} सहेजें",
+  "tui.settings_view.pane.agents_empty": "कोई एजेंट कॉन्फ़िगर नहीं है",
+  "tui.settings_view.pane.empty_hint": "{command} से सूची देखें और जोड़ें",
+  "tui.settings_view.pane.more": "{count, plural, one {… {shown} और} other {… {shown} और}}",
+  "tui.settings_view.pane.providers_empty": "किसी में लॉग इन नहीं — {command}",
+  "tui.settings_view.pane.providers_header": "प्रोवाइडर",
+  "tui.settings_view.pane.tab_agents": "एजेंट",
+  "tui.settings_view.pane.tab_teams": "टीमें",
+  "tui.settings_view.pane.teams_empty": "कोई टीम कॉन्फ़िगर नहीं है",
+  "tui.settings_view.row.add_chain": "+ चेन जोड़ें",
+  "tui.settings_view.row.add_hop": "+ हॉप जोड़ें",
+  "tui.settings_view.scope.live": "तुरंत",
+  "tui.settings_view.scope.never": "कभी नहीं",
+  "tui.settings_view.scope.new_launch": "दोबारा लॉन्च पर",
+  "tui.settings_view.scope.new_sessions": "नए सत्रों में",
+  "tui.settings_view.section.takes_effect": "लागू: {scope}",
+  "tui.settings_view.too_short": "सेटिंग्स के लिए टर्मिनल बहुत छोटा है — इसे ऊँचा करें"
+}

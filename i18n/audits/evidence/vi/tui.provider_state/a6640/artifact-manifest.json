@@ -1,0 +1,42 @@
+{
+  "record_reference": "i18n/audits/evidence/vi/tui.provider_state/a6640/record.json",
+  "auditor": {
+    "agent": "i18n-auditor / provider-state-vi-audit-A",
+    "session": "6640da3c0b72",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "5644d4838456",
+    "actual_model_source": "Explicit host model-switch message: openai/gpt-6.1-sol replacing anthropic/claude-opus-5-5; per-response serving telemetry unavailable, identity not independently measured",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": 0
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/a6640/record.json",
+      "sha256": "53873863331ea192772e7e2bfc48cef44a03499ca0de17d23d1bccad31be3154"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/a6640/report.md",
+      "sha256": "1f39341b6cbc53c30f9d917861cb8ad29c2f736bd4891cdc1bf13171c5d35ba1"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/a6640/script.py.txt",
+      "sha256": "27e1c9134c5367f0fe63b0368be2b1736a86f486f24693600fe7fac9b0f4c9c7"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/a6640/audit.log",
+      "sha256": "910f6594cf4275120cc5e007beeade98402b6aab039a5121804ad2155e036dd4"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/tui.provider_state/a6640/directledger-receipt.json",
+      "sha256": "cf3f90da73c7d4afc8a6e2df719a3432458e2a7e9fb3a4d243b48271bdc30ca6"
+    }
+  ]
+}

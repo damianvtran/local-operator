@@ -1,0 +1,104 @@
+Actual execution output. Provenance: i18n/audits/evidence/ru/cli.serve_readiness/sd3r/record.json
+UTC started: 2026-11-16T05:24:34.655940+00:00
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+STDOUT:
+check.py: catalogue checks: 0 problem(s)
+
+STDERR:
+
+EXIT_CODE: 0
+
+$ .venv/bin/python i18n/audits/evidence/ru/cli.serve_readiness/sd3r/mechanical.py.txt
+STDOUT:
+PASS en: exact accepted replacement; reverse replacement recreates sd3 input hash, proving other 14 values and formatting unchanged
+PASS ru: exact accepted replacement; reverse replacement recreates sd3 input hash, proving other 14 values and formatting unchanged
+PASS context: only not_this_daemon note changed; reverse replacement recreates sd3 context hash
+PASS glossary/style/HOWTO/evidence contract and source selection implementation unchanged from sd3
+PASS base target equals sd1r audited input; exact unchanged raw UTF-8 lines: ['cli.serve_readiness.install_unknown', 'cli.serve_readiness.cgroup_unknown', 'cli.serve_readiness.stale', 'cli.serve_readiness.other_unit']
+Changed: ['cli.serve_readiness.unproven', 'cli.serve_readiness.not_reporting', 'cli.serve_readiness.not_this_daemon', 'cli.serve_readiness.unknown_state', 'cli.serve_readiness.recorded_gap', 'cli.serve_readiness.unknown', 'cli.serve_readiness.identity_restart']
+New: ['cli.serve_readiness.pid_reason', 'cli.serve_readiness.and_more', 'cli.serve_readiness.identity_no_action', 'cli.serve_readiness.identity_restart_manual']
+RENDER cli.serve_readiness.unproven count=1: есть запись, но идентичность процесса нельзя подтвердить (не удалось сравнить отметку времени запуска)
+PASS cli.serve_readiness.unproven: args=(); cells=102..102; hints={}
+RENDER cli.serve_readiness.not_reporting count=1: есть запись, но ответа нет (сигналы активности больше не поступают)
+PASS cli.serve_readiness.not_reporting: args=(); cells=67..67; hints={}
+RENDER cli.serve_readiness.not_this_daemon count=1: есть запись, но обнаружено повторное использование PID
+PASS cli.serve_readiness.not_this_daemon: args=(); cells=54..54; hints={}
+RENDER cli.serve_readiness.unknown_state count=1: запись с неизвестным состоянием
+PASS cli.serve_readiness.unknown_state: args=(); cells=31..31; hints={}
+RENDER cli.serve_readiness.install_unknown count=1: использует сборку, которую нельзя сравнить с установленной
+PASS cli.serve_readiness.install_unknown: args=(); cells=58..58; hints={}
+RENDER cli.serve_readiness.cgroup_unknown count=1: работает в cgroup, которую эта проверка не может распознать
+PASS cli.serve_readiness.cgroup_unknown: args=(); cells=59..59; hints={}
+RENDER cli.serve_readiness.recorded_gap count=1: в записи указана сборка build-A; установлена сборка build-B
+PASS cli.serve_readiness.recorded_gap: args=(('recorded', 'simple'), ('install', 'simple')); cells=59..59; hints={}
+RENDER cli.serve_readiness.unknown count=1: демон `lop serve` на node-1 — диагноз, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+RENDER cli.serve_readiness.unknown count=2: демоны `lop serve` на node-1 — диагноз, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+RENDER cli.serve_readiness.unknown count=5: демоны `lop serve` на node-1 — диагноз, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+RENDER cli.serve_readiness.unknown count=1.5: демоны `lop serve` на node-1 — диагноз, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+PASS cli.serve_readiness.unknown: args=(('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')); cells=130..132; hints={}
+RENDER cli.serve_readiness.stale count=1: демон `lop serve` на node-1 (123, 456) использует build-A, но установленная сборка — build-B: размещённые на нём удалённые сессии используют ту другую сборку
+RENDER cli.serve_readiness.stale count=2: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+RENDER cli.serve_readiness.stale count=5: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+RENDER cli.serve_readiness.stale count=1.5: демоны `lop serve` на node-1 (123, 456) используют build-A, но установленная сборка — build-B: размещённые на них удалённые сессии используют те другие сборки
+PASS cli.serve_readiness.stale: args=(('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')); cells=157..158; hints={}
+RENDER cli.serve_readiness.other_unit count=1: демон `lop serve` на node-1 находится под управлением другой службы (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=2: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=5: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+RENDER cli.serve_readiness.other_unit count=1.5: демоны `lop serve` на node-1 находятся под управлением других служб (custom.service), а не юнита lop serve
+PASS cli.serve_readiness.other_unit: args=(('count', 'plural'), ('device', 'simple'), ('holders', 'simple')); cells=106..106; hints={}
+RENDER cli.serve_readiness.identity_restart count=1: на node-1 выполните `lop services restart`, чтобы перевести демон из записи на установленную сборку; перед действием команда проверяет каждый демон
+PASS cli.serve_readiness.identity_restart: args=(('device', 'simple'),); cells=147..147; hints={}
+RENDER cli.serve_readiness.pid_reason count=1: идентификатор процесса 123, 456 — диагноз
+RENDER cli.serve_readiness.pid_reason count=2: идентификаторы процессов 123, 456 — диагноз
+RENDER cli.serve_readiness.pid_reason count=5: идентификаторы процессов 123, 456 — диагноз
+RENDER cli.serve_readiness.pid_reason count=1.5: идентификаторы процессов 123, 456 — диагноз
+PASS cli.serve_readiness.pid_reason: args=(('count', 'plural'), ('pids', 'simple'), ('reason', 'simple')); cells=41..43; hints={}
+RENDER cli.serve_readiness.and_more count=1: и ещё 1
+RENDER cli.serve_readiness.and_more count=2: и ещё 2
+RENDER cli.serve_readiness.and_more count=5: и ещё 5
+RENDER cli.serve_readiness.and_more count=1.5: и ещё 1,5
+PASS cli.serve_readiness.and_more: args=(('count', 'plural'),); cells=7..9; hints={}
+RENDER cli.serve_readiness.identity_no_action count=1: запись с неподтверждённой идентичностью процесса соответствует установленной сборке; для этой необязательной проверки никаких действий не требуется
+RENDER cli.serve_readiness.identity_no_action count=2: записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+RENDER cli.serve_readiness.identity_no_action count=5: записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+RENDER cli.serve_readiness.identity_no_action count=1.5: записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+PASS cli.serve_readiness.identity_no_action: args=(('count', 'plural'),); cells=147..148; hints={}
+RENDER cli.serve_readiness.identity_restart_manual count=1: на node-1 перезапустите `lop serve` вручную, чтобы перевести демон из записи на установленную сборку; он не может перезагрузить себя в текущем процессе
+PASS cli.serve_readiness.identity_restart_manual: args=(('device', 'simple'),); cells=151..151; hints={}
+COMPOSED unproven 1 демон `lop serve` на node-1 — идентификатор процесса 123 — есть запись, но идентичность процесса нельзя подтвердить (не удалось сравнить отметку времени запуска); в записи указана сборка build-A; установлена сборка build-B и ещё 2, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+COMPOSED unproven 2 демоны `lop serve` на node-1 — идентификаторы процессов 123, 456 — есть запись, но идентичность процесса нельзя подтвердить (не удалось сравнить отметку времени запуска); в записи указана сборка build-A; установлена сборка build-B и ещё 2, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+COMPOSED unproven 5 демоны `lop serve` на node-1 — идентификаторы процессов 123, 456, 789, 111, 222 — есть запись, но идентичность процесса нельзя подтвердить (не удалось сравнить отметку времени запуска); в записи указана сборка build-A; установлена сборка build-B и ещё 2, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+COMPOSED not_reporting 1 демон `lop serve` на node-1 — идентификатор процесса 123 — есть запись, но ответа нет (сигналы активности больше не поступают) и ещё 2, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+COMPOSED not_reporting 2 демоны `lop serve` на node-1 — идентификаторы процессов 123, 456 — есть запись, но ответа нет (сигналы активности больше не поступают) и ещё 2, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+COMPOSED not_reporting 5 демоны `lop serve` на node-1 — идентификаторы процессов 123, 456, 789, 111, 222 — есть запись, но ответа нет (сигналы активности больше не поступают) и ещё 2, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+COMPOSED not_this_daemon 1 демон `lop serve` на node-1 — идентификатор процесса 123 — есть запись, но обнаружено повторное использование PID и ещё 2, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+COMPOSED not_this_daemon 2 демоны `lop serve` на node-1 — идентификаторы процессов 123, 456 — есть запись, но обнаружено повторное использование PID и ещё 2, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+COMPOSED not_this_daemon 5 демоны `lop serve` на node-1 — идентификаторы процессов 123, 456, 789, 111, 222 — есть запись, но обнаружено повторное использование PID и ещё 2, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+COMPOSED unknown_state 1 демон `lop serve` на node-1 — идентификатор процесса 123 — запись с неизвестным состоянием и ещё 2, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+COMPOSED unknown_state 2 демоны `lop serve` на node-1 — идентификаторы процессов 123, 456 — запись с неизвестным состоянием и ещё 2, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+COMPOSED unknown_state 5 демоны `lop serve` на node-1 — идентификаторы процессов 123, 456, 789, 111, 222 — запись с неизвестным состоянием и ещё 2, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+PASS 15-key strict JSON/parity/categories/render/opaque checks; grouped single/multi-PID samples and conservative remedy text checks. Plain-text output only, not live source-path or visual evidence.
+PASS RU-SD3-01 exact accepted number-neutral replacement; 14-key retained coverage byte-proven; all 15 mechanical/render/opaque checks rerun
+
+STDERR:
+
+EXIT_CODE: 0
+
+Append-ready receipt SHA-256: 6cef9eac0bf1f4b4edccaad52a43b1e1c515979f9498fb379dc7446a9d9f5e05
+
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale ru --namespace cli.serve_readiness
+STDOUT:
+24bedcdac7b6d1b26ed1a773b7cb497eaed455dfe45b370bdfc2a5501cf171f2
+
+STDERR:
+
+EXIT_CODE: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/ru/cli.serve_readiness/sd3r/ledger-receipt.json --expected-history-sha 24bedcdac7b6d1b26ed1a773b7cb497eaed455dfe45b370bdfc2a5501cf171f2 --dry-run
+STDOUT:
+i18n/audit-history/ru/cli.serve_readiness.json
+
+STDERR:
+
+EXIT_CODE: 0

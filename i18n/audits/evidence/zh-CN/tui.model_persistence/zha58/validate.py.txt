@@ -1,0 +1,68 @@
+"""Scoped author validation, not an independent audit or live UI proof."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import local_operator
+from local_operator.i18n.catalogues import load_catalogue, context_entry_problem
+from local_operator.i18n.runtime import parse_message, message_arguments, plural_arguments, plural_selectors, render_message
+
+root = Path.cwd().resolve()
+assert Path(local_operator.__file__).resolve() == root / 'local_operator/__init__.py'
+assert not any(k.startswith('CMUX_') for k in os.environ)
+print('module:', local_operator.__file__)
+ns = 'tui.model_persistence'
+base = Path('local_operator/i18n/catalogues')
+expected_hashes = {
+    base / 'en' / f'{ns}.json': '4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff',
+    base / 'en' / f'{ns}.context.json': 'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc',
+}
+for path, expected in expected_hashes.items():
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert actual == expected
+    print('frozen SHA256:', path, actual)
+en = load_catalogue('en', ns)
+zh = load_catalogue('zh-CN', ns)
+ctx = json.loads((base / 'en' / f'{ns}.context.json').read_text())
+assert list(en) == list(zh) == list(ctx)
+commands = {'persist': '/model default', 'settings': '/settings', 'saved': '/model saved'}
+for key, value in zh.items():
+    assert isinstance(value, str)
+    assert context_entry_problem(ctx[key]) is None
+    assert 'maxCells' not in ctx[key]
+    for text in (en[key], value):
+        parse_message(text)
+        assert plural_arguments(text) == ()
+        assert plural_selectors(text) == ()
+        assert all(kind not in ('plural', 'select') for _, kind in message_arguments(text))
+    args = message_arguments(value)
+    assert args == message_arguments(en[key])
+    assert set(dict(args)) == set(ctx[key]['placeholders'])
+    suffix = key.rsplit('.', 1)[1]
+    if suffix in commands:
+        token = commands[suffix]
+        assert value.count(token) == 1
+        assert not re.search('[A-Za-z]', value.replace(token, ''))
+        print('protected token:', repr(token), 'exact, once')
+    else:
+        assert args == (('label', 'simple'), ('routes', 'simple'))
+        assert value.count('{label}') == value.count('{routes}') == 1
+    assert not any(ord(c) in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)) for c in value)
+    print(key, 'args=', args, 'plural/select arms=0')
+    if not args:
+        print('render:', render_message(value, {}, 'zh-CN'))
+routes = ' · '.join(zh[f'{ns}.{key}'] for key in ('persist', 'saved', 'settings'))
+for label in ('provider/model', 'provider/long-opaque-model-identity-20261122-' + 'x' * 80):
+    params = {'label': label, 'routes': routes}
+    assert all(type(v) is str for v in params.values())
+    rendered = render_message(zh[f'{ns}.with_model'], params, 'zh-CN')
+    assert rendered == '模型：' + label + ' — ' + routes
+    print('envelope opaque parameters preserved:', rendered)
+setup = render_message(zh[f'{ns}.settings'], {}, 'zh-CN')
+assert '/settings' in setup and '/model' not in setup
+print('settings-only setup clause:', setup)
+target = base / 'zh-CN' / f'{ns}.json'
+print('target SHA256:', hashlib.sha256(target.read_bytes()).hexdigest())
+print('PASS: 4 keys; source order; frozen hashes; context schema; ICU argument parity; zero plural/select arms; exact protected commands; opaque string parameters; no manual bidi controls')
+print('NOT RUN: global/base-aware checker (owner centralized); live NoticeBlock wrapping 80/100/120, integration and native rendering (owner scope); independent A/B audits pending')

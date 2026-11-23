@@ -1,0 +1,38 @@
+{
+  "record_reference": "record.json",
+  "run_date": "2026-11-22",
+  "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-iso\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/hi-iso/config\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=\"$PWD\" /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/hi/tui.provider_state/hi22a/validator.py.txt > i18n/audits/evidence/hi/tui.provider_state/hi22a/validation.log 2>&1",
+  "working_directory": "/Users/damian/local-operator/.worktrees/i18n-provider-state-labels",
+  "exit_code": 0,
+  "log_kind": "actual_execution_log",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22a/validator.py.txt",
+      "sha256": "fc28ea29df50876d531c321c58abcb63d650fbd2a75ad30aa7c8fd1b7be453f2"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22a/validation.log",
+      "sha256": "32c19830c8673f5100ee67e61421a264259d59393800d719dfbcb25873954017"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22a/notes.md",
+      "sha256": "217ab58f886764e8048f0e6ae8c5c186c9c94f32d77b908882fe7b314a6c8d27"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/hi22a/provenance.json",
+      "sha256": "2118842a8d49490837e5079b171b6ed91fbcb7676540a0754e2ec4a54eb30bad"
+    }
+  ],
+  "provenance": {
+    "agent": "i18n-translator",
+    "session": "520071768802",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Fresh served-response transcript payload.usage.provider/model_id, extracted during this task; see provenance.json",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota; model-switch notice before authoring"
+    },
+    "independent_from_translator_session": false
+  }
+}

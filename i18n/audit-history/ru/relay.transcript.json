@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "relay.transcript",
-  "history_sha256": "c5e8ec53b69306c23431fa65ed74c0f2c31bff7fbe9123d5cba982c6f8322aba",
+  "history_sha256": "4cdeb0d064447fc4130e8dcb09f9f4ca2e17666516deb107ae8113e74df75cd7",
   "entries": [
     {
       "locale": "ru",
@@ -56,6 +56,167 @@
         "relay.transcript.message.show_less_label"
       ],
       "note": "4 new keys relay.transcript.message.{show_more,show_less,show_more_label,show_less_label} (fold control under a long user message in a condensed phone turn). Independent audit: 0 blocker/major. Minor findings adopted before commit: zh-CN dropped the pronoun in both _label keys; ur and hi replaced the reflexive with the polite possessive in both _label keys; ru dropped the possessive (nit). vi nit recorded as a decision, no change. The audited strings are the committed strings except those four adopted edits, which were checked mechanically for label-in-name (visible label is a prefix of the accessible name) and not re-audited by a second pass. The pre-existing keys are unchanged and carry their prior passed audit; this row re-states the namespace against the new en hash."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.transcript",
+      "source_sha256": "ec3caa56a6643b8390581298ca4fef6a37167202b4619b7a0bcc0461890d2b9c",
+      "translator": {
+        "agent": "task subagent translator specialist (lop jobs e2e64deaedb4 round 1; 5ebb122944bf relay.transcript.bridge.offline only)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop session 80746c9094ea, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-19",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.bridge.provenance",
+        "relay.transcript.bridge.loading",
+        "relay.transcript.bridge.pending",
+        "relay.transcript.bridge.held",
+        "relay.transcript.bridge.held_transient",
+        "relay.transcript.bridge.refused",
+        "relay.transcript.bridge.not_admitted",
+        "relay.transcript.bridge.unavailable",
+        "relay.transcript.bridge.signed_out",
+        "relay.transcript.bridge.other_account",
+        "relay.transcript.bridge.not_member",
+        "relay.transcript.bridge.offline",
+        "relay.transcript.bridge.deleted",
+        "relay.transcript.bridge.more_messages"
+      ],
+      "note": "14 new keys relay.transcript.bridge.* (inbound Team Bridge card body states and untrusted frame on the phone web transcript, PR #4278). 13 keys copied verbatim from the audited tui.bridge_card.* translations. Audit round 1 (translation-auditor session 2d94a2642f45) failed zh-CN on F1, rooted in the English offline string (F2: the phone card has no close action), so en relay.transcript.bridge.offline changed to 'reopen the conversation to retry' and that key was retranslated (job 5ebb122944bf). Audit round 2 passed all 7 locales against this en hash, 0 blocker/major. Pre-existing keys unchanged and carry their prior passed audit; this row re-states the namespace against the new en hash."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.transcript",
+      "source_sha256": "64d6a705302bf40e0dae9fa76bd5d19d598948cca28cd2092e610a41dee0c571",
+      "translator": {
+        "agent": "coder role, lop subagent label relay-jtl-coder (session c2f4e7591c05; parent 13fa79f1eb37)",
+        "model": "radient/auto (selector `radient/auto`, model_id `auto`; served provider not disclosed to this subagent)",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent; lop task subagent under lopdev manager, session fb63f280b9c3)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.jump.latest",
+        "relay.transcript.jump.latest_short"
+      ],
+      "note": "2 new keys relay.transcript.jump.{latest,latest_short} (jump-to-latest chip on the phone web transcript; en 'Jump to latest' / 'Latest'). Independent audit of the whole relay.transcript namespace for this locale at en sha 64d6a705…: key order, ICU placeholder parity, NFC and plural categories verified mechanically; 0 BLOCKER/MAJOR. Pre-existing keys unchanged and carry their prior passed audit. ru 'Перейти к последнему' / 'Последнее': passed. Infinitive label per ru guide; 'перейти к' matches TUI 'к первому запуску'. MINOR-1 (not blocking): 'к последнему' is a dangling adjective with no noun, so it could mean the last item rather than the newest message; 'Последнее' is then neuter nominative with no antecedent. Optional correction: jump.latest = 'Перейти к последнему сообщению' (30 chars, fits the >380px chip; reads as a natural lengthening of 'Последнее'). Out-of-diff, pre-existing: label.peer uses 'сеанса' where the glossary and every other ru surface say 'сессия'; not part of these keys, recorded only."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.transcript",
+      "source_sha256": "6aec043147ea745a29dd76cb62b973fbd8422036e373be727a78b5b2953adcd1",
+      "target_sha256": "d8e256260c12189301ca89925a6cf4b83d7814881eb3c6632850d9cec320e90c",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "not-performed"
+      },
+      "status": "pending",
+      "note": "Translation-only scoped pass; independent audit required. i18n/receipts/bridge-card-reread-translator-ru-e896d2db9139.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.transcript",
+      "source_sha256": "6aec043147ea745a29dd76cb62b973fbd8422036e373be727a78b5b2953adcd1",
+      "target_sha256": "d8e256260c12189301ca89925a6cf4b83d7814881eb3c6632850d9cec320e90c",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "independent-translation-auditor (lopdev reviewer)",
+        "session": "9af46213ad99",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider quota before audit",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Scoped bridge-card delta independently passed; untouched values retain prior audits. Evidence: i18n/receipts/bridge-card-copy-audit-9af46213ad99.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.transcript",
+      "source_sha256": "bf64e8fc10eb8b4b3ccf29fc05079a0a22192a650c2c034682b7e55f152bf374",
+      "target_sha256": "e6844fc5ea98c0a3602d96fc6c18b210eb703d38c12ed50d2d103b78d21a8e46",
+      "translator": {
+        "agent": "merged audited translations: i18n-translator (lopdev session e896d2db9139) for the bridge-card keys; coder relay-jtl-coder (session c2f4e7591c05) for the relay.transcript.jump keys; this merge performed no new translation",
+        "model": "openai/gpt-6.1-sol for the bridge-card pass; radient/auto for the jump pass",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev independent translation auditor)",
+        "session": "66500855f473",
+        "model": "openai/gpt-6.2-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol (provider quota; before semantic review)",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.bridge.held",
+        "relay.transcript.bridge.offline",
+        "relay.transcript.bridge.thread_reply"
+      ],
+      "note": "Merged-namespace re-attestation after combining PR #4408's bridge-card copy with main's relay.transcript.jump keys; the other 40 values are byte-identical to origin/main and retain their prior audits. Evidence: i18n/receipts/bridge-card-merged-relay-audit-ru-66500855f473.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.transcript",
+      "source_sha256": "87a3e3d62fddefb9212eeba2d1981e15ebf532237c5034d56f464ab47dde0af1",
+      "target_sha256": "2ea8307a60d656e2fe9f711f2ed1943ddd9e4881486d551b705f6d8864049c5c",
+      "translator": {
+        "agent": "merged audited translations: i18n-translator (lopdev session e896d2db9139) for the bridge-card keys; coder relay-jtl-coder (session c2f4e7591c05) for the relay.transcript.jump keys; this merge performed no new translation",
+        "model": "openai/gpt-6.1-sol for the bridge-card pass; radient/auto for the jump pass",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev independent translation auditor)",
+        "session": "66500855f473",
+        "model": "openai/gpt-6.2-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol (provider quota; before semantic review)",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.bridge.held",
+        "relay.transcript.bridge.offline",
+        "relay.transcript.bridge.thread_reply"
+      ],
+      "note": "Merged-namespace re-attestation (2-space re-serialization; parsed content identical to the prior pass) after combining PR #4408's bridge-card copy with main's relay.transcript.jump keys; the other 40 values are byte-identical to origin/main and retain their prior audits. Evidence: i18n/receipts/bridge-card-merged-relay-audit-ru-reserialized-66500855f473.json"
     }
   ]
 }

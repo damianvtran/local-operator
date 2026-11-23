@@ -54,6 +54,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat as stat_mode
 import sys
 import tempfile
 import textwrap
@@ -241,6 +242,47 @@ logger = logging.getLogger(__name__)
 #: actually lives. Anything the clip drops is recoverable by handle rather
 #: than destroyed, which is what makes a cap this tight safe at all.
 TOOL_OUTPUT_LIMIT_CHARS = 8 * 1024
+
+#: Inline bound for an MCP or ``web_fetch`` result in a session that CANNOT read
+#: spills (no ``read`` tool, deferred included — ``ToolContext.spill_readable``).
+#:
+#: WHY A SECOND BOUND. :data:`TOOL_OUTPUT_LIMIT_CHARS` is safe only because
+#: "anything the clip drops is recoverable by handle" (above). Without ``read``
+#: nothing is recoverable: the model re-searches or calls its own MCP ``fetch``
+#: on the ``spill://`` handle. Measured in the 2026-11-20 head-to-head benchmark
+#: (``--tools mcp__bd_search,mcp__bd_fetch``, Haiku 5.5): 62 of 159 lop MCP
+#: results were cut at 8 KiB, 11 calls went to ``fetch("spill://…")``, and lop
+#: made 13.2 tool calls per task against Claude Code's 8.6 for the same
+#: accuracy, at 1.54x the cost.
+#:
+#: WHY THIS VALUE. The benchmark's MCP server log (1,453 results) peaked at
+#: exactly 12,000 chars — bd_tools' own cap, which 322 of 509 fetches hit
+#: (fetch p50 = p99 = max = 12,000); searches peaked at 10,672. 24,000 is 2x
+#: that observed max, so a result at a server's own cap plus its JSON framing
+#: arrives whole, and under half of Claude Code's own inline threshold for MCP
+#: text results (50,000 chars before it saves to a file; 25,000-token
+#: ``MAX_MCP_OUTPUT_TOKENS`` default; code.claude.com/docs/en/mcp, "MCP output
+#: limits and warnings"). Lower than Claude Code on purpose: an inlined result
+#: is replayed on every later turn, and a 24,000-char result is ~6k tokens.
+#: Sessions WITH ``read`` keep the 8 KiB cap and its recovery footer.
+UNREADABLE_SPILL_INLINE_LIMIT_CHARS = 24_000
+
+
+def spills_readable(context: ToolContext | None) -> bool:
+    """Whether a ``spill://`` handle is a route this session can take.
+
+    ``None`` (no host context) reads as readable: that is every caller that
+    predates the field, and it keeps their footer byte-identical.
+    """
+    return context is None or bool(getattr(context, "spill_readable", True))
+
+
+def result_inline_limit(context: ToolContext | None) -> int:
+    """The inline bound for an MCP / ``web_fetch`` result in this session."""
+    if spills_readable(context):
+        return TOOL_OUTPUT_LIMIT_CHARS
+    return UNREADABLE_SPILL_INLINE_LIMIT_CHARS
+
 
 #: Back-compat name for the bash-specific budget. Same value: there is one
 #: per-result budget, and a second knob would let the two drift.
@@ -613,28 +655,89 @@ def own_launcher_path_injection(
 def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
     """``root/bin`` holding only a ``lop`` entry for ``launcher``, or ``None``.
 
-    Idempotent (an existing entry is left alone, so every bash call in a session
-    re-links nothing and the child's PATH text stays stable) and best-effort: a
-    root this session cannot write falls back to the pre-fix behaviour — no
+    Converges rather than creates-once: an entry already naming the desired
+    target is left alone (so every bash call in a session re-links nothing and
+    the child's PATH text stays stable), and an entry naming anything else, or
+    dangling, is replaced atomically (link to a temp name, then ``os.replace``,
+    so a concurrent bash call never sees the name missing). Best-effort: a root
+    this session cannot write falls back to the pre-fix behaviour — no
     injection — rather than failing the tool call. A symlink is preferred so the
     shim tracks the install; where symlinks are unavailable (Windows without the
     privilege) the launcher is copied, which is the same build's binary either
-    way.
+    way, and an existing copy is left alone (there is no generation layout there
+    to drift from).
+
+    NEVER A DIRECTORY: ``root`` is the session's scratchpad, which lives under
+    ``sessions/<id>/`` — the tree the session-deletion guard
+    (``tests/unit/session/test_no_session_deletion.py``) protects. The only
+    entries this function unlinks or replaces are the two fixed names
+    ``bin/<launcher-name>`` and ``bin/.<launcher-name>.<pid>.tmp``, and each is
+    ``lstat``-ed first: anything that is a real directory (not a symlink to one)
+    makes the shim give up, so a user's or another tool's directory at either
+    name is left byte-for-byte alone and the call falls back to no injection.
     """
     bin_dir = root / "bin"
     target = bin_dir / launcher.name
+    staged = bin_dir / f".{launcher.name}.{os.getpid()}.tmp"
+    desired = _stable_launcher(launcher)
     try:
         bin_dir.mkdir(parents=True, exist_ok=True)
-        if not target.is_file():
-            try:
-                target.symlink_to(launcher)
-            except OSError:
-                shutil.copyfile(launcher, target)
-                target.chmod(0o755)
+        if _is_real_directory(target) or _is_real_directory(staged):
+            return None
+        if target.is_symlink():
+            # ``exists()`` follows the link: a pruned generation reads as gone.
+            if os.readlink(target) == str(desired) and target.exists():
+                return bin_dir
+        elif target.is_file():
+            return bin_dir
+        with contextlib.suppress(FileNotFoundError):
+            staged.unlink()
+        try:
+            staged.symlink_to(desired)
+        except OSError:
+            shutil.copyfile(launcher, staged)
+            staged.chmod(0o755)
+        os.replace(staged, target)
         return bin_dir
     except OSError:
         logger.debug("could not build the lop shim directory under %s", root, exc_info=True)
         return None
+
+
+def _is_real_directory(path: Path) -> bool:
+    """Whether ``path`` itself (not a symlink's target) is a directory.
+
+    ``lstat`` so a symlink to a directory reads as a link — removing or
+    replacing the link never touches the directory it names.
+    """
+    try:
+        return stat_mode.S_ISDIR(path.lstat().st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _stable_launcher(launcher: Path) -> Path:
+    """``launcher`` re-anchored under ``current`` when it lives in a generation tree.
+
+    WHY: in a generation install ``sys.executable`` names THIS process's
+    generation (``~/.local/share/lop/generations/<stamp>/tools/…/bin/lop``), so
+    a shim linked to it kept running the old build after ``lop update`` flipped
+    ``current`` — and once that generation was pruned the link dangled and
+    ``lop`` in a bash child answered ``command not found`` (the node2 finding,
+    architect memo for manager 79bddc262663). The ``current/…`` spelling of the
+    same relative path is what a fresh ``lop`` would run, and it survives every
+    flip and prune. A launcher outside the generation tree (dev venv, pip,
+    desktop venv) is returned unchanged, as is one whose ``current`` twin does
+    not exist (pointer unreadable mid-flip, or a layout without it) — the
+    concrete launcher is still the right build for this session.
+    """
+    from local_operator.update import generation_containing, pointer_path
+
+    generation = generation_containing(launcher)
+    if generation is None:
+        return launcher
+    stable = pointer_path() / launcher.relative_to(generation)
+    return stable if stable.exists() else launcher
 
 
 def may_delegate_env_injection(context: object | None) -> dict[str, str]:
@@ -1323,21 +1426,43 @@ def spill_truncate(
     (output fit, or the store refused it). ``details`` never reaches a
     provider, so recording the handle there costs no prompt tokens while still
     letting renderers, transcripts and compaction see what happened.
+
+    A session that cannot read spills (``spills_readable``) gets the same
+    store-free DISPLAY shape as the degraded path below: a footer naming
+    ``read``/``spill://`` would teach a call the run cannot make, and the model
+    spends a tool call on it (see :data:`UNREADABLE_SPILL_INLINE_LIMIT_CHARS`).
+    The plain truncation marker names no route at all. The full text is STILL
+    stored and its handle still returned in ``spill_details``, because the
+    harness itself reads it back: ``web_fetch``'s ``query`` ranks passages from
+    the stored lines (without the store a no-read session got 24k unfocused
+    chars instead of a ~1.4k focused answer: agent review round 1, R2), a
+    monitor compares the stored body rather than the projection, and renderers
+    and ``format_mcp_result``'s de-duplication key on ``details['spill']``.
+    Only the model-facing route is withheld.
     """
     if len(text) <= limit:
         return text, None
     meta = _spill(text, tool_name, context)
-    if meta is None:
-        # Degraded path: there is no handle to expand, so the shape here is all
-        # the model gets. A JSON payload still comes back as JSON — otherwise a
-        # store failure would silently reintroduce the unparseable result this
-        # function's structured branch exists to remove.
-        structured = _elide_json(text, limit - len(BASH_TRUNCATION_MARKER))
-        if structured is not None:
-            return structured + BASH_TRUNCATION_MARKER, None
-        return truncate_output(text, limit), None
+    if meta is None or not spills_readable(context):
+        details = None if meta is None else {"spill": _spill_detail(meta)}
+        return unrouted_truncate(text, limit), details
     body, span = _elide_inline(text, limit)
     return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
+
+
+def unrouted_truncate(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` with the plain marker and NO recovery route.
+
+    The shape for a result the model cannot expand: a failed store write (no
+    handle exists) or a session without ``read`` (the handle is unreachable).
+    A JSON payload still comes back as JSON — otherwise a store failure would
+    silently reintroduce the unparseable result :func:`spill_truncate`'s
+    structured branch exists to remove.
+    """
+    structured = _elide_json(text, limit - len(BASH_TRUNCATION_MARKER))
+    if structured is not None:
+        return structured + BASH_TRUNCATION_MARKER
+    return truncate_output(text, limit)
 
 
 def _spill_detail(meta: SpillMeta) -> dict[str, Any]:
@@ -2712,7 +2837,7 @@ async def _acquire_heavy_lease(
     on_update: Callable[[AgentToolUpdate], None] | None,
     heavy: heavy_lease.HeavyClass | None,
     memory_budget: memory_guard.Budget,
-) -> heavy_lease.Lease | ToolResult | None:
+) -> heavy_lease.Lease | heavy_lease.InheritedLease | ToolResult | None:
     """Queue a heavy command for the machine-wide slot; None for everything else.
 
     Why: the 2026-11-16 node-2 OOM (parallel esbuild/node/chrome builds from
@@ -2740,6 +2865,12 @@ async def _acquire_heavy_lease(
     command's run and starts at spawn, so queueing never eats into it (PR
     #4104 K2: capping the queue at the 120 s default timeout refused a build
     queued behind an ordinary 5-10 minute one).
+
+    Re-entrant: a runtime that itself runs inside a leased command (a ``lop
+    exec`` or nested lop launched from one) gets a
+    :class:`heavy_lease.InheritedLease` back from ``acquire`` once the lock it
+    inherited is verified, and runs under its ancestor's slot instead of
+    queueing behind it (the 2026-11-20 self-deadlock).
     """
     if heavy is None or not heavy_lease.supported():
         return None
@@ -2764,6 +2895,20 @@ async def _acquire_heavy_lease(
                 )
             )
         return None
+    if heavy.polls_lease:
+        # Leasing this line would hold the slot its own loop waits on (the
+        # 2026-11-22 self-wait: ~21 min, two other sessions timed out). Refuse
+        # before taking a slot; the remedy is to split the wait from the build.
+        return _error(
+            tool_call_id,
+            "bash",
+            "HEAVY JOB NOT STARTED: this command is heavy and also polls the heavy-job "
+            "lease in a loop (`lop services status`). A heavy command holds the slot for "
+            "its whole run, so the loop would wait for the slot it is holding and never "
+            "finish.\nRun the heavy command on its own, without the loop: the bash tool "
+            "queues it for the slot and runs it when free, so no polling is needed. "
+            "Or run only the heavy part as `lop services heavy run -- <heavy command>`.",
+        )
     session_id = (getattr(context, "session_id", None) if context else None) or os.environ.get(
         "LOCAL_OPERATOR_SESSION_ID", ""
     )
@@ -2795,9 +2940,25 @@ async def _acquire_heavy_lease(
         reason=heavy.reason,
         session_id=str(session_id or ""),
         command=preview,
+        # The ceiling this command runs under, for the audit trail; None when
+        # the memory cap is off (there is no ceiling to record).
+        memory_mb=None if memory_budget.source == "disabled" else memory_budget.ceiling_mb,
         on_wait=_on_wait,
         aborted=(lambda: signal is not None and signal.aborted),
+        # The segment that made the line heavy, not its first word: the
+        # 2026-11-20 holder of the only slot read `rm` for a `go test -race`.
+        label=heavy.label(preview),
     )
+    if isinstance(result, heavy_lease.InheritedLease):
+        if on_update is not None:
+            line = heavy_lease.nested_line(result) + cap_off
+            on_update(
+                AgentToolUpdate(
+                    content=[TextContent(text=line)],
+                    details={"tool_name": "bash", "running": True, "heavy_job_queue": line},
+                )
+            )
+        return result
     if isinstance(result, heavy_lease.Lease):
         if cap_off and on_update is not None:
             # Only when the cap is off: an ordinary acquisition stays silent,
@@ -2821,7 +2982,9 @@ async def _acquire_heavy_lease(
     )
 
 
-def _release_heavy_lease_on_exit(process: Any, lease: heavy_lease.Lease) -> None:
+def _release_heavy_lease_on_exit(
+    process: Any, lease: heavy_lease.Lease | heavy_lease.InheritedLease
+) -> None:
     """Release ``lease`` when ``process`` exits, however the tool call ends.
 
     Tied to the PROCESS, not the tool call, so one rule covers a foreground
@@ -2836,7 +2999,8 @@ def _release_heavy_lease_on_exit(process: Any, lease: heavy_lease.Lease) -> None
         try:
             await process.wait()
         finally:
-            lease.release()
+            # returncode is None only if the wait itself was cancelled.
+            lease.release(exit_code=getattr(process, "returncode", None))
 
     task = asyncio.get_running_loop().create_task(_watch())
     _HEAVY_LEASE_WATCHERS.add(task)
@@ -4454,6 +4618,61 @@ def _github_borrow_timeout_note(outcome: Any) -> str:
     return _failure_copy(_cli_failures.github_borrow_timeout(owner=owner, seconds=seconds))
 
 
+def _github_owner_offline_note(outcome: Any) -> str:
+    """The ONE stderr line an owner outage with no saved GitHub access adds.
+
+    WHY (2026-11-21): a review/QA subagent on a remote node, its lender offline
+    and no grant of its own or its ancestors' to serve, got ``({}, "")`` in
+    silence, and ``gh`` said only "set the GH_TOKEN environment variable".
+    CONSTRAINTS: only the owner-outage codes (``github.OUTAGE_REFUSALS``) reach
+    here; the line carries the owner's display label, never a token.
+    """
+    owner = str(
+        getattr(outcome, "owner_device_name", "") or getattr(outcome, "owner_device", "") or "?"
+    )
+    return _failure_copy(_cli_failures.github_owner_offline(owner=owner))
+
+
+# Session ids whose current GitHub owner outage has already been told once.
+#
+# WHY (PR #4364 review m4): a session with no saved access during an owner
+# outage refuses on EVERY bash call, so the note rode every result -- even
+# ``ls`` -- and a line printed on every command trains people to skip it. The
+# note is now said once per session per outage EPISODE: the id enters here when
+# its first outage note is emitted and leaves the moment one of its borrows
+# completes without an outage refusal (the link recovered, or the refusal
+# stopped), so the next outage is told again.
+# CONSTRAINTS: emission-side only -- nothing about the borrow, grant or hold
+# changes, and the note is merely withheld, never the outcome. In-process,
+# never persisted: a restarted process tells an ongoing outage once more,
+# which is the right default. Bounded by sessions currently in an outage.
+# Borrows run on worker threads (``asyncio.to_thread``), hence the lock.
+_GITHUB_OUTAGE_TOLD: set[str] = set()
+_GITHUB_OUTAGE_TOLD_LOCK = threading.Lock()
+
+
+def _reset_github_outage_notes() -> None:
+    """Forget every told outage (test seam; nothing in the runtime calls it)."""
+    with _GITHUB_OUTAGE_TOLD_LOCK:
+        _GITHUB_OUTAGE_TOLD.clear()
+
+
+def _hold_fallback_session_ids(context: Any) -> tuple[str, ...]:
+    """The session's ancestors, from the harness's task tree ONLY.
+
+    ``ToolContext.ancestor_session_ids`` is set by the Session that builds the
+    context, from its live parent objects (``Session._ancestor_session_ids``);
+    the model cannot write it through a tool argument and no env var or peer
+    message feeds it. That provenance is what lets a subagent bridge an owner
+    outage on its parent's held GitHub grant without a forged id borrowing an
+    unrelated session's slot. Never read this from anywhere else.
+    """
+    raw = getattr(context, "ancestor_session_ids", ()) or ()
+    if not isinstance(raw, tuple):
+        return ()
+    return tuple(str(item) for item in raw if isinstance(item, str) and item)
+
+
 async def _github_git_injections(
     context: ToolContext | None, notes: list[str] | None = None
 ) -> dict[str, str]:
@@ -4473,19 +4692,46 @@ async def _github_git_injections(
         return {}
     store = getattr(context, "variables", None)
     extra: dict[str, Any] = {}
+    # getattr, not attribute access: this runs on EVERY bash call, and minimal
+    # duck-typed contexts (e2e probes passing only cwd + variables) carry no
+    # session_id. Absence reads as "no session" — no outage note dedup key.
+    session_id = getattr(context, "session_id", None) or ""
+    refused: list[Any] = []
     if notes is not None:
-        extra["on_timeout"] = lambda outcome: notes.append(_github_borrow_timeout_note(outcome))
+        sink = notes
+
+        def on_refusal(outcome: Any) -> None:
+            # Once per session per outage episode (see ``_GITHUB_OUTAGE_TOLD``).
+            # A context with no session id has no episode to key on: always told.
+            refused.append(outcome)
+            if session_id:
+                with _GITHUB_OUTAGE_TOLD_LOCK:
+                    if session_id in _GITHUB_OUTAGE_TOLD:
+                        return
+                    _GITHUB_OUTAGE_TOLD.add(session_id)
+            sink.append(_github_owner_offline_note(outcome))
+
+        extra["on_timeout"] = lambda outcome: sink.append(_github_borrow_timeout_note(outcome))
+        extra["on_refusal"] = on_refusal
+    ancestors = _hold_fallback_session_ids(context)
+    if ancestors:
+        extra["hold_fallback_session_ids"] = ancestors
     try:
         from local_operator.network.credentials import github
 
         env, _token = await asyncio.to_thread(
             github.lent_github_env,
-            session_id=context.session_id or "",
+            session_id=session_id,
             register=getattr(store, "register_redaction", None),
             **extra,
         )
     except Exception:  # noqa: BLE001 — a broker fault must not fail a command
         return {}
+    if notes is not None and session_id and not refused:
+        # This borrow ended without an outage refusal: the episode is over, so
+        # the next outage is a new one and is told again.
+        with _GITHUB_OUTAGE_TOLD_LOCK:
+            _GITHUB_OUTAGE_TOLD.discard(session_id)
     return env
 
 
@@ -4594,6 +4840,8 @@ def bash_guard_forge_auth(
                 lent, _token = github.lent_github_env(
                     session_id=session_id,
                     register=getattr(store, "register_redaction", None),
+                    # The harness task tree only: see ``_hold_fallback_session_ids``.
+                    hold_fallback_session_ids=_hold_fallback_session_ids(context),
                 )
             except Exception:  # noqa: BLE001 — a broker fault leaves the bare env
                 lent = {}
@@ -4976,16 +5224,23 @@ async def execute_bash(
     )
     if isinstance(heavy, ToolResult):
         return heavy
-    heavy_slot: heavy_lease.Lease | None = heavy
+    heavy_slot: heavy_lease.Lease | heavy_lease.InheritedLease | None = heavy
     spawn_options: dict[str, Any] = dict(detached_popen_kwargs())
     lease_fd = heavy_slot.fileno() if heavy_slot is not None else None
-    if lease_fd is not None and os.name == "posix":
+    passed_lease = heavy_slot if lease_fd is not None and os.name == "posix" else None
+    if passed_lease is not None:
         # The command inherits the lease descriptor, so the flock lives until
         # BOTH this harness and the command are gone: a harness SIGKILLed or
         # OOM-killed mid-build no longer frees the slot beside its still
         # running, detached build (PR #4104 QA Q1). A normal end still frees
         # it at once: Lease.release() unlocks the shared description.
         spawn_options["pass_fds"] = (lease_fd,)
+    # ...and the marker naming that descriptor, so a `lop services heavy run`
+    # (or nested lop) INSIDE this command runs under its slot instead of
+    # queueing behind its own ancestor: on 2026-11-20 one did, for its whole
+    # 3300 s timeout, while every other heavy command was refused at 900 s.
+    # Without a passed fd any inherited marker is cleared instead.
+    heavy_lease.export_marker(env, passed_lease)
     # Filesystem clock, not monotonic or wall: compared with the mtime of a
     # lock git writes during this call (guardrails/interrupted_worktree_add.py).
     spawned_at = interrupted_worktree_add.spawn_stamp(params.command)
@@ -8059,6 +8314,90 @@ def _scheme_specific_remedy(scheme: str, url: str) -> str | None:
             f'range="<from>-<to>") pages it and read(path="{target}?q=<regex>") searches it.'
         )
     return None
+
+
+# A path whose FIRST component is a bare shell-variable reference, after an
+# optional ``~/``: ``$NAME/...`` or ``${NAME}/...``. Group ``brace``/``bare`` is
+# the name, ``rest`` everything after the separating slash(es).
+#
+# Deliberately narrow, because the cost of a false positive is refusing a file
+# someone really meant to name: a ``$`` anywhere else (``price$5.md``,
+# ``a$b.md``, ``notes/$draft/x``), a component that merely STARTS with a
+# reference (``$FOO.bak/x``, ``${FOO}bar/x``), a non-identifier (``$5/x``,
+# ``$$/x``) or a bare ``$FOO`` with nothing under it (a file name, not a root
+# that ``write`` would ``mkdir``) all stay literal and go through as before.
+_ENV_VAR_ROOT_RE = re.compile(
+    r"^(?:~/+)?\$(?:\{(?P<brace>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))"
+    r"/+(?P<rest>.*)$",
+    re.DOTALL,
+)
+
+
+def _env_var_root_refusal(tool_call_id: str, tool_name: str, raw: str) -> ToolResult | None:
+    """Refuse a path rooted at an unexpanded shell variable, or ``None`` to proceed.
+
+    File tools do not expand environment variables — :func:`_resolve_workspace_path`
+    applies ``expanduser`` and nothing else — so ``$LOCAL_OPERATOR_SCRATCHPAD/x.md``
+    resolves to ``<cwd>/$LOCAL_OPERATOR_SCRATCHPAD/x.md`` and ``write`` creates a
+    directory literally named ``$LOCAL_OPERATOR_SCRATCHPAD`` in the user's working
+    directory. That is silent litter (a fresh path inside the workspace needs no
+    approval), and it is what a model does from habit: the variable is how a SHELL
+    reaches the scratchpad, and briefs name it. One such directory under the home
+    had collected 36 entries from many sessions by the time it was audited
+    (2026-11-20).
+
+    It is a REFUSAL, never an expansion, on purpose:
+
+    * Expanding would hand ``write`` a second path resolution the credential guard
+      and the approval describer do not share (``normalise_path_argument``
+      documents why the guard and the reader must normalise identically), and
+      ``expandvars`` would happily substitute a secret-bearing variable into a
+      path that is then echoed in receipts and prompts. A refusal opens nothing,
+      so there is nothing for the guard and the tool to disagree about.
+    * An existing literal ``$NAME`` directory is left exactly as it is: other
+      sessions hold receipts naming it, and this check only stops new writes.
+
+    Only ``write`` and ``edit`` call this — they are the tools that create or
+    change a file under the mistaken root. Read-only tools on the same spelling
+    already answer "does not exist", which is truthful and mutates nothing.
+
+    Model-facing error text, so English by design (AGENTS.md i18n exception).
+    """
+    match = _ENV_VAR_ROOT_RE.match(normalise_path_argument(raw))
+    if match is None:
+        return None
+    name = match.group("brace") or match.group("bare")
+    rest = match.group("rest").strip("/")
+    spelled = f"${{{name}}}" if match.group("brace") else f"${name}"
+    under = (
+        "your home directory"
+        if normalise_path_argument(raw).startswith("~")
+        else "the working directory"
+    )
+    verb = "written" if tool_name == "write" else "changed"
+    if name == SCRATCHPAD_PATH_ENV:
+        target = f"{SCRATCHPAD_SCHEME}{rest or '<name>'}"
+        remedy = (
+            f"{SCRATCHPAD_PATH_ENV} is the shell's name for this session's scratch area; "
+            f'file tools reach the same directory as {tool_name}(path="{target}").'
+        )
+    elif name == "HOME":
+        # ``~`` IS expanded by the resolver, so the home spelling has an exact
+        # equivalent and the remedy can name it rather than describe it.
+        target = f"~/{rest}" if rest else "~/<name>"
+        remedy = f'Use {tool_name}(path="{target}") — "~" is expanded.'
+    else:
+        remedy = (
+            "Pass the absolute path instead (resolve the variable in bash first if you "
+            "need its value), or scratchpad://<name> for this session's scratch area."
+        )
+    return _invalid_arguments(
+        tool_call_id,
+        tool_name,
+        f"{tool_name} does not expand environment variables: '{raw.strip()}' would be "
+        f"taken literally, as a directory named '{spelled}' under {under}, "
+        f"so it was refused and nothing was {verb}. {remedy}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -11439,6 +11778,10 @@ async def execute_edit(
     # still goes to the resolver for every other path: " x.md" and "x.md" are
     # different files, and normalising names a file the caller did not ask for.
     refusal = _scheme_refusal(tool_call_id, "edit", raw, serves=SCRATCHPAD_SCHEME)
+    if refusal is None:
+        # Before any resolution: ``$NAME/x`` would otherwise become a literal
+        # ``$NAME`` path under the cwd (see ``_env_var_root_refusal``).
+        refusal = _env_var_root_refusal(tool_call_id, "edit", raw)
     if refusal is not None:
         return refusal
     url = raw.strip()
@@ -12677,6 +13020,11 @@ async def execute_write(
     # ``notes://x.py`` would create a literal ``notes:`` directory here.
     raw = params.path
     refusal = _scheme_refusal(tool_call_id, "write", raw, serves=SCRATCHPAD_SCHEME)
+    if refusal is None:
+        # Before resolution and before ``_write_file_result`` creates parents:
+        # ``$NAME/x`` would otherwise ``mkdir`` a literal ``$NAME`` directory
+        # under the cwd (see ``_env_var_root_refusal``).
+        refusal = _env_var_root_refusal(tool_call_id, "write", raw)
     if refusal is not None:
         return refusal
     url = raw.strip()
@@ -17368,6 +17716,8 @@ async def execute_send(
         candidate_lines,
         exact_ignored_clause,
         live_scan_found_nothing,
+        pid_not_on_this_device,
+        remote_pid_decision,
         resolve_peer_target,
         session_id_unowned,
         skipped_clause,
@@ -17418,6 +17768,41 @@ async def execute_send(
         lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
         return _error(tool_call_id, "send", "\n".join(lines))
     cold_session_id = ""
+    if record is None and params.pid is not None and pid_not_on_this_device(error or ""):
+        # A REMOTE PID (2026-11-18): `sessions` lists remote rows WITH their
+        # owner's pid, which invites `send(pid=N)` — and the local resolver
+        # knew nothing of it ("no session found with pid N"), while the same
+        # session by `session=` routed fine. Pids are device-local and recycle,
+        # so the pid is translated to a session id ONLY when the owner's fresh
+        # report names exactly one running session for it; that session then
+        # rides the existing session-id route (no new transport). Several
+        # devices, a non-running row, or no match at all stay refusals — see
+        # ``peer_send.remote_pid_decision``. Entered only on the resolver's
+        # MISS form, so a local pid hit (or a local refusal about a pid this
+        # device does hold) never reaches the catalogue: local wins.
+        from local_operator.session.peer_rows import peer_pid_rows
+
+        pid_rows = await asyncio.to_thread(peer_pid_rows, params.pid, config_dir())
+        routed_row, pid_refusal = remote_pid_decision(
+            params.pid, pid_rows, address=lambda sid, _device: f"session={sid}"
+        )
+        if routed_row is None:
+            return _error(tool_call_id, "send", pid_refusal)
+        by_session = params.model_copy(update={"pid": None, "session": routed_row.session_id})
+        result = await _execute_send_routed(tool_call_id, by_session, routed_row, context)
+        # Identifier field: the session id the pid was translated to.
+        lead = (
+            f"pid {params.pid} is session {identifier_text(context, routed_row.session_id)} "
+            f"on {routed_row.owner_device_name}; routed by session id"
+        )
+        details = dict(result.details or {})
+        details["routed_from_pid"] = params.pid
+        return result.model_copy(
+            update={
+                "content": [TextContent(text=f"{lead}\n{result.text}")],
+                "details": details,
+            }
+        )
     if record is None and session_id_unowned(error):
         # No live record OWNS this id — the scan did not know it, or the record
         # it found was stale (the pid is gone) — so an exact ``session`` may
@@ -20399,6 +20784,7 @@ from local_operator.session.peek import (  # noqa: E402,F401 — see the comment
     _PeekDigest,
     _PeekWindow,
     _walk_steps,
+    digest_receipt,
 )
 
 
@@ -20507,18 +20893,17 @@ def _sessions_peek_mesh_journal(
     # S-60 stamp below keys on it, as the tail renderer keys on ``rows``.
     peeked: bool
     if mode == "digest":
-        raw_digest = payload.get("digest")
-        digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
+        digest, text = digest_receipt(payload.get("digest"))
         details.update(
             steps_seen=digest.get("steps_seen"),
             tool_calls=digest.get("tool_calls"),
             has_older=digest.get("has_older"),
+            fold_version=digest["fold_version"],
         )
-        text = str(digest.get("text") or "")
         # Fail closed: only an owner's explicit "zero steps" counts as empty.
         peeked = digest.get("steps_seen") != 0
     else:
-        window = window_from_wire(payload.get("window") or {})
+        window = window_from_wire(payload.get("window") or {}, mode=mode)
         details.update(
             steps_shown=len(window.steps),
             has_older=window.has_older,
@@ -20528,6 +20913,10 @@ def _sessions_peek_mesh_journal(
             details["scanned_bytes"] = window.scanned_bytes
         if window.match_id:
             details["match_id"] = window.match_id
+        if mode == "search":
+            details.update(
+                match_count=window.match_count, match_count_complete=window.match_count_complete
+            )
         # A miss is this harness's own sentence about an empty window; any
         # step the owner returned is transcript content.
         peeked = bool(window.steps)
@@ -27440,8 +27829,14 @@ async def _node_site_access(
             details={**details, "state": "none"},
         )
     enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    # THE SITE-CARD DOOR (security review 60334): a ``task`` subagent with no
+    # queue hands over only the typed facts of this reply, and its nearest
+    # ancestor with a queue rebuilds the card and binds it to this requester
+    # and entry. A session with its own queue has no door and keeps the plain
+    # ``enqueue_ask`` path unchanged.
+    site_door: Any = getattr(context, "enqueue_site_card", None) if context is not None else None
     entry_id = str(result.get("entryId") or "")
-    if not callable(enqueue) or not entry_id:
+    if (not callable(enqueue) and not callable(site_door)) or not entry_id:
         await _withdraw_entry()
         return _error(
             tool_call_id,
@@ -27449,7 +27844,8 @@ async def _node_site_access(
             _node_no_approver_text(
                 origin,
                 "this session cannot queue an ask for the operator (no queued-ask "
-                "engine), so the card cannot be raised.",
+                "engine: no ask surface is attached, or the operator turned queued "
+                "asks off with LOP_ASK_NONBLOCKING=0), so the card cannot be raised.",
             ),
             details={**details, "state": "none"},
         )
@@ -27515,17 +27911,101 @@ async def _node_site_access(
             withdraw_site(origin, keep_question_id=question_id)
         except Exception:  # noqa: BLE001 — the stale card's own timeout is the floor
             logger.debug("node site access: withdrawing a stale card failed", exc_info=True)
-    outcome = enqueue([question], timeout_s, tool_call_id=tool_call_id)
+    if not callable(site_door):
+        outcome = enqueue([question], timeout_s, tool_call_id=tool_call_id)
+    else:
+        outcome = site_door(
+            site_approval.SiteAccessFacts.from_bridge_reply(result, origin),
+            timeout_s,
+            tool_call_id=tool_call_id,
+            cancel=_withdraw_entry,
+        )
+        if isinstance(outcome, Mapping) and outcome.get("no_ancestor"):
+            # FAIL CLOSED, as a top-level session with no queue does — but
+            # saying why: no session up this subagent's tree can show a card.
+            await _withdraw_entry()
+            return _error(
+                tool_call_id,
+                "browser",
+                _node_no_approver_text(
+                    origin,
+                    "this subagent has no ask queue of its own, and none of the "
+                    "sessions that delegated to it can queue an ask for the operator, "
+                    "so the card cannot be raised. Report the site to whoever "
+                    "delegated this work.",
+                ),
+                details={**details, "state": "none"},
+            )
     receipt: Mapping[str, Any] = outcome if isinstance(outcome, Mapping) else {}
     ask_details = receipt.get("details")
     ask_id = str(ask_details.get("ask_id") or "") if isinstance(ask_details, Mapping) else ""
     wait = _node_wait_text(url, origin, reraised=lapsed > 0)
+    if receipt.get("busy"):
+        # ONE OPEN CARD PER ORIGIN (narrowed design, round 4; manager 79): another
+        # open card already asks the operator about this origin. The refusal is
+        # machine-actionable — a stable code plus that card's ids — and names the
+        # one next step, ``await_access``, so the agent never loops on retries.
+        # This request's own entry is deliberately NOT cancelled here: it stays
+        # pending until the extension's TTL (60334 design correction (2) prefers
+        # bounded expiry to an async cancel keyed by origin and requester while
+        # this same requester may retry), and that is what lets await_access
+        # report the other card's approve — a node-wide grant settles every
+        # pending entry for the origin.
+        card_question_id = (
+            str(ask_details.get("question_id") or "") if isinstance(ask_details, Mapping) else ""
+        )
+        return _error(
+            tool_call_id,
+            "browser",
+            _wrap_receipt(
+                f"card_busy: the operator already has a card open for {origin} on this "
+                f"node (ask {ask_id}), raised for another agent in this task, so no "
+                "second card was raised for you. Your own request stays pending in the "
+                f"node's browser. Next: call action='await_access' url={url} to "
+                "wait on that card's answer — an approve covers this whole node, so it "
+                "reports allowed. If that card has been answered or has closed and "
+                "await_access still reports pending, call request_access once: a deny is "
+                "remembered and answers denied, and otherwise a card is raised for you. "
+                "Do not call request_access while that card is open."
+            ),
+            details={
+                "origin": origin,
+                "state": "pending",
+                "approval": "card_busy",
+                "code": "card_busy",
+                "card_ask_id": ask_id,
+                "card_question_id": card_question_id,
+                "next_action": "await_access",
+            },
+        )
     if not receipt.get("ok"):
         error = str(receipt.get("error") or "the ask was refused")
+        if receipt.get("code") == site_approval.SITE_REQUESTER_CLOSED:
+            # THE TEARDOWN OWNS THIS ENTRY (60334 R4 / R2-2 residual). The fence
+            # closed while this dispatch was in flight, so the teardown holds
+            # its cancel and runs it after this call finishes, behind the guard
+            # that skips an origin whose card of this requester is ``deciding``
+            # or ``unknown``. Cancelling here would bypass that guard; the
+            # extension's TTL is the floor if the teardown's wait runs out.
+            return _error(
+                tool_call_id,
+                "browser",
+                f"Refused request_access for {url}: this subagent has finished, so no "
+                "card was raised and nothing will notify the operator.",
+                details={
+                    "origin": origin,
+                    "code": site_approval.SITE_REQUESTER_CLOSED,
+                    "state": "none",
+                },
+            )
         if "already carries that question" in error:
-            # This origin is already on the operator's card, bound to THIS
-            # entry: any card for another entry was withdrawn above, so the
-            # identical text the queue refuses is the live card's.
+            # This origin is already on an operator card with this exact text.
+            # Through the child door that card is bound to THIS entry and
+            # requester (``_queue_site_card``). On the top-level path the
+            # queue's identical-text refusal may instead name ANOTHER
+            # requester's card in this family (a child's, which the scoped
+            # withdraw above leaves alone). Either way the operator has been
+            # asked, so the copy holds and nothing is withdrawn.
             return _text(
                 tool_call_id,
                 "browser",
@@ -27687,9 +28167,58 @@ async def _bridge_access(
                         "pinned_origin": pin.origin,
                     },
                 )
-        result, problem = await _bridge_call(
-            tool_call_id, "request_access", {"url": url, **identity}, client=client
+        # THE TEARDOWN FENCE, BEFORE DISPATCH (60334 design correction (2)): a
+        # queue-less subagent whose teardown has begun sends no new request,
+        # and one sent before it is tracked until its reply becomes a card, so
+        # the teardown can cancel an entry that crossed the fence in flight.
+        begin_site: Any = (
+            getattr(context, "begin_site_request", None) if context is not None else None
         )
+        finish_site: Any = None
+        if callable(begin_site):
+
+            async def _cancel_dispatched() -> None:
+                await _bridge_call(
+                    tool_call_id, "cancel_access", {"url": url, **identity}, client=client
+                )
+
+            finish_site = begin_site(_cancel_dispatched)
+            if finish_site is None:
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    f"Refused request_access for {url}: this subagent has finished, so no "
+                    "approval request was sent and nothing will notify the operator.",
+                    details={
+                        "code": "requester_closed",
+                        "state": "refused",
+                        "approval_request_sent": False,
+                    },
+                )
+        node_result: ToolResult | None = None
+        try:
+            result, problem = await _bridge_call(
+                tool_call_id, "request_access", {"url": url, **identity}, client=client
+            )
+            if (
+                problem is None
+                and result is not None
+                and str(result.get("approval") or "") in ("signed", "no_approver")
+            ):
+                # A HEADLESS NODE's extension answered (``site_approval.py``):
+                # no person can click its popup, so the popup copy below would
+                # send the agent to wait on nothing.
+                node_result = await _node_site_access(
+                    tool_call_id,
+                    context,
+                    result,
+                    url,
+                    str(result.get("origin", url)),
+                    client=client,
+                )
+        finally:
+            if callable(finish_site):
+                finish_site()
         if problem is not None:
             if instruction:
                 problem.content.append(TextContent(text=f"\n\n{instruction}"))
@@ -27697,13 +28226,7 @@ async def _bridge_access(
         assert result is not None
         state_value = str(result.get("state", ""))
         origin = str(result.get("origin", url))
-        if str(result.get("approval") or "") in ("signed", "no_approver"):
-            # A HEADLESS NODE's extension answered (``site_approval.py``): no
-            # person can click its popup, so the popup copy below would send the
-            # agent to wait on nothing.
-            node_result = await _node_site_access(
-                tool_call_id, context, result, url, origin, client=client
-            )
+        if node_result is not None:
             if instruction:
                 node_result.content.append(TextContent(text=f"\n\n{instruction}"))
             return node_result
@@ -37336,22 +37859,20 @@ def _ask_report(
 
 #: The RESTRAINT half of the `ask` description: the SAME text under both modes.
 #:
-#: It is factored out rather than duplicated because the brake and the triggers
-#: do not depend on how an ask settles — a question is worth the operator's
-#: attention or it is not, whether the tool parks on them or queues. Duplicating
-#: it would let the two modes drift into disagreeing about what warrants asking,
-#: which is the one thing about this tool that must not vary.
+#: Factored out because the brake does not depend on how an ask settles. It is
+#: a POINTER, not the rules: the triggers and the brake ship in ``system.md``'s
+#: "Deciding and asking", which renders its ask rules exactly when ``ask`` is
+#: held (``has_ask`` in ``prompts_api.TOOL_GATED_PROSE_FLAGS``, derived from the
+#: session's LIVE tools by both ``build_system_blocks`` callers — the factory
+#: provider's ``live_tools`` probe and the subagent provider, whose children
+#: never hold ``ask``). Compaction rewrites history, never the system blocks,
+#: so the rules are on every request that carries this description. Repeating
+#: them here cost ~1.8k chars on every call of every ask-holding session (wave 2,
+#: 2026-11-19); what stays is what system.md does not say.
 _ASK_DESCRIPTION_RESTRAINT = (
-    "Ask the user to decide, never for FYI. LAST RESORT, not a checkpoint: research, "
-    "run or delegate it to a subagent and decide yourself, then report the choice. "
-    "Ask only when: the action is destructive or irreversible and the user has not "
-    "EXPLICITLY approved that action; the REQUEST ITSELF has two plausible readings "
-    "and no evidence picks between them; you need something only the user has (a "
-    "credential, access); or the answer is genuinely theirs to state. "
-    "Two technical approaches is not ambiguity. Work the user already asked for is "
-    "authorized: do not stop to confirm it — but that never extends to an "
-    "irreversible step by implication. Asking notifies: never also `notify` it or "
-    "reply with it; mechanics: `read tool://ask`."
+    "Ask the user to decide, never for FYI: a last resort under the system "
+    'prompt\'s "Deciding and asking" rules. Asking notifies: never also `notify` '
+    "it or reply with it; mechanics: `read tool://ask`. "
 )
 
 #: The tail for a host whose ``ask`` BLOCKS — the KILL-SWITCH arm.
@@ -37381,28 +37902,25 @@ _ASK_DESCRIPTION_INLINE = (
 #: 2. A RECEIPT IS NOT CONSENT (design risk 1) — the whole reason this copy is
 #:    capitals, and the reason every guide that tells an agent to act after
 #:    asking carries the same rule;
-#: 3. the deadline, its calibration and what a deadline that passes means, then
-#:    the caps, because non-blocking asking is cheap for the model and expensive
-#:    for the human.
+#: 3. the urgent deadline, then the caps, because non-blocking asking is cheap
+#:    for the model and expensive for the human.
 #:
-#: The calibration is stated as the note's §3 table (1 h routine / 5-10 min
-#: urgent / up to 24 h non-urgent, 2 min floor) rather than as "the default is
-#: 3600": a default the model cannot calibrate against is a number, and the
-#: urgent case needs its own instruction (resolve it another way) because the
-#: timeout notice repeats it.
+#: The rest of the note's §3 calibration lives where it is not repeated: the
+#: ``timeout`` field states the default (1 h), floor (2 min) and cap (24 h),
+#: and ``system.md``'s queued paragraph (rendered with ``ask``, see
+#: ``_ASK_DESCRIPTION_RESTRAINT``) states the 24 h use and what a timeout
+#: notice permits — "a timeout is never consent" — which the notice itself
+#: repeats (``ASK_UNANSWERED_TEXT``). Only the urgent 5-10 min case is said
+#: nowhere else. Likewise ``relay``'s ref shape and "one answer settles both"
+#: are its field description verbatim (wave 2, 2026-11-19).
 _ASK_DESCRIPTION_QUEUED = (
     "Ask everything you need in ONE call. It returns at once with a RECEIPT; the "
     "ANSWER ARRIVES LATER, as its own turn. A RECEIPT IS NOT CONSENT: do not run "
     "anything the ask was meant to authorise until the answer arrives — continue "
-    "other work, or end the turn saying what is queued. `timeout`: 1 h (3600) is "
-    "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
-    "(floor 2 min); on a timeout notice take your own recommendation only where it is "
-    "reversible and say what you assumed — a timeout is never consent to delete or "
-    "overwrite. At most 8 asks can be open at once; "
+    "other work, or end the turn saying what is queued. `timeout`: 5-10 minutes "
+    "when someone should answer now. At most 8 asks can be open at once; "
     "duplicates are refused. "
     "Settle one with `ask_withdraw` the moment it stops mattering. "
-    "To re-raise another session's pending ask instead, pass that one ask's "
-    "`relay` ref ('<session_id>/<ask_id>'; one answer settles both). "
     "Credentials: secret=true on that question (see `read tool://ask`)."
 )
 
@@ -37588,44 +38106,9 @@ async def execute_ask(
     # so the blocking arm and the queued arm cannot disagree about what was asked.
     questions = list(params.questions or ())
     if callable(enqueue):
-        # THE ASK GATE (design docs/design/ask-gate.md §2.2), composed AROUND
-        # the unchanged enqueue: one awaited clearance check, whose ONLY
-        # diverting outcome is a ``clear``/``resolve`` mapping. Everything
-        # else — flag off, secret, re-raise, timeout, provider error,
-        # unparseable text — comes back as ``None`` and falls through to the
-        # enqueue call below, byte-for-byte today's.
-        #
-        # The try/except is the LAST line of the design's double guard (the
-        # callable owns the policy; this guard means even a contract breach —
-        # a broken gate that raises — cannot cost the ask). ``except
-        # Exception`` and not ``BaseException``, deliberately:
-        # ``asyncio.CancelledError`` must keep propagating so an aborted turn
-        # aborts.
-        gate: Any = getattr(context, "gate_ask", None) if context is not None else None
-        if callable(gate):
-            try:
-                # ``cast`` for the same reason the enqueue call below carries it:
-                # ``callable()`` narrows an ``Any`` to ``(...) -> object``, and
-                # an un-cast ``await`` on that narrowing is a pyright error
-                # about a value whose real shape is an awaited mapping-or-None.
-                verdict: Any = await cast("Any", gate)(
-                    questions, params.timeout, tool_call_id=tool_call_id
-                )
-            except Exception:  # noqa: BLE001 — a broken gate must never cost the ask
-                verdict = None
-            if isinstance(verdict, Mapping):
-                # THE DIVERSION: no enqueue, no queue entry, no events. The
-                # result carries the hidden marker (design §3) and the
-                # decision-point note, so the model learns what happened and
-                # every human surface filters the row pair (the marker is
-                # persisted with the result; predicates live in
-                # ``harness/rows.py``).
-                return _text(
-                    tool_call_id,
-                    "ask",
-                    str(verdict.get("text") or ""),
-                    details=dict(verdict.get("details") or {}),
-                )
+        # The agent can decide whether to ask before calling the tool. Once it
+        # does, only the queue can admit or refuse the question: a clearance
+        # fork cannot answer for the operator or hide a valid call.
         # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
         # ``Callable[..., object]``, which would make every ``outcome.get`` below
         # a type error on a value whose real shape is a mapping.
@@ -37744,25 +38227,29 @@ class AskWithdrawParams(BaseModel):
 
 #: The description keeps to the facts a model cannot infer, in the order it
 #: needs them (the ask receipt's prose is the budget precedent): what settles,
-#: the two reasons with their one-line consequences, the DETECTION RULE — which
-#: is what makes the tool reachable at all, because both reasons are the model's
-#: judgment call — and the one thing it must never be used for.
+#: the two reasons with their one-line consequences, and the refusals. The
+#: DETECTION RULE (settle an ask the user's message answered before ending the
+#: turn), the dropped/handed-off moot cases, and "an answer is
+#: `answered_in_chat`, never `moot`" ship in ``system.md``'s queued-ask
+#: paragraph, which renders whenever this tool is held: both gate on the same
+#: host ask hook, and the paragraph on ``ask`` membership (see
+#: ``_ASK_DESCRIPTION_RESTRAINT``). They were repeated here verbatim until
+#: wave 2 (2026-11-19). The two moot examples system.md does NOT carry ("you
+#: found the answer yourself", "the work moved on") stay here, shortest form
+#: (PR #4326 QA Q-F2). The tool itself stays PUBLISHED —
+#: see the ``ask_withdraw`` note in ``tools/deferral.py`` for the measurement.
 _ASK_WITHDRAW_DESCRIPTION = (
     "Close a queued ask you no longer need answered — the asker's own settle. "
     "reason='moot': the question stopped mattering (you found the answer "
-    "yourself, the work moved on, or the user dropped or handed off the work "
-    "the question was about); it settles as withdrawn and nothing more is "
-    "delivered for it. reason='answered_in_chat': the user's chat message that "
-    "answered it (latest or earlier) IS the answer — an answer is "
-    "`answered_in_chat`, never `moot`, even if they used their own words "
-    "rather than the options: record their words VERBATIM in `answers`; the "
-    "standard response arrives as usual. To settle only some of its questions, "
-    "put the user's words in their cells and an empty list on the rest — those "
-    "close unanswered; re-ask any you still need. Every cell empty is refused "
-    "(that is a `moot`, not an answer). If the user's message answers a queued "
-    "ask, settle it with this tool rather than leaving the ask reading as "
-    "waiting. A secret question cannot be settled from chat — its card is the "
-    "only path. A settled ask is refused with its own words; do not retry."
+    "yourself or the work moved on); it settles as withdrawn and "
+    "nothing more is delivered for it. reason='answered_in_chat': the user's chat "
+    "message that answered it (latest or earlier) IS the answer: record their "
+    "words VERBATIM in `answers`; the standard response arrives as usual. To "
+    "settle only some of its questions, put the user's words in their cells and "
+    "an empty list on the rest — those close unanswered; re-ask any you still "
+    "need. Every cell empty is refused (that is a `moot`, not an answer). A "
+    "secret question cannot be settled from chat — its card is the only path. A "
+    "settled ask is refused with its own words; do not retry."
 )
 
 
@@ -38129,8 +38616,9 @@ class NotifyParams(BaseModel):
 #: stops a call that had nothing to say from being made at all.
 _NOTIFY_DESCRIPTION = (
     "Post an item to the operator's Notifications inbox; it stays until read or "
-    "dismissed, on every device. For FYI results, metrics or events to see on "
-    "return; never routine progress or a question (`ask` notifies). Pass a "
+    "dismissed, on every device. For FYI results, metrics (a markdown table in "
+    "`body`) or events to see on return; never routine progress or a question "
+    "(`ask` notifies). Pass a "
     "stable `key` so a repeat (a wake tick, a new count) updates one item. "
     "`title` must say what happened — a placeholder (`x`, `done`) is refused."
 )

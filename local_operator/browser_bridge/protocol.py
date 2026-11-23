@@ -101,7 +101,10 @@ def proto_supported(
 #: 0.1.27 is the first tree that pairs from Chrome managed policy
 #: (`storage.managed_schema`, `src/managed-pairing.ts`): the headless-node path,
 #: where `lop browser setup --node` delivers the code because nobody can type it.
-EXPECTED_EXTENSION_VERSION = "0.1.27"
+#: 0.1.28 is the first tree that re-checks the tab's CURRENT origin against the
+#: site grants before every page-touching command (`src/surface-origin.ts`), so
+#: a page that navigates itself off an approved site is not read unasked.
+EXPECTED_EXTENSION_VERSION = "0.1.28"
 
 #: The first extension version that opens its pairing tab on `show_pairing`.
 #: An older install ignores the event, so `lop browser pair` tells its user to

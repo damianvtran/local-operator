@@ -1,0 +1,44 @@
+{
+ "audit": "chrome-r2-es",
+ "round": 2,
+ "locale": "es",
+ "namespace": "tui.settings_view.chrome",
+ "worktree": "~/local-operator/.worktrees/i18n-settings-leftovers",
+ "head": "183ed01e92cc",
+ "sha256": {
+  "en": "2e04f79550d0b09cd262c32850a31c20d5dec2b88b09facd2369d967bd5ee930",
+  "en_context": "4d981004bb67852a6b4f8420ecb6eabba2f6c2c3d2328780830bcb4313dc8b40",
+  "es": "afd632682832371d8324562a0e3d56d4637d278c821c36234af16c897212e693"
+ },
+ "keys_read": 49,
+ "check_py_catalogues_only": "0 problem(s); no es lines",
+ "over_cap": [
+  {
+   "key": "error.unexpected_structure",
+   "es_cells": 146,
+   "en_cells": 134,
+   "cap": 74,
+   "note": "cut-with-ellipsis by design; es loses 'inesperada' at 74"
+  }
+ ],
+ "findings": [
+  {
+   "id": "ES-R2-1",
+   "severity": "minor",
+   "key": "error.unexpected_structure"
+  },
+  {
+   "id": "ES-R2-2",
+   "severity": "minor",
+   "key": "hotkey.hold_refusal/hotkey.recording_detail vs desktop_detail/hold_detail",
+   "topic": "app vs aplicación drift"
+  },
+  {
+   "id": "ES-R2-3",
+   "severity": "nit",
+   "key": "hotkey.hold_refusal"
+  }
+ ],
+ "verdict": "clean-with-findings",
+ "auditor_model": "anthropic/claude-opus-5-5 (fallback; pinned openai/gpt-6.1-sol hit quota 429)"
+}

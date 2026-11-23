@@ -500,6 +500,137 @@ def _request(provider: str = "openai", model_id: str = "gpt-4o") -> ChatRequest:
     return ChatRequest(model=ModelSpec(provider=provider, model_id=model_id))
 
 
+@pytest.mark.parametrize(
+    ("hint", "pinned", "exhausted", "vertex_attempts", "expected_sleeps"),
+    [
+        pytest.param(None, False, False, 3, None, id="unhinted-recovery"),
+        pytest.param("4s", True, False, 3, [4000, 4000], id="hinted-recovery"),
+        pytest.param("45s", False, False, 1, [], id="above-interactive-cap"),
+        pytest.param("45s", True, False, 2, [45000], id="pinned-probation"),
+        pytest.param("120s", True, False, 1, [], id="above-pinned-cap"),
+        pytest.param("4s", True, True, 3, [4000, 4000], id="all-routes-exhausted"),
+    ],
+)
+async def test_vertex_http_429_waits_or_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    hint: str | None,
+    pinned: bool,
+    exhausted: bool,
+    vertex_attempts: int,
+    expected_sleeps: list[int] | None,
+) -> None:
+    """Exercise the real Vertex HTTP error parser and streaming retry driver."""
+    from local_operator.providers.clients import client_for_spec
+
+    attempts: list[str] = []
+    sleeps: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append("vertex")
+        if exhausted or len(attempts) <= 2:
+            error: dict[str, Any] = {
+                "message": "Resource exhausted, please try again later.",
+                "status": "RESOURCE_EXHAUSTED",
+            }
+            if hint is not None:
+                error["details"] = [
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": hint}
+                ]
+            return httpx.Response(429, json={"error": error})
+        return httpx.Response(
+            200,
+            text='data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},'
+            '"finishReason":"STOP"}]}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def record_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    async def fallback(
+        request: ChatRequest, api_key: str | None, oauth_access: Any
+    ) -> AsyncIterator[Any]:
+        attempts.append("fallback")
+        if exhausted:
+            raise ProviderError(401, "fallback credential rejected")
+        yield StreamTextDelta(delta="fallback result")
+        async for event in _clean_stream():
+            yield event
+
+    monkeypatch.setattr(failover_module, "_abortable_sleep", record_sleep)
+    request = _request("google-vertex", "gemini-3.8-flash")
+    state = FailoverRouteState()
+    if pinned:
+        state.launch_pin = "google-vertex/gemini-3.8-flash"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+
+        async def client_for(spec: ModelSpec) -> Any:
+            if spec.provider == "google-vertex":
+                return client_for_spec(spec, http_client=http)
+            return _FnClient(fallback)
+
+        events = stream_with_failover(
+            request,
+            FakeAuth({"google-vertex": ["vertex-key"], "openai": ["fallback-key"]}),
+            {"retry": {"fallbackChains": {"default": ["openai/gpt-5.4"]}}},
+            client_for,
+            route_state=state,
+        )
+        if exhausted:
+            with pytest.raises(ProviderError):
+                await _collect(events)
+        else:
+            result = await _collect(events)
+            assert [e.delta for e in result if isinstance(e, StreamTextDelta)] == [
+                "ok" if vertex_attempts == 3 else "fallback result"
+            ]
+
+    assert attempts == ["vertex"] * vertex_attempts + (
+        ["fallback"] if exhausted or vertex_attempts < 3 else []
+    )
+    if expected_sleeps is None:
+        assert len(sleeps) == 2
+        assert 750 <= sleeps[0] <= 1000
+        assert 1500 <= sleeps[1] <= 2000
+    else:
+        assert sleeps == expected_sleeps
+
+
+async def test_vertex_429_after_visible_output_never_replays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def late_throttle(
+        request: ChatRequest, api_key: str | None, oauth_access: Any
+    ) -> AsyncIterator[Any]:
+        yield StreamTextDelta(delta="partial")
+        raise ProviderError(429, "late throttle", retry_after_ms=4000)
+
+    async def unexpected_sleep(delay_ms: int, signal: Any) -> None:
+        pytest.fail(f"replay after visible output: attempted sleep of {delay_ms} ms")
+
+    async def client_for(spec: ModelSpec) -> Any:
+        requested.append(spec.provider)
+        return _FnClient(late_throttle)
+
+    monkeypatch.setattr(failover_module, "_abortable_sleep", unexpected_sleep)
+    auth = FakeAuth({"google-vertex": ["vertex-key", "sibling"], "openai": ["fallback-key"]})
+    requested: list[str] = []
+    forwarded: list[str] = []
+    with pytest.raises(ProviderError) as error:
+        async for event in stream_with_failover(
+            _request("google-vertex", "gemini-3.8-flash"),
+            auth,
+            {"retry": {"fallbackChains": {"default": ["openai/gpt-5.4"]}}},
+            client_for,
+        ):
+            if isinstance(event, StreamTextDelta):
+                forwarded.append(event.delta)
+    assert error.value.status == 429
+    assert forwarded == ["partial"]
+    assert requested == ["google-vertex"]
+    assert auth.rotations == []
+
+
 async def test_local_output_envelope_never_retries_rotates_or_hops() -> None:
     from local_operator.providers.clients import StreamOutputEnvelopeExceeded
 
@@ -1189,11 +1320,11 @@ async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> N
     settings = {
         "retry": {
             "baseDelayMs": 1,
-            "fallbackChains": {"default": ["anthropic/claude-x", "groq/llama-x"]},
+            "fallbackChains": {"default": ["anthropic/claude-x", "unlisted/llama-x"]},
         }
     }
     state = FailoverRouteState()
-    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"], "groq": ["k3"]})
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"], "unlisted": ["k3"]})
 
     async def run() -> None:
         _ = [
@@ -1204,10 +1335,10 @@ async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> N
         ]
 
     await run()
-    assert specs_seen == ["openai/gpt-4o", "anthropic/claude-x", "groq/llama-x"]
+    assert specs_seen == ["openai/gpt-4o", "anthropic/claude-x", "unlisted/llama-x"]
     # The dead fallback is benched; the one that served is not.
     assert not state.target_retry_due(FallbackTarget("anthropic/claude-x"), now_ms=now_ms)
-    assert state.target_retry_due(FallbackTarget("groq/llama-x"), now_ms=now_ms)
+    assert state.target_retry_due(FallbackTarget("unlisted/llama-x"), now_ms=now_ms)
 
     # A preflight that believed the primary recovered clears the pin — which
     # must NOT clear the bench, or the next walk replays the waterfall.
@@ -1217,7 +1348,7 @@ async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> N
     await run()
     assert specs_seen == [
         "openai/gpt-4o",
-        "groq/llama-x",
+        "unlisted/llama-x",
     ], "the benched fallback was re-walked inside its cooldown"
 
     # Past the cooldown the bench expires on its own and the target is asked
@@ -1226,7 +1357,7 @@ async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> N
     specs_seen.clear()
     now_ms += failover_module.FALLBACK_FAILURE_COOLDOWN_MS
     await run()
-    assert specs_seen == ["openai/gpt-4o", "anthropic/claude-x", "groq/llama-x"]
+    assert specs_seen == ["openai/gpt-4o", "anthropic/claude-x", "unlisted/llama-x"]
 
 
 async def test_bench_never_strands_a_turn_when_every_fallback_is_benched(monkeypatch) -> None:
@@ -1255,10 +1386,10 @@ async def test_bench_never_strands_a_turn_when_every_fallback_is_benched(monkeyp
             return ScriptedClient(ProviderError(None, "model unavailable"))
         return ScriptedClient([StreamEndEvent(stop_reason="stop")])
 
-    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["groq/llama-x"]}}}
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["unlisted/llama-x"]}}}
     state = FailoverRouteState()
     state.mark_target_failed(
-        FallbackTarget("groq/llama-x"),
+        FallbackTarget("unlisted/llama-x"),
         cooldown_ms=failover_module.FALLBACK_FAILURE_COOLDOWN_MS,
         now_ms=now_ms,
     )
@@ -1266,16 +1397,16 @@ async def test_bench_never_strands_a_turn_when_every_fallback_is_benched(monkeyp
         event
         async for event in stream_with_failover(
             _request(),
-            FakeAuth({"openai": ["k1"], "groq": ["k3"]}),
+            FakeAuth({"openai": ["k1"], "unlisted": ["k3"]}),
             settings,
             client_for,
             route_state=state,
         )
     ]
-    assert specs_seen == ["openai/gpt-4o", "groq/llama-x"]
+    assert specs_seen == ["openai/gpt-4o", "unlisted/llama-x"]
     assert any(isinstance(e, StreamEndEvent) for e in got)
     # Serving cleared the bench mark.
-    assert state.target_retry_due(FallbackTarget("groq/llama-x"), now_ms=now_ms)
+    assert state.target_retry_due(FallbackTarget("unlisted/llama-x"), now_ms=now_ms)
 
 
 async def test_pinned_route_is_exempt_from_its_own_bench(monkeypatch) -> None:
@@ -1298,9 +1429,9 @@ async def test_pinned_route_is_exempt_from_its_own_bench(monkeypatch) -> None:
         specs_seen.append(f"{spec.provider}/{spec.model_id}")
         return ScriptedClient([StreamEndEvent(stop_reason="stop")])
 
-    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["groq/llama-x"]}}}
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["unlisted/llama-x"]}}}
     state = FailoverRouteState()
-    target = FallbackTarget("groq/llama-x")
+    target = FallbackTarget("unlisted/llama-x")
     await state.activate(target, "provider failure", cooldown_ms=60_000)
     state.mark_target_failed(
         target,
@@ -1311,20 +1442,20 @@ async def test_pinned_route_is_exempt_from_its_own_bench(monkeypatch) -> None:
         event
         async for event in stream_with_failover(
             _request(),
-            FakeAuth({"openai": ["k1"], "groq": ["k3"]}),
+            FakeAuth({"openai": ["k1"], "unlisted": ["k3"]}),
             settings,
             client_for,
             route_state=state,
         )
     ]
-    # The pin trim starts the walk at groq, and the bench must not skip it.
-    assert specs_seen == ["groq/llama-x"]
+    # The pin trim starts the walk at unlisted, and the bench must not skip it.
+    assert specs_seen == ["unlisted/llama-x"]
 
 
 async def test_bench_deadline_extends_but_never_shrinks(monkeypatch) -> None:
     """A fresh short failure cannot shorten a longer advertised reset."""
     state = FailoverRouteState()
-    target = FallbackTarget("groq/llama-x")
+    target = FallbackTarget("unlisted/llama-x")
     state.mark_target_failed(target, cooldown_ms=600_000, now_ms=1_000_000)
     state.mark_target_failed(target, cooldown_ms=60_000, now_ms=1_000_000)
     assert not state.target_retry_due(target, now_ms=1_000_000 + 599_999)

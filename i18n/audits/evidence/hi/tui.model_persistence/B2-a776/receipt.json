@@ -1,0 +1,54 @@
+{
+  "locale": "hi",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "target_sha256": "fe5174ef5f6cd8ea96d751c6722707d58a6a9108d17922d9b411b9a6b6799967",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "fdf96049990f",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requesting manager reports parent wait 9b5 and Hub completion metadata both GPT; not directly inspected by this auditor",
+    "self_reported_model": "anthropic/claude-opus-5-5",
+    "self_report_source": "i18n/audits/evidence/hi/tui.model_persistence/author-fdf9-fix1/record.json",
+    "qualification": "Self-report conflicts with parent-served metadata; no fresh fallback reason inferred; manager retains host snapshot addendum"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "a776dd8a4364",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Current resumed host Model declaration; no fresh model-switch telemetry supplied for this resumed round",
+    "fallback": {
+      "used": false,
+      "scope": "No fallback event supplied in current resumed round; not a claim about historical B round"
+    },
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "Independent B R2: B-HI-1 resolved; all 4 keys pass. Record: i18n/audits/evidence/hi/tui.model_persistence/B2-a776/record.json",
+  "record_reference": "i18n/audits/evidence/hi/tui.model_persistence/B2-a776/record.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B2-a776/record.json",
+      "sha256": "a573ca2c759a576ead88d0674b7eaa04232760a38b9c1df94b9de0244ea3db55"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B2-a776/report.md",
+      "sha256": "69d155ad2f1432dd47a06707df9aa182e1025beef415678229c3972b44f0ee27"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B2-a776/audit.log",
+      "sha256": "71a7d432a3346ef0e7e2730f6ae75be6e57d8b3d3b4b3c2873f105ba9b13cdf1"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B2-a776/preservation.log",
+      "sha256": "8b35c5921cc04e3ea2f422c2bcbefb36e47cd707c9f01911497bc066daea5e19"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.model_persistence/B2-a776/script.py.txt",
+      "sha256": "0c0a669b0e5c388efb162a0fa66f96aed044fbda2136789324d231db0e55877f"
+    }
+  ]
+}

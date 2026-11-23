@@ -1,0 +1,313 @@
+{
+  "locale": "ru",
+  "namespace": "tui.settings_view",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "target_sha256": "8572913bd0cab3a7bd52ad1f0f61d460a87535e24492728676edc1a51b8f8318",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "translator": {
+    "agent": "translator",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-20",
+    "provenance": "Identity supplied by manager task brief; translator session ID and fallback not independently available."
+  },
+  "auditor": {
+    "agent": "translation-auditor (settings-audit-ru)",
+    "session": "e92f890d1503",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-20",
+    "fallback": "none observed; model identity from session runtime header",
+    "result": "clean-with-findings",
+    "findings": 1,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator": true
+  },
+  "status": "passed",
+  "note": "Read-only independent semantic audit of all 21 keys, English and target with all context entries. One non-gating wording finding; no blocker/major. No repo edits; this receipt only. Not a rendered-frame/design sign-off. Full namespace verdict clean-with-findings.",
+  "finding_detail": [
+    {
+      "id": "RU1",
+      "severity": "minor",
+      "key": "tui.settings_view.section.takes_effect",
+      "current": "действует: {scope}",
+      "proposed": "вступает в силу: {scope}",
+      "reason": "The source labels when a change takes effect, whereas «действует» describes validity/application; composed with scope.never this becomes the unnatural «действует: никогда». «Вступает в силу» expresses the timing consistently across all four scope words.",
+      "code_path": "local_operator/tui/widgets/settings_view.py:4131-4141 composes and width-falls-back the section tag."
+    }
+  ],
+  "evidence": {
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-settings-view",
+    "head": "56781d884f27cb85551746e9bccf7a3c81a17ab6",
+    "python": "/Users/damian/local-operator/.venv/bin/python",
+    "PYTHONPATH": "/Users/damian/local-operator/.worktrees/i18n-settings-view",
+    "keys_read": 21,
+    "key_parity": true,
+    "placeholder_arguments": {
+      "tui.settings_view.editor.contract": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "tui.settings_view.editor.contract_unset": [
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "tui.settings_view.editor.suggest_long": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ],
+        [
+          "cancel_key",
+          "simple"
+        ]
+      ],
+      "tui.settings_view.editor.suggest_medium": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ],
+      "tui.settings_view.editor.suggest_short": [
+        [
+          "browse_keys",
+          "simple"
+        ],
+        [
+          "complete_key",
+          "simple"
+        ],
+        [
+          "save_key",
+          "simple"
+        ]
+      ],
+      "tui.settings_view.pane.agents_empty": [],
+      "tui.settings_view.pane.empty_hint": [
+        [
+          "command",
+          "simple"
+        ]
+      ],
+      "tui.settings_view.pane.more": [
+        [
+          "count",
+          "plural"
+        ],
+        [
+          "shown",
+          "simple"
+        ]
+      ],
+      "tui.settings_view.pane.providers_empty": [
+        [
+          "command",
+          "simple"
+        ]
+      ],
+      "tui.settings_view.pane.providers_header": [],
+      "tui.settings_view.pane.tab_agents": [],
+      "tui.settings_view.pane.tab_teams": [],
+      "tui.settings_view.pane.teams_empty": [],
+      "tui.settings_view.row.add_chain": [],
+      "tui.settings_view.row.add_hop": [],
+      "tui.settings_view.scope.live": [],
+      "tui.settings_view.scope.never": [],
+      "tui.settings_view.scope.new_launch": [],
+      "tui.settings_view.scope.new_sessions": [],
+      "tui.settings_view.section.takes_effect": [
+        [
+          "scope",
+          "simple"
+        ]
+      ],
+      "tui.settings_view.too_short": []
+    },
+    "plural_categories": [
+      "few",
+      "many",
+      "one",
+      "other"
+    ],
+    "plural_branches": [
+      "one",
+      "few",
+      "many",
+      "other"
+    ],
+    "plural_samples": {
+      "0": "… ещё 0",
+      "1": "… ещё 1",
+      "2": "… ещё 2",
+      "5": "… ещё 5",
+      "21": "… ещё 21"
+    },
+    "exact_number_selectors": false,
+    "bidi_controls": false,
+    "unsanctioned_latin_prose": false,
+    "style_citations": [
+      "i18n/style-guides/ru.md:8-16 (formal/impersonal/terse)",
+      "i18n/style-guides/ru.md:22-27 (Latin exception policy)",
+      "i18n/style-guides/ru.md:40-44 (all Russian plural categories)",
+      "i18n/glossary.md:25-30 (literal identifiers)",
+      "i18n/glossary.md:56,60,77 (сессия/агент/команда)"
+    ],
+    "terminology_citations": [
+      "wire.settings.classification_vendor.choice.auto.description: звено",
+      "wire.settings.web_search_excluded_providers.help: цепочка",
+      "wire.settings.web_search_excluded_providers.label: провайдеры",
+      "wire.settings.asks.description: действует сразу",
+      "tui.small.settings_view.hop_count: звено/звена/звеньев",
+      "tui.small.settings_view.chain_row_hint: цепочка",
+      "tui.small.settings_view.overflow_more: … ещё {spilled}",
+      "tui.small.org_chart_view.team_heading: команда",
+      "tui.small.session_picker.no_session: сессия"
+    ],
+    "widths": {
+      "tui.settings_view.editor.contract": {
+        "en": 25,
+        "ru": 28,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.contract_unset": {
+        "en": 42,
+        "ru": 44,
+        "maxCells": 23
+      },
+      "tui.settings_view.editor.suggest_long": {
+        "en": 50,
+        "ru": 52,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.suggest_medium": {
+        "en": 38,
+        "ru": 42,
+        "maxCells": null
+      },
+      "tui.settings_view.editor.suggest_short": {
+        "en": 22,
+        "ru": 22,
+        "maxCells": 23
+      },
+      "tui.settings_view.pane.agents_empty": {
+        "en": 20,
+        "ru": 19,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.empty_hint": {
+        "en": 29,
+        "ru": 28,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.more": {
+        "en": 8,
+        "ru": 7,
+        "maxCells": 16
+      },
+      "tui.settings_view.pane.providers_empty": {
+        "en": 22,
+        "ru": 24,
+        "maxCells": 38
+      },
+      "tui.settings_view.pane.providers_header": {
+        "en": 9,
+        "ru": 10,
+        "maxCells": 20
+      },
+      "tui.settings_view.pane.tab_agents": {
+        "en": 6,
+        "ru": 6,
+        "maxCells": 10
+      },
+      "tui.settings_view.pane.tab_teams": {
+        "en": 5,
+        "ru": 7,
+        "maxCells": 10
+      },
+      "tui.settings_view.pane.teams_empty": {
+        "en": 19,
+        "ru": 20,
+        "maxCells": 38
+      },
+      "tui.settings_view.row.add_chain": {
+        "en": 13,
+        "ru": 18,
+        "maxCells": null
+      },
+      "tui.settings_view.row.add_hop": {
+        "en": 11,
+        "ru": 16,
+        "maxCells": null
+      },
+      "tui.settings_view.scope.live": {
+        "en": 4,
+        "ru": 5,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.never": {
+        "en": 5,
+        "ru": 7,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.new_launch": {
+        "en": 10,
+        "ru": 13,
+        "maxCells": 14
+      },
+      "tui.settings_view.scope.new_sessions": {
+        "en": 12,
+        "ru": 14,
+        "maxCells": 14
+      },
+      "tui.settings_view.section.takes_effect": {
+        "en": 19,
+        "ru": 16,
+        "maxCells": null
+      },
+      "tui.settings_view.too_short": {
+        "en": 48,
+        "ru": 55,
+        "maxCells": null
+      }
+    },
+    "editor_ladder_cells": [
+      52,
+      42,
+      22
+    ],
+    "width_exception": "editor.contract_unset: 44 ru vs 42 en, both exceed 23. Verified actual fallback to editor.contract (28 ru vs 25 en) at settings_view.py:4443,4466-4471, not treated as an overflow defect.",
+    "width_notes": "No remaining explicit maxCells violations. Add-chain 18 vs 13 en, add-hop 16 vs 11 en, too-short warning 55 vs 48 en are expanded unbudgeted/cropped rows; visually check these at narrow widths in the manager QA lane. No rendered terminal frame captured in this catalogue audit.",
+    "scope_compositions": {
+      "tui.settings_view.scope.live": "действует: сразу",
+      "tui.settings_view.scope.never": "действует: никогда",
+      "tui.settings_view.scope.new_launch": "действует: с перезапуска",
+      "tui.settings_view.scope.new_sessions": "действует: с новой сессии"
+    }
+  }
+}

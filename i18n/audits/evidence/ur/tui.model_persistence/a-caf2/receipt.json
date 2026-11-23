@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "tui.model_persistence",
+      "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "3c1e111e2598",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "Explicit host model-switch notice: provider quota failure",
+        "fallback": {
+          "used": true,
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        },
+        "method": "Direct LLM reasoning; no translation service",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "caf2c0ebbb90",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "3c1e111e2598",
+        "actual_model_source": "Explicit host model-switch notice: provider failure: quota, before source/target assessment",
+        "fallback": {
+          "used": true,
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        },
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent A only; 4/4, no B/M. Record: i18n/audits/evidence/ur/tui.model_persistence/a-caf2/record.json. Plain-Rich checks; no native RTL/integration/eligibility approval."
+    }
+  ],
+  "record_reference": "i18n/audits/evidence/ur/tui.model_persistence/a-caf2/record.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/a-caf2/record.json",
+      "sha256": "7eea679e80d759776188afb95452c4c02e948a48c02332eef5cc77b659a5ff57"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/a-caf2/report.md",
+      "sha256": "8041a06f6ace21e28704f018b0f8246c8bbe64d9cff3f5b7d237670e9bc7690e"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/a-caf2/audit.log",
+      "sha256": "8efa43be3c89992aced0c8e513519e17d3a622b09ad758635cbc4f95f3824e60"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.model_persistence/a-caf2/script.py.txt",
+      "sha256": "4eac64158d8f050901618561a5af33c804e385be6b9bd871322eefec3a353b15"
+    }
+  ],
+  "disposition": "append-ready only; manager owns ledger append; no history mutation performed"
+}

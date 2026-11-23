@@ -933,6 +933,19 @@ class HealthCheckResponse(BaseModel):
         default="",
         description="Positive daemon-owned request/scheduler continuity contract; empty is unknown",
     )
+    # Additive and defaulted like the fields above. Mode only (enforcing /
+    # skipped / disabled, plus the mechanism or skip reason) so `lop doctor`
+    # and QA can read the posture without scraping logs; it discloses nothing
+    # a same-user caller could not already read from the daemon's log.
+    # ``None`` when the app is served without the gated protocol (test
+    # clients, a bare uvicorn embed) or before the startup self-probe settles.
+    peer_uid_check: Optional[dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Same-OS-user check on loopback connections: {mode, mechanism|reason}; "
+            "null when not served by `lop serve` or not yet resolved"
+        ),
+    )
 
 
 class WebsocketConnectionType(str, Enum):

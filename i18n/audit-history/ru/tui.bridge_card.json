@@ -1,0 +1,120 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "tui.bridge_card",
+  "history_sha256": "ec1a5a94c4757e49b793063fbc1f88e0b1c7f6a99381391ab0f995d6f014cab2",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "769543b0ce36575906cd49adfd51447874caddd2e5d3c4118d9549143ed318a7",
+      "translator": {
+        "agent": "translator specialist (lopdev team, job 52fccdacba96)",
+        "session": "52fccdacba96",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (lopdev team, job 14b97e09e500; independent of the translator)",
+        "session": "14b97e09e500",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18",
+        "result": "passed",
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace tui.bridge_card (14 keys, bridge-body PR 1+2). Independent audit PASS, 0 unresolved blocker/major. Minor applied as auditor-suggested: body.more_messages capitalised 'Ещё' in all four plural arms. Remaining nits deferred. Target ru/tui.bridge_card.json sha256 ae7ae07d304e9edaa1fc04e2ca4a73e3f01d75ddb882c47bb7198541ace10cc4. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "8c20c37b8880582d26fd5e50d633d995fa846200f5b670181ce69792b5654c5f",
+      "translator": {
+        "agent": "translator specialist (lopdev team, job 3cb35d7fd971)",
+        "session": "3cb35d7fd971",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (lopdev team, job 2d5a46e94264; independent of the translator)",
+        "session": "2d5a46e94264",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18",
+        "result": "passed",
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "r2: 3 changed + 4 added keys; 6 audited minors applied (PR #4238 design/review round 1 remediation: body.offline, body.show_more, body.show_less changed; body.held_transient, body.deleted, header.held_transient, header.open_to_load added). Independent audit PASS on all 7 locales, 0 blocker/major. Applied here: ru body.offline, ru header.open_to_load. Target ru/tui.bridge_card.json sha256 edb09629d3d35df84836df47131ede53539f1f8cbde149fe210a73300bdaf7e7. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "6aeebfa72e684da6edd4529d1543d7f4ff64bcd93fdc4ee67a62bfb1ef322f6e",
+      "translator": {
+        "agent": "translator specialist (lopdev team, job 3bc83ddcbee5)",
+        "session": "3bc83ddcbee5",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (lopdev team, session 2e075b0ad451; independent of the translator)",
+        "session": "2e075b0ad451",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-19",
+        "result": "passed",
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "r3: 1 key added (tui.bridge_card.header.offline, design D8 follow-up to PR #4238). Independent audit PASS on all 7 locales, 0 blocker/major; one overflow minor (fr/es length) and one ru nit deferred, no action. Target ru/tui.bridge_card.json sha256 906ae6522ef90059b86bdc4a118850327f5cfbd3ea61353ee98a9389ebdd5962. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "ce30b56df340bed5983e447aecc4fa5832b900eb5860f6aade93181891ac4301",
+      "target_sha256": "0b9c77ca709295d21f762f0cc4906ac3546fb75b6160b5fdd88174ac4bd4edb7",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "not-performed"
+      },
+      "status": "pending",
+      "note": "Translation-only scoped pass; independent audit required. i18n/receipts/bridge-card-reread-translator-ru-e896d2db9139.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "ce30b56df340bed5983e447aecc4fa5832b900eb5860f6aade93181891ac4301",
+      "target_sha256": "0b9c77ca709295d21f762f0cc4906ac3546fb75b6160b5fdd88174ac4bd4edb7",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "independent-translation-auditor (lopdev reviewer)",
+        "session": "9af46213ad99",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider quota before audit",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Scoped bridge-card delta independently passed; untouched values retain prior audits. Evidence: i18n/receipts/bridge-card-copy-audit-9af46213ad99.json"
+    }
+  ]
+}

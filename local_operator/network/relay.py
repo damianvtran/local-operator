@@ -85,7 +85,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from local_operator import supervisors
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
-from local_operator.network import projection, redial, store, wire
+from local_operator.network import nat64, projection, redial, store, uplink, wire
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.create_keys import CreateKeyIndex
@@ -95,15 +95,23 @@ from local_operator.network.credentials.sync import sync_checks
 from local_operator.network.handshake import (
     HANDSHAKE_TIMEOUT_S,
     MAX_DECLARED_ENDPOINTS,
+    REASON_LISTENER_UNPROVEN,
+    REASON_MAC,
+    REASON_PEER_IDENTITY,
     REASON_SELF,
+    REASON_SIGNATURE,
     Credential,
+    DialerExpectation,
     Handshake,
     ListenerPolicy,
+    MembershipEnded,
     pair_abort_frame,
     pair_offer_frame,
     pair_result_frame,
     pair_timeout_seconds,
+    prime_dummy_public_key,
     sas_matches,
+    set_pair_keepalive,
 )
 from local_operator.network.identity import (
     DeviceIdentity,
@@ -127,10 +135,14 @@ from local_operator.network.invite import (
 from local_operator.network.invite import mint as mint_invite
 from local_operator.network.invite import release
 from local_operator.network.types import (
+    CAPABILITIES,
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
     NET_PAIR_OPS,
+    PAIR_STAGE_AWAITING_CONFIRMATION,
+    PAIR_STAGE_AWAITING_JOINER,
     ControlRequestTimeout,
+    ControlRequestUnsent,
     Granted,
     LinkContext,
     LinkPhase,
@@ -144,6 +156,7 @@ from local_operator.network.types import (
     Refusal,
     SecretState,
     capabilities_for_role,
+    new_pairing_nonce,
     trust_state,
 )
 from local_operator.notifications.remote_attention import (
@@ -791,6 +804,23 @@ MEMBERSHIP_READ_CLIENT_TIMEOUT_S = 5.0
 #: a CAP, not a share: see :func:`probe_candidates`.
 PROBE_CONNECT_TIMEOUT_S = 3.0
 
+#: How long a literal-address connect must have WAITED, unanswered, before the
+#: probe calls it dial silence (``CandidateAttempt.dial_silent``; code review
+#: R3-1, PR #4260). The connect budget is ``min(connect_cap, deadline - now)``
+#: and one deadline is shared by peers probed in turn (``ready``'s 12 s,
+#: ``doctor``'s), so a late peer can be handed milliseconds: a connect that
+#: times out after 2 ms, or is still pending 20 ms into its life when the report
+#: stops waiting, has NOT BEEN ATTEMPTED LONG ENOUGH to say anything about the
+#: peer (reproduced: 192.0.2.1 with 2 ms or 20 ms left read as silent). 1.0 s is
+#: over 6x the slowest healthy connect measured above (~0.15 s transatlantic;
+#: loopback 0.03 s) and equals TCP's initial retransmission timeout (RFC 6298
+#: section 2.1), so a SYN unanswered that long has had its full first chance.
+#: The effective floor is ``min(connect_cap, SILENT_MIN_WAIT_S)``: a caller
+#: whose cap is shorter still gets silence when the connect used its whole cap.
+#: A shorter wait keeps its base diagnostic (``no_answer`` /
+#: ``connect_failed:TimeoutError``) with no silence evidence.
+SILENT_MIN_WAIT_S = 1.0
+
 #: The one reason a member row carries when nothing was even attempted. Its own
 #: spelling because "we could not try" and "we tried and nothing answered" are
 #: different operator actions, and a budget that ran out must never be reported as
@@ -880,6 +910,16 @@ class CandidateAttempt:
     connected: bool
     detail: str
     latency_ms: float | None = None
+    #: ATTEMPT EVIDENCE OF SILENCE (security review U3, PR #4260): True only when
+    #: a TCP connect to an IP LITERAL was actually issued and nothing answered —
+    #: the probe's own connect timed out, or the connect was still blocked (no
+    #: SYN-ACK, RST or ICMP error yet) when the collector stopped waiting. A
+    #: ``detail`` cannot carry this: ``no_answer`` is also the closing pass's name
+    #: for a worker that never reached its connect, and ``connect_failed:OSError``
+    #: covers local-stack errors (EADDRNOTAVAIL, EACCES, ENOBUFS) raised before any
+    #: SYN. Only the uplink "<peer> isn't answering" reading consumes it; every
+    #: existing reader keeps reading ``detail``.
+    dial_silent: bool = False
 
 
 @dataclass(frozen=True)
@@ -921,6 +961,7 @@ class _AttemptOutcome:
     sock: socket.socket | None
     detail: str
     latency_ms: float
+    dial_silent: bool = False
 
 
 def probe_candidates(
@@ -969,27 +1010,128 @@ def probe_candidates(
     opened_lock = threading.Lock()
     stop = threading.Event()
     started_at = time.monotonic()
+    #: ONE state per endpoint, guarded by ``opened_lock`` (U3b / R3-1, PR #4260):
+    #: absent = not started; ``("issued", t0)`` = the connect syscall is about to
+    #: run on a socket already built; ``("done", outcome)`` = the worker's
+    #: terminal answer, written under the same lock that queues it. The collector
+    #: reads this once under the lock at the cutoff, so an outcome that completed
+    #: just before the cutoff is never lost to it, and an issued-but-pending
+    #: connect stays ambiguous: it keeps ``no_answer`` and carries no evidence.
+    states: dict[str, tuple[str, Any]] = {}
+    #: R3-1: the wait a timed-out literal dial needs before its silence counts.
+    silent_floor = min(connect_cap, SILENT_MIN_WAIT_S)
+
+    def finish(outcome: _AttemptOutcome) -> None:
+        with opened_lock:
+            states[outcome.endpoint] = ("done", outcome)
+            results.put(outcome)
 
     def attempt(endpoint: str) -> None:
         budget = connect_cap
         if deadline is not None:
             budget = min(connect_cap, max(0.0, deadline - time.monotonic()))
         if budget <= 0:
-            results.put(_AttemptOutcome(endpoint, None, DETAIL_NOT_ATTEMPTED, 0.0))
+            finish(_AttemptOutcome(endpoint, None, DETAIL_NOT_ATTEMPTED, 0.0))
             return
         address, _, port_text = endpoint.rpartition(":")
         try:
             port = int(port_text)
         except ValueError:
-            results.put(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
+            finish(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
             return
+        literal = _is_ip_literal(address)
         started = time.monotonic()
+        #: U4 (PR #4260): the timeout this connect was GIVEN, and the instant it
+        #: gave up, stamped before any cleanup. See the ``dial_silent`` gate below.
+        assigned = budget
+        ended: float | None = None
         try:
-            sock = socket.create_connection((address or endpoint, port), timeout=budget)
+            if literal:
+                # Build the socket ourselves for a literal so a creation error
+                # (EMFILE, EAFNOSUPPORT) is a local error raised BEFORE the dial
+                # is marked issued, and ``t0`` is stamped right before the one
+                # syscall that sends a SYN (U3b). A hostname keeps
+                # create_connection: its blocked call may be the resolver.
+                host = address.strip("[]")
+                sock = _new_dial_socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+                try:
+                    sock.settimeout(budget)
+                    with opened_lock:
+                        started = time.monotonic()
+                        states[endpoint] = ("issued", started)
+                    sock.connect((host, port))
+                except BaseException as exc:
+                    # Stamp first: a slow close must not count as time spent
+                    # waiting for an answer (U4).
+                    ended = time.monotonic()
+                    _close_quietly(sock)
+                    # NAT64 (roaming stage 3): an IPv4 literal refused LOCALLY
+                    # (ENETUNREACH/EHOSTUNREACH/EADDRNOTAVAIL — an IPv6-only
+                    # host) is exactly the case the fallback exists for. A
+                    # timeout never tries it: a silent IPv4 dial on a dual-stack
+                    # host is a quiet peer, not a missing route, and a second
+                    # dial would only double the wait. The fallback shares this
+                    # connect's deadline (``started + budget``), and ``ended`` is
+                    # re-stamped once it returns or raises, so the silence gate
+                    # below sees the whole attempt. On ``None`` the ORIGINAL
+                    # error propagates; "issued" still means the first connect.
+                    if (
+                        isinstance(exc, OSError)
+                        and not isinstance(exc, TimeoutError)
+                        and ":" not in host
+                    ):
+                        dial_deadline = started + budget
+                        try:
+                            rescued = nat64.fallback(
+                                host,
+                                port,
+                                exc,
+                                timeout=max(0.0, dial_deadline - time.monotonic()),
+                                deadline=dial_deadline,
+                            )
+                        finally:
+                            ended = time.monotonic()
+                        if rescued is None:
+                            raise
+                        sock = rescued
+                    else:
+                        raise
+            else:
+                # ``nat64.create_connection``, not ``socket``'s: the ONE dial seam
+                # that retries an IPv4-only name through this network's NAT64 when
+                # this host has no IPv4 route (roaming stage 3). Same first connect,
+                # same exceptions; trust is still the handshake's call on the
+                # winning socket.
+                sock = nat64.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
-            results.put(
+            waited = (ended if ended is not None else time.monotonic()) - started
+            with opened_lock:
+                issued = states.get(endpoint, ("",))[0] == "issued"
+            finish(
                 _AttemptOutcome(
-                    endpoint, None, f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}", 0.0
+                    endpoint,
+                    None,
+                    f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}",
+                    0.0,
+                    # Silence only for an ISSUED literal connect that hit its OWN
+                    # timeout (every other OSError is a local or remote answer,
+                    # U3) after waiting at least the floor: a timeout on a sliver
+                    # of a shared deadline is "not attempted long enough" (R3-1).
+                    # U4 requires BOTH halves of "waited the floor": the timeout
+                    # the connect was given must itself reach the floor (a short
+                    # timeout that completed proves only a short wait, however
+                    # the clock reads afterwards), and the wait measured up to
+                    # the moment connect gave up — before the close above —
+                    # must reach it too. Either alone can be inflated: elapsed
+                    # by a slow cleanup or a descheduled thread, the assignment
+                    # by a connect that returned early.
+                    dial_silent=(
+                        literal
+                        and issued
+                        and isinstance(exc, TimeoutError)
+                        and assigned >= silent_floor
+                        and waited >= silent_floor
+                    ),
                 )
             )
             return
@@ -1001,7 +1143,9 @@ def probe_candidates(
                 _close_quietly(sock)
                 return
             opened.append(sock)
-        results.put(_AttemptOutcome(endpoint, sock, DETAIL_OK, latency))
+            outcome = _AttemptOutcome(endpoint, sock, DETAIL_OK, latency)
+            states[endpoint] = ("done", outcome)
+            results.put(outcome)
 
     threads = [
         threading.Thread(target=attempt, args=(endpoint,), name="mesh-probe", daemon=True)
@@ -1009,6 +1153,17 @@ def probe_candidates(
     ]
     for thread in threads:
         thread.start()
+
+    def record(outcome: _AttemptOutcome) -> None:
+        attempts.append(
+            CandidateAttempt(
+                endpoint=outcome.endpoint,
+                connected=outcome.sock is not None,
+                detail=outcome.detail,
+                latency_ms=outcome.latency_ms or None,
+                dial_silent=outcome.dial_silent,
+            )
+        )
 
     attempts: list[CandidateAttempt] = []
     winner_sock: socket.socket | None = None
@@ -1023,20 +1178,40 @@ def probe_candidates(
         except queue.Empty:
             break
         settled += 1
-        attempts.append(
-            CandidateAttempt(
-                endpoint=outcome.endpoint,
-                connected=outcome.sock is not None,
-                detail=outcome.detail,
-                latency_ms=outcome.latency_ms or None,
-            )
-        )
+        record(outcome)
         if outcome.sock is not None and winner_sock is None:
             winner_sock, winner = outcome.sock, outcome.endpoint
             if not wait_all:
                 break
 
-    stop.set()
+    # The cutoff: one read of every endpoint's state, under the lock the workers
+    # write it under. After ``stop`` is set no worker can append a socket, so the
+    # snapshot is the probe's final knowledge (U3b). There is deliberately no
+    # further drain at the cutoff (R4-1, deferred as a MINOR): a worker that has
+    # not written its terminal state by now reads ``no_answer`` with no silence
+    # evidence, which errs toward caution — never a false "isn't answering".
+    reported = {row.endpoint for row in attempts}
+    with opened_lock:
+        stop.set()
+        final = dict(states)
+    late: list[_AttemptOutcome] = []
+    if wait_all or winner_sock is None:
+        # A terminal outcome written before the cutoff but not yet dequeued is
+        # still that endpoint's answer (a completed timeout must not turn into
+        # ``no_answer``). The early-return path (winner, not wait_all) asked for
+        # one answer only and stays as it was.
+        for endpoint in endpoints:
+            state = final.get(endpoint)
+            if endpoint not in reported and state is not None and state[0] == "done":
+                late.append(state[1])
+                reported.add(endpoint)
+    for outcome in late:
+        # Not counted in ``settled``: ``complete`` keeps its meaning — every
+        # answer arrived before the collector stopped waiting — and a late
+        # read only stops a terminal outcome from being renamed ``no_answer``.
+        record(outcome)
+        if outcome.sock is not None and winner_sock is None:
+            winner_sock, winner = outcome.sock, outcome.endpoint
     with opened_lock:
         for sock in opened:
             if sock is not winner_sock:
@@ -1048,14 +1223,19 @@ def probe_candidates(
     # cannot mistake "we stopped waiting" for "this address is fine". WHICH name
     # depends on whether anything was tried at all — a probe handed a deadline that
     # had already passed has not dialled anything and must say so, rather than
-    # report a reachability result it never established.
+    # report a reachability result it never established. An issued connect still
+    # pending here is AMBIGUOUS (U3b): it supports only "no answer during this
+    # check", so it keeps the base ``no_answer`` and never carries ``dial_silent``.
     starved = deadline is not None and deadline <= started_at
-    reported = {row.endpoint for row in attempts}
     for endpoint in endpoints:
         if endpoint not in reported:
+            reported.add(endpoint)
             attempts.append(
                 CandidateAttempt(
-                    endpoint, False, DETAIL_NOT_ATTEMPTED if starved else DETAIL_NO_ANSWER, None
+                    endpoint,
+                    False,
+                    DETAIL_NOT_ATTEMPTED if starved else DETAIL_NO_ANSWER,
+                    None,
                 )
             )
 
@@ -1066,6 +1246,26 @@ def probe_candidates(
         complete=settled == len(threads),
         reason="" if winner_sock is not None else probe_reason(attempts),
     )
+
+
+def _new_dial_socket(family: int) -> socket.socket:
+    """The bare TCP socket a literal-address probe dials on (U3b, PR #4260).
+
+    Its own function so a creation failure is testable as what it is — a local
+    error raised before any dial was issued — without patching the socket type.
+    """
+    return socket.socket(family, socket.SOCK_STREAM)
+
+
+def _is_ip_literal(address: str) -> bool:
+    """Whether ``address`` is an IP literal, so a blocked connect cannot be a lookup."""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(address.strip("[]"))
+    except ValueError:
+        return False
+    return True
 
 
 def _dial_candidates(member: MemberRecord) -> list[str]:
@@ -1166,13 +1366,26 @@ def _is_loopback_endpoint(endpoint: str) -> bool:
 
 
 def peer_link_state(
-    link: PeerLink | None, reason: str, attempts: Sequence[CandidateAttempt]
+    link: PeerLink | None,
+    reason: str,
+    attempts: Sequence[CandidateAttempt],
+    *,
+    route_reader: Callable[[str], bool | None] | None = None,
 ) -> str:
     """Keep host refusal, address black holes and handshake rejection distinct.
 
     A refused TCP connection proves the host answered but no relay listened;
     a timeout proves neither. A connected socket rejected during handshake is
     a third state that the aggregate reason alone cannot reliably distinguish.
+
+    ``local_offline`` (2026-11-18: a Mac on an IPv6-only network dialling an
+    IPv4-only node2) is the fourth: THIS device has no route to ANY of the
+    peer's own dialled endpoints, so the failure is ours, not the peer's. It
+    wins over ``address_unreachable`` only, and only when a passive lookup of
+    each endpoint PROVES the missing route (``uplink.no_route_for``). Asked per
+    endpoint, never inferred from the public-route reading (review R1): a LAN
+    or loopback peer keeps its route without a default route. No reader, a
+    hostname or an unreadable lookup keeps today's ``address_unreachable``.
     """
     if link is not None:
         return "reachable"
@@ -1196,6 +1409,10 @@ def peer_link_state(
     ):
         return "relay_down"
     if any(attempt.detail != DETAIL_NOT_ATTEMPTED for attempt in attempts):
+        if route_reader is not None and uplink.no_route_for(
+            [attempt.endpoint for attempt in attempts], route_reader
+        ):
+            return "local_offline"
         return "address_unreachable"
     if reason in ("no_endpoint", "not_a_member"):
         return reason
@@ -1287,6 +1504,26 @@ def handshake_not_attempted_reason(winner: str, *, budget: str = "listing") -> s
 #: every human surface that renders a peer's reason (:func:`handshake_refused_reason`
 #: writes it; ``resume.peer_reason_words`` reads it).
 HANDSHAKE_REFUSED = "handshake_refused"
+
+#: How long after ``member rm`` a removed device that dials in and PROVES its stored
+#: key is told "membership ended" instead of silence (G9-B). Seven days is the
+#: security owner's floor for the persisted tombstone; the row itself lives for
+#: ``store.TOMBSTONE_PRUNE_AGE_S`` (90 days), so the window, not the row, is the
+#: bound. After it the device gets the plain silent refusal again.
+#:
+#: The window holds however many rotations happened inside it (security P3 /
+#: review R1-1, closed in the G9-B follow-up): the handshake's step-4 epoch check
+#: (``Handshake.verify_auth``) runs the same tombstone probe before it refuses, so a
+#: device removed and then left behind by a second removal, a ``leave`` or a
+#: ``panic`` still proves its key and is told. Before that it got silence until its
+#: hold ended.
+REMOVAL_NOTICE_WINDOW_S = 7 * 24 * 60 * 60.0
+#: At most one notice per tombstoned key per this many seconds, per relay process;
+#: every other attempt in the window is the plain silent close. The value is the
+#: security owner's "about one per key per few minutes": a stolen key re-dialling
+#: in a loop must not turn the notice into a liveness probe of this device. A
+#: restart forgets the window, which costs at most one extra notice.
+REMOVAL_NOTICE_INTERVAL_S = 300.0
 
 
 def handshake_refused_reason(exc: BaseException) -> str:
@@ -1598,6 +1835,7 @@ def adopt_members(
     *,
     sender_device_id: str = "",
     allow_new: bool = True,
+    supplier_verified: bool,
 ) -> tuple[bool, list[str]]:
     """Take a peer's member rows into this device's record. Returns (changed, added).
 
@@ -1607,7 +1845,14 @@ def adopt_members(
     A joined member may assert its own bounded standing; only an active admin
     may introduce another device. Unknown rows arrive only in receiver-initiated
     pulls (``allow_new``), never in unsolicited change notifications. No new
-    wire field is needed: the link already authenticates the answering peer.
+    wire field is needed: the link authenticates the answering peer, in BOTH
+    directions since the dialer verifies the listener's welcome proof.
+
+    ``supplier_verified`` is that fact, passed in (``PeerLink.peer_verified``) and
+    REQUIRED with no default: an unverified supplier is refused outright, so a
+    future caller holding a link ``_admit_link`` never vetted cannot merge rows on
+    a claimed admin's authority (mesh trust audit G2). ``_admit_link`` already
+    refuses such links; this is the backup at the one function that writes rows.
 
     THE RULES, and each one is a refusal to guess:
 
@@ -1643,6 +1888,8 @@ def adopt_members(
       the normal case, and shrinking the table on the weaker evidence is how a mesh
       loses members that are still members.
     """
+    if not supplier_verified:
+        return False, []
     changed = False
     added: list[str] = []
     sender = record.member(sender_device_id)
@@ -1711,6 +1958,10 @@ def adopt_members(
             adopt, retired = _rotation_retirements(record, incoming, survivor=incoming)
             if not adopt:
                 continue
+            # S15 (#4245 security round 3): an admin may introduce a device, never a
+            # receiver-local grant for it. Before ``_take_over_standing``, so a signed
+            # successor still inherits a grant THIS device made to its predecessor.
+            incoming.capabilities = _without_receiver_local(incoming.capabilities)
             if retired:
                 _retire_superseded_rows(record, retired, survivor=incoming)
                 _take_over_standing(retired[-1], incoming)
@@ -2463,7 +2714,7 @@ def set_member_capabilities(
     refused rather than stored, since a typo stored is an authority nobody decided.
     The CALLER holds the record's write lock and saves; this function only mutates.
     """
-    from local_operator.network.types import CAPABILITIES, SELF_DECIDED_SCOPES
+    from local_operator.network.types import SELF_DECIDED_SCOPES
 
     me = record.self_member()
     is_admin = bool(me and me.active and "admin" in me.capabilities)
@@ -2707,6 +2958,18 @@ def _sanitise_frame_names(rows: list[MemberRecord], *, source: str) -> None:
         row.name = _accepted_name(row.name, "", source=source)
 
 
+#: Capabilities that exist only as THIS device's own decision about a peer (#4245
+#: security round 3, S15): ``workset_import`` lets a peer write working files into
+#: this device's home, and the ruling is "granted on the receiver, never implied by
+#: any role incl. admin". A row learned from a peer's table (a pull or a rotation
+#: frame) therefore never brings it in; only ``set_member_capabilities`` here does.
+_RECEIVER_LOCAL_CAPABILITIES: frozenset[str] = frozenset({"workset_import"})
+
+
+def _without_receiver_local(capabilities: Sequence[str]) -> list[str]:
+    return [name for name in capabilities if name not in _RECEIVER_LOCAL_CAPABILITIES]
+
+
 def _keep_local_authority(record: NetworkRecord, rows: list[MemberRecord]) -> None:
     """Give each incoming row this device already holds its LOCAL role, set and name.
 
@@ -2728,6 +2991,9 @@ def _keep_local_authority(record: NetworkRecord, rows: list[MemberRecord]) -> No
             row.role = local.role
             row.capabilities = list(local.capabilities)
             row.name = local.name or row.name
+        else:
+            # Taken as the frame carries it, minus what only this device may grant.
+            row.capabilities = _without_receiver_local(row.capabilities)
     # LAST, so it also covers the name just copied from a held row that has none.
     _sanitise_frame_names(rows, source="a rotation frame")
 
@@ -3284,7 +3550,13 @@ def _members_inconsistent(
     for row in rows:
         if not row.public_key:
             return "member_without_key"
-        if not set(row.capabilities) <= set(capabilities_for_role("admin")):
+        # Validate against the whole vocabulary, NOT the admin role's set: since
+        # #4245 ``admin`` deliberately omits ``workset_import`` (it is a
+        # receive-side grant each device decides for itself), so checking rows
+        # against the admin set refused every rotation frame from a device that
+        # had granted it — that device then cut itself off at its next rotation
+        # (#4245 agent review round 3, B1).
+        if not set(row.capabilities) <= CAPABILITIES:
             return "member_capability_unknown"
     return ""
 
@@ -4851,8 +5123,14 @@ class PeerLink:
         codec: wire.LinkCrypto,
         settings: NetworkSettings,
         reader: wire.FrameReader | None = None,
+        peer_verified: bool = False,
     ) -> None:
         """``reader`` is the HANDSHAKE's reader, when it still holds bytes.
+
+        ``peer_verified`` is whether THIS side proved the peer's identity in the
+        handshake (``HandshakeResult.peer_verified``). Every build site states it
+        explicitly (listener register, pair listener, dialer) so the value a mesh
+        origin stamp relies on is a reviewed decision per site, never a default.
 
         A link takes over the socket the handshake just finished on, and the
         handshake reader may already own bytes of the first record (see
@@ -4873,6 +5151,16 @@ class PeerLink:
         self.device_id = result.peer_device_id
         self.instance_id = result.peer_instance_id
         self.network_id = result.network_id
+        #: ``PeerLink.peer_verified: bool`` — True iff this link's peer was
+        #: authenticated against its stored key (``HandshakeResult.peer_verified``:
+        #: the listener verified the dialer's auth, or the dialer verified the
+        #: listener's welcome proof and that it is the device it meant to reach),
+        #: as each build site states it (see the constructor). ``_admit_link``
+        #: refuses False; ``adopt_members``, ``_note_peer_endpoints`` and
+        #: ``_broadcast_epoch`` read it as a backup; ``_peer_block`` puts it in the
+        #: block the owner's relay MACs for its runtime (G6), where it caps the
+        #: stamp's ``verified``. The name is a cross-lane interface — do not rename it.
+        self.peer_verified: bool = bool(peer_verified)
         self.epoch = result.epoch
         self.phase: LinkPhase = result.phase
         self.capabilities = frozenset(result.peer_capabilities)
@@ -4896,6 +5184,9 @@ class PeerLink:
         self.peer_addr = ""
         self.opened_at = time.time()
         self.last_frame_at = time.time()
+        #: The reader's monotonic timeout and writer's wall-idle check can race;
+        #: the relay claims their single idle audit row under its links lock.
+        self._idle_audited = False
         #: When the writer last sent a keepalive ``ping``. The cadence is measured from
         #: the LATER of this and ``last_frame_at`` — see ``_write_loop``.
         self.last_ping_sent_at = 0.0
@@ -5249,7 +5540,28 @@ class PeerLink:
 
     def _write_loop(self) -> None:
         try:
+            last_wall, last_mono = time.time(), time.monotonic()
             while not self._closed.is_set():
+                now, mono = time.time(), time.monotonic()
+                gap_s = (now - last_wall) - (mono - last_mono)
+                last_wall, last_mono = now, mono
+                if gap_s > self.settings.keepalive_s:
+                    # macOS monotonic time excludes clamshell sleep. Explain that
+                    # gap without publishing absolute clock values, once across
+                    # all writers waking on this host. A large forward wall-clock
+                    # adjustment has the same signature, not proof of suspend.
+                    self.server.audit_host_resume(gap_s=gap_s, clock_offset=now - mono)
+                if (
+                    not self._flushing.is_set()
+                    and now - self.last_frame_at > self.settings.link_idle_s
+                ):
+                    # The reader's monotonic deadline did not spend the sleeping
+                    # minutes. Expire the wall-stale link BEFORE draining new work
+                    # on its first wake tick. An existing close still owns its
+                    # bounded control-frame flush; do not turn it into a timeout.
+                    self.server.audit_idle(self)
+                    self.close("timeout")
+                    return
                 sent = self._drain()
                 if self._flushing.is_set() and self._reliable.empty() and not self._droppable:
                     # BOTH QUEUES EMPTY AND DRAINED BY THIS THREAD: everything a
@@ -5436,6 +5748,59 @@ class ServerPolicy(ListenerPolicy):
         if member is None or not member.active:
             return None
         return member.public_key or None
+
+    def removed_member_public_key(self, network_id: str, device_id: str) -> str | None:
+        """A tombstone's stored key while it may still be told it was removed (G9-B).
+
+        The tombstone IS the member row ``remove_member`` kept: ``removed_at``,
+        ``lifecycle="expired"`` and the public key, no secret. It is notice-eligible
+        for :data:`REMOVAL_NOTICE_WINDOW_S` after the removal; past that the device
+        falls back to the plain silent refusal. A device that LEFT (``removed_by`` is
+        itself) already knows, so it is never eligible. Only ever used to check a
+        signature; it authorises nothing.
+        """
+        if not self._record or network_id != self._record.network_id:
+            return None
+        # A listener that knows it was itself removed has no standing to tell
+        # anyone else they were (review R1-4): the dialer verifies the signer only
+        # against ITS OWN record, which may not yet show this device removed, so the
+        # check has to live here. Falling through to ``None`` keeps the probe on the
+        # same one-verify path (the discarded key stands in), so this is silence.
+        # Do not use ``member``/``self_member`` here: their first-match lookup
+        # skips later rows. Every claim scans every row/alias and revocation id,
+        # then evaluates the same eligibility checks, including on a dummy miss.
+        # This is a work-shape invariant, not a constant-time Python guarantee.
+        member = MemberRecord(device_id="", removed_at=0.0)
+        me = MemberRecord(device_id="", removed_at=0.0)
+        found = self_found = False
+        for row in self._record.members:
+            matches = row.device_id == device_id
+            self_matches = row.device_id == self._record.self_device_id
+            for previous_id in row.previous_ids:
+                matches |= previous_id == device_id
+                self_matches |= previous_id == self._record.self_device_id
+            if matches & (not found):
+                member = row
+            if self_matches & (not self_found):
+                me = row
+            found |= matches
+            self_found |= self_matches
+        revoked = False
+        for removed_id in self._record.removed_ids:
+            revoked |= removed_id == device_id
+        public_key = member.public_key
+        eligible = (
+            found
+            & self_found
+            & (me.removed_at is None)
+            & (me.lifecycle != "expired")
+            & (member.removed_at is not None)
+            & (member.removed_by != device_id)
+            & revoked
+            & bool(public_key)
+            & (time.time() - float(member.removed_at or 0.0) <= REMOVAL_NOTICE_WINDOW_S)
+        )
+        return public_key if eligible else None
 
     def invite_credential(self, network_id: str, invite_id: str) -> Credential | None:
         """The invite's MAC key, or ``None`` when the token may not be redeemed.
@@ -5856,11 +6221,52 @@ class RelayServer:
         #: (``network.redial``). Fed by link admission and close; read by
         #: ``_redial_loop`` and ``peer_status``.
         self.redial = redial.RedialTracker()
-        #: Collapses repeats of one identical handshake refusal into one audit row
-        #: per window (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these.
+        # The passive per-endpoint route lookup (``network.uplink``). An attribute
+        # so a test can inject a scripted reader; a relay built without
+        # ``__init__`` has none, so no ``local_offline`` and no recovery kick.
+        self._route_reader: Callable[[str], bool | None] | None = uplink.endpoint_has_route
+        #: Collapses identical handshake refusals and redial failures per window
+        #: (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these repeats.
         self._refusal_rows = redial.RefusalCoalescer()
+        #: (network_id, device_id) -> monotonic time of the last "membership ended"
+        #: notice sent to that tombstoned key (``_send_removal_notice``). Process
+        #: memory, ids only, pruned past :data:`REMOVAL_NOTICE_INTERVAL_S`.
+        self._removal_notices: dict[tuple[str, str], float] = {}
+        self._removal_notices_lock = threading.Lock()
+        # Claim failure telemetry once even when different peer readers deliver
+        # notices concurrently. Never hold this lock across audit/disk I/O.
+        self._unrecorded_removals: set[str] = set()
+        self._unrecorded_removals_lock = threading.Lock()
+        #: device_id -> {"build", "endpoint", "at"} for every member whose LISTENER
+        #: answered this device's dial without a welcome proof (``listener_unproven``).
+        #: STICKY ON PURPOSE, separate from ``redial``: the tracker's ``last_cause`` is
+        #: overwritten by every later ``connect_failed``, so the one actionable fact
+        #: ("that device runs a build too old to prove itself; update it") would flap
+        #: away under the reconnect loop. Cleared when an OUTBOUND link to that device
+        #: is admitted, or an INBOUND one whose MAC-covered caps carry
+        #: ``listener-proof-v1`` (``_admit_link``; review m1 / UX U1). In memory only:
+        #: re-learnt on the first dial after a restart. Read by ``peers()`` as
+        #: ``listener_proof``.
+        self._unproven_listeners: dict[str, dict[str, Any]] = {}
+        #: device_id -> {endpoint, ...} answered by a party that could NOT prove it is
+        #: that member, on UNAUTHENTICATED evidence (a challenge naming another device,
+        #: or a signature that does not verify). IN MEMORY, NEVER THE ROW (review M1,
+        #: security S-2): one bare frame from anyone at that address costs 64 random
+        #: bytes, so it may reorder this device's dials but never durably delete a
+        #: member's address. ``_ensure_link_with_reason`` dials these only after the
+        #: member's other addresses fail; a verified link at the address clears it.
+        self._suspect_endpoints: dict[str, set[str]] = {}
         self.links: dict[str, PeerLink] = {}
         self._links_lock = threading.RLock()
+        #: How many inviter ceremonies are PARKED on this relay right now (from the
+        #: listener's entry to its exit) — the count :data:`PAIR_PARKED_CEREMONY_CAP`
+        #: bounds. A plain int under its own lock: the listener runs one thread per
+        #: accepted pair socket, so the check-and-increment must be one step.
+        self._pair_parked = 0
+        self._pair_parked_lock = threading.Lock()
+        #: A clock discontinuity belongs to the host, not each of its links.
+        #: Compared under _links_lock; absolute clock offsets are never audited.
+        self._resume_clock_offset: float | None = None
         self._listener: socket.socket | None = None
         self._control: socket.socket | None = None
         self._control_key = wire.b64u(os.urandom(32))
@@ -6117,6 +6523,10 @@ class RelayServer:
         # BEFORE the accept loop starts: a peer that handshakes in the first
         # millisecond must find this device's endpoints already on the self row.
         self.sync_self_endpoints()
+        # And the tombstone probe's stand-in key, for the same reason: minted here,
+        # once, so no inbound probe ever pays for a keygen (the timing equalisation
+        # in ``Handshake._probe_tombstone``) and no CLI import pays for it either.
+        prime_dummy_public_key()
         for target, name in (
             (self._accept_loop, "mesh-accept"),
             (self._control_loop, "mesh-control"),
@@ -6651,8 +7061,17 @@ class RelayServer:
                 # writing it back would resurrect it (``save`` creates the file).
                 continue
 
-    def _note_peer_endpoints(self, network_id: str, device_id: str, endpoints: list[str]) -> None:
+    def _note_peer_endpoints(
+        self, network_id: str, device_id: str, endpoints: list[str], *, verified: bool
+    ) -> None:
         """Record where a peer says it can be reached, on its member row.
+
+        ``verified`` is whether the handshake that carried ``endpoints`` authenticated
+        the peer against its stored key. False writes NOTHING: a durable endpoint is
+        a redirect of every future dial, and before the dialer verified the
+        listener's welcome proof an impostor's endpoints landed here on the victim's
+        row (mesh trust audit G4). Both callers now run after verification, so this
+        is the assertion-style guard that keeps a new caller from undoing that.
 
         THE ROW IS THE ONLY PLACE ``_ensure_link`` DIALS, so a declaration that
         never lands here is a peer that is permanently unreachable. A peer that
@@ -6668,7 +7087,7 @@ class RelayServer:
         flight. The read happens inside the lock instead, and a record that cannot be
         reloaded is still not this connection's problem.
         """
-        if not endpoints or not device_id:
+        if not verified or not endpoints or not device_id:
             return
         try:
             with store.mutate(network_id, self.root) as record:
@@ -6927,7 +7346,11 @@ class RelayServer:
         # stamps hiding it.
         with store.mutate(link.network_id, self.root) as record:
             changed, added = adopt_members(
-                record, rows, sender_device_id=link.device_id, allow_new=allow_new
+                record,
+                rows,
+                sender_device_id=link.device_id,
+                allow_new=allow_new,
+                supplier_verified=bool(getattr(link, "peer_verified", False)),
             )
             link.member_pull_added = list(added)
             if not changed:
@@ -7153,17 +7576,37 @@ class RelayServer:
         which ``_note_peer_endpoints`` records — healing the row on both sides.
         """
         for record in store.list_networks(self.root):
-            if record.trust != "active":
+            if record.trust != "active" or _self_removed(record):
                 continue
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
                     continue
                 if self._redial_candidates(member):
                     self.redial.seed(member.device_id)
+        # Peers whose last failed redial had NO route to any of their own
+        # endpoints. Watched for a route to appear; see ``_kick_routed_peers``.
+        unroutable: set[str] = set()
         while not self._stop.wait(REDIAL_TICK_S):
+            # ADVISORY, NEVER A PAUSE (security U1, review R1): the baseline
+            # backoff below runs for every peer whatever the route reading says,
+            # so a wrong reading can delay nobody and starve nobody. The reading
+            # only ADDS a retry: a peer proven unroutable is redialled the
+            # moment a route to ITS endpoints appears (U2), instead of waiting
+            # out a backoff grown while there was no route to it at all.
+            if unroutable:
+                self._kick_routed_peers(unroutable)
             for device_id in self.redial.due():
                 if self._stop.is_set():
                     return
+                if self._named_only_where_self_removed(device_id):
+                    # THIS DEVICE WAS REMOVED from every network naming the peer
+                    # (#4394 review R2-4): a verified notice tombstoned our own row,
+                    # and nothing a dial can bring back changes that — re-admission is
+                    # a fresh invite. Stop scheduling it rather than re-dial a
+                    # member that will only refuse (or re-send the notice) every
+                    # backoff for the whole notice window.
+                    self.redial.forget(device_id)
+                    continue
                 if self._link_for(device_id) is not None:
                     # Admission already owns the connected transition under
                     # _links_lock. This lookup is only a scheduling hint: the link
@@ -7175,7 +7618,7 @@ class RelayServer:
                     # loopback on our own port) and will come back by dialling us.
                     # Counted as a failed redial WITHOUT a dial, so the grace window
                     # still escalates to ``down`` on schedule.
-                    self.redial.failed(device_id, cause="waiting_for_peer")
+                    self._note_redial_failure(device_id, cause="waiting_for_peer")
                     continue
                 try:
                     link, reason = self._ensure_link_with_reason(
@@ -7184,13 +7627,101 @@ class RelayServer:
                 except Exception as exc:  # noqa: BLE001 — the loop must survive any dial
                     link, reason = None, f"error:{type(exc).__name__}"
                 if link is None:
-                    self.redial.failed(device_id, cause=reason or "unreachable")
+                    self._note_redial_failure(device_id, cause=reason or "unreachable")
+                    if self._peer_route(device_id) is False:
+                        unroutable.add(device_id)
 
-    def _members_named(self, device_id: str) -> list[MemberRecord]:
-        """Every active member row for ``device_id``, across this device's networks."""
-        rows: list[MemberRecord] = []
+    def _note_redial_failure(self, device_id: str, *, cause: str) -> None:
+        """Audit the tracker's actual retry decision, without one row per retry.
+
+        Keep this beside the scheduler's existing cause, not handshake refusal
+        handling: a capped retry can repeat all night, and no peer authenticated
+        merely because this device attempted its stored address. The actor is
+        this device; ``device`` and ``code`` are the intended peer and typed cause.
+        """
+        self.redial.failed(device_id, cause=cause)
+        status = self.redial.snapshot(device_id)
+        if "next_retry_at" not in status:
+            # A concurrent admission already cleared this loss; there is no
+            # scheduled failure left to describe or next deadline to invent.
+            return
+        admitted, repeats = self._refusal_rows.admit(("redial_failed", device_id, cause))
+        if not admitted:
+            return
+        detail: dict[str, Any] = {
+            "device": device_id,
+            "code": cause,
+            "attempt": status["attempts"],
+            "next_retry_at": status["next_retry_at"],
+        }
+        if repeats:
+            detail["repeats"] = repeats
+        self.audit.record(
+            AuditEvent(
+                event="redial_failed",
+                actor=self.identity.device_id,
+                subject=device_id,
+                detail=detail,
+            )
+        )
+
+    def _peer_route(self, device_id: str) -> bool | None:
+        """Whether this device has a route to any of ``device_id``'s dial candidates.
+
+        ``None`` (no claim) without a reader, without candidates, or for any
+        hostname/unreadable lookup — see ``uplink.endpoints_route``.
+        """
+        reader = getattr(self, "_route_reader", None)
+        if reader is None:
+            return None
+        endpoints = [
+            endpoint
+            for member in self._members_named(device_id)
+            for endpoint in self._redial_candidates(member)
+        ]
+        return uplink.endpoints_route(endpoints, reader)
+
+    def _kick_routed_peers(self, unroutable: set[str]) -> None:
+        """Kick each watched peer whose own endpoints have a route again (U2).
+
+        CONFIRMED RECOVERY ONLY: ``True`` from a fresh per-endpoint lookup. An
+        ``unknown`` answer is not recovery — it kicks nothing and the peer stays
+        watched; its baseline retry still runs regardless. A peer that linked
+        up meanwhile (a surface dial, or it dialled us) needs no kick. The
+        lookup sends nothing (``network.uplink``), so doing it once per tick
+        for the few unroutable peers costs syscalls, not traffic.
+        """
+        for device_id in list(unroutable):
+            if self._link_for(device_id) is not None:
+                unroutable.discard(device_id)
+                continue
+            if self._peer_route(device_id) is True:
+                unroutable.discard(device_id)
+                self.redial.kick(device_id)
+
+    def _named_only_where_self_removed(self, device_id: str) -> bool:
+        """Whether every trusted network listing ``device_id`` active has removed US."""
+        named = False
         for record in store.list_networks(self.root):
             if record.trust != "active":
+                continue
+            member = record.member(device_id)
+            if member is None or not member.active:
+                continue
+            if not _self_removed(record):
+                return False
+            named = True
+        return named
+
+    def _members_named(self, device_id: str) -> list[MemberRecord]:
+        """Every active member row for ``device_id``, across this device's networks.
+
+        A network whose own self row is tombstoned names nobody this device may
+        dial (#4394 review R2-4; see ``_named_only_where_self_removed``).
+        """
+        rows: list[MemberRecord] = []
+        for record in store.list_networks(self.root):
+            if record.trust != "active" or _self_removed(record):
                 continue
             member = record.member(device_id)
             if member is not None and member.active:
@@ -7582,6 +8113,14 @@ class RelayServer:
                     handshake.credential = invite_credential_for(
                         joined, joined_secrets.secret, invite_id
                     )
+            if handshake.mode == "member":
+                # A ROTATED LISTENER CARRIES ITS HOP (G1D-1): a dialer still holding
+                # our pre-rotation row verifies this statement against that row's key
+                # before its auth, then our proof under the new key. Public data (it
+                # rides on every copy of the table), so it is safe to show pre-auth.
+                handshake.self_rotation = _own_rotation_statement(
+                    self.store_view.network(network_id), self.identity.device_id
+                )
             handshake.send_challenge(sock, policy)
             stage = "auth"
             handshake.verify_auth(reader, deadline, policy)
@@ -7607,19 +8146,41 @@ class RelayServer:
             stage = "establish"
             result = handshake.establish()
         except MeshRefusal as refusal:
-            self._audit_handshake_refusal(
-                refusal,
-                network_id,
-                peer_addr,
-                mode,
-                # ``handshake`` is created INSIDE this ``try`` (it is the first
-                # thing that can refuse), so a refusal raised by its own
-                # construction has nothing to read: the row then says so rather
-                # than this handler failing the accept loop.
-                declared_device=handshake.peer_device_id if handshake is not None else "",
-                verified=handshake.auth_verified if handshake is not None else False,
-            )
-            _close_quietly(sock)
+            # THE SOCKET IS ANSWERED AND CLOSED BEFORE THE AUDIT ROW IS WRITTEN (G9-B
+            # follow-up, the unknown-vs-known id timing oracle, #4394 QA O1). The
+            # measured gap was not in the handshake: ``handshake_refused`` is a
+            # DURABLE event (written through and fsynced), and the refusal coalescer
+            # (``_refusal_rows``) writes one only for a (code, claimed id, host, ...)
+            # tuple it has not seen in its window. Writing it before the close put
+            # that fsync — ~1.6 ms on an EBS-backed Linux dev host, ~2.5 ms in #4394's QA rig —
+            # inside the time a dialer observes, so a never-seen id read slower than
+            # a repeated one. Closing first removes every audit cost from the
+            # same-connection observation window in this handler, with no sleep, no
+            # jitter and no floor; the row, its text and its durability are unchanged,
+            # only its timing relative to the FIN. The notice (a proven tombstone's
+            # only reply) still goes out before the close, decided as before.
+            try:
+                if handshake is not None and handshake.removal_proven:
+                    self._send_removal_notice(sock, handshake, network_id)
+            except Exception as exc:  # noqa: BLE001 — a notice is only best-effort
+                logger.warning(
+                    "relay: removal notice failed network=%s exception=%s",
+                    network_id[:80],
+                    type(exc).__name__[:64],
+                )
+            finally:
+                # Exceptions raised inside this handler bypass its sibling excepts.
+                # A failed courtesy notice must not skip socket cleanup or telemetry.
+                _close_quietly(sock)
+                self._audit_handshake_refusal(
+                    refusal,
+                    network_id,
+                    peer_addr,
+                    mode,
+                    # Construction itself may refuse before ``handshake`` exists.
+                    declared_device=handshake.peer_device_id if handshake is not None else "",
+                    verified=handshake.auth_verified if handshake is not None else False,
+                )
             return
         except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError) as exc:
             # A CONNECTION THAT DIED BETWEEN ITS HELLO AND ITS WELCOME LEAVES A ROW
@@ -7766,6 +8327,12 @@ class RelayServer:
             "bad_mac": "auth_failed",
             "protocol_mismatch": "protocol_mismatch",
             "invite_device_mismatch": "wrong_device",
+            # The dialer's refusals of a listener (``Handshake.verify_welcome``): no
+            # proof reads as an old build; answering as the wrong device is the
+            # wrong-device family the join path already had.
+            "listener_unproven": "protocol_mismatch",
+            "peer_identity_mismatch": "wrong_device",
+            "invite_wrong_inviter": "wrong_device",
             "invite_invalid": "policy",
             "self_link": "policy",
         }.get(refusal.code, "policy")
@@ -7881,6 +8448,16 @@ class RelayServer:
         answer every other refusal on this transport gives — an open port that
         explains itself is an oracle — and the record of why is this device's own.
         """
+        # NO UNVERIFIED LINK ENTERS THE TABLE (mesh trust audit G1-G4). Checked before
+        # the lock and the duplicate fence: a link whose peer never proved its
+        # identity must not displace a real one, reach ``redial.connected``, run the
+        # link-up hooks, or become visible to any consumer (the member pull, epoch
+        # broadcast, forwards, credential lending). One structural gate here instead
+        # of one per consumer. The handshake normally refuses first; this is the
+        # gate a new dial path cannot forget.
+        if not getattr(link, "peer_verified", False):
+            _close_quietly(link.sock)
+            return "unverified_link"
         displaced: PeerLink | None = None
         with self._links_lock:
             refusal = self._refusal_reason(link.network_id)
@@ -7937,6 +8514,23 @@ class RelayServer:
         if refusal:
             _close_quietly(link.sock)
         else:
+            if outbound or "listener-proof-v1" in getattr(link, "capabilities", ()):
+                # The peer has now proved itself AS A LISTENER (outbound: we verified
+                # its welcome proof), or is a build whose listener always signs its
+                # welcome (inbound, the cap inside the MAC-covered transcript this
+                # side just verified). Either way the sticky "cannot prove its
+                # identity" fact is no longer true; clearing it on the inbound case is
+                # what lets the warning go once the member updates and dials in first
+                # (review m1, UX U1, S-3, Q-1). An inbound link from an OLD member
+                # carries no cap and says nothing about its listener half (T22).
+                unproven = getattr(self, "_unproven_listeners", None)
+                if unproven is not None:
+                    unproven.pop(link.device_id, None)
+            if outbound:
+                # A verified link at this address: it reaches the member after all.
+                suspects = getattr(self, "_suspect_endpoints", {}).get(link.device_id)
+                if suspects is not None:
+                    suspects.discard(str(getattr(link, "peer_addr", "") or ""))
             if displaced is not None:
                 # Outside the lock: ``close`` waits on the writer's flush and then
                 # runs ``link_closed``, which finds the new link and so records no
@@ -7997,6 +8591,9 @@ class RelayServer:
             codec=handshake.codec(),
             settings=self.settings,
             reader=reader,
+            # The listener verified the dialer's auth MAC (``verify_auth``): its id is
+            # PROVEN, and that fact is what a mesh origin stamp may later vouch for.
+            peer_verified=result.peer_verified,
         )
         link.peer_addr = peer_addr
         # A REFUSAL HERE IS A HINT, NOT THE DECISION (see :meth:`_refusal_reason`): it
@@ -8062,7 +8659,10 @@ class RelayServer:
         # and re-read inside the record's lock, which is what makes that tolerance
         # safe to hand them rather than this method's own copy of the record.
         self._note_peer_endpoints(
-            result.network_id, result.peer_device_id, handshake.peer_endpoints
+            result.network_id,
+            result.peer_device_id,
+            handshake.peer_endpoints,
+            verified=bool(getattr(result, "peer_verified", False)),
         )
         self._note_observed_endpoint(
             result.network_id, result.peer_device_id, peer_addr, handshake.peer_endpoints
@@ -8220,7 +8820,28 @@ class RelayServer:
             )
         )
 
+    def audit_host_resume(self, *, gap_s: float, clock_offset: float) -> None:
+        """One gap-only row per host discontinuity, not one per sleeping link."""
+        with self._links_lock:
+            previous: float | None = getattr(self, "_resume_clock_offset", None)
+            if previous is not None and abs(clock_offset - previous) <= self.settings.keepalive_s:
+                return
+            self._resume_clock_offset = clock_offset
+            self.audit.record(
+                AuditEvent(
+                    event="host_resumed",
+                    actor=self.identity.device_id,
+                    detail={"gap_s": round(gap_s, 3)},
+                )
+            )
+
     def audit_idle(self, link: PeerLink) -> None:
+        # Both deadline owners can notice one dead link at once. Claim the audit
+        # fact before either closes it, rather than recording two incidents.
+        with self._links_lock:
+            if getattr(link, "_idle_audited", False):
+                return
+            link._idle_audited = True
         self.audit.record(
             AuditEvent(
                 event="link_idle",
@@ -8405,11 +9026,11 @@ class RelayServer:
         # pair before this was fixed, and caught by the e2e test rather than by
         # review).
         if result is None:
-            reply: dict[str, Any] = {"op": "ack", "req": req, "detail": ""}
+            reply = wire.peer_ack(req, "")
         elif result.get("op") in ("ack", "error"):
             reply = result
         else:
-            reply = {"op": "ack", "req": req, "detail": result}
+            reply = wire.peer_ack(req, result)
         # EVERY REPLY LEAVES THROUGH ONE WRAP (agent review round 1, R1-2), the empty
         # ack above included. A reply carrying SECRET material — the broker's `copy`
         # value, the epoch-rotation answers, the reconcile catch-up — is an ack with
@@ -9826,17 +10447,21 @@ class RelayServer:
         except Exception:  # noqa: BLE001 — a trust change must never fail on this
             logger.debug("mesh relay: dropping renewed logins failed", exc_info=True)
 
-    def _op_identity_rotate(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
-        record = self.store_view.network(link.network_id)
-        if record is None:
-            raise MeshRefusal("not_a_member", "this device is not in that network")
-        statement = frame.get("statement")
-        if not isinstance(statement, dict):
-            raise MeshRefusal("bad_rotation_statement", "no rotation statement was carried")
+    def _apply_rotation_statement(
+        self, network_id: str, statement: dict[str, Any]
+    ) -> DeviceRotationOutcome:
+        """Apply one verified-on-arrival rotation statement and audit it if it moved a row.
+
+        ONE implementation for the two routes a hop arrives by: the queued
+        ``net_identity_rotate`` frame (``_op_identity_rotate``) and a dial answered by
+        the rotated device itself (``dial``, mesh-listener-auth G1D-1). Both must
+        verify ``sig_old`` against the stored row and write the same row, or the
+        two routes would disagree about one member. Raises ``MeshRefusal``.
+        """
         # The member row is rewritten in place: read and write inside the lock, so
         # a membership pull that admitted somebody in the same second is not
         # reverted by this one-row edit.
-        with store.mutate(link.network_id, self.root) as record:
+        with store.mutate(network_id, self.root) as record:
             rotation = apply_device_rotation(record, statement, root=self.root)
         # THE AUDIT LINE IS CONDITIONAL ON WHAT WAS APPLIED, not on the frame having
         # arrived. A duplicate delivery (the table overtook the queue) rewrites nothing
@@ -9863,6 +10488,16 @@ class RelayServer:
                     },
                 )
             )
+        return rotation
+
+    def _op_identity_rotate(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        record = self.store_view.network(link.network_id)
+        if record is None:
+            raise MeshRefusal("not_a_member", "this device is not in that network")
+        statement = frame.get("statement")
+        if not isinstance(statement, dict):
+            raise MeshRefusal("bad_rotation_statement", "no rotation statement was carried")
+        rotation = self._apply_rotation_statement(link.network_id, statement)
         return {
             "op": "ack",
             "req": frame.get("req"),
@@ -9890,13 +10525,28 @@ class RelayServer:
     # ordering rule against stream pushes on the same link.
 
     def _peer_block(self, link: PeerLink) -> dict[str, Any]:
-        """The dialing peer's identity, for a refusal that has to name it (§4.4)."""
+        """The dialing peer's identity, for a refusal that has to name it (§4.4).
+
+        Also the identity BLOCK of the relay→runtime proof (mesh-origin-stamp G6):
+        ``network_id``, ``link_id`` and ``peer_verified`` are LINK facts this relay
+        holds, and ``dial.dial_owner`` MACs this block (``origin.canonical_block``)
+        under ``K_relay``, so the runtime can stamp a remote row with the device it
+        came from and believe it only when the proof checks. ``peer_verified`` is
+        the per-link handshake fact, never a constant: a relay that has not proved
+        its peer can only produce an unverified stamp.
+        """
         name = ""
         record = self.store_view.network(link.network_id)
         if record is not None:
             member = record.member(link.device_id)
             name = member.name if member is not None else ""
-        return {"device_id": link.device_id, "name": name}
+        return {
+            "device_id": link.device_id,
+            "name": name,
+            "network_id": str(link.network_id or ""),
+            "link_id": str(link.link_id or ""),
+            "peer_verified": bool(getattr(link, "peer_verified", False)),
+        }
 
     def _session_record(self, session_id: str) -> Any:
         """The live discovery record for one of THIS device's sessions, or None.
@@ -10479,7 +11129,7 @@ class RelayServer:
         prompt_detail = ""
         waited: dict[str, float] = {}
         if prompt:
-            outcome = self._prompt_on(session_id, prompt, frame.get("images"), due=due)
+            outcome = self._prompt_on(session_id, prompt, frame.get("images"), due=due, link=link)
             admitted = bool(outcome["admitted"])
             prompt_state = str(outcome["state"])
             prompt_detail = str(outcome["detail"])
@@ -11387,14 +12037,14 @@ class RelayServer:
         THE REFRESH IS SCHEDULED ON THE PAGE LOOP because ``start_refresh`` is
         loop-resident by construction (it creates a task on the RUNNING loop),
         and this handler runs on the LINK'S READER thread. SINGLE-FLIGHT MEANS
-        PER LOOP HERE: ``transcript_index`` joins an in-flight task only when it
-        was recorded for the same loop — a request from another loop starts a
-        FRESH task and replaces the map's entry. Every stored-page read in this
-        process shares the one page loop, so concurrent frame reads join one
-        scan; a refresh already running on ANOTHER loop (the desktop bridge's,
-        another process) is duplicated, not joined — safe (the same journal, an
-        idempotent cache write), and exactly why this side schedules its own
-        rather than assuming anyone else's scan is in flight. The submit is
+        ACROSS LOOPS AND PROCESSES. Every stored-page read shares the one page
+        loop; a refresh this relay already runs on another of its loops (the
+        source-availability join) is joined through a proxy task
+        (``start_refresh``'s cross-loop join). The desktop bridge's refresh of
+        the same journal runs in ANOTHER PROCESS (``lop serve``), which no task
+        can join: there ``refresh_index``'s per-session build lock makes the
+        later builder wait for the first one's publication and take its
+        exact-signature hit, so the two opens cost one scan. The submit is
         taken under ``_page_loop_lock`` for the same reason
         ``_stored_page_read``'s is: a ``stop`` landing between choosing the loop
         and submitting must hand this read either the live loop or a fresh one,
@@ -11433,14 +12083,14 @@ class RelayServer:
     async def _schedule_frame_index_refresh(self, session_id: str) -> None:
         """Create the index refresh task, on the page loop.
 
-        THE LOOP IS THE JOIN CONDITION, not just the executor: ``start_refresh``
-        joins a task only for the loop it was recorded under, and every
-        stored-page read here shares this one — so concurrent frame reads join
-        ONE scan. (A refresh already running on another loop is not joined; see
-        :meth:`_stored_frame_index` for the scope and why the duplicate is
-        safe.) A coroutine rather than a direct call because ``start_refresh``
-        reads ``asyncio.get_running_loop()`` — it must run where a loop is
-        running, which is the page loop and only the page loop on this side.
+        Every stored-page read here shares this loop, so concurrent frame reads
+        join ONE task; a refresh another of this process's live loops already
+        runs is joined through ``start_refresh``'s cross-loop proxy, and the
+        desktop bridge's build in ``lop serve`` (another process) through
+        ``refresh_index``'s build lock (see :meth:`_stored_frame_index`). A
+        coroutine rather than a direct call because ``start_refresh`` reads
+        ``asyncio.get_running_loop()`` — it must run where a loop is running,
+        which is the page loop and only the page loop on this side.
         """
         from local_operator.session import transcript_index as index_module
 
@@ -12028,7 +12678,13 @@ class RelayServer:
         return {"applied": True, "detail": ""}
 
     def _prompt_on(
-        self, session_id: str, text: str, images: Any, *, due: float | None = None
+        self,
+        session_id: str,
+        text: str,
+        images: Any,
+        *,
+        due: float | None = None,
+        link: "PeerLink | None" = None,
     ) -> dict[str, Any]:
         """Admit the first prompt of a freshly created session, and say what became of it.
 
@@ -12087,7 +12743,11 @@ class RelayServer:
         if due is None:
             due = time.monotonic() + create_op_deadline_s(self.settings.op_wait_s)
         try:
-            dial = self._dial_owned(session_id, capabilities=("prompt",))
+            # ``link`` (the creating member's) rides along so the first prompt of a
+            # remotely created session carries the same peer block, and therefore
+            # the same verifiable mesh origin, as every later relayed prompt; a
+            # linkless dial sends no block and can only stamp unverified (M-6).
+            dial = self._dial_owned(session_id, capabilities=("prompt",), link=link)
         except session_dial.OwnerUnreachable as exc:
             return {"admitted": False, "state": "refused", "detail": str(exc)}
         # After the dial, so connecting to the runtime is paid out of the budget
@@ -12295,6 +12955,16 @@ class RelayServer:
         if not isinstance(inner, dict):
             raise MeshRefusal("protocol_error", "a stream frame must carry the frame it forwards")
         inner_op = str(inner.get("op") or "")
+        from local_operator.network.origin import RELAY_ATTEST_OP
+
+        if inner_op == RELAY_ATTEST_OP:
+            # THE PROOF IS THE OWNER RELAY'S, NEVER A VIEWER'S (M-9). ``relay_attest``
+            # is what THIS relay sends as the first frame of its own dial, and the
+            # runtime already refuses one in any later position; dropping it here as
+            # well means a viewer cannot even put one on the owner's socket.
+            raise MeshRefusal(
+                "not_authorised", "relay_attest is sent by the owner's relay, not a viewer"
+            )
         from local_operator.network.types import INNER_OP_CAPABILITY
 
         required = INNER_OP_CAPABILITY.get(inner_op)
@@ -12525,6 +13195,18 @@ class RelayServer:
             member = record.member(device_id)
             if member is None or not member.active:
                 continue
+            # THE ROW'S CURRENT ID, NOT THE CALLER'S (security S-6). ``member()``
+            # also matches ``previous_ids``, so a caller still holding the id a
+            # proven rotation retired (a stream's recorded ``peer``, a move or an
+            # attention record) lands on the rotated row. The listener can only
+            # prove the key that row now stores, so dialling — and keying suspect
+            # marks — by the retired id would refuse the real device and mark its
+            # real address suspect, where main kept reaching it through that id.
+            current_id = member.device_id
+            if current_id != device_id:
+                live = self._link_for(current_id, network_id=record.network_id)
+                if live is not None:
+                    return live, "", attempts
             # Our own listener answers a self-addressed candidate before any real
             # peer can (the self-race, ``_reaches_own_listener``), so those are
             # dropped before the race rather than lost to it.
@@ -12532,29 +13214,46 @@ class RelayServer:
             if not candidates:
                 reason = "no_endpoint"
                 continue
-            probe = probe_candidates(candidates, deadline=deadline, connect_cap=cap)
-            attempts.extend(probe.attempts)
-            if probe.sock is None:
-                reason = probe.reason
-                continue
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                # The address answered and the budget ran out before the
-                # handshake: "unreachable" would be a claim about the peer when
-                # the truth is a claim about our clock.
-                _close_quietly(probe.sock)
-                return None, handshake_not_attempted_reason(probe.winner), attempts
-            link, dial_reason = self.dial(
-                record.network_id,
-                host=probe.winner,
-                epoch=record.epoch,
-                timeout_s=remaining,
-                connected=probe.sock,
-                expected_device=device_id,
-            )
-            if link is not None:
-                return link, "", attempts
-            reason = dial_reason or probe.reason
+            # SUSPECT ADDRESSES GO LAST, NEVER AWAY (review M1, security S-2): an
+            # address where an unproven party answered is dialled only after the
+            # member's other addresses failed in this same attempt, so a stale or
+            # hijacked address cannot win the first-connect race forever, and a
+            # member whose only address is suspect is still dialled.
+            # ``getattr``: stand-in servers built without ``__init__`` (as the probe
+            # tests build them) have no suspects, which is the honest default.
+            suspects = getattr(self, "_suspect_endpoints", {}).get(current_id, set())
+            tiers = [
+                tier
+                for tier in (
+                    [c for c in candidates if c not in suspects],
+                    [c for c in candidates if c in suspects],
+                )
+                if tier
+            ]
+            for tier in tiers:
+                probe = probe_candidates(tier, deadline=deadline, connect_cap=cap)
+                attempts.extend(probe.attempts)
+                if probe.sock is None:
+                    reason = probe.reason
+                    continue
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    # The address answered and the budget ran out before the
+                    # handshake: "unreachable" would be a claim about the peer when
+                    # the truth is a claim about our clock.
+                    _close_quietly(probe.sock)
+                    return None, handshake_not_attempted_reason(probe.winner), attempts
+                link, dial_reason = self.dial(
+                    record.network_id,
+                    host=probe.winner,
+                    epoch=record.epoch,
+                    timeout_s=remaining,
+                    connected=probe.sock,
+                    expected_device=current_id,
+                )
+                if link is not None:
+                    return link, "", attempts
+                reason = dial_reason or probe.reason
         return None, reason, attempts
 
     def _open_viewer_stream(self, frame: dict[str, Any]) -> tuple[dict[str, Any], _Stream | None]:
@@ -12863,6 +13562,8 @@ class RelayServer:
         peer_addr: str,
         offer: list[dict[str, Any]],
         offer_detail: dict[str, Any],
+        expires_at: float,
+        ceremony: str,
     ) -> PairDecision:
         """Design §5.3's second half: a person on the INVITING device confirms the code.
 
@@ -12881,7 +13582,10 @@ class RelayServer:
         """
         invite = record.invite(invite_id)
         role = (invite.role if invite is not None else "read") or "read"
-        window = pair_timeout_seconds(_remaining_of(record, invite_id))
+        # WHAT IS LEFT OF THE CEREMONY'S ONE DEADLINE (S-R1-4), never a fresh window:
+        # stage 2 must not outlive what stage 1 showed. ``expires_at`` was fixed by the
+        # listener at the ceremony's start as min(invite expiry, start + ceiling).
+        window = max(0.0, expires_at - time.time())
         from local_operator.network.credentials import offers as offers_mod
 
         # §4.2's state rides the record so EVERY surface (the relay's inline
@@ -12903,7 +13607,7 @@ class RelayServer:
             fingerprint=wire.transcript_fingerprint(bytes.fromhex(result.transcript_hash)),
             transcribed=transcribed,
             peer_addr=peer_addr,
-            expires_at=time.time() + window,
+            expires_at=expires_at,
             prompt=inviter_prompt_for(
                 network_name=record.name,
                 role=role,
@@ -12916,8 +13620,58 @@ class RelayServer:
             ),
             offer=list(offer),
             offer_state=offer_state,
+            stage=PAIR_STAGE_AWAITING_CONFIRMATION,
+            role=role,
+            nonce=new_pairing_nonce(),
+            ceremony=ceremony,
         )
-        store.save_pending_pairing(pending, self.root)
+        # THE STALE-DECISION RACE GUARD. The decision poll below reads ANY decision
+        # file for this invite, so a decision written while the row was still stage 1
+        # (an out-of-band file write, or a confirm racing the flip) would admit a
+        # device whose person never compared the transcription. The clear runs BEFORE
+        # the record flips, and both run under the network record's write lock — the
+        # same lock ``_ctl_pair_confirm`` holds while it checks the stage and writes —
+        # so no answer can land between "cleared" and "now stage 2" and survive.
+        #
+        # EVERY generic decision goes, stamped or not (security review round 2,
+        # S-R2-1). An unstamped file cannot say who wrote it or for which ceremony
+        # (a terminal confirm with no relay running, a decision left by an earlier
+        # ceremony on this invite whose cleanup has not run yet), so none is ever
+        # read as an answer to this one; the poll below takes only decisions stamped
+        # with ``ceremony``. The previous "unstamped and written before this
+        # ceremony started" exception compared wall clocks and could not tell the
+        # two apart, so it is gone.
+        #
+        # THE ONE STAND-IN FOR A PERSON is onboarding's :class:`PairPreApproval`, a
+        # separate record bound to this invite and to the joiner it was minted for.
+        # It is consumed HERE, inside the same lock as the flip: deleted, and turned
+        # into a decision stamped with this ceremony, so it answers exactly one
+        # ceremony through the one decision path and the latch refuses any later
+        # card answer. A different joiner (or invite, or network) leaves it alone.
+        # This runs only after the wire code compare above, so a pre-approval never
+        # admits a mismatched transcription.
+        with store.mutate(record.network_id, self.root):
+            store.clear_pair_decision(invite_id, self.root)
+            approval = store.pre_approval(invite_id, self.root)
+            if approval is not None and approval.matches(
+                invite_id=invite_id, network_id=record.network_id, joiner_device_id=joiner_id
+            ):
+                store.clear_pre_approval(invite_id, self.root)
+                store.save_pair_decision(
+                    PairDecision(
+                        invite_id=invite_id,
+                        decision="admit",
+                        matched=True,
+                        reason="",
+                        answered_by=approval.answered_by,
+                        # An approval shares nothing: credentials are a person's
+                        # choice on the card, never an automated default.
+                        shares=[],
+                        ceremony=ceremony,
+                    ),
+                    self.root,
+                )
+            store.save_pending_pairing(pending, self.root)
         self.audit.record(
             AuditEvent(
                 event="pairing_awaiting_confirmation",
@@ -12937,9 +13691,9 @@ class RelayServer:
             decision = self._await_pairing_decision(pending, window)
         finally:
             # Cleared either way: the code must not outlive the ceremony it belongs
-            # to, and a leftover decision must never be read by the NEXT pairing.
-            store.clear_pending_pairing(invite_id, self.root)
-            store.clear_pair_decision(invite_id, self.root)
+            # to, and a leftover decision must never be read by the NEXT pairing. Only
+            # THIS ceremony's records, though (S-R1-3): see ``_clear_ceremony``.
+            self._clear_ceremony(record.network_id, invite_id, ceremony)
         self.audit.record(
             AuditEvent(
                 event="pairing_confirmed" if decision.matched else "pairing_refused",
@@ -12997,7 +13751,11 @@ class RelayServer:
         deadline = time.monotonic() + window
         while time.monotonic() < deadline:
             decision = store.pair_decision(pending.invite_id, self.root)
-            if decision is not None:
+            # ONLY a decision stamped with THIS ceremony answers it (S-R1-3, S-R2-1):
+            # every relay ingress stamps ``live.ceremony`` under the record lock, and
+            # onboarding's pre-approval is stamped when the flip consumes it. An
+            # unstamped file (an out-of-band write) is never an answer.
+            if decision is not None and _answers_ceremony(decision, pending.ceremony):
                 return decision
             time.sleep(0.2)
         return PairDecision(
@@ -13063,13 +13821,44 @@ class RelayServer:
         # one ceremony disagreed about how long a human has. `pair_timeout_seconds`
         # is the one owner of that number, and `invite.joiner_prompt` prints the same
         # number to the person, so the promise and the wait cannot drift again.
-        deadline = wire.deadline_in(pair_timeout_seconds(_remaining_of(record, invite_id)))
+        window = pair_timeout_seconds(_remaining_of(record, invite_id))
+        deadline = wire.deadline_in(window)
+        # ONE ABSOLUTE DEADLINE FOR THE WHOLE CEREMONY (security review round 1, S-R1-4):
+        # min(invite expiry, start + ceiling), fixed HERE, at the ceremony's start. Both
+        # card stages, their ``expires_at`` (which also bounds an app attestation's
+        # deadline, ``desktop_mesh_pairings.answer``) and the stage-2 decision poll use
+        # this one wall-clock instant. Recomputing a fresh ``pair_timeout_seconds`` at
+        # the stage-2 flip gave a ceremony up to two windows end to end.
+        ceremony_expires_at = time.time() + window
+        # WHICH CEREMONY THIS IS (S-R1-3): stamped on both stage records and on every
+        # decision written for them, so this thread's cleanup removes only what belongs
+        # to it, never a record a later ceremony on the same invite parked.
+        ceremony = new_pairing_nonce()
+        # KERNEL KEEPALIVE ON THE PARKED SOCKET (see ``set_pair_keepalive``): the window
+        # above can now be ten minutes, which outlives many NAT idle timers. No app-level
+        # heartbeat — an older joiner would not expect one.
+        set_pair_keepalive(sock)
+        holds_slot = False
         member_row: MemberRecord | None = None
         #: WHICH STATEMENT BOUNDARY THE PAIR LISTENER WAS AT when a socket-class
         #: failure landed — the field that turns "the pairing was refused" into
         #: "the first sealed read failed". Local record only, never on the wire.
         stage = "offer_send"
         try:
+            # THE PARKED-CEREMONY CAP, checked before anything is sent or parked. A
+            # pairing can now hold a socket (and a thread) for up to the whole invite
+            # life, so an unbounded number of token holders dialling at once would be
+            # an unbounded number of parked threads and Mesh approvals cards. The
+            # refusal is ``pairing_busy``: retryable, spends no attempt and does not
+            # consume the invite (``_RETRYABLE_PAIRING_REASONS``), so an honest joiner
+            # simply tries again.
+            holds_slot = self._take_pair_slot()
+            if not holds_slot:
+                raise PairingRefusal(
+                    "pairing_busy",
+                    "the inviting device is already handling as many pairings as it allows "
+                    "at once; nothing was spent — try again in a minute with the same token",
+                )
             # THE SHARE LIST IS THE FIRST SEALED RECORD (§2.3): sent before anything
             # waits on a human, so both ends can show the same list before either
             # person commits. Inside this try on purpose — a socket that dies sending
@@ -13077,9 +13866,20 @@ class RelayServer:
             # joiner's bounded drain plus its tolerant first-result read absorb a
             # slow frame rather than failing the ceremony.
             from local_operator.network.credentials import offers as offers_mod
+            from local_operator.network.invite import check_offer_policy
 
+            # THE SAVED INVITE IS THE POLICY (``--no-credential-offers``), read
+            # before anything is enumerated: a token holder can re-tag an edited
+            # payload, so the joiner's claim is only COMPARED (a mismatch is a
+            # terminal, consumed refusal through the handler below) and never
+            # decides what this device builds or grants.
+            stored_invite = record.invite(invite_id)
+            if stored_invite is None:
+                raise PairingRefusal("invite_invalid", "that invite was never minted here")
+            check_offer_policy(stored_invite, handshake.join_block)
+            offers_allowed = stored_invite.offers_credentials
             send_offer, offer_items, offer_detail = _pair_offer_for(
-                handshake, self.root, record.network_id
+                handshake, self.root, record.network_id, offers_allowed=offers_allowed
             )
             if send_offer:
                 sock.sendall(
@@ -13089,6 +13889,30 @@ class RelayServer:
                         )
                     )
                 )
+            # STAGE 1 OF THE MESH APPROVALS CARD (``awaiting_joiner``). The inviter's
+            # person has nothing to type yet — the joiner's person must first type the
+            # code THIS card shows — so the record exists only so the app can show the
+            # code ("type this on <joiner>"); there is nothing to answer on it, and its
+            # expiry is the ceremony's one deadline. ``_ctl_pair_confirm``
+            # refuses any answer to a stage-1 row (``pairing_not_ready``), and the
+            # stage-2 flip in ``_inviter_human_step`` clears any decision written in
+            # the meantime, so an early answer can never admit.
+            self._save_awaiting_joiner(
+                record=record,
+                invite_id=invite_id,
+                result=result,
+                joiner_id=joiner_id,
+                joiner_name=joiner_name,
+                peer_addr=peer_addr,
+                expires_at=ceremony_expires_at,
+                ceremony=ceremony,
+                offer=list(offer_items) if send_offer else [],
+                offer_state=(
+                    offers_mod.OWNER_SKIPPED
+                    if str(offer_detail.get("offer_skip") or "") == offers_mod.OWNER_SKIPPED
+                    else offers_mod.OWNER_SENT
+                ),
+            )
             stage = "ready_read"
             try:
                 ready = codec.open(reader.read_record_payload(deadline))
@@ -13137,7 +13961,31 @@ class RelayServer:
                 peer_addr=peer_addr,
                 offer=offer_items,
                 offer_detail=offer_detail,
+                expires_at=ceremony_expires_at,
+                ceremony=ceremony,
             )
+            if (
+                decision.reason == "sas_mismatch"
+                and decision.decision != "admit"
+                and _budget_spent(result.network_id, invite_id, self.root)
+            ):
+                # THE CARD'S LAST WRONG CODE. ``_ctl_pair_confirm`` only writes this
+                # decision once the invite's attempt budget is spent, so it refuses by
+                # the wire's own name and the handler below CONSUMES (the budget is
+                # exhausted, so ``_pairing_retryable`` is false) — no second attempt is
+                # charged, because the confirm op already counted this one.
+                #
+                # THE REASON IS ONLY BELIEVED WHEN THE BUDGET SAYS SO (review round 1,
+                # N2): a legacy ``lop network confirm`` frame copies its caller's
+                # ``reason`` verbatim, and taking ``sas_mismatch`` at its word would
+                # turn that decline into a retryable, attempt-spending refusal. Any
+                # other decline falls through to ``declined_remote`` and consumes, as
+                # it did before this path existed.
+                raise PairingRefusal(
+                    "sas_mismatch",
+                    "the code typed on the inviting device did not match, and the "
+                    "invitation's attempts are spent",
+                )
             if not (decision.decision == "admit" and decision.matched):
                 # A timeout and a decline are both refusals: an unanswered question
                 # must never admit a device, and §5.4 makes every one of these
@@ -13213,6 +14061,7 @@ class RelayServer:
                     record,
                     joiner_id=joiner_id,
                     decision=decision,
+                    offers_allowed=offers_allowed,
                     offer_items=offer_items,
                     owner_name=self.identity.name or record.self_device_id,
                     root=self.root,
@@ -13282,6 +14131,9 @@ class RelayServer:
                 codec=codec,
                 settings=self.settings,
                 reader=reader,
+                # The pair listener ran ``verify_auth`` and the SAS ceremony proved the joiner,
+                # so the handshake's own proved fact carries over (mesh-origin-stamp §2 r3).
+                peer_verified=result.peer_verified,
             )
             link.peer_addr = peer_addr
             # NOT A FIRST CONTACT FOR THE SLICES: see ``PeerLink.link_up_hooks``.
@@ -13308,6 +14160,9 @@ class RelayServer:
             self.contact_peers()
         except (MeshRefusal, wire.LinkCryptoError, OSError) as exc:
             reason = getattr(exc, "code", "error")
+            #: Whether THIS refusal consumed the invite: the abort frame says so, so the
+            #: joiner's remedy stops offering the SAME token (QA round 1, Q3).
+            spent = False
             try:
                 # THE REFUSAL'S CONSUME RE-READS TOO, for the same reason the
                 # admission does: this handler runs after the human step and after the
@@ -13340,6 +14195,7 @@ class RelayServer:
                                 )
                             else:
                                 consume(current, invite_id, outcome=reason)
+                                spent = True
                             store.save(current, self.root)
                 except FileNotFoundError:
                     pass
@@ -13353,6 +14209,7 @@ class RelayServer:
                             req=0,
                             reason=reason,
                             detail=getattr(exc, "sentence", "") or str(exc),
+                            spent=spent,
                         )
                     )
                 )
@@ -13400,12 +14257,111 @@ class RelayServer:
             # cannot silently reintroduce the batching lag.
             self.audit.flush()
             _close_quietly(sock)
+        finally:
+            # EVERY EXIT CLEARS THE CARD AND FREES THE SLOT: an expiry (``timeout``),
+            # a refusal, an admission. The record must not outlive its socket — the app
+            # would show a card nobody can answer — and a decision left behind must never
+            # be read by the next ceremony on this invite. Idempotent with the stage-2
+            # ``finally`` in ``_inviter_human_step``. Membership is untouched here: only
+            # the admission block above writes members. ONLY THIS CEREMONY'S records
+            # (S-R1-3): the refusal handler above may already have released the invite,
+            # so a new ceremony can have parked the same key by the time this runs.
+            if holds_slot:
+                self._clear_ceremony(result.network_id, invite_id, ceremony)
+                self._free_pair_slot()
+
+    def _take_pair_slot(self) -> bool:
+        """Reserve one parked-ceremony slot; ``False`` when the cap is reached."""
+        with self._pair_parked_lock:
+            if self._pair_parked >= PAIR_PARKED_CEREMONY_CAP:
+                return False
+            self._pair_parked += 1
+            return True
+
+    def _free_pair_slot(self) -> None:
+        with self._pair_parked_lock:
+            self._pair_parked = max(0, self._pair_parked - 1)
+
+    def _save_awaiting_joiner(
+        self,
+        *,
+        record: NetworkRecord,
+        invite_id: str,
+        result: Any,
+        joiner_id: str,
+        joiner_name: str,
+        peer_addr: str,
+        expires_at: float,
+        ceremony: str,
+        offer: list[dict[str, Any]],
+        offer_state: str,
+    ) -> None:
+        """Write the stage-1 (``awaiting_joiner``) record the Mesh approvals card reads.
+
+        ``transcribed`` is empty and ``prompt`` is empty on purpose: there is nothing
+        to compare yet, and every CLI surface (``net_pair_pending`` without
+        ``include_stages``) filters this stage out, so an older ``lop network confirm``
+        never sees a row it could not answer. A FRESH nonce: the stage-2 flip mints
+        another, so an attestation made against this card can never answer the next.
+        """
+        invite = record.invite(invite_id)
+        pending = PendingPairing(
+            invite_id=invite_id,
+            network_id=record.network_id,
+            network_name=record.name,
+            joiner_device_id=joiner_id,
+            joiner_name=joiner_name,
+            sas=result.sas,
+            fingerprint=wire.transcript_fingerprint(bytes.fromhex(result.transcript_hash)),
+            peer_addr=peer_addr,
+            expires_at=expires_at,
+            offer=offer,
+            offer_state=offer_state,
+            stage=PAIR_STAGE_AWAITING_JOINER,
+            role=(invite.role if invite is not None else "read") or "read",
+            nonce=new_pairing_nonce(),
+            ceremony=ceremony,
+        )
+        # Under the record lock, like every other write of this key, so the identity
+        # check in ``_clear_ceremony`` cannot interleave with the park it protects.
+        with _pairing_lock(record.network_id, self.root):
+            store.save_pending_pairing(pending, self.root)
+
+    def _clear_ceremony(self, network_id: str, invite_id: str, ceremony: str) -> None:
+        """Remove THIS ceremony's card and decision, and nothing else (S-R1-3).
+
+        The files are keyed by invite only. A retryable refusal releases the invite
+        before the refusing thread reaches its cleanup, so another dial can park the
+        same key in between; an unconditional delete then removed the NEW ceremony's
+        card (the app lost a live pairing) or its decision (a person's answer vanished).
+        So: the card goes only when its ``ceremony`` is ours; the decision goes when it
+        is stamped with ours, or is an unstamped out-of-band write while no other
+        ceremony owns the key (no ceremony ever honours an unstamped decision; the
+        stage-2 flip clears them all). Checked and deleted under the record lock that
+        every park, flip and answer of this key also holds.
+
+        NEVER the onboarding :class:`PairPreApproval` (S-R2-1, the reverse case of
+        agent review round 2, m1): it lives in its own file, so a ceremony that fails
+        at stage 1 leaves it for the invite's automated retry. It is removed only by
+        the flip that consumes it, by its writer's cleanup, or by expiring with the
+        invite.
+        """
+        with _pairing_lock(network_id, self.root):
+            live = store.pending_pairing(invite_id, self.root)
+            ours_or_none = live is None or live.ceremony == ceremony
+            if live is not None and live.ceremony == ceremony:
+                store.clear_pending_pairing(invite_id, self.root)
+            decided = store.pair_decision(invite_id, self.root)
+            if decided is not None and (
+                decided.ceremony == ceremony or (not decided.ceremony and ours_or_none)
+            ):
+                store.clear_pair_decision(invite_id, self.root)
 
     # -- fan-out and the durable outbox -------------------------------------
 
     def _broadcast_epoch(
         self, record: NetworkRecord, state: SecretState, *, reason: str, removed: list[str]
-    ) -> None:
+    ) -> set[str]:
         """Send ``net_epoch`` to every live link, and QUEUE it for the offline ones.
 
         The frame is built PER RECIPIENT by :func:`epoch_frame`, which withholds the
@@ -13424,6 +14380,13 @@ class RelayServer:
         for link in list(self.links.values()):
             if link.network_id != record.network_id:
                 continue
+            # NEVER A SECRET TO AN UNVERIFIED LINK (G3): ``epoch_frame`` carries the
+            # rotated secret for any active id, so a link whose peer did not prove
+            # its identity gets nothing and the real member's copy is QUEUED below.
+            # ``_admit_link`` already keeps such links out of the table; this is the
+            # backup at the one place the secret is sent.
+            if not getattr(link, "peer_verified", False):
+                continue
             if link.send(
                 epoch_frame(record, state, reason=reason, target_device_id=link.device_id)
             ):
@@ -13432,6 +14395,10 @@ class RelayServer:
             if member.device_id in delivered or member.device_id == record.self_device_id:
                 continue
             self._queue_epoch_for(member.device_id, record, state, reason=reason)
+        # The devices a live, verified link ACCEPTED the frame for. ``member rm`` reads
+        # it (G9): a removed device in this set was told over its link, and its client
+        # drops every borrowed grant on that news; one outside it never learns.
+        return delivered
 
     def _queue_epoch_for(
         self, device_id: str, record: NetworkRecord, state: SecretState, *, reason: str
@@ -13546,6 +14513,8 @@ class RelayServer:
         budget = self.settings.handshake_timeout_s if timeout_s is None else float(timeout_s)
         record = store.load(network_id, self.root)
         state = store.require_secrets(network_id, self.root)
+        if mode != "join":
+            expected_device = _current_member_id(record, expected_device)
         if connected is not None:
             sock = connected
         else:
@@ -13555,7 +14524,10 @@ class RelayServer:
             except ValueError:
                 return None, "bad_endpoint"
             try:
-                sock = socket.create_connection((address or host, port), timeout=budget)
+                # The shared NAT64-aware seam (see ``probe_candidates``): a synthesised
+                # address only carries the bytes; the handshake below still decides
+                # whether the device on the other end is the member we meant.
+                sock = nat64.create_connection((address or host, port), timeout=budget)
             except OSError as exc:
                 return None, f"connect_failed:{exc.__class__.__name__}"
         deadline = wire.deadline_in(budget)
@@ -13598,8 +14570,23 @@ class RelayServer:
             handshake.send_hello(sock)
             reader = wire.FrameReader(sock)
             handshake.read_challenge(reader, deadline)
+            # WHO THIS DIAL MEANT TO REACH, from this device's own record. The
+            # listener's welcome proof is verified against the STORED key of that
+            # member's ACTIVE row (never a key from the frame), and the peer must be
+            # ``expected_device`` — an empty one refuses, because a dial that cannot
+            # say whom it meant cannot tell an impostor from the member (G1). Every
+            # production caller passes it. Join (unused here: the CLI owns joins)
+            # treats ``expected_device`` as the token's inviter id.
+            expect = DialerExpectation(
+                device_id=expected_device,
+                public_key_for=None if mode == "join" else _active_key_reader(record),
+            )
+            # A challenge naming another device is refused BEFORE our auth, so an
+            # honest listener at a stale address never completes and never evicts
+            # its real link from us (see ``Handshake.refuse_unexpected_peer``).
+            handshake.refuse_unexpected_peer(expect)
             handshake.send_auth(sock, credential)
-            handshake.read_welcome(reader, deadline)
+            handshake.read_welcome(reader, deadline, expect)
             # ``read_welcome`` takes the phase off that very frame — the ONE place
             # it is decided (``Handshake.read_welcome``) — so re-reading it here
             # would be a second rule for one fact.
@@ -13612,6 +14599,21 @@ class RelayServer:
                 # connection it was told nothing about.
                 _close_quietly(sock)
                 return None, "pair_phase_requires_the_ceremony"
+            if handshake.peer_rotation:
+                # THE TARGET ROTATED WHILE THIS DEVICE WAS AWAY (G1D-1), and has now
+                # proved it: ``sig_old`` verified against our stored row before our
+                # auth left, and the welcome proof under the new key. The hop is
+                # applied BEFORE admission, through the same code the queued
+                # ``net_identity_rotate`` frame uses, so the link is admitted under a
+                # member id this device's record already knows. A refusal here
+                # (``MeshRefusal``) closes the socket below and demotes nothing.
+                # WRITTEN EVEN IF ``_admit_link`` THEN REFUSES (review m2-2): by
+                # this point the rotation is fully proven (old-key statement plus the
+                # new key's welcome proof), and the row it writes is byte-for-byte
+                # what the queued ``net_identity_rotate`` would write. A network-level
+                # refusal of the LINK (relay stopping, network refused) says nothing
+                # against the rotation, so keeping it spares the next dial the hop.
+                self._apply_rotation_statement(record.network_id, handshake.peer_rotation)
             link = PeerLink(
                 server=self,
                 sock=sock,
@@ -13619,17 +14621,37 @@ class RelayServer:
                 codec=handshake.codec(),
                 settings=self.settings,
                 reader=reader,
+                # G1: the dialer verified the listener's welcome proof against its stored
+                # key and that it is the device it meant to reach (``verify_welcome``), so
+                # the handshake's own proved fact carries over (mesh-origin-stamp §2 r3).
+                peer_verified=result.peer_verified,
             )
             link.peer_addr = host
             refusal = self._admit_link(link, outbound=True)
             if refusal:
                 return None, refusal
+            # Dial-only devices never reach the listener's audit site. Record
+            # this admitted handshake too, without altering either side's proof
+            # or refusal handling (including listener-auth verification).
+            self.audit.record(
+                AuditEvent(
+                    event="link_opened",
+                    actor=result.peer_device_id,
+                    subject=result.network_id,
+                    network_id=result.network_id,
+                    epoch=result.epoch,
+                    detail={"role": "dialer", "epoch": result.epoch, "phase": result.phase},
+                )
+            )
             # The listener's endpoints arrive in its ``welcome``; they are how this
             # device will re-open the link without being told the address again.
             # ``record`` was read before this handshake and is only an id source now:
             # a round trip has happened since, so the write re-reads inside the lock.
             self._note_peer_endpoints(
-                record.network_id, result.peer_device_id, handshake.peer_endpoints
+                record.network_id,
+                result.peer_device_id,
+                handshake.peer_endpoints,
+                verified=link.peer_verified,
             )
             # CONTACT RE-EVALUATES MEMBERSHIP (§8.4). A link is the one moment both
             # ends are known to be up, and the member table is a distributed fact
@@ -13638,6 +14660,13 @@ class RelayServer:
             self._pull_members(link)
             self._clear_refusal_mark(record.network_id)
             return link, "ok"
+        except MembershipEnded as ended:
+            # A CURRENT member (by this device's own record) proved, on this very
+            # handshake, that this device was removed (G9-B). Reduce authority here
+            # and now instead of reading the refusal as an owner that is asleep.
+            _close_quietly(sock)
+            self._apply_verified_removal(network_id, ended)
+            return None, ended.code
         except MeshRefusal as refusal:
             _close_quietly(sock)
             self._audit_handshake_refusal(
@@ -13652,6 +14681,13 @@ class RelayServer:
                 # never mistaken for the peer's proof of anything.
                 expected_device=expected_device,
             )
+            self._note_listener_refusal(
+                refusal.code,
+                network_id,
+                host,
+                expected_device=expected_device,
+                build=dict(handshake.peer_build) if handshake is not None else {},
+            )
             return None, refusal.code
         except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
             _close_quietly(sock)
@@ -13659,6 +14695,103 @@ class RelayServer:
                 record.network_id, host, mode, expected_device=expected_device
             )
             return None, handshake_refused_reason(exc)
+
+    def _note_listener_refusal(
+        self,
+        code: str,
+        network_id: str,
+        host: str,
+        *,
+        expected_device: str,
+        build: dict[str, Any],
+    ) -> bool:
+        """What a refused LISTENER teaches this dialer. Returns whether E was removed.
+
+        ``listener_unproven`` (no proof: an old build or an impostor) is remembered
+        in ``_unproven_listeners`` so ``peers``/``doctor`` can name it; it is NOT a
+        reason to touch the member row, because it is the expected answer of a
+        legitimate not-yet-updated member and demoting its address would strand it
+        once it updates. It is NOT recorded while a verified link that proves the
+        member's listener is live (review m1 / security S-3): a doctor probe of a
+        stale address must not contradict the link the operator is using.
+
+        WHAT MAY DELETE AN ADDRESS (review M1, security S-2). Only ``bad_mac``: it is
+        reachable only after a signature that verified under M's STORED key, so the
+        answering party provably holds M's key and not this network's secret. A
+        challenge naming another device and a ``bad_signature`` are UNAUTHENTICATED
+        (a bare frame, or 64 random bytes), so they only mark E suspect in memory
+        (``_suspect_endpoints``): this device tries M's other addresses first and
+        still falls back to E. And even ``bad_mac`` never removes M's LAST address,
+        nor its ``observed_endpoint`` (written only by verified inbound links), so no
+        answer at one address can leave a member undialable from here.
+        """
+        if not expected_device:
+            return False
+        if code == REASON_LISTENER_UNPROVEN:
+            if not self._listener_proven_by_live_link(expected_device):
+                self._unproven_listeners[expected_device] = {
+                    "build": _build_version_only(build),
+                    "endpoint": host,
+                    "at": time.time(),
+                }
+            return False
+        if code in (REASON_PEER_IDENTITY, REASON_SIGNATURE):
+            self._mark_suspect(expected_device, host)
+            return False
+        if code != REASON_MAC:
+            return False
+        demoted = False
+        try:
+            with store.mutate(network_id, self.root) as record:
+                member = record.member(expected_device)
+                if (
+                    member is not None
+                    and host in member.endpoints
+                    and len(member.endpoints) > 1
+                    and host != (member.observed_endpoint or "")
+                ):
+                    member.endpoints = [e for e in member.endpoints if e != host]
+                    store.save(record, self.root)
+                    demoted = True
+        except FileNotFoundError:
+            return False
+        if not demoted:
+            # The last address (or the observed one) stays; it is still tried last.
+            self._mark_suspect(expected_device, host)
+            return False
+        self.audit.record(
+            AuditEvent(
+                event="endpoint_demoted",
+                actor="self",
+                subject=expected_device,
+                outcome="ok",
+                network_id=network_id,
+                cause="auth_failed",
+                detail={"endpoint": host, "code": code},
+            )
+        )
+        return True
+
+    def _mark_suspect(self, device_id: str, endpoint: str) -> None:
+        """Remember ``endpoint`` as unproven for ``device_id``: memory only, never the row."""
+        if not hasattr(self, "_suspect_endpoints"):
+            self._suspect_endpoints = {}
+        self._suspect_endpoints.setdefault(device_id, set()).add(endpoint)
+
+    def _listener_proven_by_live_link(self, device_id: str) -> bool:
+        """Whether a live link already proves ``device_id``'s listener can verify.
+
+        An OUTBOUND link means this device verified that listener's welcome proof;
+        an inbound one whose MAC-covered transcript advertises ``listener-proof-v1``
+        comes from a build whose listener signs its welcome. Either one outranks an
+        "unproven" answer from some address (review m1, UX U1, security S-3, Q-1).
+        """
+        link = self._link_for(device_id)
+        if link is None:
+            return False
+        return bool(getattr(link, "outbound", False)) or "listener-proof-v1" in getattr(
+            link, "capabilities", ()
+        )
 
     def _clear_refusal_mark(self, network_id: str) -> None:
         """A COMPLETED handshake clears a ``refused_by_peers`` mark.
@@ -13682,6 +14815,158 @@ class RelayServer:
                 store.save(record, self.root)
         except FileNotFoundError:
             return
+
+    def _send_removal_notice(
+        self, sock: socket.socket, handshake: Handshake, network_id: str
+    ) -> bool:
+        """Answer a PROVEN removed member with the fixed notice, at most once per window.
+
+        Reached only when ``handshake.removal_proven`` (the dialer signed this
+        transcript with its tombstoned row's exact key, inside the notice window).
+        Everything else, including a second attempt by the same key inside
+        :data:`REMOVAL_NOTICE_INTERVAL_S`, gets the plain silent close the caller
+        does next — nothing on the socket — so a stolen key cannot use the notice
+        to poll whether this device is up. This device never DIALS a tombstoned
+        member (``_ensure_link_with_reason`` skips inactive rows): the notice exists
+        only as an answer. Best-effort: a dead socket costs the notice, nothing else.
+        """
+        key = (network_id, handshake.peer_device_id)
+        moment = time.monotonic()
+        lock = getattr(self, "_removal_notices_lock", None)
+        if lock is None:  # a relay built without ``__init__`` (test doubles)
+            return False
+        with lock:
+            notices = self._removal_notices
+            for stale in [
+                k for k, at in notices.items() if moment - at >= REMOVAL_NOTICE_INTERVAL_S
+            ]:
+                del notices[stale]
+            if key in notices:
+                return False
+            notices[key] = moment
+        try:
+            epoch = ServerPolicy(self, network_id).current_epoch
+            return handshake.send_removal_notice(sock, epoch)
+        except (OSError, ValueError, MeshRefusal):
+            return False
+
+    def _apply_verified_removal(self, network_id: str, ended: MembershipEnded) -> None:
+        """Mark THIS device removed locally and drop every borrowed bearer at once.
+
+        Only ever reduces authority, and only on this device: the self row is
+        tombstoned the way ``remove_member`` tombstones a row (``removed_at``,
+        ``removed_by`` = the member that said so, ``lifecycle="expired"``) and the
+        network is marked ``stale: refused_by_peers`` exactly as a rotation frame
+        naming this device does (``apply_epoch``'s ``removing_us`` branch). The
+        epoch, secrets and member table are left alone: no rejoin, no rotation,
+        nothing deleted. Once the self-tombstone saves, session processes fail
+        closed on their next borrow or held serve
+        (``MeshCredentialClient._self_membership_active``), and
+        the credential client's own membership-loss path runs here too
+        (``invalidate_membership``: persistent network deny, borrowed cache drop,
+        GitHub revoke, held rows retired) so the offline hold ends now rather than at
+        its expiry.
+
+        ONE ``membership_ended`` ROW, ON THE TRANSITION ONLY (review R1-2): after
+        this runs, this device's record still lists the signer as active, so it
+        keeps re-dialling it, and the signer answers again every
+        ``REMOVAL_NOTICE_INTERVAL_S`` for the whole notice window. Every one of
+        those notices verifies; only the first one that flips our self row from
+        active to removed is audited. The drop itself re-runs each time, which is
+        harmless (it only ever reduces authority). A crash between the record save
+        and the audit write loses that one row; the removal itself is persisted.
+
+        FAIL SAFE ON A RECORD ERROR (review R1-3, security S3): a verified notice is
+        reason enough to drop borrowed bearers even when the self-tombstone cannot
+        be saved — without it the lazy ``_self_membership_active`` gate never fires
+        either — so any write failure is logged and the drop still runs. The
+        transition row waits for a save that succeeds (the next notice retries);
+        meanwhile the drop is audited as ``recorded: false`` (#4394 review R2-2), so
+        a record that NEVER saves — a corrupt file, a read-only disk — still leaves
+        audit evidence of the attempted credential drop, not only a WARNING line.
+        ONE audit ATTEMPT per network per relay process (a failing audit sink can
+        still lose that row): a record that keeps failing keeps this device
+        re-dialling (its self row still reads active), and a row per notice — one
+        every ``REMOVAL_NOTICE_INTERVAL_S`` for the whole window — is the R1-2 flood
+        again. The 300 s ``_refusal_rows`` window is no help there: it equals the
+        notice interval, so it would admit every one.
+        """
+        moment = time.time()
+        transitioned = False
+        recorded = False
+        epoch = 0
+        try:
+            with store.mutate(network_id, self.root) as record:
+                me = record.self_member()
+                was_active = me is not None and me.active
+                if me is not None and me.active:
+                    me.removed_at = moment
+                    me.removed_by = ended.signer
+                    me.lifecycle = "expired"
+                if record.self_device_id and record.self_device_id not in record.removed_ids:
+                    record.removed_ids.append(record.self_device_id)
+                record.stale = "refused_by_peers"
+                store.save(record, self.root)
+                epoch = record.epoch
+                transitioned = was_active
+                recorded = True
+        except Exception as exc:  # noqa: BLE001 — the credential drop below must still run
+            transitioned = False
+            logger.warning(
+                "relay: could not record a verified removal network=%s exception=%s",
+                network_id[:80],
+                type(exc).__name__[:64],
+            )
+        dropped = False
+        try:
+            from local_operator.network.credentials.client import MeshCredentialClient
+
+            client = MeshCredentialClient.for_this_device(self.root, network_id)
+            if client is not None:
+                client.invalidate_membership()
+                dropped = True
+        except Exception as exc:  # noqa: BLE001 — the record write above already fails closed
+            logger.warning(
+                "relay: credential drop after a verified removal failed network=%s exception=%s",
+                network_id[:80],
+                type(exc).__name__[:64],
+            )
+        if not recorded:
+            with self._unrecorded_removals_lock:
+                should_audit = network_id not in self._unrecorded_removals
+                self._unrecorded_removals.add(network_id)
+            if should_audit:
+                self.audit.record(
+                    AuditEvent(
+                        event="membership_ended",
+                        actor=ended.signer,
+                        subject=network_id,
+                        outcome="refused",
+                        network_id=network_id,
+                        epoch=epoch,
+                        cause="not_a_member",
+                        detail={
+                            "notice_epoch": ended.epoch,
+                            "credentials_dropped": dropped,
+                            "recorded": False,
+                        },
+                    )
+                )
+            return
+        if not transitioned:
+            return
+        self.audit.record(
+            AuditEvent(
+                event="membership_ended",
+                actor=ended.signer,
+                subject=network_id,
+                outcome="refused",
+                network_id=network_id,
+                epoch=epoch,
+                cause="not_a_member",
+                detail={"notice_epoch": ended.epoch, "credentials_dropped": dropped},
+            )
+        )
 
     def _note_refused_handshake(
         self, network_id: str, host: str, mode: str, *, expected_device: str = ""
@@ -13968,6 +15253,7 @@ class RelayServer:
             "net_show": lambda frame: self.network_detail(str(frame.get("network") or "")),
             "net_peer_ls": lambda frame: self.peer_status(),
             "net_invite": self._ctl_invite,
+            "net_invite_policy": self._ctl_invite_policy,
             "net_member_rm": self._ctl_member_rm,
             "net_trust_local": self._ctl_trust,
             "net_panic_local": self._ctl_panic,
@@ -14015,6 +15301,32 @@ class RelayServer:
             for record in store.list_networks(self.root)
         ]
 
+    def _ctl_invite_policy(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """``net_invite_policy``: mint an invite that carries a NON-DEFAULT offer policy.
+
+        WHY A SEPARATE OP (review round 1, S2/R1-2): ``net_invite`` cannot carry
+        a restrictive policy safely across versions. A relay built before the
+        policy existed ignores the unknown ``credential_offers`` field, mints an
+        ordinary credential-offering invite and writes its token file BEFORE the
+        CLI can read the reply and notice — leaving exactly the invite the
+        operator asked not to create. An op name such a relay does not serve is
+        refused by ``control_dispatch`` with nothing changed, so the version
+        check happens before any mutation instead of after it.
+
+        The policy is REQUIRED here and must be one this build understands and
+        not the default; a default mint keeps using ``net_invite`` unchanged.
+        """
+        from local_operator.network.types import CREDENTIAL_OFFER_POLICIES
+
+        policy = frame.get("credential_offers")
+        if not isinstance(policy, str) or not policy or policy not in CREDENTIAL_OFFER_POLICIES:
+            raise MeshRefusal(
+                "bad_offer_policy",
+                f"net_invite_policy needs a known non-default credential-offer policy; "
+                f"got {policy!r}. Nothing was minted.",
+            )
+        return self._ctl_invite(frame)
+
     def _ctl_invite(self, frame: dict[str, Any]) -> dict[str, Any]:
         # ``_require_network`` resolves a name to an id and answers the refusal;
         # the record it returns is not the one this WRITES. Minting appends an
@@ -14044,6 +15356,7 @@ class RelayServer:
                 or self.advertised_endpoints()
                 or None,
                 device_id=str(frame.get("device_id") or ""),
+                credential_offers=str(frame.get("credential_offers") or ""),
             )
             # MINTING IS WHERE THE LIST GROWS, so it is where the dead entries go:
             # the same locked write that adds a row drops the ones past their own
@@ -14067,6 +15380,7 @@ class RelayServer:
                     "role": minted.record.role,
                     "expires_at": minted.record.expires_at,
                     "bound_device": minted.record.device_id,
+                    "credential_offers": minted.record.credential_offers,
                 },
             )
         )
@@ -14081,6 +15395,7 @@ class RelayServer:
             "hosts": list(minted.record.hosts),
             "network_id": record.network_id,
             "network_name": record.name,
+            "credential_offers": minted.record.credential_offers,
         }
 
     def _ctl_member_rm(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -14133,11 +15448,31 @@ class RelayServer:
                     },
                 )
             )
-        self._broadcast_epoch(record, state, reason="member_removed", removed=outcome.removed)
+        told = self._broadcast_epoch(
+            record, state, reason="member_removed", removed=outcome.removed
+        )
         self._rehandshake_network(record.network_id, reason="epoch_stale")
+        from local_operator.network.credentials import owner as owner_mod
+        from local_operator.network.credentials.lends import removal_lends
+
+        # Read BEFORE the off-thread revoke below starts, while the lender still
+        # holds the token: an App lend counts as "revocation requested" only if
+        # that DELETE will actually be attempted (review R1-1; ``lends.py``).
+        network_id = record.network_id
+        lends = removal_lends(
+            self.root,
+            network_id,
+            device_id,
+            told=device_id in told,
+            revoke_tracked=lambda key, holder: owner_mod.lent_token_tracked(
+                self, network_id, key, holder
+            ),
+            audit=self.audit,
+        )
         # The owner half of "membership loss ends a held GitHub token" (#3947 M2).
         self._revoke_lent_on_removal(record.network_id, [device_id])
         return {
+            **lends,
             "network_id": record.network_id,
             "removed": device_id,
             "epoch": outcome.epoch,
@@ -14228,15 +15563,24 @@ class RelayServer:
             )
         return {"network_id": record.network_id, "trust": record.trust}
 
-    def _ctl_pair_pending(self, _frame: dict[str, Any]) -> list[dict[str, Any]]:
+    def _ctl_pair_pending(self, frame: dict[str, Any]) -> list[dict[str, Any]]:
         """The pairings parked for a human, oldest first. A list is the answer.
 
         A method rather than a lambda in the handler table: the CLI and the harness
         drive this path, and a missing method would fail as an `AttributeError`
         inside whatever is waiting for the answer — which is how a two-sided test
         ends up waiting for a timeout instead of reporting the real fault.
+
+        STAGE FILTER (version skew). Only stage-2 rows (``awaiting_confirmation``)
+        are returned unless the caller sends ``include_stages: true`` — the desktop
+        server's Mesh approvals read does. An older ``lop network confirm`` would
+        otherwise list a stage-1 row whose transcription is empty and offer a y/N
+        nobody can meaningfully answer (and that this op now refuses anyway).
         """
-        return [pending.to_json() for pending in store.pending_pairings(self.root)]
+        rows = store.pending_pairings(self.root)
+        if not bool((frame or {}).get("include_stages")):
+            rows = [row for row in rows if row.stage == PAIR_STAGE_AWAITING_CONFIRMATION]
+        return [pending.to_json() for pending in rows]
 
     def _ctl_pair_confirm(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Record the inviter's human answer to a parked pairing.
@@ -14249,8 +15593,20 @@ class RelayServer:
         """
         invite_id = str(frame.get("invite_id") or "")
         pending = store.pending_pairing(invite_id, self.root) if invite_id else None
+        if pending is None and "code" in frame:
+            # A CODE-CARRYING ANSWER NAMES ITS CEREMONY. The fallback below (answer
+            # the oldest open pairing) is the legacy CLI's convenience; a card answer
+            # for an invite that is no longer parked must not land on another one.
+            raise MeshRefusal(
+                "no_pending_pairing",
+                "that pairing is no longer waiting on this device, so nothing was answered",
+            )
         if pending is None:
-            open_pairings = store.pending_pairings(self.root)
+            open_pairings = [
+                row
+                for row in store.pending_pairings(self.root)
+                if row.stage == PAIR_STAGE_AWAITING_CONFIRMATION
+            ]
             if not open_pairings:
                 raise MeshRefusal(
                     "no_pending_pairing",
@@ -14260,6 +15616,62 @@ class RelayServer:
                 )
             pending = open_pairings[0]
         admit = str(frame.get("decision") or "admit") == "admit"
+        if "code" in frame:
+            return self._pair_confirm_by_code(pending, frame, admit=admit)
+        # A LEGACY FRAME (no ``code``): ``lop network confirm``'s y/N, which asserts
+        # ``matched`` itself after its person compared the two codes on screen. Kept
+        # byte-compatible as the same-user terminal fallback; it is only refused on a
+        # stage-1 row, where there is nothing to have compared yet.
+        with _pairing_lock(pending.network_id, self.root):
+            return self._pair_confirm_legacy(pending, frame, admit=admit)
+
+    def _refuse_if_decided(self, live: PendingPairing, *, spent: bool) -> None:
+        """THE TERMINAL-DECISION LATCH (security review round 1, S-R1-2; review M1).
+
+        Caller holds the record lock. Once this ceremony has a decision on disk, or the
+        invite's attempt budget is spent, EVERY later answer — card, legacy y/N, any
+        ingress — is refused and nothing is overwritten. Without it the exhausting
+        decline sat on disk until the listener's next 0.2 s poll, and a correct code in
+        that gap replaced it with an admit. ``pairing_expired`` is the refusal: the
+        ceremony is no longer open to answers, which is the sentence the card shows.
+
+        A SECOND ANSWER GETS ITS OWN CODE, ``pairing_answered`` (security review round
+        2, S-R2-2): the decision already on disk may be an admit, so the card's
+        sentence must not claim "nothing was approved" the way ``pairing_expired``'s
+        does; it says only that this answer was not recorded.
+        """
+        decided = store.pair_decision(live.invite_id, self.root)
+        # The poll's own rule (``_answers_ceremony``): a decision the poll would
+        # never act on must not shut the ceremony to a live answer either.
+        if _answers_ceremony(decided, live.ceremony):
+            raise MeshRefusal(
+                "pairing_answered",
+                "that pairing is no longer open, and this answer was not recorded",
+            )
+        if spent:
+            raise MeshRefusal(
+                "pairing_expired",
+                "that pairing's attempts are spent, so this answer was not recorded and "
+                "the invitation is used up",
+            )
+
+    def _pair_confirm_legacy(
+        self, pending: PendingPairing, frame: dict[str, Any], *, admit: bool
+    ) -> dict[str, Any]:
+        """``lop network confirm``'s y/N frame (no ``code``). Caller holds the lock."""
+        live = store.pending_pairing(pending.invite_id, self.root)
+        if live is None:
+            raise MeshRefusal(
+                "no_pending_pairing",
+                "that pairing is no longer waiting on this device, so nothing was answered",
+            )
+        pending = live
+        if pending.stage != PAIR_STAGE_AWAITING_CONFIRMATION:
+            raise MeshRefusal(
+                "pairing_not_ready",
+                "the joining device has not typed this device's code yet, so there is "
+                "nothing to confirm; wait until it has",
+            )
         matched = bool(frame.get("matched")) and admit
         # THE SHARE DECISION, REDUCE-ONLY (§3.3). The offered set is the list this
         # relay SENT (``PendingPairing.offer``, state ``"sent"``); a frame with no
@@ -14293,6 +15705,12 @@ class RelayServer:
             reason="" if matched else str(frame.get("reason") or "declined"),
             answered_by=str(frame.get("answered_by") or "human"),
             shares=sorted(shares) if matched else [],
+            ceremony=pending.ceremony,
+        )
+        # The latch sits after the frame's own validation (a widening is refused by its
+        # own name either way) and before the only write.
+        self._refuse_if_decided(
+            pending, spent=_budget_spent(pending.network_id, pending.invite_id, self.root)
         )
         store.save_pair_decision(decision, self.root)
         return {
@@ -14305,6 +15723,170 @@ class RelayServer:
             # answers without this key, and the CLI says so by name rather than
             # silently admitting more than the operator chose.
             "shares": list(decision.shares),
+        }
+
+    def _pair_confirm_by_code(
+        self, pending: PendingPairing, frame: dict[str, Any], *, admit: bool
+    ) -> dict[str, Any]:
+        """A code-carrying answer (the Mesh approvals card): the RELAY compares.
+
+        WHY THE RELAY OWNS THE COMPARISON. A caller-asserted ``matched`` is a claim,
+        and the desktop route that relays the card's answer is reachable by anything
+        holding the desktop bearer. With a ``code`` present this compares it against
+        THIS relay's own derivation (``pending.sas``) and ignores ``matched``
+        entirely, so the strongest thing a caller can do is type digits.
+
+        ONE TRANSACTION. Re-reading the pending record, checking its stage and nonce,
+        comparing, spending an attempt and writing the decision all happen under the
+        network record's write lock — the same lock the stage-2 flip in
+        ``_inviter_human_step`` takes — so a mismatch is counted exactly once, cannot
+        interleave with the flip, and survives a relay restart (the count lives on
+        the invite row: ``invite.attempts``, the 3-budget the wire path spends).
+
+        A mismatch writes NO decision: the listener keeps polling and the socket stays
+        open while attempts and time remain. The attempt that exhausts the budget
+        writes a ``decline`` with reason ``sas_mismatch``, which the listener turns
+        into today's consuming refusal. A decline (``decision: "decline"``) is never
+        compared and spends nothing.
+        """
+        from local_operator.network.credentials import offers as offers_mod
+
+        invite_id = pending.invite_id
+        typed = str(frame.get("code") or "")
+        nonce = str(frame.get("nonce") or "")
+        if not nonce:
+            # A CODE-CARRYING ANSWER NAMES ITS CEREMONY AND STAGE (review round 1, N3).
+            # The only such caller (the desktop route) always sends the card's nonce;
+            # refusing the nonce-less shape means no control-socket frame can land a
+            # code on whichever ceremony happens to be parked under this invite now.
+            raise MeshRefusal(
+                "pairing_expired",
+                "that answer does not name the pairing card it is for, so nothing was "
+                "answered; reopen Mesh approvals and answer the current one",
+            )
+        with store.mutate(pending.network_id, self.root) as record:
+            live = store.pending_pairing(invite_id, self.root)
+            if live is None or not live.is_open():
+                raise MeshRefusal(
+                    "pairing_expired",
+                    "that pairing ran out of time before it was answered, so nothing was "
+                    "admitted",
+                )
+            if nonce != live.nonce:
+                # The card answered is not the ceremony now parked (a retry re-parked
+                # the invite, or stage 1 became stage 2): never let it answer this one.
+                raise MeshRefusal(
+                    "pairing_expired",
+                    "that pairing card is out of date; reopen Mesh approvals and answer "
+                    "the current one",
+                )
+            if live.stage != PAIR_STAGE_AWAITING_CONFIRMATION:
+                raise MeshRefusal(
+                    "pairing_not_ready",
+                    "the joining device has not typed this device's code yet, so there is "
+                    "nothing to confirm; wait until it has",
+                )
+            invite = record.invite(invite_id)
+            if invite is None:
+                raise MeshRefusal("no_pending_pairing", "that invite was never minted here")
+            self._refuse_if_decided(live, spent=failures_exhausted(record, invite_id))
+            if not admit:
+                decision = PairDecision(
+                    invite_id=invite_id,
+                    decision="decline",
+                    matched=False,
+                    # Never the caller's word for it: a card decline is a decline, and
+                    # ``sas_mismatch`` is only ever written by the exhausting compare.
+                    reason="declined",
+                    answered_by=str(frame.get("answered_by") or "human"),
+                    ceremony=live.ceremony,
+                )
+                store.save_pair_decision(decision, self.root)
+                return self._pair_confirm_reply(live, decision, record)
+            wanted = frame.get("shares")
+            if not isinstance(wanted, list):
+                # THE CARD'S SELECTION IS EXPLICIT (security review round 1, S-R1-1).
+                # A card admit carries exactly the list the person left ticked, and the
+                # app attested that list; "absent = the whole offer" is the legacy
+                # y/N convenience and must never be how a card answer grants, or a
+                # body that attested ``[]`` and then omitted the key would serve every
+                # offered credential. ``[]`` grants nothing; absent is refused.
+                # Judged BEFORE the code compare (agent review round 2, n1): a
+                # malformed frame is not a guess at the code and must spend no attempt.
+                raise MeshRefusal(
+                    "bad_request",
+                    "a code answer must name the credentials to share (an empty list "
+                    "shares none), so nothing was answered",
+                )
+            if not sas_matches(live.sas, typed):
+                invite.attempts += 1
+                exhausted = failures_exhausted(record, invite_id)
+                store.save(record, self.root)
+                if exhausted:
+                    decision = PairDecision(
+                        invite_id=invite_id,
+                        decision="decline",
+                        matched=False,
+                        reason="sas_mismatch",
+                        answered_by=str(frame.get("answered_by") or "human"),
+                        ceremony=live.ceremony,
+                    )
+                    store.save_pair_decision(decision, self.root)
+                    reply = self._pair_confirm_reply(live, decision, record)
+                    reply["status"] = "refused"
+                    return reply
+                # A REPLY, NOT A REFUSAL: the ceremony and its socket stay open, and the
+                # caller needs ``attempts_left`` to say so — a control refusal carries
+                # only a code and a sentence.
+                return {
+                    "invite_id": invite_id,
+                    "decision": "",
+                    "matched": False,
+                    "joiner_device_id": live.joiner_device_id,
+                    "shares": [],
+                    "status": "sas_mismatch",
+                    "attempts_left": self._attempts_left(record, invite_id),
+                }
+            offered = list(live.offer) if live.offer_state == offers_mod.OWNER_SENT else []
+            servable = offers_mod.served_keys(offered)
+            shares = sorted(str(key) for key in wanted)
+            unoffered = [key for key in shares if key not in servable]
+            if unoffered:
+                raise MeshRefusal(
+                    "shares_not_offered",
+                    f"{unoffered[0]!r} is not being served in this ceremony, so it cannot "
+                    "be granted by it — the list can only be reduced here",
+                )
+            decision = PairDecision(
+                invite_id=invite_id,
+                decision="admit",
+                matched=True,
+                answered_by=str(frame.get("answered_by") or "human"),
+                shares=shares,
+                ceremony=live.ceremony,
+            )
+            store.save_pair_decision(decision, self.root)
+            return self._pair_confirm_reply(live, decision, record)
+
+    @staticmethod
+    def _attempts_left(record: NetworkRecord, invite_id: str) -> int:
+        from local_operator.network.invite import PAIRING_MAX_FORGIVEN_FAILURES
+
+        invite = record.invite(invite_id)
+        spent = invite.attempts if invite is not None else PAIRING_MAX_FORGIVEN_FAILURES
+        return max(0, PAIRING_MAX_FORGIVEN_FAILURES - spent)
+
+    def _pair_confirm_reply(
+        self, pending: PendingPairing, decision: PairDecision, record: NetworkRecord
+    ) -> dict[str, Any]:
+        return {
+            "invite_id": pending.invite_id,
+            "decision": decision.decision,
+            "matched": decision.matched,
+            "joiner_device_id": pending.joiner_device_id,
+            "shares": list(decision.shares),
+            "status": "sent",
+            "attempts_left": self._attempts_left(record, pending.invite_id),
         }
 
     # -- incident fan-out: what the PEERS report -----------------------------
@@ -15694,6 +17276,9 @@ class RelayServer:
         """
         peers: list[dict[str, Any]] = []
         deadline = time.monotonic() + LISTING_PROBE_BUDGET_S
+        # Per-endpoint passive route lookups (no traffic) are what let a row say
+        # ``local_offline`` instead of blaming the peer.
+        route_reader = getattr(self, "_route_reader", None)
         for record in store.list_networks(self.root):
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
@@ -15720,7 +17305,7 @@ class RelayServer:
                     if tracker is not None and link is None
                     else {"state": redial.CONNECTED, "attempts": 0}
                 )
-                state = peer_link_state(link, reason, attempts)
+                state = peer_link_state(link, reason, attempts, route_reader=route_reader)
                 peers.append(
                     {
                         "device_id": member.device_id,
@@ -15774,9 +17359,48 @@ class RelayServer:
                         # unchanged.
                         "build": dict(link.peer_build) if link is not None else {},
                         "capabilities": sorted(link.capabilities) if link is not None else [],
+                        # WHETHER THIS PEER CAN PROVE ITSELF AS A LISTENER — present on
+                        # every row, like ``build``. Driven by the sticky
+                        # ``_unproven_listeners`` fact, never by ``redial.last_error``,
+                        # so the reconnect loop cannot flap it away.
+                        "listener_proof": self._listener_proof_row(member.device_id, link),
                     }
                 )
         return peers
+
+    def _listener_proof_row(self, device_id: str, link: PeerLink | None) -> dict[str, Any]:
+        """``{"state", "build", "build_source", "at"}`` for one ``peers()`` row.
+
+        ``unproven``: this device's dial was answered with no welcome proof and no
+        outbound link has been admitted since. The build is what the CHALLENGE
+        reported (``build_source: "challenge"``, a claim) unless a live INBOUND link
+        from that member exists, whose hello build the listener side verified
+        (``"hello"``). ``verified``: a live link to it carries ``listener-proof-v1``
+        (inside the MAC-covered transcript) or this device dialled it successfully.
+        ``unknown`` otherwise. Only ``version`` is rendered, never ``source_ref``.
+        """
+        # A LIVE PROOF WINS over the sticky record (review m1, UX U1, S-3, Q-1): the
+        # record says what one dial saw; this link is what the operator is using now.
+        if link is not None and (
+            getattr(link, "outbound", False)
+            or "listener-proof-v1" in getattr(link, "capabilities", ())
+        ):
+            return {"state": "verified", "build": {}, "build_source": "", "at": None}
+        unproven = getattr(self, "_unproven_listeners", {}).get(device_id)
+        if unproven is not None:
+            build = dict(unproven.get("build") or {})
+            source = "challenge"
+            if link is not None and not getattr(link, "outbound", False):
+                hello_build = _build_version_only(getattr(link, "peer_build", {}))
+                if hello_build:
+                    build, source = hello_build, "hello"
+            return {
+                "state": "unproven",
+                "build": build,
+                "build_source": source,
+                "at": unproven.get("at"),
+            }
+        return {"state": "unknown", "build": {}, "build_source": "", "at": None}
 
     def status(self, *, refresh: bool = False) -> dict[str, Any]:
         """Install state, health, links, log paths — what ``lop network status`` prints.
@@ -15922,6 +17546,9 @@ class RelayServer:
                 if peer and member.device_id != peer:
                     continue
                 findings.extend(self._probe_member(record, member, deadline=deadline))
+                proof = self._listener_proof_finding(member)
+                if proof is not None:
+                    findings.append(proof)
         return {
             "checks": findings,
             "identity_dir": str(identity),
@@ -16030,6 +17657,9 @@ class RelayServer:
                         "ok": False,
                         "latency_ms": attempt.latency_ms,
                         "detail": attempt.detail,
+                        # Present only when True, so every other row's shape is
+                        # exactly today's (U3; read by uplink._answered_by_silence).
+                        **({"dial_silent": True} if attempt.dial_silent else {}),
                     }
                 )
         # SCOPE FIRST, THEN INFORMATIONAL (F9; design round 1, D3): the same
@@ -16042,7 +17672,8 @@ class RelayServer:
         # per member probed.
         from local_operator.network import readiness as readiness_mod
 
-        readiness_mod.mark_out_of_scope(rows, addresses.local_ipv4_addresses())
+        own_addresses = addresses.local_ipv4_addresses()
+        readiness_mod.mark_out_of_scope(rows, own_addresses)
         # INFORMATIONAL, NOT FAILED (drill finding, 2026-10-03): the same
         # semantics ``ready`` applies to its own rows — ONE home,
         # ``readiness.mark_informational`` — because doctor's reader met the same
@@ -16051,7 +17682,20 @@ class RelayServer:
         # another address. The flip touches reachability rows only; the
         # credential-repair rows beside them stay exactly as they are.
         readiness_mod.mark_informational(rows)
-        if probe.sock is None and probe.attempts and not any(a.connected for a in probe.attempts):
+        # A LIVE LINK VOUCHES (live-link false red, 2026-11-16): the same rule
+        # ``ready`` applies, one home (``readiness.mark_covered_by_link``). A peer
+        # that dials in while its advertised address is dead is up; neither the
+        # silent address nor the "restart its relay / open the port" row below is
+        # a fault while its link is live. Without one, both stay exactly as before.
+        # Read under the link lock and AFTER the probe (#4110 round 1, R1-3/R1-4).
+        link_live = readiness_mod.link_is_live(self, member.device_id)
+        readiness_mod.mark_covered_by_link(rows, link_live=link_live, own_addresses=own_addresses)
+        if (
+            not link_live
+            and probe.sock is None
+            and probe.attempts
+            and not any(a.connected for a in probe.attempts)
+        ):
             # EVERY ADDRESS WENT UNANSWERED (2026-10-21): the node's public IP had
             # moved after an EC2 stop/start, this device kept dialling the stored
             # one, and the row could only heal on a completed handshake — which the
@@ -16076,6 +17720,45 @@ class RelayServer:
                 }
             )
         return rows
+
+    def _listener_proof_finding(self, member: MemberRecord) -> dict[str, Any] | None:
+        """The named doctor warning for a member whose listener cannot prove itself.
+
+        Read from the sticky ``_unproven_listeners`` fact (this doctor run's own dial
+        refreshes it), so it says the same thing ``lop network peers`` does. Severity
+        ``warn``: named, non-gating — the handshake row already reports the dial.
+        The remedies name both routes: the mesh roll from here, and ``lop update`` on
+        the member itself for one that can never connect to this device (the roll
+        rides the member's own inbound link, which such a member never opens).
+        """
+        from local_operator.resume import (
+            UNNAMED_DEVICE,
+            listener_unproven_remedies,
+            listener_unproven_sentence,
+        )
+
+        if member.device_id not in self._unproven_listeners:
+            return None
+        proof = self._listener_proof_row(member.device_id, self._link_for(member.device_id))
+        if proof.get("state") != "unproven":
+            # A live verified link outranks the record (review m1): no warning.
+            return None
+        label = member.name or UNNAMED_DEVICE
+        return {
+            "check": "listener_proof",
+            "code": REASON_LISTENER_UNPROVEN,
+            "device_id": member.device_id,
+            "device_name": member.name,
+            "ok": False,
+            "severity": "warn",
+            "listener_proof": proof,
+            # ``detail`` IS A CODE on every doctor row (``doctor_detail_words`` maps
+            # it), so the sentence rides in ``message`` (UX U8), and stops before the
+            # remedy, which the bullets below carry once (UX U5).
+            "detail": REASON_LISTENER_UNPROVEN,
+            "message": listener_unproven_sentence(label, proof, with_remedy=False),
+            "remedies": list(listener_unproven_remedies(label, device_id=member.device_id)),
+        }
 
     def _handshake_row(
         self, member: MemberRecord, endpoint: str, *, ok: bool, detail: str, **extra: Any
@@ -16113,8 +17796,24 @@ class RelayServer:
             return self._handshake_row(member, endpoint, ok=False, detail=refusal.code)
         latency_ms = round((time.monotonic() - started) * 1000, 1)
         if link is None:
+            # Whether this dial's refusal took the address off the row (only a
+            # ``bad_mac`` demotion can), read back rather than inferred from the code,
+            # so the doctor line says "removed" only when it is true (UX U6).
+            extra: dict[str, Any] = {}
+            if endpoint in member.endpoints:
+                try:
+                    after = store.load(record.network_id, self.root).member(member.device_id)
+                except FileNotFoundError:
+                    after = None
+                if after is not None and endpoint not in after.endpoints:
+                    extra = {"endpoint_removed": True, "device_name": member.name}
             return self._handshake_row(
-                member, endpoint, ok=False, detail=reason or "unreachable", latency_ms=latency_ms
+                member,
+                endpoint,
+                ok=False,
+                detail=reason or "unreachable",
+                latency_ms=latency_ms,
+                **extra,
             )
         skew = None
         if link.epoch != record.epoch:
@@ -16251,7 +17950,7 @@ def build_stamp() -> dict[str, str]:
 
 
 def _pair_offer_for(
-    handshake: Handshake, root: Path, network_id: str
+    handshake: Handshake, root: Path, network_id: str, *, offers_allowed: bool = True
 ) -> tuple[bool, list[dict[str, Any]], dict[str, Any]]:
     """``(send, items, audit detail)`` for the pair ceremony's share list.
 
@@ -16281,6 +17980,15 @@ def _pair_offer_for(
 
     if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
         return False, [], {"offer_skip": offers_mod.OWNER_SKIPPED}
+    if not offers_allowed:
+        # ``--no-credential-offers``: the store is NEVER enumerated (``build_items``
+        # reads MCP and provider credentials), and the joiner still gets an
+        # EXPLICIT sealed empty list rather than no frame — an absent frame reads
+        # as an old owner ("did not offer") and costs the joiner its drain wait,
+        # while an empty list is the true statement and parses on every build that
+        # knows the frame. ``offer_policy`` lets the audit say why it was empty.
+        empty = offers_mod.digest_of([])
+        return True, [], {"offer_sent": 0, "offer_digest": empty, "offer_policy": "none"}
     try:
         items = offers_mod.build_items(root, network_id=network_id)
     except offers_mod.OfferEnumerationError:
@@ -16302,6 +18010,7 @@ def _grant_pair_shares(
     owner_name: str,
     root: Path,
     audit: Any,
+    offers_allowed: bool = True,
 ) -> tuple[list[str], list[str]]:
     """Admission's credential grants: ``(granted, reduced)``. Caller holds the lock.
 
@@ -16321,6 +18030,15 @@ def _grant_pair_shares(
     with an audit row and left out of the receipt, which names the remedy. Labels
     and emails never enter the audit (§9: masked is display-level).
     """
+    if not offers_allowed:
+        # INDEPENDENT OF THE OFFER (defence in depth for ``--no-credential-offers``):
+        # the offer was empty, so ``_ctl_pair_confirm`` already refuses any named
+        # share — but a decision written another way must still place nothing and,
+        # above all, never add the broker capability. Nothing was offered, so
+        # nothing is ``reduced`` either.
+        if decision.shares:
+            _audit_pair_grant(audit, record, joiner_id, "", holders=0, skipped="invite_policy_none")
+        return [], []
     from local_operator.network.credentials import github as github_mod
     from local_operator.network.credentials import offers as offers_mod
     from local_operator.network.credentials import placement as placement_mod
@@ -16415,6 +18133,77 @@ def _audit_pair_grant(
     )
 
 
+def _own_rotation_statement(record: NetworkRecord | None, device_id: str) -> dict[str, Any]:
+    """This device's last rotation statement for ``record``, or ``{}``.
+
+    Read from the self row's ``rotation_proof`` and offered only when it names THIS
+    identity as the successor: a statement for an older hop (the row rotated again,
+    or the identity on disk is not the row's) would only make a dialer refuse.
+    """
+    if record is None:
+        return {}
+    member = record.member(device_id)
+    proof = member.rotation_proof if member is not None else None
+    if not isinstance(proof, dict) or proof.get("new_device_id") != device_id:
+        return {}
+    return dict(proof)
+
+
+def _active_key_reader(record: NetworkRecord) -> Callable[[str], str | None]:
+    """The dialer's key lookup: the ACTIVE member row's stored key, or ``None``.
+
+    The same rule the listener's policy applies (``active_member_public_key``): a
+    tombstoned or absent device has no key to verify against, so it is refused
+    ``not_a_member`` before any signature is checked.
+    """
+
+    def public_key_for(device_id: str) -> str | None:
+        member = record.member(device_id)
+        if member is None or not member.active:
+            return None
+        return member.public_key or None
+
+    return public_key_for
+
+
+def _self_removed(record: NetworkRecord) -> bool:
+    """Whether ``record`` holds THIS device's own row and that row is tombstoned.
+
+    A missing self row is not "removed": records built before the self row was
+    written (and test fixtures) must keep their old redial behaviour.
+    """
+    me = record.self_member()
+    return me is not None and not me.active
+
+
+def _current_member_id(record: NetworkRecord, device_id: str) -> str:
+    """The id a dial must expect for ``device_id``: the row's current one (S-6).
+
+    A caller may hold an id that a PROVEN rotation has since retired into the
+    row's ``previous_ids`` (only a verified ``rotation_proof`` or a hop puts it
+    there). The listener can prove only the key the row now stores, so expecting
+    the retired id would refuse the real device ``peer_identity_mismatch``, mark
+    its address suspect and write a misleading ``wrong_device`` audit line (QA
+    Q2-1). Resolving here, against the record ``dial`` has just re-read, covers
+    every caller, including a doctor/readiness pass that iterated a snapshot
+    taken before a concurrent hop. An exact row match wins, so a stale table that
+    still carries the old row is never redirected; an unknown id is returned
+    unchanged and refused as before.
+    """
+    if not device_id or any(row.device_id == device_id for row in record.members):
+        return device_id
+    member = record.member(device_id)
+    return member.device_id if member is not None else device_id
+
+
+def _build_version_only(build: Any) -> dict[str, Any]:
+    """A peer's build stamp reduced to its ``version`` — never ``source_ref`` paths."""
+    if not isinstance(build, dict):
+        return {}
+    version = str(build.get("version") or "")
+    return {"version": version} if version else {}
+
+
 def _net_summary(record: NetworkRecord | None) -> dict[str, Any]:
     if record is None:
         return {}
@@ -16425,6 +18214,44 @@ def _net_summary(record: NetworkRecord | None) -> dict[str, Any]:
         "sequence": record.sequence,
         "trust": record.trust,
     }
+
+
+def _answers_ceremony(decision: PairDecision | None, ceremony: str) -> bool:
+    """Whether ``decision`` is THE answer to the live ``ceremony`` — the one rule.
+
+    ONE HELPER, TWO READERS (security review round 3, S-R3-1 / QA Q-R3-1). The
+    pairing poll and the terminal-answer latch must agree on what counts as an
+    answer: when the latch also honoured an UNSTAMPED decision file (an
+    out-of-band write, or a stale CLI fallback) while the poll ignored it, a stray
+    file blocked every live answer with ``pairing_answered`` and then let the
+    ceremony time out — refused on one side, never seen on the other. Every relay
+    ingress stamps ``live.ceremony`` under the record lock, so only a stamp that
+    matches the current ceremony is an answer; an empty stamp never matches, even
+    against an (unstamped) empty live ceremony.
+    """
+    return decision is not None and bool(decision.ceremony) and decision.ceremony == ceremony
+
+
+@contextmanager
+def _pairing_lock(network_id: str, root: Path | None) -> Iterator[None]:
+    """The network record's write lock, WITHOUT loading the record.
+
+    The same per-target lock ``store.mutate`` holds (``store._write_lock`` on the
+    record path), so a card park, the stage-2 flip, an answer and an identity-checked
+    cleanup are serialised against each other — and, unlike ``mutate``, it still
+    works for a cleanup that runs after the network record was forgotten.
+    """
+    with store._write_lock(store.record_path(network_id, root)):  # noqa: SLF001
+        yield
+
+
+def _budget_spent(network_id: str, invite_id: str, root: Path | None) -> bool:
+    """Whether the invite's forgiving SAS budget is spent, read fresh from disk."""
+    try:
+        record = store.load(network_id, root)
+    except FileNotFoundError:
+        return False
+    return failures_exhausted(record, invite_id)
 
 
 def _remaining_of(record: NetworkRecord | None, invite_id: str) -> float:
@@ -16461,8 +18288,20 @@ def _invite_role(record: NetworkRecord, invite_id: str) -> str:
 
 
 def _invite_capabilities(record: NetworkRecord, invite_id: str) -> set[str]:
+    """The capabilities admission grants for ``invite_id``: the saved row's, under its policy.
+
+    The policy filter repeats the one ``invite.mint`` applies (review round 1,
+    S1/R1-1): a ``--no-credential-offers`` row must never admit
+    ``broker_credential`` — the ``admin`` role carries it — so admission
+    enforces that from the row's own policy rather than trusting how the row's
+    capability list was written.
+    """
+    from local_operator.network.invite import capabilities_under_policy
+
     invite = record.invite(invite_id)
-    return set(invite.capabilities) if invite else set()
+    if invite is None:
+        return set()
+    return capabilities_under_policy(invite.capabilities, invite.credential_offers)
 
 
 #: The refusals that are about TIME or about a motion a human can correct, and which
@@ -16474,13 +18313,30 @@ def _invite_capabilities(record: NetworkRecord, invite_id: str) -> set[str]:
 #: ``timeout`` is bounded instead by what remains of the invite's own life — the
 #: listener and the parked question both wait `_remaining_of`, and the join path
 #: refuses an expired token locally before it dials anything.
-_RETRYABLE_PAIRING_REASONS: frozenset[str] = frozenset({"timeout", "sas_mismatch"})
+#:
+#: ``pairing_busy`` (the parked-ceremony cap, :data:`PAIR_PARKED_CEREMONY_CAP`) is a
+#: refusal about THIS relay's load, decided before any code was shown, so it spends
+#: nothing and leaves the token standing exactly like a delay.
+_RETRYABLE_PAIRING_REASONS: frozenset[str] = frozenset({"timeout", "sas_mismatch", "pairing_busy"})
+
+#: At most this many inviter ceremonies parked on one relay at once (stage 1 or 2).
+#: WHY A CAP: the person window is now up to ``PAIR_PARK_CEILING_S`` (ten minutes)
+#: per ceremony, and each parked ceremony holds a thread, a socket and a Mesh
+#: approvals card; a token holder (or several) dialling repeatedly must not turn that
+#: into unbounded parked state. WHY 4: a person answers one pairing at a time, and
+#: the realistic concurrent case is "a couple of devices joining the same afternoon";
+#: the security review (60334a0b4c12) set four, the same depth the attestation table
+#: keeps per card (``asks.app_attest.MAX_PENDING_PER_ASK``). The fifth gets
+#: ``pairing_busy``, which spends nothing.
+PAIR_PARKED_CEREMONY_CAP = 4
 
 
 def _pairing_retryable(reason: str, record: NetworkRecord, invite_id: str) -> bool:
     """Whether a pairing refusal may leave its invite usable. See the table above."""
     if reason not in _RETRYABLE_PAIRING_REASONS:
         return False
+    if reason == "pairing_busy":
+        return True
     if reason == "timeout":
         # A delay is bounded by the invite's OWN REMAINING life: the listener's wait and
         # the parked question's window are both `pair_timeout_seconds(_remaining_of(...))`,
@@ -16497,6 +18353,7 @@ def acquire_invite(record: NetworkRecord, invite_id: str) -> bool:
 
 _PAIR_CAUSE: dict[str, str] = {
     "sas_mismatch": "sas_mismatch",
+    "pairing_busy": "busy",
     "declined_local": "policy",
     "timeout": "timeout",
     "invite_already_used": "policy",
@@ -19255,6 +21112,7 @@ def control_request(
     *,
     timeout: float = 5.0,
     report_timeout: bool = False,
+    report_unsent: bool = False,
     **fields: Any,
 ) -> dict[str, Any] | None:
     """Dial the relay's loopback control socket and run one op.
@@ -19289,15 +21147,30 @@ def control_request(
     lower-bound byte count; a reply that is not a JSON object raises
     ``frame_unreadable``. Both reach the operator with the relay named as the
     component that answered, not as a component that stayed silent.
+
+    ``report_unsent`` SPLITS THAT ``None`` IN TWO for a caller that must not
+    over-claim (security review round 3, S-R3-1): when the op frame provably never
+    left this device — no connection, or the connection failed before the op line
+    was written — it raises :class:`ControlRequestUnsent`, and ``None`` then means
+    only "sent, but no reply came back", where the relay may have acted. The flag
+    defaults off so every existing caller (and every test double of this function)
+    sees exactly the old contract.
     """
     try:
         sock = socket.create_connection(("127.0.0.1", record.control_port), timeout=timeout)
     except TimeoutError as exc:
+        if report_unsent:
+            raise ControlRequestUnsent() from exc
         if report_timeout:
             raise ControlRequestTimeout(timeout) from exc
         return None
-    except OSError:
+    except OSError as exc:
+        if report_unsent:
+            raise ControlRequestUnsent() from exc
         return None
+    # Flipped just before the op line is written: a failure after that point may
+    # have delivered the op, so it is never reported as "unsent".
+    sent = False
     try:
         # The bound is read here rather than left to the reader's default: this call
         # CHOOSES the control socket's bound, and ``dial.MAX_SESSION_FRAME_BYTES`` is
@@ -19306,6 +21179,7 @@ def control_request(
             sock, session_dial.MAX_SESSION_FRAME_BYTES, report_bad_frames=True
         )
         sock.sendall(wire.encode_line({"key": record.control_key, "client": "cli"}))
+        sent = True
         sock.sendall(wire.encode_line({"op": op, "req": 1, **fields}))
         started = time.monotonic()
         reply = reader.read_frame(timeout)
@@ -19332,10 +21206,14 @@ def control_request(
             "not a relay that stayed silent.",
         ) from exc
     except TimeoutError as exc:
+        if report_unsent and not sent:
+            raise ControlRequestUnsent() from exc
         if report_timeout:
             raise ControlRequestTimeout(timeout) from exc
         return None
-    except (OSError, ConnectionError):
+    except (OSError, ConnectionError) as exc:
+        if report_unsent and not sent:
+            raise ControlRequestUnsent() from exc
         # Non-timeout no-answer cases retain their existing result.
         return None
     finally:

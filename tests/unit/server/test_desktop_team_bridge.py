@@ -551,6 +551,22 @@ class FakeClient:
         FakeClient.behavior["last_lifecycle"] = (conversation_id, action)
         return self._answer("conversation_lifecycle")
 
+    async def conversation_update(self, conversation_id, **fields):
+        FakeClient.behavior["last_update"] = (conversation_id, fields)
+        return self._answer("conversation_update")
+
+    async def conversation_rename(
+        self,
+        conversation_id: str,
+        name: str,
+        *,
+        tenant_id=None,
+        access: Any = None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_rename"] = (conversation_id, name, tenant_id)
+        return self._answer("conversation_rename")
+
     async def conversation_delete(
         self,
         conversation_id: str,
@@ -924,7 +940,6 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
         # M1a: the detail read and the list excerpts EXIST on this build, and
         # both answer only through the shared admission predicate.
         "screened_detail": True,
-        "read_ack": False,
         "local_events": False,
     }
     assert result["surface_state"] == "B"
@@ -3444,6 +3459,7 @@ async def test_every_desktop_write_refuses_a_scope(api):
         ("post", "/v1/desktop/team-bridge/conversations?scope=account", {"kind": "dm"}),
         ("post", f"{base}/archive?scope=account", None),
         ("post", f"{base}/unarchive?scope=account", None),
+        ("post", f"{base}/rename?scope=account", {"name": "Renamed"}),
         ("delete", f"{base}?scope=account", None),
         (
             "post",
@@ -3517,6 +3533,7 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
         ("get", "/v1/desktop/team-bridge/conversations/nope/messages", None),
         ("post", "/v1/desktop/team-bridge/conversations/nope/archive", None),
         ("post", "/v1/desktop/team-bridge/conversations/nope/unarchive", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/rename", {"name": "Renamed"}),
         ("delete", "/v1/desktop/team-bridge/conversations/nope", None),
         (
             "post",
@@ -3653,6 +3670,47 @@ async def test_conversation_reactions_require_the_owner_receipt(api, put_body, d
     assert (await client.put(path, json=put_body)).status_code == 422
     assert (await client.put(path)).status_code == 422
     assert (await client.delete(path + delete_query)).status_code == 422
+    assert FakeClient.instances == []
+
+
+@pytest.mark.parametrize(
+    "given,canonical",
+    [
+        ("thumbsup", "👍"),
+        (":white_check_mark:", "✅"),
+        ("\u2764", "\u2764\ufe0f"),
+        # The shared table with the hub: CLDR skin-tone names resolve here too.
+        ("thumbs_up_medium_skin_tone", "👍🏽"),
+        (":✅:", "✅"),
+    ],
+)
+async def test_conversation_reactions_canonicalise_shortcodes(api, given, canonical):
+    """A UI/relay shortcode reaches the hub as the same key an agent sends."""
+    from urllib.parse import quote
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_react"] = {"message_id": "bcmsg_abcdef12", "reactions": []}
+    path = "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+    receipt = {"tenant_id": "tnt_1", "expected_account_id": "acc_1"}
+    response = await client.put(path + quote(given, safe=""), json=receipt)
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_react"][2] == canonical
+
+
+async def test_conversation_reactions_refuse_an_unknown_shortcode_before_upstream(api):
+    client, _root, _d = api
+    path = "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+    receipt = {"tenant_id": "tnt_1", "expected_account_id": "acc_1"}
+    response = await client.put(path + "not_an_emoji_name", json=receipt)
+    assert response.status_code == 422
+    # QA round 1 Q1: the refusal names the accepted forms (shared wording with
+    # the agent tool), keeps the classifiable code, and never echoes the input.
+    from local_operator.team_bridge.emoji_names import ACCEPTED_FORMS_HINT
+
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_request"
+    assert ACCEPTED_FORMS_HINT in detail["message"]
+    assert "not_an_emoji_name" not in detail["message"]
     assert FakeClient.instances == []
 
 
@@ -4855,3 +4913,184 @@ def test_trip_from_a_helper_thread_is_named_in_the_audit_message() -> None:
     assert "leaky-helper-thread" in msg
     assert "a DIFFERENT thread" in msg
     assert "test_desktop_team_bridge.py" in msg and "worker" in msg
+
+
+RENAME = "/v1/desktop/team-bridge/conversations/bcv_abc12345/rename"
+
+
+async def test_rename_answers_the_updated_conversation(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {
+        "conversation_id": "bcv_abc12345",
+        "kind": "channel",
+        "name": "Renamed",
+    }
+    response = await client.post(RENAME, json={"name": "Renamed", "tenant_id": "tnt_1"})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["name"] == "Renamed"
+    assert FakeClient.behavior["last_rename"] == ("bcv_abc12345", "Renamed", "tnt_1")
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "details"),
+    [
+        (409, "conversation_name_taken", {"conversation_id": "bcv_other123", "name": "x"}),
+        (409, "conversation_archived", None),
+        (409, "invalid_transition", {"rule": "dm"}),
+        (409, "invalid_transition", {"rule": "builtin"}),
+        (400, "invalid_request", {"field": "name", "rule": "empty"}),
+        (400, "invalid_request", {"field": "name", "rule": "too_long"}),
+        (400, "invalid_request", {"field": "name", "rule": "control_character"}),
+        (400, "invalid_request", {"field": "name", "rule": "invisible_character"}),
+        (400, "invalid_request", {"field": "name", "rule": "unsupported_space"}),
+        (400, "not_allowed", None),
+        (403, "forbidden", None),
+        (404, "conversation_not_found", None),
+        (503, "messaging_unavailable", None),
+    ],
+)
+async def test_rename_refusals_pass_through_untouched(api, status, code, details):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = BridgeRefusal(
+        code, "refused", http_status=status, details=details
+    )
+    response = await client.post(RENAME, json={"name": "x"})
+    assert response.status_code == status
+    expected = {"code": code, "message": "refused"}
+    if details:
+        expected["details"] = details
+    assert response.json()["detail"] == expected
+
+
+@pytest.mark.parametrize("body", [{}, {"name": "x", "topic": "nope"}, {"name": "x" * 129}])
+async def test_rename_refuses_a_malformed_body_before_io(api, body):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.post(RENAME, json=body)
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+async def test_rename_forwards_a_name_over_the_server_limit(api):
+    """65 code points is the server's ``too_long`` to refuse, with its rule;
+    the daemon must not pre-empt it with a rule-less 422."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {"name": "ok"}
+    response = await client.post(RENAME, json={"name": "é" * 65})
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_rename"][1] == "é" * 65
+
+
+@pytest.mark.parametrize("name", ["", "   "], ids=["empty", "blank"])
+async def test_rename_forwards_an_empty_name_for_the_server_rule(api, name):
+    """The server is the authority on name rules: an empty name is not a local
+    422 (no ``min_length``), so ``""`` reaches it and its ``rule=empty`` refusal
+    is what the renderer shows, exactly as for a whitespace-only name."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_rename"] = {"name": "ok"}
+    response = await client.post(RENAME, json={"name": name})
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_rename"][1] == name
+
+
+# ASGI route-contract fixtures: FakeClient is intentional; these do not claim
+# a live hub, MongoDB transaction or production write.
+UPDATE = "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"topic": ""},
+        {"name": "new"},
+        {"topic": "  line 1\nline 2  "},
+        {"name": None},
+        {"topic": None},
+        {},
+    ],
+)
+async def test_metadata_update_preserves_field_presence(api, fields):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_update"] = {"name": "new"}
+    body = {"expected_account_id": "acc_1", "tenant_id": "tnt_1", **fields}
+    response = await client.patch(UPDATE, json=body)
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_update"] == ("bcv_abc12345", body)
+    assert "topic" not in response.json()["result"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "description",
+        "members",
+        "visibility",
+        "kind",
+        "agent_capable",
+        "builtin",
+        "status",
+        "actor_endpoint_id",
+        "endpoint_id",
+        "notify",
+    ],
+)
+async def test_metadata_update_rejects_unknown_metadata_before_io(api, extra):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.patch(UPDATE, json={"topic": "x", extra: "no"})
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+@pytest.mark.parametrize(
+    "suffix,body",
+    [
+        ("?tenant_id=tnt_1", {"topic": "x"}),
+        ("?expected_account_id=acc_1", {"topic": "x"}),
+        ("", {"expected_account_id": "acc_1", "topic": "x"}),
+        ("", {"expected_account_id": "acc_1", "tenant_id": "  ", "topic": "x"}),
+        ("", {"topic": 123}),
+    ],
+)
+async def test_metadata_update_rejects_malformed_receipts_before_io(api, suffix, body):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.patch(UPDATE + suffix, json=body)
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+async def test_metadata_update_refuses_account_scope(api):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.patch(UPDATE + "?scope=account", json={"topic": "x"})
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls
+
+
+@pytest.mark.parametrize(
+    "status,code,details",
+    [
+        (400, "invalid_request", {"field": "topic", "rule": "not_allowed"}),
+        (400, "invalid_request", {"rule": "no_fields"}),
+        (401, "unauthorized", None),
+        (403, "conversation_not_permitted", None),
+        (404, "conversation_not_found", None),
+        (409, "conversation_name_taken", {"name": "x"}),
+        (429, "rate_limited", None),
+        (503, "messaging_unavailable", None),
+    ],
+)
+async def test_metadata_update_refusals_pass_through(api, status, code, details):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_update"] = BridgeRefusal(
+        code, "refused", http_status=status, details=details
+    )
+    response = await client.patch(UPDATE, json={"topic": ""})
+    assert response.status_code == status, response.text
+    expected = {"code": code, "message": "refused"}
+    if details:
+        expected["details"] = details
+    assert response.json()["detail"] == expected

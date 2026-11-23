@@ -31,8 +31,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import time
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -634,8 +634,9 @@ async def test_a_delete_during_a_cold_open_is_not_served_either(
     result that PREDATES the delete, finds no bridge, and would build one for a
     directory that is gone — the removed conversation resident and served again,
     for the whole cold-open window (seconds on a large journal, per
-    ``docs/evidence/session-load-central-cache``). The delay below is that window
-    made deterministic, and the fix is the directory re-check at INSERT time.
+    ``docs/evidence/session-load-central-cache``). The handshake below holds that
+    window open through deletion; the product fix is the directory re-check at
+    INSERT time.
 
     Driven against a real pool rather than through the routes, because the race is
     inside ``DesktopSessions`` and a second HTTP client cannot hold the caller
@@ -647,17 +648,25 @@ async def test_a_delete_during_a_cold_open_is_not_served_either(
     pool = DesktopSessions(root)
 
     original = DesktopSessions._locate_flight
+    loop = asyncio.get_running_loop()
+    located = asyncio.Event()
+    release_lookup = Event()
+    # These are deadlock bounds, not scheduling assumptions: the ordering comes
+    # from the events. Leave ample room for real deletion guards/filesystem work
+    # on a loaded CI worker, while failing inside the enclosing test-run bound.
+    handshake_timeout = 60
 
     def slow_locate_flight(self, session_id, locate):
         def delayed():
             # THE ORDER IS THE WINDOW: the lookup reads the directory FIRST (it
             # exists, so it answers), and only then is the answer held — which is
             # what a slow journal read does in production and what a delete can
-            # land inside. Sleeping before the lookup would instead make
+            # land inside. Waiting before the lookup would instead make
             # ``locate``'s own directory check do the work, and the test would
             # pass without the fix.
             answer = locate()
-            time.sleep(0.4)
+            loop.call_soon_threadsafe(located.set)
+            assert release_lookup.wait(handshake_timeout), "deletion never released the lookup"
             return answer
 
         return original(self, session_id, delayed)
@@ -668,20 +677,37 @@ async def test_a_delete_during_a_cold_open_is_not_served_either(
         async with pool.session(MINE, read=True):
             return None
 
+    reader = asyncio.create_task(read_once())
     try:
-        reader = asyncio.create_task(read_once())
-        await asyncio.sleep(0.1)  # the reader is parked on the cold lookup
-        assert (await pool.delete(MINE))["deleted"] is True
-        assert not (root / "sessions" / MINE).exists()
+        await asyncio.wait_for(located.wait(), timeout=handshake_timeout)
+        try:
+            # A fixed sleep can expire before deletion finishes, allowing a
+            # perfectly valid read and then falsely demanding KeyError from it.
+            # Only release the stale lookup AFTER the real delete has returned.
+            assert (await asyncio.wait_for(pool.delete(MINE), timeout=handshake_timeout))[
+                "deleted"
+            ] is True
+            assert not (root / "sessions" / MINE).exists()
+        finally:
+            release_lookup.set()
 
         with pytest.raises(KeyError):
-            await reader
+            await asyncio.wait_for(reader, timeout=handshake_timeout)
         assert MINE not in pool.bridges, "the pool went resident again for a deleted id"
         with pytest.raises(KeyError):
             async with pool.session(MINE, read=True):
                 pass
     finally:
-        await pool.close()
+        # Release the worker even if the handshake or delete fails, and consume
+        # the owned reader before closing its pool so failures leave no tasks.
+        release_lookup.set()
+        reader.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(reader, return_exceptions=True), timeout=handshake_timeout
+            )
+        finally:
+            await pool.close()
 
 
 @pytest.mark.asyncio

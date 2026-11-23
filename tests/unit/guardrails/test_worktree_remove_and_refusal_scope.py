@@ -172,18 +172,24 @@ def test_clean_sibling_worktree_without_pr_stays_low(home: Path, repo: Path) -> 
 
 
 def test_regenerable_ignored_output_keeps_a_worktree_clean(home: Path, repo: Path) -> None:
-    """The entries that made the operator's real clean worktrees "dirty"."""
+    """Legacy status ignores generated-looking names; exact cleanup needs proof."""
     wt = _add(repo, repo / ".worktrees" / "wt", "wt")
     (wt / ".DS_Store").write_text("finder")
     (wt / "pkg.egg-info").mkdir()
     (wt / "pkg.egg-info" / "PKG-INFO").write_text("meta")
     (wt / ".cache").mkdir()
-    (wt / ".cache" / "x").write_text("c")
+    marker = wt / ".cache" / "x"
+    marker.write_text("local data with no rebuild witness\n")
     (wt / "._f").write_text("appledouble")
     (wt / "scripts").mkdir()
     (wt / "scripts" / "_table-pager-range-22269.bundle.mjs").write_text("bundle")
     assert prov.worktree_state(str(wt)) == "clean"
-    assert _verdict(home, f"git -C {repo} worktree remove {wt}").risk is Risk.LOW
+    # A generated-looking name is not the shared-link witness covered by
+    # test_plain_exact_own_checkout_accepts_shared_link_witness.
+    plain = _verdict(home, f"git -C {repo} worktree remove {wt}")
+    assert plain.risk is Risk.HIGH and plain.targets[0].cleanup_hold, plain.reasons
+    assert "the guard cannot prove regenerable" in plain.targets[0].reason
+    assert marker.read_text() == "local data with no rebuild witness\n"
     # Still dirty: a non-regenerable ignored file, and an untracked file.
     (wt / ".env").write_text("SECRET=1")
     assert prov.worktree_state(str(wt)) == "dirty"

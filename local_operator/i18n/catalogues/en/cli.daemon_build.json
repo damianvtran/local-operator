@@ -1,0 +1,7 @@
+{
+  "cli.daemon_build.install_restarted": "restarted the running service onto the new build (it was still running {generation})",
+  "cli.daemon_build.install_restarted_unconfirmed": "restarted the running service because its build could not be confirmed as current",
+  "cli.daemon_build.install_restart_failed": "could not restart the running service onto the new build; run `{command}` to move it",
+  "cli.daemon_build.install_unconfirmed": "could not confirm the running service is on the new build; run `{command}` if it still behaves like the old one",
+  "cli.daemon_build.status_stale": "running an older build ({generation}); run `{command}` to restart it onto the new build"
+}

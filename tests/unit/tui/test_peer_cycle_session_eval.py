@@ -50,6 +50,93 @@ from tests.unit.session.test_session import ScriptedStream, make_session
 from tests.unit.tui.test_peer_message import _settle_for_session
 
 
+async def _drain_preterminal_refresh(transcript):
+    from local_operator.session import transcript_index
+
+    journal = transcript.directory
+    # Session has finished writing this captured history, but a shared refresh
+    # may still cover an earlier journal generation. Drain that work BEFORE
+    # discovery: joining it is not a readiness barrier for terminal appends.
+    # Failures/cancellation must propagate, not masquerade as an empty archive.
+    previous = transcript_index.in_flight_refresh(journal.parent.parent, journal.name)
+    if previous is not None:
+        await asyncio.wait_for(asyncio.shield(previous), timeout=20)
+
+
+@pytest.mark.asyncio
+async def test_terminal_discovery_drains_held_older_generation(tmp_path, monkeypatch):
+    import threading
+
+    from local_operator.harness.types import Message, ToolCall
+    from local_operator.session import transcript_index
+    from local_operator.session.transcript import Transcript
+
+    session_id = "terminal-readiness-synthetic"
+    transcript = Transcript(tmp_path / "sessions" / session_id)
+    first = Message.user("before the refresh", id="before")
+    await transcript.append_message(first)
+    loop = asyncio.get_running_loop()
+    built = asyncio.Event()
+    release = threading.Event()
+    refresh = transcript_index.refresh_index
+    snapshots = []
+
+    def hold_first_refresh(root, sid):
+        # Build/publish a REAL index in its real worker, then hold only its
+        # return. No fabricated index, synchronous loop scan, or sleep decides
+        # this ordering. The terminal append must outlive the captured cut.
+        result = refresh(root, sid)
+        snapshots.append(result)
+        if len(snapshots) == 1:
+            loop.call_soon_threadsafe(built.set)
+            release.wait()
+        return result
+
+    monkeypatch.setattr(transcript_index, "refresh_index", hold_first_refresh)
+    old, started = transcript_index.start_refresh(tmp_path, session_id)
+    try:
+        assert started
+        await asyncio.wait_for(built.wait(), timeout=20)
+        assert snapshots[0] is not None
+        terminal = Message(
+            role="assistant",
+            id="terminal",
+            tool_calls=[ToolCall(id="terminal-eval", name="eval", arguments={"code": "1"})],
+        )
+        await transcript.append_message(terminal)
+        assert snapshots[0].sig["size"] < transcript.path.stat().st_size
+        assert transcript_index.in_flight_refresh(tmp_path, session_id) is old
+        # Release at the terminal/pre-discovery boundary, NOT at discovery:
+        # draining before discovery would otherwise deadlock. No await here:
+        # even a returned worker needs a loop turn to settle its asyncio task.
+        release.set()
+        assert not old.done()
+        from local_operator.harness.peer_cycle_display import BUILDING, discover_records
+
+        await _drain_preterminal_refresh(transcript)
+        archived = discover_records(transcript, [first, terminal], session_id)
+        assert archived is not None and archived.get("status") == BUILDING
+        armed = transcript_index.in_flight_refresh(tmp_path, session_id)
+        assert armed is not None
+        await asyncio.wait_for(asyncio.shield(armed), timeout=20)
+        archived = discover_records(transcript, [first, terminal], session_id)
+        assert archived is None, "current journal contains no display certificate"
+        assert len(snapshots) == 2, "one old scan, one terminal-generation scan"
+        current = transcript_index.current_without_build(tmp_path, session_id)
+        assert current is not None
+        assert current.sig["size"] == transcript.path.stat().st_size
+        assert {first.id, terminal.id} <= current.journal_rows.keys()
+        assert await old is snapshots[0], "the joined task really covered the old cut"
+    finally:
+        release.set()
+        # Reap both old and (on the negative control) newly armed work before
+        # pytest tears down the loop; propagate every task failure/cancellation.
+        await asyncio.wait_for(asyncio.shield(old), timeout=20)
+        pending = transcript_index.in_flight_refresh(tmp_path, session_id)
+        if pending is not None:
+            await asyncio.wait_for(asyncio.shield(pending), timeout=20)
+
+
 def _call(call_id, name, arguments) -> list[StreamEvent]:
     return [
         StreamToolCallDelta(index=0, id=call_id, name=name, argument_delta=json.dumps(arguments)),
@@ -648,13 +735,31 @@ async def test_real_session_direct_eval_peer_send_quiet_cycle_records_live_and_d
                 assert len(closures) == 0, "no model-visible nested proof may be invented"
                 assert len((report["trusted_display"] or {}).get("records", [])) == 1
                 from local_operator.harness.peer_cycle_display import (
+                    BUILDING,
                     discover_records,
                     validate_record,
                 )
 
                 trusted = report["trusted_display"]["records"][0]
                 assert validate_record(trusted, history, session.session_id) is not None
+                await _drain_preterminal_refresh(session._transcript)
                 archived = discover_records(session._transcript, history, session.session_id)
+                if archived is not None and archived.get("status") == BUILDING:
+                    # This test reads ON the loop, so the never-build-on-a-loop
+                    # contract (PR #4224, ``_index_or_arm``) may answer "not
+                    # ready" and arm the shared refresh. ``building`` is never
+                    # the durable answer: await that SAME armed single-flight
+                    # task (no second scan) and re-read. The durable assertion
+                    # below is unchanged, so a refresh that never makes the
+                    # archived record readable still fails here.
+                    from local_operator.session import transcript_index
+
+                    journal = session._transcript.directory
+                    armed = transcript_index.in_flight_refresh(journal.parent.parent, journal.name)
+                    assert armed is not None, "building must arm the shared refresh"
+                    await asyncio.wait_for(asyncio.shield(armed), timeout=20)
+                    archived = discover_records(session._transcript, history, session.session_id)
+                    assert archived is not None and "status" not in archived
                 assert archived is not None and [item["id"] for item in archived["records"]] == [
                     trusted["id"]
                 ]

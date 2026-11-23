@@ -1046,6 +1046,8 @@ async def test_tui_hop_is_bounded_by_one_budget(monkeypatch) -> None:
 
     monkeypatch.setattr(mod, "_APP_HOP_TIMEOUT_S", 0.3)
     entered = threading.Event()
+    app_free = threading.Event()
+    ran = threading.Event()
 
     class Session(FakeSession):
         def refresh_attention(self) -> dict[str, Any]:
@@ -1057,20 +1059,28 @@ async def test_tui_hop_is_bounded_by_one_budget(monkeypatch) -> None:
 
         def call_from_thread(self, callback: Any) -> None:
             entered.set()
-            # The app is busy: the callback is queued and not run. The fake
-            # waits long enough that the budget must expire first, then runs it
-            # anyway — which is exactly what Textual does, and why the
-            # docstring says the bound does not RECALL an enqueue.
-            time.sleep(1.0)
+            # The app is busy: the callback is queued and not run until the
+            # test frees the app, which it does only after the caller has been
+            # answered -- then it runs anyway, which is exactly what Textual
+            # does, and why the docstring says the bound does not RECALL an
+            # enqueue. The 10 s only bounds a mutant whose budget misses the
+            # enqueue: it is answered once the app frees itself, and fails.
+            app_free.wait(10.0)
             callback()
+            ran.set()
 
     handle = TuiSessionHandle(App(Session()))  # type: ignore[arg-type]
-    started = time.monotonic()
-    with pytest.raises(TimeoutError) as caught:
-        await handle.refresh_attention()
-    elapsed = time.monotonic() - started
+    # "Told within the budget" is read as "told before the app ran the
+    # callback", not as `elapsed < 0.9`: that ceiling crossed on a runner that
+    # stalled the 0.3 s budget's wake-up by 600 ms (docs/TEST_TIME_ASSERTIONS.md).
+    try:
+        with pytest.raises(TimeoutError) as caught:
+            await handle.refresh_attention()
+        ran_at_answer = ran.is_set()
+    finally:
+        app_free.set()
     assert entered.is_set(), "the hop never reached the app"
-    assert elapsed < 0.9, f"the caller waited {elapsed:.2f}s past its budget"
+    assert not ran_at_answer, "the caller waited past its budget for the app loop"
     assert "did not answer within" in str(caught.value)
 
 
@@ -1086,6 +1096,12 @@ async def test_tui_stop_receipt_does_not_wait_for_the_app_loop() -> None:
     the work it announces to have started.
     """
     ran = threading.Event()
+    # Set the moment the app STARTS the hop, before the callback runs: "the
+    # receipt waited for the app" is then a fact recorded on the app's side,
+    # not a race with `ran.set()` after the callback has already resolved the
+    # caller's future.
+    hopped = threading.Event()
+    app_free = threading.Event()
 
     class Session(FakeSession):
         def __init__(self) -> None:
@@ -1108,10 +1124,23 @@ async def test_tui_stop_receipt_does_not_wait_for_the_app_loop() -> None:
             self._session = session
 
         def call_from_thread(self, callback: Any) -> None:
-            # The app is busy: the scheduling step is queued, not run yet.
-            time.sleep(0.4)
+            # The app is busy: the scheduling step is queued, not run until the
+            # test frees the app after the receipt is in hand. The bound only
+            # matters to a mutant that builds the receipt inside the hop, and
+            # it is deliberately SHORTER than the 5 s `wait_for` below: the hop
+            # then completes, and that mutant fails by name ("the receipt
+            # waited for the app loop") instead of as a bare TimeoutError
+            # (review round 1, R4).
+            app_free.wait(2.0)
+            hopped.set()
             callback()
             ran.set()
+
+        async def _stop_local_session(self) -> None:
+            # Present so a hop that RUNS `schedule` completes instead of
+            # raising AttributeError: a mutant that awaits the hop must reach
+            # the named assertion below, not die on the fake's missing method.
+            return None
 
         def run_worker(self, coro: Any, **kwargs: Any) -> None:
             # ``_stop_local_session`` is a coroutine the real app owns; the
@@ -1119,11 +1148,16 @@ async def test_tui_stop_receipt_does_not_wait_for_the_app_loop() -> None:
             coro.close()
 
     handle = TuiSessionHandle(App(Session()))  # type: ignore[arg-type]
-    started = time.monotonic()
-    receipt = await asyncio.wait_for(handle.request_stop(), timeout=5)
-    elapsed = time.monotonic() - started
+    # "Does not wait for the app loop" is read as "the receipt arrived before
+    # the app ran the hop", not as `elapsed < 0.3` against a 0.4 s busy app --
+    # a 100 ms margin any loaded runner eats (docs/TEST_TIME_ASSERTIONS.md).
+    try:
+        receipt = await asyncio.wait_for(handle.request_stop(), timeout=5)
+        hopped_at_receipt = hopped.is_set()
+    finally:
+        app_free.set()
+    assert not hopped_at_receipt, "the receipt waited for the app loop"
     assert receipt == 'stopping "the conversation" — /resume sess reopens it'
-    assert elapsed < 0.3, f"the receipt waited {elapsed:.2f}s for the app loop"
     assert await asyncio.to_thread(ran.wait, 5), "the stop hop never reached the app"
 
 

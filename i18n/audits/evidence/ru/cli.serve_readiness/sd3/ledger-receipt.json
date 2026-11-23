@@ -1,0 +1,28 @@
+{
+  "locale": "ru",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10",
+  "status": "changes_requested",
+  "translator": {
+    "agent": "170903662c6e",
+    "session": "170903662c6e",
+    "model": null,
+    "actual_model_source": "Current translation job identified by manager; actual model for this job not supplied",
+    "prior_translator_session": "acf0a84cd992",
+    "prior_model": "openai/gpt-6.1-sol"
+  },
+  "auditor": {
+    "agent": "independent-ru-auditor",
+    "session": "b8c027b19533",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "170903662c6e",
+    "actual_model_source": "Current session runtime declaration: openai/gpt-6.1-sol; no fallback observed",
+    "fallback": null
+  },
+  "audit_date": "2026-11-16",
+  "unresolved_blocker_major_count": 1,
+  "finding_ids": [
+    "RU-SD3-01"
+  ],
+  "note": "i18n/audits/evidence/ru/cli.serve_readiness/sd3/record.json; sd3: RU-SD3-01 major, singular deictic after grouped PIDs; 11 changed/new audited, 4 unchanged byte-proven; 15-key mechanics passed."
+}

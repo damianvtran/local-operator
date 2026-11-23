@@ -1,0 +1,7 @@
+[
+  {
+    "key": "cli.serve_readiness.cgroup_unknown",
+    "before": "ایسے cgroup میں چلتا ہے جس کی جگہ یہ جانچ متعین نہیں کر سکتی",
+    "after": "ایسے cgroup میں چلتا ہے جس کی نوعیت یہ جانچ متعین نہیں کر سکتی"
+  }
+]

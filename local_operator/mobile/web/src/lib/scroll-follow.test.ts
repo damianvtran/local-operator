@@ -7,7 +7,7 @@
 // (reviewer MAJOR 1 = UX U29: clearing the rung at the tail subtracted the
 // reserve's height a second time and left the newest row under the fold).
 import { describe, expect, it } from "vitest";
-import { followScrollTop } from "./scroll-follow";
+import { followScrollTop, jumpOffered, newCommandIds } from "./scroll-follow";
 
 const base = { domDelta: 0, scrollTop: 500, max: 1000, reserveEdge: false };
 
@@ -50,5 +50,26 @@ describe("the transcript's one follow write", () => {
 		// Content that is NOT the reserve still holds its row at the top (the
 		// older-rows prepend), and the write has room to move down.
 		expect(followScrollTop({ ...base, scrollTop: 0, domDelta: 30 })).toBe(30);
+	});
+});
+
+describe("the way back to the tail", () => {
+	const seen = "3:a:120:false:";
+
+	it("is offered only for content that arrived after the reader left it", () => {
+		expect(jumpOffered({ pinned: false, growth: "4:d:0:false:", seen })).toBe(true);
+		// The projection re-sends a fresh `entries` array on every repaint; the
+		// content key does not move, so a repaint offers nothing.
+		expect(jumpOffered({ pinned: false, growth: seen, seen })).toBe(false);
+		// At the tail there is nowhere to jump to.
+		expect(jumpOffered({ pinned: true, growth: "9:z:0:false:", seen })).toBe(false);
+	});
+
+	it("reads a send from the ids a pending list GAINED, never from one it lost", () => {
+		expect(newCommandIds(new Set(["a"]), ["a", "b"])).toEqual(["b"]);
+		// Reconciliation only removes ids: the real row took the message over.
+		expect(newCommandIds(new Set(["a", "b"]), ["b"])).toEqual([]);
+		// A resolve landing in the same frame as the next send still names the send.
+		expect(newCommandIds(new Set(["a", "b"]), ["b", "c"])).toEqual(["c"]);
 	});
 });

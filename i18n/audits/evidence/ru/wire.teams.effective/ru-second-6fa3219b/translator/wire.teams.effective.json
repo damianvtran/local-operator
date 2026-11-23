@@ -1,0 +1,11 @@
+{
+  "wire.teams.effective.team_missing": "Команда с именем «{role}» не найдена.",
+  "wire.teams.effective.registry_unreadable": "Не удалось прочитать реестр агентов. Проверьте определения агентов и повторите попытку.",
+  "wire.teams.effective.config_unreadable": "Не удалось прочитать конфигурацию моделей. Проверьте настройки и повторите попытку.",
+  "wire.teams.effective.tier_invalid_value": "Недопустимое значение в subagents.models.{tier}. Укажите идентификатор provider/model или объект с настройками модели.",
+  "wire.teams.effective.tier_invalid_mapping": "Недопустимый объект настроек в subagents.models.{tier}. Задайте для model идентификатор provider/model и, при необходимости, для effort — поддерживаемый уровень рассуждений.",
+  "wire.teams.effective.tier_unconfigured": "Модель в subagents.models.{tier} не настроена.",
+  "wire.teams.effective.tier_invalid_selector": "Недопустимый идентификатор модели в subagents.models.{tier}. Используйте формат provider/model.",
+  "wire.teams.effective.model_unresolvable": "Не удалось определить модель {selector}. Проверьте идентификатор модели и настройки провайдера.",
+  "wire.teams.effective.unavailable": "Этот участник команды недоступен. Проверьте настройки его модели и определение агента."
+}

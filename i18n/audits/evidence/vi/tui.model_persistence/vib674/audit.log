@@ -1,0 +1,118 @@
+COMMAND: primary .venv/bin/python script.py.txt; isolated HOME/config, PYTHONPATH=worktree; no CMUX inherited
+INTERPRETER /Users/damian/local-operator/.venv/bin/python RUNTIME /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py CHECKER /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/scripts/i18n/check.py
+OFFICIAL scoped check_catalogues en/vi namespace + context + ICU: []
+NEGATIVE missing_key ["vi/tui.model_persistence: missing key 'tui.model_persistence.persist'"]
+NEGATIVE renamed_arg ["vi/tui.model_persistence: tui.model_persistence.with_model: arguments (('wrong', 'simple'), ('routes', 'simple')) != en's (('label', 'simple'), ('routes', 'simple')): argument 1 is 'wrong', en's is 'label' (renamed or reordered)"]
+KEY tui.model_persistence.persist ARGS () CELLS 49 plural/select=0 NFC=PASS
+KEY tui.model_persistence.settings ARGS () CELLS 48 plural/select=0 NFC=PASS
+KEY tui.model_persistence.saved ARGS () CELLS 63 plural/select=0 NFC=PASS
+KEY tui.model_persistence.with_model ARGS (('label', 'simple'), ('routes', 'simple')) CELLS 27 plural/select=0 NFC=PASS
+NEGATIVE missing_arg label MessageFormatError message argument 'label' was not supplied (have: routes)
+NEGATIVE missing_arg routes MessageFormatError message argument 'routes' was not supplied (have: label)
+UNKNOWN ID passes through: tui.model_persistence.not_a_key
+PROTECTED PSEUDO PASS
+PLAIN_RICH en ordinary label 3 width 80 lines 2 max 77
+model: p/m — /model default saves this for new sessions · switch to the boot 
+default with /model saved · /settings edits the boot default too
+PLAIN_RICH en ordinary label 3 width 100 lines 2 max 97
+model: p/m — /model default saves this for new sessions · switch to the boot default with /model 
+saved · /settings edits the boot default too
+PLAIN_RICH en ordinary label 3 width 120 lines 2 max 120
+model: p/m — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits
+the boot default too
+PLAIN_RICH en missing_model label 3 width 80 lines 2 max 78
+model: p/m — /model default saves this for new sessions · /settings edits the 
+boot default too
+PLAIN_RICH en missing_model label 3 width 100 lines 1 max 94
+model: p/m — /model default saves this for new sessions · /settings edits the boot default too
+PLAIN_RICH en missing_model label 3 width 120 lines 1 max 94
+model: p/m — /model default saves this for new sessions · /settings edits the boot default too
+PLAIN_RICH en hosting_deadend label 3 width 80 lines 1 max 49
+model: p/m — /settings edits the boot default too
+PLAIN_RICH en hosting_deadend label 3 width 100 lines 1 max 49
+model: p/m — /settings edits the boot default too
+PLAIN_RICH en hosting_deadend label 3 width 120 lines 1 max 49
+model: p/m — /settings edits the boot default too
+PLAIN_RICH en ordinary label 59 width 80 lines 3 max 77
+model: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model 
+default saves this for new sessions · switch to the boot default with /model 
+saved · /settings edits the boot default too
+PLAIN_RICH en ordinary label 59 width 100 lines 2 max 99
+model: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model default saves this for 
+new sessions · switch to the boot default with /model saved · /settings edits the boot default too
+PLAIN_RICH en ordinary label 59 width 120 lines 2 max 120
+model: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model default saves this for new sessions · switch
+to the boot default with /model saved · /settings edits the boot default too
+PLAIN_RICH en missing_model label 59 width 80 lines 2 max 76
+model: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model 
+default saves this for new sessions · /settings edits the boot default too
+PLAIN_RICH en missing_model label 59 width 100 lines 2 max 99
+model: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model default saves this for 
+new sessions · /settings edits the boot default too
+PLAIN_RICH en missing_model label 59 width 120 lines 2 max 114
+model: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model default saves this for new sessions · 
+/settings edits the boot default too
+PLAIN_RICH en hosting_deadend label 59 width 80 lines 2 max 79
+model: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /settings 
+edits the boot default too
+PLAIN_RICH en hosting_deadend label 59 width 100 lines 2 max 94
+model: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /settings edits the boot 
+default too
+PLAIN_RICH en hosting_deadend label 59 width 120 lines 1 max 105
+model: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /settings edits the boot default too
+PLAIN_RICH vi ordinary label 3 width 80 lines 3 max 80
+mô hình: p/m — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên 
+này sang mô hình mặc định đã lưu bằng /model saved · /settings cũng sửa mô hình 
+mặc định khi mở phiên
+PLAIN_RICH vi ordinary label 3 width 100 lines 2 max 100
+mô hình: p/m — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc
+định đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi ordinary label 3 width 120 lines 2 max 118
+mô hình: p/m — /model default lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc định đã lưu bằng 
+/model saved · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi missing_model label 3 width 80 lines 2 max 77
+mô hình: p/m — /model default lưu lựa chọn này cho các phiên mới · /settings 
+cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi missing_model label 3 width 100 lines 2 max 98
+mô hình: p/m — /model default lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc 
+định khi mở phiên
+PLAIN_RICH vi missing_model label 3 width 120 lines 1 max 115
+mô hình: p/m — /model default lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi hosting_deadend label 3 width 80 lines 1 max 63
+mô hình: p/m — /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi hosting_deadend label 3 width 100 lines 1 max 63
+mô hình: p/m — /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi hosting_deadend label 3 width 120 lines 1 max 63
+mô hình: p/m — /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi ordinary label 59 width 80 lines 3 max 80
+mô hình: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model 
+default lưu lựa chọn này cho các phiên mới · chuyển phiên này sang mô hình mặc 
+định đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi ordinary label 59 width 100 lines 3 max 100
+mô hình: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model default lưu lựa chọn 
+này cho các phiên mới · chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved · /settings 
+cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi ordinary label 59 width 120 lines 2 max 120
+mô hình: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model default lưu lựa chọn này cho các phiên mới
+· chuyển phiên này sang mô hình mặc định đã lưu bằng /model saved · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi missing_model label 59 width 80 lines 3 max 80
+mô hình: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model 
+default lưu lựa chọn này cho các phiên mới · /settings cũng sửa mô hình mặc định
+khi mở phiên
+PLAIN_RICH vi missing_model label 59 width 100 lines 2 max 99
+mô hình: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model default lưu lựa chọn 
+này cho các phiên mới · /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi missing_model label 59 width 120 lines 2 max 120
+mô hình: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /model default lưu lựa chọn này cho các phiên mới
+· /settings cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi hosting_deadend label 59 width 80 lines 2 max 80
+mô hình: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /settings
+cũng sửa mô hình mặc định khi mở phiên
+PLAIN_RICH vi hosting_deadend label 59 width 100 lines 2 max 98
+mô hình: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /settings cũng sửa mô hình 
+mặc định khi mở phiên
+PLAIN_RICH vi hosting_deadend label 59 width 120 lines 1 max 119
+mô hình: provider/opaque-model-2026-11-22-long-identifier-0123456789 — /settings cũng sửa mô hình mặc định khi mở phiên
+NO maxCells/maxChars in sidecar; plain Rich wrap only, NOT styled NoticeBlock/native/font geometry or real transcript families
+IMMUTABLE before/after {"context": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc", "en": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff", "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7", "style": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51", "vi": "d6b5f00ab0a25ea2596879299e5cda07b5b5bb66bf8ea8bc9081f503719cf505"}
+ALL SCOPED CHECKS PASS

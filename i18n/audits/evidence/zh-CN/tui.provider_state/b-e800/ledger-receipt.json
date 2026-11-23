@@ -1,0 +1,35 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.provider_state",
+  "source_sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912",
+  "status": "passed",
+  "date": "2026-11-22",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "298f6fe9722a",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host [model switch] message in this session; provider quota failure",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "e800bd515a19",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "298f6fe9722a",
+    "independent_from_english_source_author_session": "93b7b02899af",
+    "independent_from_auditor_A_session": "8aa95e755693",
+    "actual_model_source": "Host [model switch] message: temporary fallback due to provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "auditor_result": "passed",
+  "unresolved_blocker_major_count": 0,
+  "note": "Independent B; 5/5; no findings. Evidence: i18n/audits/evidence/zh-CN/tui.provider_state/b-e800/record.json. Scoped mechanics only; no app/UI/network proof."
+}

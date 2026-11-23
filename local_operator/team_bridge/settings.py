@@ -199,17 +199,22 @@ HOLD_ALERT_MAX_MINUTES = 10080
 #: ``personal_info_request`` and every multi-category answer still reject.
 #:
 #: ``false`` restores the pre-B4b behaviour exactly (the bounce is a reject;
-#: the desktop routes refuse every write with ``hold_release_off``). Like
-#: ``review_held``, only a real ``false`` turns it off; absent/garbled reads ON,
+#: the desktop routes refuse every write with ``hold_release_off``). The value
+#: is read through ``settings_io.strict_bool`` (see :func:`_hold_release`), the
+#: SAME reader the ``/settings`` row uses, so a hand-edited ``"false"``/``off``/
+#: ``no``/``0`` turns it off on both sides; absent or unparseable reads ON,
 #: because the outcome it opens is a HOLD a person controls, never an admit:
 #: nothing is delivered without the operator's signed Deliver.
 #:
-#: Still read from the config file with NO ``/settings`` registry row, like
-#: ``hold_alert_after_minutes``: a row adds ``wire.settings`` copy, and measured
-#: on 2026-11-18 that drops ``i18n/data/shipped.json`` to ``["en"]`` until all
-#: seven locales are translated and independently audited. The off switch is
-#: documented in the Team Bridge guide (``hold_release: false`` under
-#: ``values:`` > ``team_bridge:``); the row is a separately-translated change.
+#: Registered as the ``team_bridge.hold_release`` ``/settings`` row (BOOL,
+#: default ``True``), whose literal ``_team_bridge_consumer_defaults()`` in
+#: tests/unit/test_settings_io.py pins to this constant. The row's copy carries
+#: ``wire.settings`` keys, which is why it arrived separately from S3a: new
+#: copy keeps a locale shipping only once that locale's ledger has a passed
+#: independent audit at the new source hashes (``i18n/data/shipped.json`` is
+#: generated from it, measured on 2026-11-18 to drop to ``["en"]`` without). The
+#: config-file form documented in the Team Bridge guide (``hold_release:
+#: false`` under ``values:`` > ``team_bridge:``) is the same key.
 DEFAULT_HOLD_RELEASE = True
 
 #: ``team_bridge.review_held`` — the owner-review EXIT for a cached screening
@@ -232,6 +237,32 @@ DEFAULT_HOLD_RELEASE = True
 #: ``/settings`` row, for the same i18n-ledger reason as ``hold_release``.
 DEFAULT_REVIEW_HELD = True
 
+#: ``team_bridge.screening_hold_review_after_minutes`` — how long a message may
+#: sit in a SCREENING-UNAVAILABLE hold (``provider_error``, ``breaker_open``,
+#: ``policy_stale``, ``model_identity_unknown`` and the rest of
+#: ``store._HOLD_CLASS_SCREENING_UNAVAILABLE``) before it becomes the owner's
+#: review (``model_hold`` + a review decision row: Deliver/Discard). ``0`` turns
+#: the escalation off (the old retry-forever ladder); valid range 0..10080.
+#:
+#: WHY (operator report 2026-11-17). Those holds had no age limit and no exit:
+#: only an empty/unparsable reply escalated (``UNUSABLE_PASSES_BEFORE_REVIEW``),
+#: every other code re-held on the connector's ladder (gap capped at 1 h)
+#: forever while the sender read "temporarily unavailable" — five production
+#: messages sat for hours and were later admitted ``allow``. The age is the
+#: hold row's DURABLE ``created_at`` (``Store.screening_hold_first_held_at``),
+#: never the loop's in-memory ``_RETRY_ATTEMPTS``, so a restart cannot reset it.
+#:
+#: WHY 30. The ladder (``connector/loop.py``: 60 s doubling) re-screens at
+#: ~+1, +3, +7, +15 and +31 min, and the account breaker's longest rung is
+#: 900 s (``Store.BREAKER_BACKOFF_S``), so 30 minutes gives the full screening
+#: chain (preferred model, then every fallback hop) four to five complete passes
+#: and outlasts any single breaker window before a person is asked. It never
+#: delivers anything: escalation only hands the decision to the owner, so
+#: moderation stays fail-closed. Gated by ``review_held`` like every review
+#: hold. No ``/settings`` row, for the same i18n-ledger reason as
+#: ``hold_alert_after_minutes``.
+DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES = 30
+
 #: ``team_bridge.share_typing`` — whether this person's composers tell the other
 #: members of a conversation "X is typing" (typing-indicators design §7).
 #:
@@ -250,6 +281,60 @@ DEFAULT_REVIEW_HELD = True
 #: a typo) reads OFF, because that writer was trying to change the default and
 #: a privacy switch must not reopen on a value it cannot parse.
 DEFAULT_TEAM_BRIDGE_SHARE_TYPING = True
+
+#: ``team_bridge.ambient_wake_dwell_seconds`` — how long a NON-urgent woken channel
+#: message (today: a reply in a thread this agent follows) waits for neighbours before
+#: its card goes out, so a burst becomes ONE turn (operator, 2026-11-21: "see if there
+#: are multiple messages arriving at a time or in close proximity, if we can batch
+#: those"; chosen window 15-20 s). Measured baseline for that choice: 50.4% of channel
+#: messages land <=30 s after the previous one. A DM, a mention, a directly addressed
+#: or owner-sent message never waits (and pulls a waiting group forward). ``0`` is the
+#: pre-dwell behaviour. Whole seconds 0..60; anything else reads as the default.
+#:
+#: No ``/settings`` row for the same i18n-ledger reason as ``hold_alert_after_minutes``:
+#: a hand edit of the config file works, and the connector reads it per message.
+DEFAULT_AMBIENT_WAKE_DWELL_SECONDS = 15
+AMBIENT_WAKE_DWELL_MAX_SECONDS = 60
+
+#: ``team_bridge.ambient_triage`` — the deterministic channel-wake triage
+#: (``connector/conversation.py:classify_wake``). ``on`` defers unaddressed channel
+#: traffic instead of waking a turn per message (measured: 80.4% of channel messages
+#: are unaddressed, ~420 ambient turns/day for the CoS); ``shadow`` computes and LOGS
+#: the class it would choose but behaves exactly as ``off``; ``off`` is the pre-triage
+#: behaviour (every admitted message wakes). Anything else reads as ``on``. Config-file
+#: only, like the dwell above. Quoting is NOT required: YAML 1.1 reads a bare ``off`` /
+#: ``on`` as a boolean, so ``false`` means ``off`` and ``true`` means ``on`` (review r1
+#: R4: the rollback switch must not fail toward ``on``).
+AMBIENT_TRIAGE_MODES = ("on", "shadow", "off")
+DEFAULT_AMBIENT_TRIAGE = "on"
+
+#: ``team_bridge.urgent_failover_seconds`` — for an URGENT ambient message (a human's
+#: channel post, ``@everyone``, a question) one agent wakes at once and the others
+#: stand by: the agent ranked ``k`` for that message wakes ``k`` x this many seconds
+#: later, and only if nobody else has replied in the thread by then; every rank >= 3
+#: shares the last delay (3 x this), so a non-receiving member holding a slot costs
+#: latency, never the message (the operator: a lost urgent message is worse than a
+#: duplicate answer). MEASURED BEFORE CAPPED (2026-11-21, this machine, read-only): the first
+#: channel post after each card in the same conversation (``reply_guard.posts`` vs
+#: ``body_reservations.card_posted_at``, ~24 h, cutoff 1800 s) had n=181, p50 25.3 s,
+#: p90 312.0 s, max 1753.6 s (censored by the cutoff); 89.5% answered within 300 s.
+#: The default sits just above that p90 so a failover agent rarely wakes while the
+#: first one is still mid-turn. Whole seconds 0..600 (0 = every ranked agent wakes
+#: together); anything else reads as the default.
+DEFAULT_URGENT_FAILOVER_SECONDS = 330
+URGENT_FAILOVER_MAX_SECONDS = 600
+
+#: ``team_bridge.multi_frame_turns`` — serve several admitted bodies as ONE turn
+#: (``pending_turn.PendingTurnBatch``): the drain's next woken rows of the same
+#: conversation ride as companion frames, plus a bounded ambient digest of
+#: deferred posts. MEASURED (2026-11-21, this machine): 50.4% of inbound bridge
+#: messages arrive <=30 s after the previous one, bursts reach 35-47, and each
+#: body was its own full-context turn (~$0.17 at 260k-400k context), so a 5-post
+#: burst cost 5 consecutive turns that mostly ended in no_reply. ``off`` is the
+#: one-body-per-turn behaviour exactly. Config-file only, like the triage keys;
+#: a YAML boolean reads as the mode it spells (``off`` -> ``False``); anything
+#: else reads ON.
+DEFAULT_MULTI_FRAME_TURNS = True
 
 #: ``team_bridge.screening.*`` — the rolling-hour ceilings on SCREENING SPEND,
 #: now CONFIGURABLE. They were fixed class constants on ``Store`` (40/30/35/20,
@@ -298,8 +383,13 @@ ONBOARDING_PATH = ("team_bridge", "onboarding")
 DEFAULT_ENROLLMENT_PATH = ("team_bridge", "default_enrollment")
 SESSION_PATH = ("team_bridge", "session")
 HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
+AMBIENT_WAKE_DWELL_PATH = ("team_bridge", "ambient_wake_dwell_seconds")
+AMBIENT_TRIAGE_PATH = ("team_bridge", "ambient_triage")
+URGENT_FAILOVER_PATH = ("team_bridge", "urgent_failover_seconds")
+MULTI_FRAME_TURNS_PATH = ("team_bridge", "multi_frame_turns")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
 REVIEW_HELD_PATH = ("team_bridge", "review_held")
+SCREENING_HOLD_REVIEW_AFTER_PATH = ("team_bridge", "screening_hold_review_after_minutes")
 SHARE_TYPING_PATH = ("team_bridge", "share_typing")
 #: The SUBTREE the four screening ceilings live under. Readers take this tuple,
 #: so no consumer re-spells "where screening lives" and drifts from the writer.
@@ -353,6 +443,31 @@ def _enabled(value: Any) -> bool:
     if value is _MISSING:
         return DEFAULT_TEAM_BRIDGE_ENABLED
     return value if isinstance(value, bool) else False
+
+
+def _hold_release(value: Any) -> bool:
+    """``team_bridge.hold_release`` read EXACTLY as the ``/settings`` row reads it.
+
+    WHY ``strict_bool`` AND NOT ``is not False`` (security round 1, S-1 on PR
+    #4317). The row's ``read_setting`` normalises every BOOL through
+    ``settings_io.strict_bool``, which maps a hand-edited ``"false"``, ``off``,
+    ``no``, ``"0"`` or ``0`` to False. The receiver used to read those as ON, so
+    the page painted "off" while work requests (and the #4308 fallback-review
+    entry, which also needs this flag) kept arriving as Deliver-able holds — an
+    operator who believed the surface closed was still being asked to click.
+    One reader on both sides removes the split; the parsed-false direction is
+    the conservative one (the bounce stays a reject, no new hold surface).
+    Anything ``strict_bool`` cannot parse still reads the shipped default, ON,
+    because what ON opens is a person-controlled hold, never an admit.
+
+    Imported lazily, like the other ``strict_bool`` consumers
+    (``supplements/policy.py``, ``monitors/spec.py``), so importing this light
+    module never drags the whole settings registry in with it.
+    """
+
+    from local_operator.settings_io import strict_bool
+
+    return strict_bool(value, DEFAULT_HOLD_RELEASE)
 
 
 def _onboarding(value: Any) -> str:
@@ -512,6 +627,53 @@ def _hold_alert_after_minutes(value: Any) -> int:
         return DEFAULT_HOLD_ALERT_AFTER_MINUTES
     if not 0 <= value <= HOLD_ALERT_MAX_MINUTES:
         return DEFAULT_HOLD_ALERT_AFTER_MINUTES
+    return value
+
+
+def _bounded_whole_seconds(value: Any, *, default: int, maximum: int) -> int:
+    """Whole seconds in ``0..maximum``, else ``default`` (same rule as the alert).
+
+    A bool is an ``int`` to Python, so ``true`` is refused by name; a float, a
+    string or an out-of-range number reads as the default rather than being
+    coerced into a timing nobody wrote.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value if 0 <= value <= maximum else default
+
+
+def _ambient_triage(value: Any) -> str:
+    """One of :data:`AMBIENT_TRIAGE_MODES`; anything else is the default (``on``).
+
+    A YAML boolean is the unquoted spelling of a mode (``off`` → ``False``), so it
+    maps back to that mode rather than to the default.
+    """
+
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, str) and value.strip().lower() in AMBIENT_TRIAGE_MODES:
+        return value.strip().lower()
+    return DEFAULT_AMBIENT_TRIAGE
+
+
+def _multi_frame_turns(value: Any) -> bool:
+    """ON unless the file says off (``false``/``"off"``); junk reads the default."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("off", "false"):
+        return False
+    return DEFAULT_MULTI_FRAME_TURNS
+
+
+def _screening_hold_review_after_minutes(value: Any) -> int:
+    """Whole minutes in 0..10080, else the default (same rule as the alert)."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES
+    if not 0 <= value <= HOLD_ALERT_MAX_MINUTES:
+        return DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES
     return value
 
 
@@ -738,6 +900,12 @@ class TeamBridgeSettings:
     hold_alert_after_minutes: int = DEFAULT_HOLD_ALERT_AFTER_MINUTES
     #: B4b owner release (``hold_release.py``); ON unless a real ``false``.
     hold_release: bool = DEFAULT_HOLD_RELEASE
+    #: Channel-wake triage and batching (see the ``DEFAULT_*`` docs above).
+    ambient_wake_dwell_seconds: int = DEFAULT_AMBIENT_WAKE_DWELL_SECONDS
+    ambient_triage: str = DEFAULT_AMBIENT_TRIAGE
+    urgent_failover_seconds: int = DEFAULT_URGENT_FAILOVER_SECONDS
+    #: Several admitted bodies per turn (see ``DEFAULT_MULTI_FRAME_TURNS``).
+    multi_frame_turns: bool = DEFAULT_MULTI_FRAME_TURNS
     #: The stored "Screening model" preference as a ``(provider, model_id)``
     #: pair, or ``None`` for "no preference" (the shipped default). Shape-parsed
     #: by :func:`_screening_model`; the evaluated-table check happens in
@@ -746,6 +914,9 @@ class TeamBridgeSettings:
     #: Owner review of cached answer holds (``hold_release.REVIEW_HOLD_CODES``);
     #: ON unless the file says a real ``false``.
     review_held: bool = DEFAULT_REVIEW_HELD
+    #: Minutes a screening-unavailable hold may age before it becomes the
+    #: owner's review; ``0`` = never (see the constant).
+    screening_hold_review_after_minutes: int = DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES
     #: Whether this person's composers report "is typing" (sender-side only).
     share_typing: bool = DEFAULT_TEAM_BRIDGE_SHARE_TYPING
     #: Whether ``team_bridge.enabled`` was PRESENT in the document (any value,
@@ -805,13 +976,28 @@ class TeamBridgeSettings:
             hold_alert_after_minutes=_hold_alert_after_minutes(
                 get(HOLD_ALERT_AFTER_PATH, DEFAULT_HOLD_ALERT_AFTER_MINUTES)
             ),
-            # ``is not False``: only an explicit ``false`` closes it (S3a). The
-            # path it opens is a person-controlled hold, never an admit.
-            hold_release=get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE) is not False,
+            hold_release=_hold_release(get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE)),
+            ambient_wake_dwell_seconds=_bounded_whole_seconds(
+                get(AMBIENT_WAKE_DWELL_PATH, DEFAULT_AMBIENT_WAKE_DWELL_SECONDS),
+                default=DEFAULT_AMBIENT_WAKE_DWELL_SECONDS,
+                maximum=AMBIENT_WAKE_DWELL_MAX_SECONDS,
+            ),
+            ambient_triage=_ambient_triage(get(AMBIENT_TRIAGE_PATH, DEFAULT_AMBIENT_TRIAGE)),
+            urgent_failover_seconds=_bounded_whole_seconds(
+                get(URGENT_FAILOVER_PATH, DEFAULT_URGENT_FAILOVER_SECONDS),
+                default=DEFAULT_URGENT_FAILOVER_SECONDS,
+                maximum=URGENT_FAILOVER_MAX_SECONDS,
+            ),
+            multi_frame_turns=_multi_frame_turns(
+                get(MULTI_FRAME_TURNS_PATH, DEFAULT_MULTI_FRAME_TURNS)
+            ),
             screening_model=_screening_model(
                 get(SCREENING_MODEL_PATH, DEFAULT_TEAM_BRIDGE_SCREENING_MODEL)
             ),
             review_held=get(REVIEW_HELD_PATH, DEFAULT_REVIEW_HELD) is not False,
+            screening_hold_review_after_minutes=_screening_hold_review_after_minutes(
+                get(SCREENING_HOLD_REVIEW_AFTER_PATH, DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES)
+            ),
             share_typing=_share_typing(get(SHARE_TYPING_PATH, _MISSING)),
         )
 

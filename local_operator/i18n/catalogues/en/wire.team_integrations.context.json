@@ -1,0 +1,115 @@
+{
+  "wire.team_integrations.ask.add_to_channel.question": {
+    "note": "{channel} is a channel name already prefixed with '#'.",
+    "role": "ask question title",
+    "tone": "plain"
+  },
+  "wire.team_integrations.ask.create_hook.question": {
+    "note": "{source} is a monitoring product identifier (datadog, grafana, alertmanager, generic) and stays as is. An automation receives alerts from that product.",
+    "role": "ask question title",
+    "tone": "plain"
+  },
+  "wire.team_integrations.ask.details.channels": {
+    "note": "{channels} is a comma-separated list of '#name' channels, or the word for 'none'.",
+    "role": "ask detail line",
+    "tone": "plain"
+  },
+  "wire.team_integrations.ask.details.credential_hook": {
+    "note": "Same as the token line, for the secret that authenticates a monitoring product's webhook.",
+    "role": "ask detail line",
+    "tone": "plain"
+  },
+  "wire.team_integrations.ask.details.credential_none": {
+    "note": "No credential is created by this action.",
+    "role": "ask detail line",
+    "tone": "plain"
+  },
+  "wire.team_integrations.ask.details.credential_token": {
+    "note": "{secret_name} is a secret name identifier (e.g. RADIENT_APP_TOKEN) and stays as is. Reassures that the token is stored locally and not displayed.",
+    "role": "ask detail line",
+    "tone": "plain"
+  },
+  "wire.team_integrations.ask.details.none": {
+    "note": "Shown in place of an empty channel list.",
+    "role": "list placeholder",
+    "tone": "plain"
+  },
+  "wire.team_integrations.ask.details.permissions": {
+    "note": "{permissions} is a list like 'chat:write (post messages)'; the codes stay English, the parentheses carry the translated scope words.",
+    "role": "ask detail line",
+    "tone": "plain"
+  },
+  "wire.team_integrations.ask.mint_token.question": {
+    "note": "Asks whether to create a new bearer credential (app token) for the app. {app_name} app name, {org_name} organization name.",
+    "role": "ask question title",
+    "tone": "plain"
+  },
+  "wire.team_integrations.ask.publish.question": {
+    "note": "{app_name} is the integration app name the user chose; {org_name} is the Radient organization name. Keep the typographic quotes around the app name. Approving makes the app live in the organization's channels.",
+    "role": "ask question title",
+    "tone": "plain"
+  },
+  "wire.team_integrations.ask.rotate_token.question": {
+    "note": "Asks whether to replace an existing app token. {token_id} is an identifier like itk_0123… and stays as is.",
+    "role": "ask question title",
+    "tone": "plain"
+  },
+  "wire.team_integrations.option.approve": {
+    "maxCells": 24,
+    "note": "Affirmative option on token, automation and channel asks.",
+    "role": "ask option label",
+    "tone": "plain"
+  },
+  "wire.team_integrations.option.approve.description": {
+    "note": "Single use: approving authorizes one change only.",
+    "role": "ask option description",
+    "tone": "plain"
+  },
+  "wire.team_integrations.option.approve_publish": {
+    "maxCells": 24,
+    "note": "Affirmative option on the publish ask.",
+    "role": "ask option label",
+    "tone": "plain"
+  },
+  "wire.team_integrations.option.approve_publish.description": {
+    "note": "{secret_name} is an identifier and stays as is.",
+    "role": "ask option description",
+    "tone": "plain"
+  },
+  "wire.team_integrations.option.approve_publish.description_no_credential": {
+    "note": "Publish with no credential.",
+    "role": "ask option description",
+    "tone": "plain"
+  },
+  "wire.team_integrations.option.cancel": {
+    "maxCells": 24,
+    "note": "Negative option. Choosing it changes nothing.",
+    "role": "ask option label",
+    "tone": "plain"
+  },
+  "wire.team_integrations.option.cancel.description": {
+    "note": "Under Cancel on the other asks.",
+    "role": "ask option description",
+    "tone": "plain"
+  },
+  "wire.team_integrations.option.cancel_draft.description": {
+    "note": "Under Cancel on the publish ask: the drafted app stays inactive.",
+    "role": "ask option description",
+    "tone": "plain"
+  },
+  "wire.team_integrations.scope.alerts_ingest": {
+    "note": "Plain words for the alerts:ingest permission: posting alert cards that may wake automated responders.",
+    "role": "scope explanation",
+    "tone": "plain"
+  },
+  "wire.team_integrations.scope.chat_write": {
+    "note": "Plain words for the chat:write permission.",
+    "role": "scope explanation",
+    "tone": "plain"
+  },
+  "wire.team_integrations.scope.chat_write_thread": {
+    "note": "Plain words for chat:write.thread: replying under messages the app itself posted.",
+    "role": "scope explanation",
+    "tone": "plain"
+  }
+}

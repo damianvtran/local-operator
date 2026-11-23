@@ -1,0 +1,34 @@
+{
+  "locale": "ur",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "3c1e111e2598",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Explicit host model-switch notice: provider quota failure",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "method": "Direct LLM reasoning; no translation service"
+  },
+  "auditor": {
+    "agent": "i18n-auditor B",
+    "session": "41b08626ce5f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "3c1e111e2598",
+    "independent_from_auditor_A_session": "caf2c0ebbb90",
+    "actual_model_source": "Explicit host model-switch notice in this session",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "status": "passed",
+  "note": "Independent B; all 4 keys; 0 blocker/major. Record: i18n/audits/evidence/ur/tui.model_persistence/b-41b0/record.json. Plain Rich only; styled/native RTL gate open."
+}

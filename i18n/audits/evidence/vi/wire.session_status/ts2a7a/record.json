@@ -1,0 +1,132 @@
+{
+  "locale": "vi",
+  "namespace": "wire.session_status",
+  "audit_id": "ts2a7a",
+  "audit_date": "2026-11-19T21:50:35.512178+00:00",
+  "key_count": 17,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "terminal-status-vi-audit",
+    "session": "7a2548e2c7b1",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session host Model header",
+    "fallback_used": false,
+    "independent_from_translator_session": "56c3029571f6",
+    "independent_from_translator": true,
+    "date": "2026-11-19T21:50:35.512178+00:00",
+    "result": "passed",
+    "unresolved_blocker_major": 0
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.json",
+      "sha256": "52a712a441652702614192715b94d271bdc4653497a9d7065c82d362786d9326"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/i18n/catalogues/en/wire.session_status.context.json",
+      "sha256": "5119ae9388854ba8c6bbca489034d75d145426ad13d12361468cc6a6d25fc525"
+    },
+    "vi": {
+      "path": "/Users/damian/.local-operator/sessions/56c3029571f6/scratchpad/wire.session_status.vi.r2.json",
+      "sha256": "91fdc2a9fb34b9bd23efce8daabd33a74a7511ad67a9b269e711dd90c96b277e"
+    },
+    "previous_vi": {
+      "path": "/Users/damian/.local-operator/sessions/56c3029571f6/scratchpad/wire.session_status.vi.json",
+      "sha256": "963b8bf337981a328bb80b265cb49d033db10c7afb2838c4ec8d5f05df20c1d1"
+    },
+    "incidents": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/incidents.py",
+      "sha256": "a69a30b90874c06ddb48ee50f45b4821feedee0b80ebda12123afba7b2f9ca78"
+    },
+    "types": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/session/runtime/types.py",
+      "sha256": "200c7a8f43190766df20bf7bd39d32ec2243f902163d60d0997ef8dc2b395cf0"
+    },
+    "process": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/local_operator/session/runtime/process.py",
+      "sha256": "5eb749061e2d8ec9dd2862489e417cf0b6051eb987dbc44df4b491bc39d4b729"
+    },
+    "style_guide": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/i18n-terminal-status/i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts2a7a/report.md",
+      "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/vi-r2-first-report.md",
+      "sha256": "3d72600a9b6db7577e0f712dc51eec0188338a4695f0f5a58d7866134260ef09"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts2a7a/audit.log",
+      "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/vi-r2-first-audit.log",
+      "sha256": "73ab596f8acc9880f306c6f8568f4bdd1481ffce99b033322d4e3952e83ff1fe"
+    },
+    "icu-cases.json": {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts2a7a/icu-cases.json",
+      "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/vi-r2-first-cases.json",
+      "sha256": "8722494d4b212d55be1f2e8b64f7a0cc2d58e14eecb035c682da18037b3dbc62"
+    },
+    "audit-script.py.txt": {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts2a7a/audit-script.py.txt",
+      "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/audit_vi_r2.py",
+      "sha256": "7951aae25ff334ab10c80f2cd836de979a0caffc08085c2c542fe1fd2b21d8b9"
+    },
+    "ledger-dryrun.log": {
+      "path": "i18n/audits/evidence/vi/wire.session_status/ts2a7a/ledger-dryrun.log",
+      "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/vi-r2-first-ledger-dryrun.log",
+      "sha256": "ef248edc168a9e71f5d0285e981fed202c51b6a8254dadee566b7582969fecd1"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "remediated_finding_ids": [
+    "VI-S2-01"
+  ],
+  "round": "R2 first auditor delta",
+  "scope": {
+    "changed_keys": [
+      "wire.session_status.error_cause",
+      "wire.session_status.unseen_error_cause"
+    ],
+    "changed_arms": [
+      "runtime_overdue"
+    ],
+    "actual_icu_cases": 26,
+    "retained_original_icu_cases": 58,
+    "retention_proof": "exactly two reverse UTF-8 phrase substitutions restore entire original candidate bytes; AST verifies only two runtime_overdue bodies changed"
+  },
+  "retained_first_audit": {
+    "record_path": "i18n/audits/evidence/vi/wire.session_status/ts1a7a/record.json",
+    "scratch_handoff_path": "/Users/damian/.local-operator/sessions/7a2548e2c7b1/scratchpad/vi-first-record.json",
+    "record_sha256": "418310e2350db1302c5eb44870b4d1a735ede118ede43d8dd02332bfb89cd66e",
+    "receipt_sha256": "cc450c1a6ffb9c456e77c4a74d81a11b7ff5b08d7147146a0e17759d5e52bbc8",
+    "old_overdue_judgment_superseded": true
+  },
+  "report_kind": "audit_notes_not_execution_log",
+  "execution_log": "i18n/audits/evidence/vi/wire.session_status/ts2a7a/audit.log",
+  "original_lost_evidence": {
+    "status": "not_applicable"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "retention_status": "scratch handoff only; coordinator must retain canonical bundle before applying history",
+  "limitations": [
+    "second independent current-hash audit separately required",
+    "no integrated runtime/visual/pseudo/shaping proof",
+    "external diagnostic legacy-English path remains UNRESOLVED"
+  ],
+  "ledger_dry_run": {
+    "result": "passed",
+    "applied": false,
+    "expected_history_sha256": "f3329749bec6e39c39a685e16aad99a9c7d8e34f272bff08b9b3cb9c8383dc2e"
+  }
+}

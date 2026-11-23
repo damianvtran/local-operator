@@ -1,0 +1,23 @@
+{
+  "tui.settings_view.editor.contract": "{save_key} guarda · {cancel_key} cancela",
+  "tui.settings_view.editor.contract_unset": "{save_key} guarda · {cancel_key} cancela · vacío quita",
+  "tui.settings_view.editor.suggest_long": "{browse_keys} sugerencias · {complete_key} completa · {save_key} guarda · {cancel_key}",
+  "tui.settings_view.editor.suggest_medium": "{browse_keys} navega · {complete_key} completa · {save_key} guarda",
+  "tui.settings_view.editor.suggest_short": "{browse_keys} · {complete_key} · {save_key} guarda",
+  "tui.settings_view.pane.agents_empty": "no hay agentes configurados",
+  "tui.settings_view.pane.empty_hint": "{command} los lista y los asocia",
+  "tui.settings_view.pane.more": "{count, plural, one {… {shown} más} many {… {shown} más} other {… {shown} más}}",
+  "tui.settings_view.pane.providers_empty": "ninguno conectado — {command}",
+  "tui.settings_view.pane.providers_header": "proveedores",
+  "tui.settings_view.pane.tab_agents": "agentes",
+  "tui.settings_view.pane.tab_teams": "equipos",
+  "tui.settings_view.pane.teams_empty": "no hay equipos configurados",
+  "tui.settings_view.row.add_chain": "+ añadir una cadena",
+  "tui.settings_view.row.add_hop": "+ añadir un salto",
+  "tui.settings_view.scope.live": "al instante",
+  "tui.settings_view.scope.never": "nunca",
+  "tui.settings_view.scope.new_launch": "al reiniciar",
+  "tui.settings_view.scope.new_sessions": "sesión nueva",
+  "tui.settings_view.section.takes_effect": "se aplica: {scope}",
+  "tui.settings_view.too_short": "terminal muy baja — aumenta la altura"
+}

@@ -135,7 +135,9 @@ def _pair(root: Path) -> tuple[relay.RelayServer, relay.RelayServer, types.Netwo
     joined.members = list(record.members)
     store.save(joined, root_b)
     store.save_secrets(types.SecretState(network_id=network_id, epoch=1, secret=secret), root_b)
-    link, reason = server_b.dial(network_id, host=f"{host_a}:{port_a}", epoch=1)
+    link, reason = server_b.dial(
+        network_id, host=f"{host_a}:{port_a}", epoch=1, expected_device=server_a.identity.device_id
+    )
     assert link is not None, f"the audit-io pair could not link: {reason}"
     # THE PAIRING IS NOT SETTLED WHEN THE DIALER RETURNS. ``server_b.dial`` returns
     # once the DIALER's half of the handshake is done, and the LISTENER records its

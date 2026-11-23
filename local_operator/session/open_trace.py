@@ -11,8 +11,8 @@ tracing performs no JSON encoding or file I/O: the writer returns on a
 module-level ``None`` check. Call sites still read span-start clocks, so the
 disabled overhead is small, not literally zero.
 
-ROWS ARE APPEND-ONLY JSONL under a lock: ``at`` (epoch ms), ``stage``, an
-optional ``ms`` span the caller just finished timing, and whatever fields the
+ROWS ARE APPEND-ONLY JSONL under a lock: ``at`` (epoch ms), ``stage``,
+``pid``, an optional ``ms`` span the caller just finished timing, and whatever fields the
 site knows. The writer NEVER raises — a trace that can break the read it
 observes is worse than no trace — and the module is inert when the variable is
 unset.
@@ -50,7 +50,14 @@ def mark(stage: str, ms: float | None = None, **fields: object) -> None:
     """Append one trace row. Never raises, never mutates ``fields``."""
     if _PATH is None:
         return
-    row: dict[str, object] = {"at": time.time() * 1000.0, "stage": stage}
+    # ``pid`` on EVERY row: session runtimes are children of ``lop serve`` and
+    # inherit ``LOP_OPEN_TRACE``, so one file interleaves serve rows with
+    # runtime rows. Without the pid a count such as ``index.refresh_start``
+    # cannot say whether serve or a runtime scanned (the transcript-index ADR
+    # could not settle its 14,483-row count for exactly that reason). Read per
+    # row, not cached at import: a forked child must stamp its own pid. Only
+    # reached when tracing is on, so the disabled path is unchanged.
+    row: dict[str, object] = {"at": time.time() * 1000.0, "stage": stage, "pid": os.getpid()}
     if ms is not None:
         row["ms"] = round(ms, 3)
     row.update(fields)
@@ -60,6 +67,39 @@ def mark(stage: str, ms: float | None = None, **fields: object) -> None:
             handle.write(line + "\n")
     except Exception:  # noqa: BLE001 — see the module docstring: observability
         pass  # must never fail the read it observes.
+
+
+class DesktopEventsIngressTrace:
+    """Join one authenticated desktop first-paint request across ASGI stages.
+
+    The entry clock is sampled before middleware/auth awaits but written only
+    after the validated route is reached. This is ASGI dispatch, not arrival on
+    the socket. Epoch milliseconds join other processes' rows; monotonic
+    elapsed milliseconds measure this request even if wall time jumps.
+
+    On ``desktop.events.*`` rows, ``ms`` is always since ASGI entry, and
+    ``open_id`` joins the request without its URL or session id. The acquire
+    row's separate ``acquire_id`` joins to the existing ``a.acquire`` span
+    (whose ``ms`` remains its own duration).
+    """
+
+    def __init__(self, entry_mono: float, entry_at: float) -> None:
+        self._entry_mono = entry_mono
+        self._entry_at = entry_at
+        self._open_id = uuid4().hex
+        self.started = False
+
+    def start(self) -> None:
+        route_ms = (time.monotonic() - self._entry_mono) * 1000
+        route_at = time.time() * 1000
+        self.started = True
+        # Record both boundaries, not the writer's later emission times: the
+        # first row's write must not count as time spent in middleware.
+        mark("desktop.events.asgi_entry", 0.0, at=self._entry_at, open_id=self._open_id)
+        mark("desktop.events.route", route_ms, at=route_at, open_id=self._open_id)
+
+    def mark(self, stage: str, **fields: object) -> None:
+        mark(stage, (time.monotonic() - self._entry_mono) * 1000, open_id=self._open_id, **fields)
 
 
 class ColdOpenTrace:

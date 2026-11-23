@@ -1,0 +1,70 @@
+{
+  "prior_record": "i18n/audits/evidence/fr/cli.serve_readiness/sd2r/record.json",
+  "prior_target_sha256": "4f3fcbc1a716d020cc9735382e607ca315e5cdbf2d922750f8d333f2e4f9ae68",
+  "prior_catalogue_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+  "unchanged_keys": [
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.stale"
+  ],
+  "changed_new_keys": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.not_this_daemon",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ],
+  "before_after": {
+    "cli.serve_readiness.unproven": {
+      "before": "est enregistré, mais l’identité de son processus ne peut pas être prouvée (aucun horodatage de démarrage n’a pu être comparé)",
+      "after": "enregistrement présent, mais identité du processus impossible à prouver (aucun horodatage de démarrage n’a pu être comparé)"
+    },
+    "cli.serve_readiness.not_reporting": {
+      "before": "est enregistré mais ne répond pas (il n’envoie plus de signal de vie)",
+      "after": "enregistrement présent, mais aucune réponse (plus de signal de vie)"
+    },
+    "cli.serve_readiness.not_this_daemon": {
+      "before": "est enregistré, mais un autre processus détient désormais ce PID",
+      "after": "enregistrement présent, mais PID désormais détenu par un autre processus"
+    },
+    "cli.serve_readiness.unknown_state": {
+      "before": "est enregistré dans un état inconnu",
+      "after": "enregistrement présent avec un état inconnu"
+    },
+    "cli.serve_readiness.recorded_gap": {
+      "before": "build enregistré {recorded}, installation {install} (identité du processus non prouvée)",
+      "after": "l’enregistrement indique le build {recorded} ; le build {install} est installé"
+    },
+    "cli.serve_readiness.unknown": {
+      "before": "{count, plural, one {le daemon `lop serve` sur {device} : {reasons} ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé} many {les daemons `lop serve` sur {device} : {reasons} ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés} other {les daemons `lop serve` sur {device} : {reasons} ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés}}",
+      "after": "{count, plural, one {le daemon `lop serve` sur {device} — {reasons} ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé} many {les daemons `lop serve` sur {device} — {reasons} ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés} other {les daemons `lop serve` sur {device} — {reasons} ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés}}"
+    },
+    "cli.serve_readiness.identity_restart": {
+      "before": "sur {device}, lancez `lop services status` pour inspecter les enregistrements, puis `lop services restart` pour enregistrer les identités des processus ; le redémarrage vérifie chaque daemon avant toute action",
+      "after": "sur {device}, lancez `lop services restart` pour faire passer le daemon enregistré au build installé ; le redémarrage vérifie chaque daemon avant toute action"
+    },
+    "cli.serve_readiness.pid_reason": {
+      "before": null,
+      "after": "{count, plural, one {identifiant de processus {pids} — {reason}} many {identifiants de processus {pids} — {reason}} other {identifiants de processus {pids} — {reason}}}"
+    },
+    "cli.serve_readiness.and_more": {
+      "before": null,
+      "after": "{count, plural, one {et # de plus} many {et # de plus} other {et # de plus}}"
+    },
+    "cli.serve_readiness.identity_no_action": {
+      "before": null,
+      "after": "{count, plural, one {l’enregistrement, dont l’identité du processus n’est pas prouvée, correspond au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire} many {les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire} other {les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire}}"
+    },
+    "cli.serve_readiness.identity_restart_manual": {
+      "before": null,
+      "after": "sur {device}, redémarrez `lop serve` manuellement pour faire passer le daemon enregistré au build installé ; il ne peut pas se recharger lui-même en cours d’exécution"
+    }
+  }
+}

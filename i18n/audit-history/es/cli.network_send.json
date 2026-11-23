@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "cli.network_send",
+  "history_sha256": "4355fc0519cad2ba2c4d94434a38d0a7760170567790518560bf699ea30f265e",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "cli.network_send",
+      "source_sha256": "ec0a1e7966b76337a2353b3da356a647d5e4a7a35f4648da2afb075bcab5721d",
+      "target_sha256": "127f0e52a2ac4c745681fbeff46de27b62634e1c660ff77d7bf740f98a954267",
+      "translator": {
+        "agent": "coder",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-22",
+        "fallback": "anthropic/claude-opus-5-5 to openai/gpt-6.2-sol (provider quota)",
+        "job_id": "c0b10ae3e823"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer (independent i18n auditor; session 62a9e9827514)",
+        "model": "openai/gpt-6.2-sol",
+        "fallback": "anthropic/claude-opus-5-5 to openai/gpt-6.2-sol (provider quota, before semantic audit)",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Direct neutral CLI refusal; sesión / en cola; aún and emphatic NO.",
+      "head": "2418c3444c41d7a80cc25cd9f5e663093ffec307",
+      "context_sha256": "5d54ad3a61d5fd87cbe3d7c2ece337708103025847e24d289e65f78de05d8e45",
+      "keys_reviewed": [
+        "cli.network_send.still_starting"
+      ]
+    }
+  ]
+}
