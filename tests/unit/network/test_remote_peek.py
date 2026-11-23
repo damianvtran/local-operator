@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.network import peek as net_peek
 from local_operator.network import relay, types, wire
 from local_operator.network.types import MeshRefusal
@@ -233,25 +234,94 @@ def test_peer_query_counts_a_match_before_display_elision(tmp_path: Path) -> Non
     assert "你好" not in reply["window"]["steps"][-1]["body"]
 
 
-@pytest.mark.parametrize("bad_index", [0, 2])
+@pytest.mark.parametrize("bad_index", [0, 2], ids=["before-hit", "after-hit"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "timestamp",
+        "escaped-surrogate",
+        "tool-calls",
+        "peer-sender",
+        "raw-utf8",
+        "deep-json",
+        "unencodable-cursor",
+        "empty-id",
+    ],
+)
 def test_peer_query_keeps_a_good_hit_with_an_unrenderable_neighbor(
-    tmp_path: Path, bad_index: int
+    tmp_path: Path, bad_index: int, shape: str
 ) -> None:
     path = _journal(tmp_path, rows=3) / "transcript.jsonl"
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
-    rows[bad_index]["payload"].update(role="assistant", tool_calls=["not-a-tool-call"])
-    path.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
+    lines = path.read_bytes().splitlines()
+    bad = json.loads(lines[bad_index])
+    payload = bad["payload"]
+    if shape == "timestamp":
+        bad["ts"] = 10**310
+    elif shape == "escaped-surrogate":
+        payload["content"] = [{"text": "\ud800"}]
+    elif shape == "tool-calls":
+        payload.update(role="assistant", tool_calls=["not-a-tool-call"])
+    elif shape == "peer-sender":
+        payload.update(
+            kind="custom", custom_type=PEER_MESSAGE_MESSAGE_TYPE, details={"sender": ["peer"]}
+        )
+    elif shape in {"raw-utf8", "deep-json"}:
+        payload["content"] = [{"text": "BAD_VALUE"}]
+    elif shape == "unencodable-cursor":
+        bad["id"] = "\udfff"
+    elif shape == "empty-id":
+        bad["id"] = ""
+        payload["content"] = [{"text": "row 2"}]
+    raw = json.dumps(bad).encode("ascii")
+    if shape == "raw-utf8":
+        # Invalid journal bytes, not a valid JSON escape for a surrogate.
+        raw = raw.replace(b"BAD_VALUE", b"\xff")
+    elif shape == "deep-json":
+        # Fail in the JSON decoder itself, independently of any field's type.
+        raw = raw.replace(b'"BAD_VALUE"', b"[" * 10_000 + b"0" + b"]" * 10_000)
+    lines[bad_index] = raw
+    path.write_bytes(b"\n".join(lines) + b"\n")
 
+    # steps=3 would put the corrupt neighbor on the ACK, if admitted.
     answer = net_peek.serve(
-        tmp_path, {"session_id": SESSION, "query": "row 2", "steps": 1}, own_label="b"
+        tmp_path, {"session_id": SESSION, "query": "row 2", "steps": 3}, own_label="b"
     )
     window = answer["window"]
-    assert [step["body"] for step in window["steps"]] == ["row 2"]
     assert window["match_count"] == 1
     assert window["match_count_complete"] is False
-    assert "1 unrenderable row skipped" in window["note"]
-    assert "count is a lower bound" in window["note"]
-    print(f"{window['steps'][0]['body']}: {window['note']}")
+    assert "1 unrenderable row skipped; count is a lower bound" in window["note"]
+    bodies = [step["body"] for step in window["steps"]]
+    assert bodies == (["row 2", "row 3"] if bad_index == 0 else ["row 1", "row 2"])
+    assert bodies[window["match_step"] - 1] == "row 2"
+    if bad_index == 0 and shape in {"escaped-surrogate", "deep-json"}:
+        assert answer["name"] == f"session {SESSION}"
+    print(f"{shape}: {bodies}; {window['note']}")
+
+
+def test_peer_query_counts_skips_outside_its_window_and_on_a_miss(tmp_path: Path) -> None:
+    path = _journal(tmp_path, rows=3) / "transcript.jsonl"
+    lines = path.read_bytes().splitlines()
+    bad = json.loads(lines[0])
+    bad["payload"]["content"] = [{"text": "\ud800"}]
+    path.write_bytes(b"\n".join([json.dumps(bad).encode("ascii"), lines[1], b"{"]) + b"\n")
+
+    for query, expected_count in [("row 2", 1), ("absent", 0)]:
+        answer = net_peek.serve(
+            tmp_path, {"session_id": SESSION, "query": query, "steps": 1}, own_label="b"
+        )
+        window = answer["window"]
+        assert window["match_count"] == expected_count
+        assert window["match_count_complete"] is False
+        receipt = window["note"] if expected_count else window["miss"]
+        assert "2 unrenderable rows skipped; count is a lower bound" in receipt
+
+
+def test_peer_query_clean_journal_has_a_complete_count(tmp_path: Path) -> None:
+    _journal(tmp_path, rows=3)
+    answer = net_peek.serve(tmp_path, {"session_id": SESSION, "query": "row"}, own_label="b")
+    assert answer["window"]["match_count"] == 3
+    assert answer["window"]["match_count_complete"] is True
+    assert "skipped" not in answer["window"]["note"]
 
 
 def test_peer_query_receipt_discloses_a_legacy_owner_without_count(tmp_path: Path) -> None:

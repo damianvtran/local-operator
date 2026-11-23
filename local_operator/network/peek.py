@@ -269,7 +269,19 @@ def serve(root: Path, frame: dict[str, Any], *, own_label: str) -> dict[str, Any
     # the local tool does (``_peek_body``'s ``anchor``/``query``).
     answer["request"] = peek.wire_request(request, request.given)
     live_name = getattr(record, "conversation_name", "") if record is not _UNRESOLVED else ""
-    answer["name"] = live_name or session_name(directory) or f"session {session_id}"
+    fallback_name = f"session {session_id}"
+    if answer["mode"] == "search":
+        # The stored-name fallback can independently read the opener from the
+        # journal. Optional header decoration must not resurrect a malformed
+        # row that the counted reader already omitted, or count it twice.
+        try:
+            name = live_name or session_name(directory) or fallback_name
+            name.encode("utf-8")
+        except Exception:
+            name = fallback_name
+        answer["name"] = name
+    else:
+        answer["name"] = live_name or session_name(directory) or fallback_name
     # Cap the same ACK the relay would send, including the actual request ID.
     # Like LinkCrypto's separate record ceiling, this is on uncompressed JSON,
     # not the compressed/encrypted record: a peer's codec must not change which

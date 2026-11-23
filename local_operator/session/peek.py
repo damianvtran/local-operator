@@ -22,16 +22,18 @@ over-budget request refuses with the same sentence on either path.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, NamedTuple, Protocol
 
 if TYPE_CHECKING:
+    from local_operator.harness.comms import PeekStep
     from local_operator.session.transcript import TranscriptEntry
 
 
@@ -611,7 +613,7 @@ def _peer_peek_search(
     for the first chronological hit and a count, so retain its neighbours as
     we walk forward; re-locating by id would price a second read from the tail.
     """
-    from local_operator.harness.comms import _render_message_step, is_peek_step_entry
+    from local_operator.harness.comms import _clip, _render_message_step, is_peek_step_entry
     from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
@@ -623,9 +625,10 @@ def _peer_peek_search(
         raise FileNotFoundError(f"{directory} holds no transcript")
     before = need // 2
     after = need - before - 1
-    preceding: deque[TranscriptEntry] = deque(maxlen=before)
-    selected: list[TranscriptEntry] = []
+    preceding: deque[tuple[str, PeekStep]] = deque(maxlen=before)
+    selected: list[tuple[str, PeekStep]] = []
     hit_id = ""
+    match_step = None
     count = skipped = 0
     older = newer = False
     eligible = 0
@@ -639,35 +642,50 @@ def _peer_peek_search(
             if not complete and consumed > scanned:
                 # The byte bound may bisect a row. Never count its prefix.
                 break
-            entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
-            if entry is None:
-                skipped += 1
-                continue
-            if not is_peek_step_entry(entry):
-                continue
-            if not _peer_search_row_renderable(entry.payload):
+            try:
+                entry = TranscriptEntry.from_json(raw.decode("utf-8"))
+                if entry is None or not entry.id or not math.isfinite(entry.ts):
+                    skipped += 1
+                    continue
+                if not is_peek_step_entry(entry):
+                    continue
+                if not _peer_search_row_renderable(entry.payload):
+                    skipped += 1
+                    continue
+                step = _render_message_step(0, entry.payload, body_limit=None)
+                # Strict journal decoding catches corrupt bytes; JSON escapes can
+                # still introduce unpaired surrogates. Check every row-derived
+                # wire string (including the cursor) before clipping or counting,
+                # so neither the ACK encoder nor display elision decides which
+                # malformed rows are omitted.
+                for value in (entry.id, step.kind, step.heading, step.body):
+                    value.encode("utf-8")
+                row = (entry.id, replace(step, body=_clip(step.body)))
+                text = f"{step.heading}\n{step.body}"
+            except Exception:
+                # This guard is deliberately per row, not a list of known parser
+                # and renderer exceptions. File I/O and query-wide errors (e.g.
+                # a regex budget refusal) stay outside it and still surface.
                 skipped += 1
                 continue
             if hit_id:
-                if len(selected) < need and after:
-                    selected.append(entry)
+                if after:
+                    selected.append(row)
                     after -= 1
                 else:
                     newer = True
-            # Match the decoded view, not the JSON syntax or unseen metadata.
-            # Search each row before display elision so it cannot hide matches
-            # from the count. Only the selected, clipped window is sent.
-            step = _render_message_step(0, entry.payload, body_limit=None)
-            text = f"{step.heading}\n{step.body}"
+            # Search the full decoded view, not JSON syntax, unseen metadata or
+            # the clipped preview. Only the selected previews go to the caller.
             found = pattern.search(text) is not None if pattern is not None else needle in text
             if found:
                 count += 1
                 if not hit_id:
-                    hit_id = entry.id
+                    hit_id = row[0]
                     older = eligible > len(preceding)
-                    selected = [*preceding, entry]
+                    selected = [*preceding, row]
+                    match_step = len(selected)
             if not hit_id:
-                preceding.append(entry)
+                preceding.append(row)
             eligible += 1
 
     # This is model-facing tool-result metadata. Rows beyond the byte bound
@@ -687,15 +705,17 @@ def _peer_peek_search(
             match_count_complete=count_complete,
             miss=f"no match for {needle!r}: {note}.",
         )
-    window = _peek_window(
-        selected,
-        need=need,
+    # Assemble only already-validated previews. Passing raw entries to the
+    # shared window renderer would reopen the unguarded row path after counting.
+    return _PeekWindow(
+        steps=[replace(step, index=index) for index, (_, step) in enumerate(selected, 1)],
         has_older=older,
         has_newer=True if newer else False if complete else None,
-        match_id=hit_id,
-    )
-    return window._replace(
+        before_cursor=selected[0][0],
+        after_cursor=selected[-1][0],
         scanned_bytes=scanned,
+        match_id=hit_id,
+        match_step=match_step,
         match_count=count,
         match_count_complete=count_complete,
         note=f"{note}; first match, up to {before} before and {need - before - 1} after",
