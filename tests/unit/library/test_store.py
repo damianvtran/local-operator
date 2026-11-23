@@ -626,7 +626,12 @@ def test_a_decode_failure_never_records_a_stale_target(tmp_path, monkeypatch) ->
     picture as the new one, so a decode failure must stay a failure.
     """
     root, asset_id, store = _thumb_asset(tmp_path, monkeypatch)
-    source, _content_type, _suffix = store.thumbnail_source(asset_id)
+    # Precondition: the fixture must be a thumbnailable image whose source
+    # exists, or the ``None`` below would pass for the wrong reason.
+    thumb_source = store.thumbnail_source(asset_id)
+    assert thumb_source is not None
+    source, _content_type, _suffix = thumb_source
+    assert source.is_file()
     real_key = store_module._thumb_key
     thumbs = root / "cache" / "library" / "thumbs"
 
