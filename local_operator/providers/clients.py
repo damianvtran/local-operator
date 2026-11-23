@@ -3075,6 +3075,18 @@ class OpenAICompatClient:
     # (Radient, OpenRouter) enforce Anthropic's 4-breakpoint limit per request.
     MAX_CACHE_BREAKPOINTS = 4
 
+    #: Whether the wire needs each request body to EXTEND the previous one as a
+    #: byte prefix (the Muse prompt-delta contract: it persists the exact bytes
+    #: it already paid for and replays them on resume). A per-request suffix is
+    #: fine for providers that tolerate an uncached tail, but on a
+    #: prefix-stable wire that suffix sits MID-conversation on the next request
+    #: (transcript, then suffix, then the new turn), so the earlier body is no
+    #: longer a prefix of the later one and the provider must re-send the whole
+    #: conversation uncached. Wires that declare this pin the inline discovery
+    #: hint at the HEAD instead, where it is byte-identical on every request and
+    #: rides the cached prefix; see ``_inline_ui_hint_item``.
+    inline_ui_hint_rides_head = False
+
     def __init__(
         self,
         base_url: str,
@@ -3816,13 +3828,18 @@ class OpenAICompatClient:
         if request.inline_ui_hint is not None:
             # A real user item would move the Responses turn boundary, discard
             # encrypted tool-round reasoning and reposition top-level instructions.
-            body["input"].append(
-                {
-                    "type": "message",
-                    "role": "developer",
-                    "content": [{"type": "input_text", "text": request.inline_ui_hint}],
-                }
-            )
+            hint_item = {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": request.inline_ui_hint}],
+            }
+            if self.inline_ui_hint_rides_head:
+                # Prefix-stable wire: the tail would break the append-only body
+                # contract this provider requires (see the class attribute), so
+                # pin it before the transcript where it stays constant.
+                body["input"].insert(0, hint_item)
+            else:
+                body["input"].append(hint_item)
         if request.tools:
             body["tools"] = _tools_to_openai_responses(request.tools)
             body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(

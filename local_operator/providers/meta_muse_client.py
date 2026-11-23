@@ -79,6 +79,12 @@ def _rename_items(value: Any, mapping: dict[str, str]) -> None:
 class MetaMuseClient(OpenAICompatClient):
     """Narrow public-Responses dialect; no account bearer or PAYG fallback."""
 
+    # Muse persists the exact request prefix it already paid for and replays it
+    # on resume (``append_only_state``), so a trailing inline-UI hint would break
+    # that contract on the very next request. See the attribute on the base
+    # class; the hint rides the head of ``input`` instead, where it is constant.
+    inline_ui_hint_rides_head = True
+
     last_subscription_observation: dict[str, Any] | None = None
     last_request_id: str | None = None
 
