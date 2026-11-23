@@ -53,18 +53,20 @@ Pure ASGI on purpose: a ``BaseHTTPMiddleware`` here would itself be one more
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
 from fastapi import HTTPException
 from starlette.requests import Request
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from local_operator.server.desktop import require_desktop
-from local_operator.session import transcript_index
+from local_operator.session import open_trace, transcript_index
 
 #: The scope key carrying this request's early release to the route.
 SCOPE_KEY = "local_operator.early_paint_hold"
+TRACE_SCOPE_KEY = "local_operator.desktop_events_ingress_trace"
 
 #: ``/v1/desktop/sessions/<id>/events`` -- the only route that takes a paint
 #: hold. Any id shape: an id the route rejects is held for one request only.
@@ -113,6 +115,10 @@ class EarlyPaintHoldMiddleware:
         if scope["type"] != "http" or scope.get("method") != "GET":
             await self.app(scope, receive, send)
             return
+        # Dispatch into the outer user ASGI middleware, not socket arrival or
+        # HTTP parsing. Sample before matching/auth, but retain nothing on the
+        # request until the same auth check that guards the hold succeeds.
+        entry = (time.monotonic(), time.time() * 1000) if open_trace.enabled() else None
         match = _EVENTS.match(scope.get("path", ""))
         if match is None or not _is_first_paint(scope.get("query_string") or b""):
             await self.app(scope, receive, send)
@@ -131,7 +137,21 @@ class EarlyPaintHoldMiddleware:
         release = transcript_index.hold_paint(root, match.group(1))
         scope[SCOPE_KEY] = release
         try:
-            await self.app(scope, receive, send)
+            if entry is None:
+                await self.app(scope, receive, send)
+                return
+
+            trace = open_trace.DesktopEventsIngressTrace(*entry)
+            scope[TRACE_SCOPE_KEY] = trace
+
+            async def traced_send(message: Message) -> None:
+                if trace.started and message["type"] == "http.response.start":
+                    trace.mark("desktop.events.response_start", status=message["status"])
+                await send(message)
+
+            await self.app(scope, receive, traced_send)
         finally:
+            if entry is not None:
+                scope.pop(TRACE_SCOPE_KEY, None)
             scope.pop(SCOPE_KEY, None)
             release()

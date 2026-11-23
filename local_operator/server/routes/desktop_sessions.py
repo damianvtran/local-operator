@@ -6789,6 +6789,14 @@ async def events(
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
+    scope = getattr(request, "scope", None)
+    ingress_trace = (
+        scope.get(early_paint_hold.TRACE_SCOPE_KEY)
+        if open_trace.enabled() and scope is not None and open_frame == 1
+        else None
+    )
+    if ingress_trace is not None:
+        ingress_trace.start()
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
     # ``allow_draft``: the pane's subscription is the bridge user that holds a
@@ -6818,8 +6826,13 @@ async def events(
     # middleware stack (``server.early_paint_hold``). Dropped only AFTER the
     # route's hold is taken, so the count never reaches zero in between, and
     # from here on the snapshot-frame release above is the only one owed.
-    early_paint_hold.hand_off(getattr(request, "scope", None))
-    context = pool.session(session_id, read=True, allow_draft=True)
+    early_paint_hold.hand_off(scope)
+    if ingress_trace is None:
+        context = pool.session(session_id, read=True, allow_draft=True)
+    else:
+        # Carry the request explicitly; single-flight lookups and the bridge
+        # itself are shared by concurrent streams of the same conversation.
+        context = pool.session(session_id, read=True, allow_draft=True, ingress_trace=ingress_trace)
     try:
         async with errors(request):
             bridge: DesktopSessionBridge = await context.__aenter__()

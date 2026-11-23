@@ -36,6 +36,7 @@ from local_operator.server.models.desktop_sessions import CheckpointManifest
 from local_operator.server.routes import desktop_sessions
 from local_operator.server.utils import desktop_sessions as module
 from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.session import open_trace
 from local_operator.session import transcript_index as ti
 from local_operator.session.attached import AttachedSession
 
@@ -658,4 +659,85 @@ async def test_a_rejected_query_releases_the_early_hold(early) -> None:
     response = await client.get(OPEN + "&after_seq=-1")
     assert response.status_code == 422
     assert len(seen["inner"]) == 1 and sum(seen["inner"][0].values()) == 1
+    assert ti._PAINT_HOLDS == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sink", ["on", "off", "unwritable"])
+async def test_first_paint_ingress_trace_keeps_same_session_streams_distinct(
+    early, monkeypatch, sink
+) -> None:
+    client, app, root, _seen = early
+    _write_session(root)
+    path = root / "trace.jsonl"
+    monkeypatch.setattr(open_trace, "_PATH", {"on": path, "off": None, "unwritable": root}[sink])
+
+    # Bound only the frame iterator; the authenticated route, shared pool,
+    # competing acquisitions, and ASGI response-start are all real.
+    both_streaming = asyncio.Event()
+    streams = 0
+
+    async def frames(self, *_args: Any, **_kwargs: Any):
+        nonlocal streams
+        streams += 1
+        if streams >= 2:
+            both_streaming.set()
+        yield {"type": "snapshot", "payload": {"message": "not-traced"}}
+        await both_streaming.wait()
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "events", frames)
+    opened = await asyncio.wait_for(asyncio.gather(client.get(OPEN), client.get(OPEN)), timeout=30)
+    for response in opened:
+        assert response.status_code == 200
+        assert response.text == 'data: {"type":"snapshot","payload":{"message":"not-traced"}}\n\n'
+        assert "open_id" not in response.headers
+    assert ti._PAINT_HOLDS == {}
+    assert app.state.desktop_sessions.bridges[SID].users == 0
+
+    if sink != "on":
+        assert not path.exists()
+        return
+
+    def rows():
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    original = rows()
+    by_open: dict[str, list[dict[str, Any]]] = {}
+    shared_fields = {"stage", "at", "pid", "ms", "open_id"}
+    for row in original:
+        if row["stage"].startswith("desktop.events."):
+            by_open.setdefault(row["open_id"], []).append(row)
+    assert len(by_open) == 2
+    acquire_ids = set()
+    for group in by_open.values():
+        expected = [
+            ("asgi_entry", set()),
+            ("route", set()),
+            ("pool", set()),
+            ("acquire", {"acquire_id"}),
+            ("response_start", {"status"}),
+        ]
+        assert [(r["stage"], r.keys() - shared_fields) for r in group] == [
+            (f"desktop.events.{stage}", fields) for stage, fields in expected
+        ]
+        elapsed = [r["ms"] for r in group]
+        assert elapsed[0] == 0 and elapsed == sorted(elapsed)
+        assert group[0]["at"] > 0 and group[-1]["status"] == 200
+        acquire_ids.add(group[3]["acquire_id"])
+    assert len(acquire_ids) == 2
+    for stage in ("a.acquire.start", "a.acquire"):
+        spans = [r for r in original if r["stage"] == stage]
+        assert len(spans) == 2 and {r["acquire_id"] for r in spans} == acquire_ids
+        assert {r["session"] for r in spans} == {SID}
+
+    assert (await client.get(OPEN, headers={"Authorization": "Bearer wrong"})).status_code == 401
+    assert (await client.get(OPEN + "&after_seq=-1")).status_code == 422
+    assert rows() == original
+    assert (await client.get(OPEN.removesuffix("?open_frame=1"))).status_code == 200
+    # The raw query triggers the existing hold, but FastAPI resolves the last
+    # value, so a duplicate ending in zero must not produce an ingress span.
+    assert (await client.get(OPEN + "&open_frame=0")).status_code == 200
+    assert [r for r in rows() if r["stage"].startswith("desktop.events.")] == [
+        r for r in original if r["stage"].startswith("desktop.events.")
+    ]
     assert ti._PAINT_HOLDS == {}
