@@ -11,10 +11,11 @@
  * answered and what the agent had already been told.
  *
  * ONE LINE AT REST (§7.4), and the line is the runtime's own — `entry.text` is
- * the shared `harness/rows.py` copy ("Answered — delivering (ask …)", "Timed out
- * after 42m — the agent goes ahead without your answer (ask …)"), the same
- * sentence the TUI prints. Re-authoring it here would be a second wording of one
- * rule, which is exactly what that shared function exists to prevent.
+ * the shared `harness/rows.py` copy (`a-745e · "Which region?" — Answered,
+ * delivering`; the timeout reads `… — Timed out after 42m, the agent goes ahead
+ * without your answer`), the same sentence the TUI prints. Re-authoring it here
+ * would be a second wording of one rule, which is exactly what that shared
+ * function exists to prevent.
  *
  * THE DISCLOSURE IS THE RECORD. `ask_response` expands to the question/answer
  * pairs; `ask_timeout` expands to the notice the MODEL was given, labelled as

@@ -2733,7 +2733,7 @@ class WakeBlock(ExpandableActionBlock):
         # final line so truncation cannot orphan a bidi delimiter. No provenance
         # (`None`) means this identity is not catalogue copy: external tool and
         # model prose passes through untouched even under an Urdu preference.
-        summary = truncate_cells(identity, budget)
+        summary = self._fit_summary(identity, budget)
         if self._summary_source_locale is not None:
             summary = localized_display(summary, source_locale=self._summary_source_locale).plain
 
@@ -2753,6 +2753,18 @@ class WakeBlock(ExpandableActionBlock):
             row.append(" " * pad, style=dim)
             row.append(slot, style=dim)
         return row
+
+    def _fit_summary(self, identity: str, budget: int) -> str:
+        """The summary as it fits ``budget`` cells — the row's LAST cut.
+
+        A row whose summary is ONE sentence fits by losing its end, which is
+        what this does. A row whose summary is COMPOSED — an ask receipt is an
+        id, a name and a state — overrides this instead, so the part that can
+        give way shrinks and the part that carries the fact does not.
+        """
+        from local_operator.tui.widgets.tool_card import truncate_cells
+
+        return truncate_cells(identity, budget)
 
     def _build_content(self, width: int) -> Text:
         """The card: the one-row summary, plus the delivered prompt expanded."""
@@ -7523,6 +7535,42 @@ class AskResponseBlock(WakeBlock):
         else:
             identity, _ = ask_response_notice(self._details)
         return identity, str(self._details.get("text") or "")
+
+    def _fit_summary(self, identity: str, budget: int) -> str:
+        """Fit the receipt by shrinking the NAME; the STATE is never cut for it.
+
+        The whole-sentence fit (``WakeBlock._fit_summary``) trims the tail, and
+        on this row the tail IS the state — so at 80 columns a reader saw
+        ``Answered, d…`` and a timeout lost "the agent goes ahead without your
+        answer" entirely (review round 1, M1). The state is the audit content of
+        the row; the name is a handle that the id beside it already disambiguates.
+
+        So the parts are composed here instead: id, then the name fitted to the
+        room left at the END of the row, then the state whole. When the room is
+        too small for the name to be words at all (:data:`ASK_NAME_MIN_CELLS`),
+        the name is dropped rather than stubbed. ``identity`` is not read — the
+        parts carry the same words, and reading them is what lets the shrinking
+        land on one field.
+        """
+        from local_operator.harness.rows import (
+            ASK_NAME_MIN_CELLS,
+            ask_response_parts,
+            ask_timeout_parts,
+            fit_name_cells,
+        )
+        from local_operator.tui.widgets.tool_card import truncate_cells
+
+        parts = ask_timeout_parts if self._kind == "timeout" else ask_response_parts
+        ask_id, name, state, _ = parts(self._details)
+        id_only = f"{ask_id} — {state}"
+        if not name:
+            return truncate_cells(id_only, budget)
+        lead = f'{ask_id} · "'
+        tail = f'" — {state}'
+        room = budget - cell_len(lead) - cell_len(tail)
+        if room < ASK_NAME_MIN_CELLS:
+            return truncate_cells(id_only, budget)
+        return f"{lead}{fit_name_cells(name, room)}{tail}"
 
     def _summary_ink(self) -> str:
         """The receipt's ink is the SEVERITY the shared row computed, not the kind.
