@@ -195,6 +195,11 @@ class HeavyClass:
     #: the lease would last as long as the server (PR #4104 R2-1). The caller
     #: prints a note telling the agent to run the build on its own so it queues.
     long_lived: bool = False
+    #: The line also POLLS the lease (``lop services status`` inside a loop):
+    #: leased, it would hold the slot it waits for and wait on itself until
+    #: killed (2026-11-22: ~21 min, two other sessions timed out behind it). The
+    #: bash tool refuses such a line before taking a slot; see :func:`polls_lease`.
+    polls_lease: bool = False
 
     def label(self, command: str) -> str:
         """The holder label: the segment that made the line heavy, else argv[0].
@@ -1152,7 +1157,29 @@ def is_heavy(
     reason, long_lived = _unpack(_classify_command(command, cwd, 0))
     if reason is None:
         return None
-    return HeavyClass(reason, long_lived=long_lived)
+    return HeavyClass(reason, long_lived=long_lived, polls_lease=polls_lease(command))
+
+
+#: A lease READ: ``lop|lo|local-operator [options] services [heavy] status``.
+_LEASE_READ = re.compile(
+    r"(?:^|[\s;&|(`'\"])(?:\S*/)?(?:lop|lo|local-operator)(?=\s)[^;&|\n]*?"
+    r"\bservices\s+(?:heavy\s+)?status\b"
+)
+#: A shell loop keyword in command position (start of the line or after a
+#: separator or quote), so an argument that merely reads ``for`` is not one.
+_SHELL_LOOP = re.compile(r"(?:^|[;&|(`'\"]|\bdo\b|\bthen\b)\s*(?:while|until|for)\s")
+
+
+def polls_lease(command: str) -> bool:
+    """Whether ``command`` reads the heavy-job lease from inside a shell loop.
+
+    A leased command holds a slot for its whole life, so a loop that waits for
+    the slot to free (``while lop services status | grep "1/1 slots held"; do
+    sleep 50; done; vitest run``) waits for ITSELF. Only a loop counts: one
+    status read beside a heavy command (``lop services status; pytest -n 4``)
+    returns at once and is harmless.
+    """
+    return bool(_LEASE_READ.search(command) and _SHELL_LOOP.search(command))
 
 
 # -- slot sizing ------------------------------------------------------------
