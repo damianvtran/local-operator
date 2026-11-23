@@ -1074,8 +1074,36 @@ async def test_later_exact_approval_supersedes_only_the_earlier_timeout(deep: Pa
             "Delete ~/other/x",
         ),
         ([{"label": "Delete next week"}, {"label": "Keep"}], "Delete next week"),
+        # QA Q-R3-1: a pick that narrows the question to a glob or a path that
+        # does not exist still narrows it; the question's list is not chosen.
+        (
+            [{"label": "Approve removing only ~/hyperplane-cpp/*/cache"}, {"label": "Keep"}],
+            "Approve removing only ~/hyperplane-cpp/*/cache",
+        ),
+        (
+            [{"label": "Approve removing ~/no-such-dir"}, {"label": "Keep"}],
+            "Approve removing ~/no-such-dir",
+        ),
+        # Review SEC-R3-B2: the other path named without ``~``/``/``.
+        ([{"label": "Delete the second one"}, {"label": "Keep"}], "Delete the second one"),
+        ([{"label": "Delete x"}, {"label": "Keep"}], "Delete x"),
+        ([{"label": "Remove only x"}, {"label": "Keep"}], "Remove only x"),
+        ([{"label": "Delete other/x"}, {"label": "Keep"}], "Delete other/x"),
+        ([{"label": "Delete $HOME/other/x"}, {"label": "Keep"}], "Delete $HOME/other/x"),
     ],
-    ids=["remove-none", "delete-nothing", "other-path-pick", "next-week"],
+    ids=[
+        "remove-none",
+        "delete-nothing",
+        "other-path-pick",
+        "next-week",
+        "narrowing-glob",
+        "narrowing-missing-path",
+        "second-one",
+        "bare-name",
+        "only-bare-name",
+        "relative",
+        "dollar-home",
+    ],
 )
 async def test_pick_that_approves_no_named_path_cannot_supersede_timeout(
     deep: Path, options: list[dict[str, str]], pick: str

@@ -596,6 +596,7 @@ def test_3_merged_plain_cleanup_requires_preserved_payload(
         "late-fresh-holder",
         "reworded",
         "excluding",
+        "narrowing-pick",
     ],
 )
 async def test_ignored_cleanup_approval_at_real_checkpoint(
@@ -739,6 +740,16 @@ async def test_ignored_cleanup_approval_at_real_checkpoint(
     # Review round 2: approval is a rule on the pick, not a vocabulary tuned to
     # one field ask. An unqualified ask in other words must pass; a list that
     # spares a path (the field Q3 shape, "excluding ~/x") must fail closed.
+    if mode == "narrowing-pick":
+        # QA Q-R3-1: the pick narrows the field question to a glob of
+        # ignored payload; it must not approve removing the whole trees.
+        question["question"] = (
+            f"Approve removing 33 clean merged/closed worktrees with ignored files: {named}?"
+        )
+        question["options"] = [
+            {"label": f"Approve removing only {wt.parent}/*/node_modules"},
+            {"label": "Keep everything"},
+        ]
     if mode in ("reworded", "excluding"):
         question["question"] = (
             f"OK to clear out these finished worktrees now: {named}?"
@@ -770,9 +781,13 @@ async def test_ignored_cleanup_approval_at_real_checkpoint(
                         "Remove them"
                         if mode in ("reworded", "excluding")
                         else (
-                            "Approve removing all 33 clean merged/closed worktrees (~17.3 GiB)"
-                            if mode.startswith("field-") or mode == "mixed-question"
-                            else "Approve"
+                            f"Approve removing only {wt.parent}/*/node_modules"
+                            if mode == "narrowing-pick"
+                            else (
+                                "Approve removing all 33 clean merged/closed worktrees (~17.3 GiB)"
+                                if mode.startswith("field-") or mode == "mixed-question"
+                                else "Approve"
+                            )
                         )
                     )
                 )
@@ -1071,6 +1086,12 @@ FIELD_XARGS = "find . -maxdepth 4 -name '__pycache__' -type d -prune -print0 | x
         ("find . -name x -print0 | xargs -0 rm -rf ../precious", Risk.HIGH),
         # Newline-separated output (SEC-R2-m2): only -print0 | xargs -0 is find's list.
         ("find . -name __pycache__ -print | xargs rm -rf", Risk.HIGH),
+        # Review SEC-R3-B1: a grouped stage feeds rm more than find's list.
+        (
+            "(printf '%s\\0' ../precious; find . -name __pycache__ -print0) | xargs -0 rm -rf",
+            Risk.HIGH,
+        ),
+        ("{ true && find . -name __pycache__ -print0; } | xargs -0 rm -rf", Risk.HIGH),
     ],
     ids=[
         "field-xargs",
@@ -1090,6 +1111,8 @@ FIELD_XARGS = "find . -maxdepth 4 -name '__pycache__' -type d -prune -print0 | x
         "files0-from",
         "extra-operand",
         "newline-print",
+        "grouped-subshell",
+        "grouped-brace",
     ],
 )
 def test_find_fed_xargs_delete_ranks_like_find(

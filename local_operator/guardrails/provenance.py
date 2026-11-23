@@ -1501,6 +1501,11 @@ _REGENERABLE = frozenset(
         # rewrites on its own (thumbnail cache, per-folder view settings).
         "Thumbs.db",
         "desktop.ini",
+        # Added 2026-11-23 (PR #4493, lane QA worktrees qa2069-head/base in
+        # local-operator-ui): electron-vite's build output directory, the
+        # same standing as ``build``/``dist`` (only ever matched when Git
+        # itself reports the entry IGNORED).
+        "out",
     }
 )
 #: Basename patterns with the same standing as :data:`_REGENERABLE`:
@@ -2531,6 +2536,12 @@ def plain_cleanup_ignored_inventory(
             return None
         if _shared_dependencies_link(real, entry):
             continue
+        if own_regenerable and os.path.islink(os.path.join(real, entry)):
+            # Git removes the LINK, never what it points to (``rm`` and
+            # ``git worktree remove`` do not follow it), so an ignored
+            # symlink in an own tree loses at most a link string: the shared
+            # ``node_modules`` link with ANY target, a ``.venv`` link, etc.
+            continue
         if (
             own_regenerable
             and _regenerable(os.path.basename(entry))
@@ -3480,10 +3491,11 @@ def _glab_mrs(repo: str, branch: str) -> list[ForgeChange] | None:
 
 
 class UnattributedWorktree(OSError):
-    """The ledger was READ and holds no current-generation ``git worktree add``
-    row for this path: nobody is on record as its owner. Distinct from an
-    unreadable ledger (plain ``OSError``/``sqlite3.Error``), which says
-    nothing (QA Q-R2-1, PR #4493)."""
+    """No current-generation ``git worktree add`` row for this path: the
+    ledger was read and holds none, or no ledger file exists yet (nothing was
+    ever recorded). Either way nobody is on record as its owner. Distinct
+    from an unreadable ledger (plain ``OSError``/``sqlite3.Error``), which
+    says nothing (QA Q-R2-1, PR #4493)."""
 
 
 def worktree_creators(real: str, *, strict: bool = True) -> frozenset[str]:

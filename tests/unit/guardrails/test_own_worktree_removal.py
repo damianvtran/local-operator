@@ -638,3 +638,60 @@ async def test_own_plain_cleanup_sheds_os_folder_metadata(
     outcome = await _check(home, COMMAND_1, judge)
     assert outcome is None or not outcome.blocked, outcome and outcome.text
     assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_own_ui_qa_worktree_sheds_out_symlink_and_finder_metadata(
+    home: Path, mobile: Path
+) -> None:
+    """PR #4493 field case (local-operator-ui ``qa2069-head``/``-base``): an
+    own finished tree holding electron-vite ``out/``, a ``node_modules``
+    SYMLINK to somewhere other than the shared ``../../node_modules``, and
+    ``.DS_Store`` files. The link's target must survive."""
+    tree = mobile / ".worktrees" / "refused-connect"
+    exclude = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(exclude).parent.mkdir(parents=True, exist_ok=True)
+    with open(exclude, "a") as fh:
+        fh.write("out/\n.DS_Store\n")
+    (tree / "out" / "main").mkdir(parents=True)
+    (tree / "out" / "main" / "index.js").write_text("module.exports = {}\n")
+    (tree / ".DS_Store").write_bytes(b"\0meta")
+    (tree / "out" / ".DS_Store").write_bytes(b"\0meta")
+    elsewhere = home / "shared-deps" / "node_modules"
+    (elsewhere / "pkg").mkdir(parents=True)
+    (elsewhere / "pkg" / "index.js").write_text("module.exports = 1\n")
+    link = tree / "node_modules"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(elsewhere)
+    judge = _Judge("BLOCK: should not be asked")
+    outcome = await _check(home, COMMAND_1, judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+    assert (elsewhere / "pkg" / "index.js").is_file()
+
+
+@pytest.mark.asyncio
+async def test_sibling_tree_still_holds_a_foreign_symlink(home: Path, mobile: Path) -> None:
+    """The symlink rule is own-tree only: in a tree this session did not make,
+    a link's existence proves nothing about what the creator relies on."""
+    from local_operator.guardrails.provenance import plain_cleanup_ignored_inventory
+
+    tree = mobile / ".worktrees" / "refused-connect"
+    elsewhere = home / "elsewhere-deps"
+    elsewhere.mkdir()
+    link = tree / "node_modules"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(elsewhere)
+    real = os.path.realpath(tree)
+    foreign = plain_cleanup_ignored_inventory(real)
+    own = plain_cleanup_ignored_inventory(real, own_regenerable=True)
+    assert foreign is not None and foreign.unverified_ignored >= 1
+    assert own is not None and own.unverified_ignored == 0

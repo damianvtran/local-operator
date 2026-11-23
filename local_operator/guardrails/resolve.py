@@ -7219,9 +7219,10 @@ class _Walker:
           [rm flags]`` with no operands of its own, no ``-I``/``-i``/``-a``
           or any other xargs option, and no redirection (``< file``);
         * the upstream stage is the IMMEDIATE previous one, a plain ``find``
-          with at least one literal root, then only the tests in
-          :data:`_FIND_PIPE_TESTS` (each value-taking test with its value)
-          and exactly one ``-print0`` as the last word. No ``-H/-L/-P``,
+          (no grouping, no ``;``/``&&`` list) with at least one literal root,
+          then only :data:`_FIND_PIPE_VALUED` tests (each with its value)
+          and :data:`_FIND_PIPE_BARE` words, and exactly one ``-print0`` as
+          the last word. No ``-H/-L/-P``,
           ``-printf``/``-fprint*``/``-ls``/``-exec``/``-delete``/
           ``-files0-from``: each can make the printed text differ from the
           walked paths;
@@ -7243,7 +7244,12 @@ class _Walker:
             return False
         if operands or any(f not in _RM_PIPE_FLAGS for f in flags):
             return False
-        stage = _strip_grouping(feed.stages[-1])
+        # A grouped stage (``(printf …; find …) | xargs -0 rm``) runs other
+        # commands whose output reaches rm too (review SEC-R3-B1): only a bare
+        # ``find`` stage is find's list.
+        stage = feed.stages[-1].strip()
+        if _strip_grouping(stage) != stage:
+            return False
         raw_words, stage_redirects = scan(stage)
         if stage_redirects:
             return False

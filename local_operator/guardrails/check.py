@@ -1262,6 +1262,59 @@ _DELETE_PICK = re.compile(
     r"(?i)^(?:(?:yes|approve[ds]?|confirm)\s*[,:]?\s*)?"
     r"(?:force[- ])?(?:delete|remove|deletion|removal|deleting|removing)\b"
 )
+#: Words a path-less delete pick may carry after its verb (SEC-R3-B2): which
+#: of the question's paths it means, said only with quantifiers and the set
+#: descriptions agents write in cleanup asks. Parenthesised text (a size,
+#: "(~17.3 GiB)") is dropped first. Anything else fails closed.
+_PICK_PLURAL = frozenset({"all", "both", "every", "each", "everything", "them", "these", "those"})
+_PICK_SET_WORDS = _PICK_PLURAL | frozenset(
+    {
+        "the",
+        "of",
+        "and",
+        "it",
+        "this",
+        "that",
+        "listed",
+        "above",
+        "named",
+        "clean",
+        "dirty",
+        "merged",
+        "closed",
+        "finished",
+        "old",
+        "stale",
+        "detached",
+        "worktree",
+        "worktrees",
+        "tree",
+        "trees",
+        "checkout",
+        "checkouts",
+        "clone",
+        "clones",
+        "folder",
+        "folders",
+        "dir",
+        "dirs",
+        "directory",
+        "directories",
+        "repo",
+        "repos",
+        "qa",
+        "bench",
+        "build",
+        "builds",
+        "output",
+        "outputs",
+        "cache",
+        "caches",
+        "ignored",
+        "file",
+        "files",
+    }
+)
 #: A bare yes; only consent with an imperative delete question.
 _BARE_YES = re.compile(r"(?i)(?:yes|approve|approved|confirm|go ahead)[.! ]*")
 _DELETE_QUESTION = re.compile(r"(?i)^(?:delete|remove)\s+")
@@ -1365,26 +1418,43 @@ def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
             # a bare yes) refers back to the paths its question lists.
             if names(words.firm):
                 return True
-            # A pick names some OTHER path when it carries a path-shaped word
-            # that stands on its own (not the tail of "merged/closed", which
-            # the path reader would read as "/closed") and is either listed by
-            # the question or exists on disk: then it chose that, not this.
-            # A size such as "~17.3 GiB" is neither listed nor on disk.
-            listed = {
-                prov._expand_word(word, home, cwd)
-                for word, _ in prov._path_readings(prov._expand_prose_braces(question))
-            }
+            # A pick that carries ANY stand-alone path word other than this
+            # path narrowed the question ("only <repo>/.worktrees/*/node_modules",
+            # "Delete ~/other/x"), so the question's list is not what it chose:
+            # fail closed (review SEC-R2-B2, QA Q-R3-1), globs and non-existent
+            # paths included. A path this pick names itself was accepted just
+            # above. Ignored: the tail of prose the path reader splits
+            # ("merged/closed" reads as "/closed"; not stand-alone) and words
+            # that do not expand to a path at all ("~17.3 GiB": ``None``).
             pick_text = prov._expand_prose_braces(label)
             pick_words = [
                 m.group(1).rstrip("/.:?!,")
                 for m in prov._PATHISH.finditer(pick_text)
                 if m.start(1) == 0 or not pick_text[m.start(1) - 1].isalnum()
             ]
-            pick_targets = [prov._expand_word(word, home, cwd) for word in pick_words if word]
-            # ``_expand_word`` is ``None`` for an unexpandable word ("~17.3").
-            if any(t is not None and (t in listed or os.path.lexists(t)) for t in pick_targets):
+            if any(word and prov._expand_word(word, home, cwd) is not None for word in pick_words):
                 continue
-            if names(question):
+            # Review SEC-R3-B2: a pick that names no path must still say WHICH
+            # of the listed paths it means. Its words after the verb must come
+            # from a closed vocabulary of quantifiers and set descriptors (an
+            # unanchored "x", "other/x", "$HOME/…" or "the second one" is not
+            # in it), and it covers the question's whole list only through a
+            # plural quantifier ("all 33 …", "them", "both") or a bare yes to
+            # an imperative "Delete …?"; otherwise only a single-path question.
+            listed = {
+                t
+                for word, _ in prov._path_readings(question)
+                if (t := prov._expand_word(word, home, cwd)) is not None
+            }
+            if label_delete:
+                rest = re.sub(r"\([^)]*\)", " ", label[label_delete.end() :])
+                rest_words = re.findall(r"[A-Za-z]+", rest.replace("/", " "))
+                if any(w.lower() not in _PICK_SET_WORDS for w in rest_words):
+                    continue
+                plural = any(w.lower() in _PICK_PLURAL for w in rest_words)
+            else:
+                plural = True  # a bare yes to "Delete <list>?" takes the list
+            if (plural or len(listed) == 1) and names(question):
                 return True
     except Exception:  # noqa: BLE001 — unreadable or malformed ask is never consent
         logger.debug("guardrail: deletion approval unreadable", exc_info=True)
