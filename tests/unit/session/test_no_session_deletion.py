@@ -73,6 +73,21 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
+        "local_operator/network/file_release_coordinator.py::FileReleaseCoordinator._write",
+        "os.replace",
+        "Only state.json/initialized.json in the no-follow owner-domain directory: supplied "
+        "dir-fd must match a fresh validated domain open; source is its O_EXCL regular "
+        "single-link UUID stage, destination metadata rejects directories/symlinks. No session "
+        "path accepted; regular-file rename also refuses a raced directory destination.",
+    ),
+    (
+        "local_operator/network/file_release_coordinator.py::FileReleaseCoordinator._write",
+        "os.unlink",
+        "Only this call's UUID .state.json/.initialized.json stage basename relative to "
+        "the freshly identity-checked owner-domain dir-fd, after successful O_EXCL creation; "
+        "never accepts a session path, and unlink refuses even a substituted directory.",
+    ),
+    (
         "local_operator/remote_files/cache.py::evict",
         "os.unlink",
         "Removes only 32-hex digest blobs/sidecars relative to a held cache/remote-files "

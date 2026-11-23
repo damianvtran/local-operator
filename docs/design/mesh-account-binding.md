@@ -349,6 +349,53 @@ returns a local hit before any peer fetch
 That existing local-copy path is not a grant to request fresh owner bytes and
 must not be turned into a mandatory mesh round trip by this proposal.
 
+### IMPLEMENTATION-STATUS: dormant owner-wide coordinator prerequisite
+
+`network/file_release_coordinator.py` now supplies default-OFF, Linux-only durable
+negative coordination mechanics, with no runtime consumer, switch, or installer.
+OS-account home plus canonical existing anchor-path spelling chooses one domain,
+independent of HOME/XDG/profile and anchor key content. This is location, **not
+account proof or new authority**. An explicit never-used initializer creates its
+private witness, stable lock and state; reads never initialize, repair or clear
+missing/corrupt/pending state. Distinct overlapping transactions survive process
+exit, with no PID/time/profile/key-rotation reset or new retention policy.
+
+A successful begin acknowledges pending only after file/parent fsync and exact
+readback, before any affected effect/prompt. External publication and independent
+outcome verification stay outside the innermost coordinator lock. Finish may
+remove only its exact transaction after that verification, never on a failed or
+unknown outcome or from a generic finally. Rename is the visibility linearization
+point, not the acknowledgement: an uncertain call latches its handle negative.
+The closed outcome names are `finished`, `denied`, and `indeterminate`;
+indeterminate is never success or a retry token, and its original call/handle
+cannot be upgraded by a later read. Begin binds an exact external operation key
+and boundary/profile key. Completion durably binds those keys, domain
+incarnation, exact transaction and the independently verified outcome SHA256 to
+its new revision. A fresh read-only inspection can recognize only that **exact**
+committed fact; another effect/profile/transaction/fingerprint or absent match
+refuses. It never re-executes an effect or changes state. A verified completion
+already published before a final sync/readback/ack failure may be found committed
+after restart; this is not recovery or permission, and the pre-begin receipt
+remains invalid. An uncommitted failed begin permits no effect,
+not an impossible promise to durably poison unchanged state. Partial/missing or
+ambiguous state refuses. Owner-private integrity/coherent all-state rollback,
+not hardware anti-rollback, remains the stated trust boundary.
+
+**All four integration limits remain:** no actual PeerLink queue/handshake/close
+handoff proof; no exhaustive real-mutator participation/source closure; no
+production concurrent reader-close ownership proof; no macOS/Windows proof.
+Raw storage/process/TCP tests are not the parked actual-PeerLink proof. A guarded
+body permits at most one nonblocking emission, never source reads, external locks,
+audit fsync, prompts, presence checks, socket readiness waits or sendall. No
+production emitter uses this boundary, so no exhaustive fence is claimed.
+
+The owner-wide coordination root is **managed control state, never eligible
+outside-PAD content**. Future activation must integrate the existing central
+managed-root/config exclusion (reuse S1 protection, not a parallel denylist),
+besides complete authority/audit verification and participation. This dormant
+prerequisite adds no serving path and cannot create production state by default.
+Current strict source eligibility and C/outside-PAD serving remain unchanged/OFF.
+
 ### Dormant B1 implementation boundary
 
 `network/mentioned_file_read.py` supplies only the owner-process audit → snapshot
