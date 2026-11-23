@@ -8305,6 +8305,24 @@ def _offload(
     )
     if blocked is not None:
         return blocked
+    # Read the authenticated hello/challenge advert on the very link that will
+    # carry the invite, not pairing or member records: reconnecting (including
+    # after a downgrade) gets a new handshake, so no old yes carries forward.
+    # net_definitions state is admin-gated; reading it here would impose admin
+    # on a move-authorized peer. Neither authorization check is changed.
+    # Silence is not consent: no advert on this link fails closed. Admission
+    # proves "cannot participate" without the advert; the wait proves "not
+    # credited" without the matching echo. Neither stands in for the other.
+    from local_operator.network.wire import SESSION_MOVE_ATTEMPT_V1
+
+    if SESSION_MOVE_ATTEMPT_V1 not in link.capabilities:
+        return _move_refusal(
+            session_id,
+            "peer_cannot_confirm_attempts",
+            f"{target_name or target_device} does not advertise move attempt token support. "
+            "Upgrade that peer to a version that advertises move attempt token support, "
+            "or move the session to a device that advertises support.",
+        )
     # NOTHING IS APPLIED ON THE DESTINATION BEFORE THIS INVITE (review round 4,
     # R4-2). The invite is not authority to install anything there — not roles or
     # teams, and not the standing-instructions singleton either: "the empty
@@ -8368,8 +8386,8 @@ def _offload(
                 # THE ATTEMPT THIS INVITE BELONGS TO (R4-1), echoed back on any
                 # refusal this move produces: without it the owner can only guess
                 # which attempt a sentence answers, and guessing wrong ends a fresh
-                # attempt with an old refusal. Absent from an older peer, which
-                # reads as "no token" below, never as a refusal.
+                # attempt with an old refusal. The live advert was required at
+                # admission; only the matching echo can confirm this attempt.
                 "attempt": attempt,
                 # THE OWNER'S WAIT TRAVELS WITH THE INVITE: the re-probe happens
                 # where the busy answer is produced (the destination's loop), so

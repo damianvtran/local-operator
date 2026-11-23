@@ -565,6 +565,104 @@ def test_an_offload_to_a_peer_that_cannot_move_is_refused_before_the_invite(
     assert (server_b.root / "sessions" / SESSION).is_dir()
 
 
+@pytest.mark.parametrize("peer_reply", ["no-advert", "no-echo", "correct-echo"])
+def test_offload_admission_and_wait_require_different_peer_evidence(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, peer_reply: str
+) -> None:
+    from local_operator.network.wire import SESSION_MOVE_ATTEMPT_V1
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    source = _owned_session(server_a)
+    request = relay.PeerLink.request
+    send = relay.PeerLink.send
+    invite_frames: list[dict[str, Any]] = []
+    sent_invites: list[int] = []
+    done_frames: list[dict[str, Any]] = []
+
+    def send_recorded(link: relay.PeerLink, frame: dict[str, Any], **kwargs: Any) -> bool:
+        if (
+            link.server is server_a
+            and frame.get("op") == "net_session_move"
+            and frame.get("phase") == "invite"
+        ):
+            sent_invites.append(frame["attempt"])
+        return send(link, frame, **kwargs)
+
+    def record(
+        link: relay.PeerLink, frame: dict[str, Any], **kwargs: Any
+    ) -> dict[str, Any] | None:
+        if frame.get("op") == "net_session_move":
+            if link.server is server_a and frame.get("phase") == "invite":
+                invite_frames.append(dict(frame))
+                if peer_reply == "no-echo":
+                    assert SESSION_MOVE_ATTEMPT_V1 in link.capabilities
+                    # An inert ack: no transfer and no completion evidence follow it.
+                    return {"op": "ack", "detail": {"result": "accepted"}}
+            if link.server is server_b and frame.get("phase") == "done":
+                done_frames.append(dict(frame))
+        return request(link, frame, **kwargs)
+
+    monkeypatch.setattr(relay.PeerLink, "request", record)
+    monkeypatch.setattr(relay.PeerLink, "send", send_recorded)
+    if peer_reply == "no-echo":
+        monkeypatch.setattr(mobility, "move_bound_s", lambda *_a, **_k: 0.0)
+
+    def offload() -> dict[str, Any]:
+        return _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+    if peer_reply == "no-advert":
+        link_for_move = mobility._link_for_move
+
+        def assert_refusal(*, empty_advert: bool) -> None:
+            with monkeypatch.context() as advertised:
+
+                def read_link(
+                    server: relay.RelayServer, device_id: str, label: str
+                ) -> relay.PeerLink:
+                    link = link_for_move(server, device_id, label)
+                    # Replace only the observed advert; grants and invite handling are real.
+                    caps = (
+                        frozenset()
+                        if empty_advert
+                        else link.capabilities - {SESSION_MOVE_ATTEMPT_V1}
+                    )
+                    advertised.setattr(link, "capabilities", caps)
+                    return link
+
+                advertised.setattr(mobility, "_link_for_move", read_link)
+                result = offload()
+            assert not result["ok"] and not result["changed"], result
+            assert result["code"] == "peer_cannot_confirm_attempts", result
+            assert "Upgrade that peer to a version that advertises move attempt token support" in (
+                result["message"]
+            )
+            assert "or move the session to a device that advertises support" in result["message"]
+            assert len(sent_invites) == 0, sent_invites
+            assert len(invite_frames) == 0, invite_frames
+
+        assert_refusal(empty_advert=False)
+        assert_refusal(empty_advert=True)
+        assert source.is_dir()
+        return
+
+    result = offload()
+    assert len(invite_frames) == 1, (invite_frames, result)
+    token = invite_frames[0]["attempt"]
+    assert token > 0
+    if peer_reply == "no-echo":
+        assert not result["ok"] and not result["changed"], result
+        assert result["code"] == "move_attempt_unconfirmed", result
+        assert done_frames == []
+        assert source.is_dir()
+        assert not (server_b.root / "sessions" / SESSION).exists()
+    else:
+        assert result["ok"], result
+        assert sent_invites == [token]
+        assert [frame.get("attempt") for frame in done_frames] == [token]
+        assert (server_b.root / "sessions" / SESSION).is_dir()
+
+
 def test_an_offload_carries_the_sessions_unattended_authority_on_the_invite(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
