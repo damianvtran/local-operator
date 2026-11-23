@@ -3337,6 +3337,7 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
     ("path", "selected"),
     (
         ("tests/unit/network/test_credentials_private_paths.py", True),
+        ("tests/unit/network/test_mobility_windows.py", True),
         ("tests/unit/conftest.py", True),
         ("tests/unit/network/conftest.py", True),
         ("tests/unit/network/test_credential_inherit.py", True),

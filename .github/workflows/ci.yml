@@ -981,8 +981,8 @@ jobs:
       !cancelled() &&
       needs.changes.outputs.windows != 'false'
     # Canonical containment must use native Windows drive/junction semantics,
-    # not a POSIX test with os.name mocked. Keep this bounded to the HTTP/import
-    # contract rather than claiming the complete interactive suite is portable.
+    # not a POSIX test with os.name mocked. Run selected boundary tests rather
+    # than claiming the complete interactive suite is portable.
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -1001,7 +1001,7 @@ jobs:
           $env:USERPROFILE = $env:HOME
           $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
           New-Item -ItemType Directory -Force $env:HOME | Out-Null
-          python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py tests/unit/network/test_credentials_private_paths.py::test_missing_root_creates_only_leaf_and_missing_parent_refuses tests/unit/network/test_credentials_private_paths.py::test_public_writer_preserves_existing_root_and_ancestors tests/unit/network/test_credentials_private_paths.py::test_two_process_lock_retains_inode_and_actual_timeout -n0 -q
+          python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py tests/unit/network/test_credentials_private_paths.py::test_missing_root_creates_only_leaf_and_missing_parent_refuses tests/unit/network/test_credentials_private_paths.py::test_public_writer_preserves_existing_root_and_ancestors tests/unit/network/test_credentials_private_paths.py::test_two_process_lock_retains_inode_and_actual_timeout tests/unit/network/test_mobility_windows.py -n0 -q
 
       # The Team Bridge receiver is cross-platform (Task Scheduler on Windows),
       # and its Windows arm has properties a POSIX host cannot answer: the
