@@ -85,5 +85,19 @@
   "relay.asks.card.progress_tally": "Đã trả lời hoặc bỏ qua {answered} trên {total} câu hỏi",
   "relay.asks.card.progress_pick_or_type": "Chọn một lựa chọn hoặc tự nhập câu trả lời để gửi.",
   "relay.asks.card.progress_type": "Nhập câu trả lời hoặc bỏ qua câu hỏi để gửi.",
-  "relay.asks.card.other_kept": "Văn bản của bạn được giữ lại, chưa gửi"
+  "relay.asks.card.other_kept": "Văn bản của bạn được giữ lại, chưa gửi",
+  "relay.asks.id.copy_label": "Sao chép id câu hỏi {id}",
+  "relay.asks.id.copied": "Đã sao chép",
+  "relay.asks.id.copied_named": "Đã sao chép {id}",
+  "relay.asks.id.copy_failed": "Không sao chép được — id đã được chọn; hãy sao chép từ đó",
+  "relay.asks.chip.open": "đang mở",
+  "relay.asks.chip.answered": "đã trả lời",
+  "relay.asks.chip.declined": "đã từ chối",
+  "relay.asks.chip.timed_out": "quá hạn",
+  "relay.asks.chip.late": "trả lời muộn",
+  "relay.asks.chip.dismissed": "đã bỏ qua",
+  "relay.asks.chip.withdrawn": "đã rút lại",
+  "relay.asks.chip.expired": "đã hết hạn",
+  "relay.asks.chip.label": "Câu hỏi {id}, {state}: {question}. Kích hoạt để xem.",
+  "relay.asks.chip.label_bare": "Câu hỏi {id}, {state}. Kích hoạt để xem."
 }

@@ -85,5 +85,19 @@
   "relay.asks.card.progress_tally": "{answered} sur {total} questions répondues ou passées",
   "relay.asks.card.progress_pick_or_type": "Choisissez une option ou saisissez votre propre réponse pour envoyer.",
   "relay.asks.card.progress_type": "Saisissez une réponse ou passez la question pour envoyer.",
-  "relay.asks.card.other_kept": "Votre texte est conservé, non envoyé"
+  "relay.asks.card.other_kept": "Votre texte est conservé, non envoyé",
+  "relay.asks.id.copy_label": "Copier l'identifiant de la question {id}",
+  "relay.asks.id.copied": "Copié",
+  "relay.asks.id.copied_named": "Copié {id}",
+  "relay.asks.id.copy_failed": "Copie impossible — l'identifiant est sélectionné ; copiez-le depuis là",
+  "relay.asks.chip.open": "ouverte",
+  "relay.asks.chip.answered": "répondue",
+  "relay.asks.chip.declined": "refusée",
+  "relay.asks.chip.timed_out": "délai dépassé",
+  "relay.asks.chip.late": "en retard",
+  "relay.asks.chip.dismissed": "écartée",
+  "relay.asks.chip.withdrawn": "retirée",
+  "relay.asks.chip.expired": "expirée",
+  "relay.asks.chip.label": "Question {id}, {state} : {question}. Activez pour l'afficher.",
+  "relay.asks.chip.label_bare": "Question {id}, {state}. Activez pour l'afficher."
 }

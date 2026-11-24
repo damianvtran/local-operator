@@ -85,5 +85,19 @@
   "relay.asks.card.progress_tally": "已回答或跳过 {answered}/{total} 个问题",
   "relay.asks.card.progress_pick_or_type": "选择一个选项，或输入你自己的回答后发送。",
   "relay.asks.card.progress_type": "输入回答，或跳过该问题后发送。",
-  "relay.asks.card.other_kept": "你的文字已保留，尚未发送"
+  "relay.asks.card.other_kept": "你的文字已保留，尚未发送",
+  "relay.asks.id.copy_label": "复制问题 ID {id}",
+  "relay.asks.id.copied": "已复制",
+  "relay.asks.id.copied_named": "已复制 {id}",
+  "relay.asks.id.copy_failed": "无法复制——ID 已选中，请在那里复制",
+  "relay.asks.chip.open": "待回答",
+  "relay.asks.chip.answered": "已回答",
+  "relay.asks.chip.declined": "已拒绝",
+  "relay.asks.chip.timed_out": "已超时",
+  "relay.asks.chip.late": "迟答",
+  "relay.asks.chip.dismissed": "已忽略",
+  "relay.asks.chip.withdrawn": "已撤回",
+  "relay.asks.chip.expired": "已过期",
+  "relay.asks.chip.label": "问题 {id}，{state}：{question}。激活以显示。",
+  "relay.asks.chip.label_bare": "问题 {id}，{state}。激活以显示。"
 }

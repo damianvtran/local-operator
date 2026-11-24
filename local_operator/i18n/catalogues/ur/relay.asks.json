@@ -85,5 +85,19 @@
   "relay.asks.card.progress_tally": "{answered} سوالات کے جواب دیے گئے یا چھوڑے گئے (کل {total})",
   "relay.asks.card.progress_pick_or_type": "بھیجنے کے لیے کوئی آپشن چنیں یا اپنا جواب لکھیں۔",
   "relay.asks.card.progress_type": "بھیجنے کے لیے جواب لکھیں یا سوال چھوڑ دیں۔",
-  "relay.asks.card.other_kept": "آپ کا متن محفوظ ہے، بھیجا نہیں گیا"
+  "relay.asks.card.other_kept": "آپ کا متن محفوظ ہے، بھیجا نہیں گیا",
+  "relay.asks.id.copy_label": "سوال کی شناخت {id} نقل کریں",
+  "relay.asks.id.copied": "نقل ہو گیا",
+  "relay.asks.id.copied_named": "نقل ہو گیا {id}",
+  "relay.asks.id.copy_failed": "نقل نہیں ہو سکا — شناخت منتخب ہے؛ وہیں سے نقل کریں",
+  "relay.asks.chip.open": "کھلا",
+  "relay.asks.chip.answered": "جواب دیا گیا",
+  "relay.asks.chip.declined": "مسترد",
+  "relay.asks.chip.timed_out": "وقت ختم",
+  "relay.asks.chip.late": "تاخیر سے",
+  "relay.asks.chip.dismissed": "نظر انداز",
+  "relay.asks.chip.withdrawn": "واپس لیا گیا",
+  "relay.asks.chip.expired": "میعاد ختم",
+  "relay.asks.chip.label": "سوال {id}، {state}: {question}۔ دکھانے کے لیے فعال کریں۔",
+  "relay.asks.chip.label_bare": "سوال {id}، {state}۔ دکھانے کے لیے فعال کریں۔"
 }
