@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_operator.i18n.duration_message import format_duration as _format_duration
 from local_operator.i18n.messages import Msg
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 from local_operator.session import temporary
@@ -241,7 +242,7 @@ class CatalogEntry:
 
     @property
     def activity_key(self) -> tuple[int, float, str]:
-        """``(active_first, -mtime, id)`` -- the SIDEBAR HEAD's own order.
+        """``(running_first, -mtime, id)`` -- the SIDEBAR HEAD's own order.
 
         WHY A SECOND KEY, and its scope. The desktop sidebar's contract is a
         time-binned list: its sections partition by the ACTIVITY clock, its
@@ -252,9 +253,38 @@ class CatalogEntry:
         scheduled conversations the two disagree in a way a reader feels: the
         wake band fills the first page, and the conversation the reader JUST
         USED falls outside it entirely. This key keeps the membership rule the
-        sidebar actually needs: a row that needs the reader (``active`` --
-        pending, unseen, or holding a live runtime) always fits, and everything
-        else is as recent as its own last movement.
+        sidebar actually needs: work in progress (:attr:`running`) always
+        fits, and everything else -- unread completions and attached terminals
+        included -- is as recent as its own last movement.
+
+        WHY ONLY ``running`` LEADS, not ``active`` (v3; local-operator-ui#2069
+        QA finding Q3). The v2 key led with every ``active`` row -- pending,
+        UNREAD, or holding ANY live runtime -- and paged in that order. On a
+        store with more active rows than ``limit`` (the operator's: mostly
+        unread completions, some days old) page 1 held no idle row at all, so
+        the sidebar drew week-old unread chats while today's idle chats were
+        still unloaded, and "Show more" then inserted NEWER rows ABOVE the
+        ones already drawn -- local and remote rows looked un-intercalated
+        because one population had been pushed past the page edge. Narrowing
+        the lead to ``running`` loses nothing, and that is the constraint any
+        future edit here must keep:
+
+        * every running row is ALREADY appended to the first page as an extra
+          for every order (``catalogue_page``'s below-the-window extras read
+          ``entry.running``, never the key), so leading with it is about
+          drawn order, not membership;
+        * the renderer has no Active section -- it lifts running rows and
+          bins everything else by the activity clock -- so an unread or
+          attached row is drawn in its time bin wherever the page puts it,
+          and only the page CUT was ever decided by ``active``;
+        * the census (``counts.active``) is taken BEFORE the sort, so badge
+          counts are identical under either key.
+
+        ``running`` (status code OR live background work) rather than the
+        bare :data:`RUNNING_STATUS_CODES` test, so the key and the extras rule
+        can never disagree about which rows are running. The cursor version
+        moved 2 -> 3 with this change (:data:`CURSOR_VERSIONS`): a v2 position
+        is not a position in this order.
 
         A PROPERTY beside ``rank`` rather than a second ordering authority:
         both keys live on the catalogue entry, ``catalogue_page`` picks one per
@@ -265,7 +295,7 @@ class CatalogEntry:
         ``-created_at`` does in ``rank`` above (#800: the immutable ordering
         fact stays readable in the token, and the negation happens here).
         """
-        return (0 if self.active else 1, -self.row.mtime, self.id)
+        return (0 if self.running else 1, -self.row.mtime, self.id)
 
     @property
     def active(self) -> bool:
@@ -666,8 +696,9 @@ def status_duration(seconds: float) -> str:
     the unit letters are product copy inside a localized label, so an ASCII
     ``4m`` inside a French sentence was English leaking into a translated row
     (the operator's "no English anywhere" requirement). ``info.model`` stays
-    stdlib-only by contract and keeps its own ASCII spelling for ``/info``;
-    migrating that screen is a separate slice.
+    stdlib-only by contract and keeps its ASCII spelling for machine/CLI users.
+    The shared lightweight duration leaf owns the branch arithmetic; Info uses
+    its own callback and active locale without importing this heavy catalogue.
 
     CONSTRAINTS:
 
@@ -688,24 +719,7 @@ def status_duration(seconds: float) -> str:
     * Negative ages clamp to zero like the original; callers handle ``None``
       ("not measured") themselves — this never renders ``unknown``.
     """
-    from local_operator.i18n.keys import wire_session_status
-
-    total = int(max(0.0, seconds))
-    if total < 60:
-        return _terminal_label(wire_session_status.duration_seconds(count=total))
-    if total < 3600:
-        return _terminal_label(wire_session_status.duration_minutes(count=total // 60))
-    if total < 86400:
-        return _terminal_label(
-            wire_session_status.duration_hours_minutes(
-                hours=total // 3600, minutes=(total % 3600) // 60
-            )
-        )
-    return _terminal_label(
-        wire_session_status.duration_days_hours(
-            days=str(total // 86400), hours=(total % 86400) // 3600
-        )
-    )
+    return _format_duration(seconds, render=_terminal_label)
 
 
 def waiting_label(jobs: int, subagents: int = 0) -> str:
@@ -1063,9 +1077,10 @@ CURSOR_VERSION = 1
 #: minted under. ``rank`` is :attr:`CatalogEntry.rank` -- the default, and the
 #: only order that existed before the activity head. ``activity`` is
 #: :attr:`CatalogEntry.activity_key`, the desktop sidebar's membership rule
-#: (``sort=activity``): active rows first, then everything else
-#: newest-activity-first. The order rides the token because a position in one
-#: order is meaningless in the other, and the documented remedy for a token
+#: (``sort=activity``): running rows first, then everything else -- unread and
+#: attached rows included -- newest-activity-first. The order rides the token
+#: because a position in one order is meaningless in the other, and the
+#: documented remedy for a token
 #: that cannot be used -- a first page -- is exactly what a cross-order replay
 #: must get.
 CURSOR_ORDER_RANK = "rank"
@@ -1080,12 +1095,19 @@ CATALOGUE_SORTS: tuple[str, ...] = (CATALOGUE_SORT_ACTIVITY,)
 
 #: The token version per order. v1 is the shipped rank shape, kept
 #: byte-for-byte because a token an older build minted must keep resuming for a
-#: newer one; the activity key mints v2, which an older decoder -- refusing any
+#: newer one; the activity key mints v3, which an older decoder -- refusing any
 #: ``v`` it does not know -- answers as a first page instead of resuming the
 #: wrong order.
+#:
+#: v2 was the activity key that led with every ``active`` row; v3 leads with
+#: ``running`` rows only (local-operator-ui#2069, Q3). The two orders place
+#: unread and attached rows differently, so a v2 position resumed under v3
+#: would skip or repeat rows at the page edge. Retiring v2 makes the decoder
+#: answer it as ``cursor_missing`` -- the scope's first page, the documented
+#: remedy -- and the client re-reads from the top once after the upgrade.
 CURSOR_VERSIONS: dict[str, int] = {
     CURSOR_ORDER_RANK: CURSOR_VERSION,
-    CURSOR_ORDER_ACTIVITY: 2,
+    CURSOR_ORDER_ACTIVITY: 3,
 }
 
 #: The route refuses a longer token by name; stated here too, where it is minted.
@@ -2628,8 +2650,9 @@ def catalogue_page(
     ``sort`` NAMES THE ORDER THE PAGE IS TAKEN IN. ``""`` is ``rank`` --
     byte-for-byte the listing every caller read before this parameter existed --
     and ``"activity"`` is :attr:`CatalogEntry.activity_key`, the desktop
-    sidebar's head order: rows that need the reader first (``active``), then
-    everything else newest-activity-first, so the conversations a reader has
+    sidebar's head order: work in progress first (``running``), then
+    everything else -- unread completions and attached terminals included --
+    newest-activity-first, so the conversations a reader has
     just used stay inside the page on a store whose cold population a wake band
     would otherwise fill. IT IS DELIBERATELY NOT A SECOND AUTHORITY over the
     rank: both keys live on the entry (one property each), this function picks
@@ -2773,8 +2796,9 @@ def catalogue_page(
         # running row exists to fetch. Appended here instead, below the page and
         # in the page's own order, so the guarantee holds for whatever order
         # ``ranked`` is in force -- this rule reads the rows, never the sort key
-        # (see #2527, the complementary activity-sort change, which still cuts
-        # when the active set alone exceeds ``limit``).
+        # (see #2527, the complementary activity-sort change; since its v3 key
+        # leads with running rows only, these extras are what keep a running
+        # row on page 1 when the running set alone exceeds ``limit``).
         #
         # THE PINS ARE STILL THE HEAD ANSWER'S ALONE. A scoped answer cannot
         # speak for the pinned set -- the client gates its pin facts on the head

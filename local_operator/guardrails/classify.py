@@ -93,10 +93,11 @@ class RankedTarget:
     shown: str = ""
     cleanup_hold: bool = False
     #: Which preservation condition a ``cleanup_hold`` failed (``HOLD_*`` below);
-    #: empty = the general hold. Display only: ``cleanup_hold_text`` picks its
-    #: guidance from it so an ignored-files hold is never worded like the
-    #: unpushed-work one. Rank and branch never read it.
+    #: empty = the general hold. Only an exact verified ask can lift the
+    #: ignored-only condition; other preservation holds remain unconditional.
     hold_conditions: tuple[str, ...] = ()
+    #: A lifted ignored-only hold still needs the live-holder settlement check.
+    cleanup_consent: bool = False
 
     @property
     def path(self) -> str:
@@ -1477,7 +1478,12 @@ def _rank(
                     cleanup_hold=True,
                 )
             if plain_payload is not None:
-                inventory = plain_cleanup_ignored_inventory(path)
+                # Own trees (this session, its descendants, or an ancestor that
+                # delegated the cleanup: ``owned_record``'s family) may shed
+                # regenerable build output; a sibling's ``kin`` tree may not.
+                inventory = plain_cleanup_ignored_inventory(
+                    path, own_regenerable=own is not None and relation != "kin"
+                )
                 if inventory is None:
                     return RankedTarget(
                         target,

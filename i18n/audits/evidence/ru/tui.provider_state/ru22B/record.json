@@ -1,0 +1,96 @@
+{
+  "locale": "ru",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "audit_pass": "B",
+  "key_count": 5,
+  "source_audit_revision": "2b924d84f0e663302fd93a7b36411ee6035576fe",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "eb9e65295113",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "29d4fc18d1a7",
+    "actual_model_source": "Host [model switch] notice in this session: openai/gpt-6.1-sol, previously anthropic/claude-opus-5-5, provider failure: quota. No provider telemetry independently available.",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "qualification": "Native-fluent LLM lexical judgment, not human native-speaker review. Same reported fallback model as translator; independent session, not model-family independence."
+  },
+  "translator": {
+    "record_path": "i18n/audits/evidence/ru/tui.provider_state/ru22t/record.json",
+    "record_sha256": "4686ee5e50184d98d96d2441406b7d32e7ac07ae3a1e1cfe5983770c86999812",
+    "agent": "i18n-translator",
+    "session": "29d4fc18d1a7",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host [model switch] message: now running as openai/gpt-6.1-sol (was anthropic/claude-opus-5-5); provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "translation_method": "native LLM reasoning; no MT/API/service"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/tui.provider_state.json",
+      "sha256": "8536b96d908eb3f80192801d4444b283bf6a024668247f14a2ed7cb0ecf8558b"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/audit.log",
+      "sha256": "56f807a1b2d3ad56724090d0b27e0b46aaecbd160ec5fdc09960935562bba01e"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/directCLIledger-receipt.json",
+      "sha256": "da16c421bb0871f7820acd3c75d58fc138dcce93e8e2eca1084629b1d5e13466"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/ledger-dry-run.log",
+      "sha256": "4c4f55a03a642e996eb9e87bffc25cc0ecd9c55c3e4693b87822f6e7bb6d2649"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/report.md",
+      "sha256": "73da14b81e87c8ce9fe378dc66b0e82d63bcf41adc4de804565b8a6198d72309"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22B/script.py.txt",
+      "sha256": "57a09b2701c1e7db982122f6da42cd5029df74f0faed8b8eda6024aa70ac1487"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "notes_kind": "audit_notes_not_execution_log",
+  "actual_execution_log": "i18n/audits/evidence/ru/tui.provider_state/ru22B/audit.log",
+  "native_all_five_judgment": "i18n/audits/evidence/ru/tui.provider_state/ru22B/report.md",
+  "ledger": {
+    "mode": "dry-run only",
+    "exit_code": 0,
+    "expected_history_sha": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "applied": false
+  },
+  "scope_limits": [
+    "plain Rich diagnostics only",
+    "no styled/native font/grapheme shaping proof",
+    "no current app or namespace eligibility approval",
+    "no release clearance"
+  ],
+  "original_lost_evidence": false,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "current_bytes_match_audited_hashes": true
+}

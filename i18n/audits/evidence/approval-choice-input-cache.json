@@ -1,0 +1,104 @@
+{
+  "head": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "keys": [
+    "wire.settings.tool_approval_mode.choice.ask.label",
+    "wire.settings.tool_approval_mode.choice.auto.label"
+  ],
+  "records": [
+    {
+      "locale": "en",
+      "source_path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "whole_file_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+      "selected_canonical_sha256": "9914ac66bb51db26ab03ea0672af262adddbb62ef7cedcd8d6b0b6d4bd68de29",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "Ask",
+        "wire.settings.tool_approval_mode.choice.auto.label": "Automatic"
+      }
+    },
+    {
+      "locale": "zh-CN",
+      "source_path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "whole_file_sha256": "cba7d4afe5a3b22f229f3f31e8c3a7eb8dfcdc3aceb9562f78c07d76cfb4341b",
+      "selected_canonical_sha256": "528e62ca2b728e6ed06c2ebc9692c6c40bf4c8ee7b9f97f86556555fe04d11df",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "ask",
+        "wire.settings.tool_approval_mode.choice.auto.label": "auto"
+      }
+    },
+    {
+      "locale": "fr",
+      "source_path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+      "whole_file_sha256": "7067ac12bb803902e580de79671c11a134a6890a26b98f34610d4a1be9613076",
+      "selected_canonical_sha256": "b86281ff6fa8c5d681c71c7cba9af3fcc8159b519f99a8c872f6bb84a13abb4f",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "demander",
+        "wire.settings.tool_approval_mode.choice.auto.label": "auto"
+      }
+    },
+    {
+      "locale": "es",
+      "source_path": "local_operator/i18n/catalogues/es/wire.settings.json",
+      "whole_file_sha256": "69ea99a4a07d996963c9ac597b5f0a0a855d0fecd4660fbab776660061cdfb93",
+      "selected_canonical_sha256": "e59acb3dce14fe4f2caaedc57f8cf416ceeb4cd4b6b3a1d59538a8088902e29b",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "preguntar",
+        "wire.settings.tool_approval_mode.choice.auto.label": "auto"
+      }
+    },
+    {
+      "locale": "ru",
+      "source_path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+      "whole_file_sha256": "68a0809d4356416703208d407734abe6433ec1b7b6796d61b7a2706691b3a624",
+      "selected_canonical_sha256": "c6e9ee9ae8e23027e2e29588154c7e71e142a05f202428bc4da93a19d07c9bba",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "спрашивать",
+        "wire.settings.tool_approval_mode.choice.auto.label": "auto"
+      }
+    },
+    {
+      "locale": "vi",
+      "source_path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+      "whole_file_sha256": "df178c2af51d345e5692e2fe68ac3b069907548424efb5bda5b5dc01bcee95f2",
+      "selected_canonical_sha256": "fb2f03d6f71f93691856fd6c1d07e6432b1d30e8217d16f538945c879948f0db",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "hỏi trước",
+        "wire.settings.tool_approval_mode.choice.auto.label": "auto"
+      }
+    },
+    {
+      "locale": "hi",
+      "source_path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+      "whole_file_sha256": "6c4712d0a5a6edd1b2fee561f5ca66dcaf5916fe8ef356a27ee20100de31da0d",
+      "selected_canonical_sha256": "80494db52c30abe94b6ce0b5be2825072e9bbce5381a26d4d76046f9defbec5e",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "पूछें",
+        "wire.settings.tool_approval_mode.choice.auto.label": "auto"
+      }
+    },
+    {
+      "locale": "ur",
+      "source_path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "whole_file_sha256": "5b47f6cbefb5a6c485d44af0b40842c3e295ef72538bb30bb27bed55ba706931",
+      "selected_canonical_sha256": "528e62ca2b728e6ed06c2ebc9692c6c40bf4c8ee7b9f97f86556555fe04d11df",
+      "messages": {
+        "wire.settings.tool_approval_mode.choice.ask.label": "ask",
+        "wire.settings.tool_approval_mode.choice.auto.label": "auto"
+      }
+    }
+  ],
+  "contexts": {
+    "wire.settings.tool_approval_mode.choice.ask.label": {
+      "role": "approval mode dropdown choice label",
+      "tone": "concise, neutral, sentence case",
+      "note": "Human-facing name for the prompting mode, not the ask tool or a command. Translate naturally as a mode label; do not preserve the raw English enum token. Choice.value remains the machine value ask, while Choice.label is independently localized display copy. Ask mode prompts for write and command tools, not unconditionally for every tool call. Existing guardrail risk checks and mandatory human-approval requirements still apply in both modes. This label is neither authorization nor permission to execute a tool. Keep it compact; no ICU arguments. See settings_io.py's tool_approval_mode choices, harness/approval.py and guardrails/check.py."
+    },
+    "wire.settings.tool_approval_mode.choice.auto.label": {
+      "role": "approval mode dropdown choice label",
+      "tone": "concise, neutral, sentence case",
+      "note": "Human-facing name for the automatic tool-approval mode. Translate naturally as a mode label, not as an untranslated machine token; use an idiomatic local abbreviation only if natural. Choice.value remains the machine value auto, while Choice.label is independently localized display copy. Automatic does not mean every action is allowed: existing guardrail risk checks and mandatory human-approval requirements still apply, including person-only gates for account profile saves and community posts. Do not imply a guardrail bypass, unconditional approval, authorization or permission to execute a tool. Keep it compact; no ICU arguments. See settings_io.py's tool_approval_mode choices, harness/approval.py and guardrails/check.py."
+    }
+  },
+  "invariant": "All message values captured sequentially via read_public_copy; selected-map digests match pinned original catalogue subsets; no raw-source values substituted into tool captures. Metadata sidecar SHA verified. For authoring only, not audit approval."
+}

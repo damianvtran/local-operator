@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 import yaml
 
+from local_operator.harness.approval import ACCOUNT_PROFILE_GATE, COMMUNITY_POST_GATE
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.approval import ApprovalPolicy, ApprovalPrompt
@@ -639,6 +640,68 @@ async def test_the_dense_rail_paints_the_third_label_inside_the_card(config_dir:
         assert any("A.Allow all" in row for row in painted), painted
         await pilot.press("n")
         await asyncio.wait_for(pending, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate_name", [ACCOUNT_PROFILE_GATE, COMMUNITY_POST_GATE, "bash"])
+async def test_allow_consequence_for_person_only_and_ordinary_cards(
+    config_dir: Path, gate_name: str
+) -> None:
+    from local_operator.config import ConfigManager
+    from local_operator.tui.widgets.approval import PERSON_ONLY_CONSEQUENCE
+
+    ConfigManager(config_dir).set_config_value("tool_approval_mode", "ask")
+    assert PERSON_ONLY_CONSEQUENCE == "only you can approve this"
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        pending = asyncio.ensure_future(_gate(session)(gate_name, "Confirm this action"))
+        card = await _card(pilot, app)
+        expected = (
+            "run this call and ask again next time"
+            if gate_name == "bash"
+            else PERSON_ONLY_CONSEQUENCE
+        )
+        assert card._row_description(0) == expected
+        await pilot.press("n")
+        await asyncio.wait_for(pending, 2)
+
+
+@pytest.mark.asyncio
+async def test_auto_settings_description_renders_whole(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Headless pilots must never inherit a real workspace identity.
+    import os
+
+    from local_operator import settings_io
+    from local_operator.tui.widgets.settings_view import SettingsView
+    from tests.unit.tui.test_urdu_rtl_display import _select_setting
+
+    for key in tuple(os.environ):
+        if key.startswith("CMUX_"):
+            monkeypatch.delenv(key)
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 40)) as pilot:
+        await _boot(pilot, app)
+        app._open_settings_view()
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        _select_setting(view, "tool_approval_mode")
+        await pilot.press("enter")
+        await pilot.pause()
+        choice = next(
+            c for c in settings_io.BY_KEY["tool_approval_mode"].choices if c.value == "auto"
+        )
+        notes = [row for row in view._rows if row.kind == "note"]
+        assert " ".join(row.text for row in notes) == choice.description
+        assert all(not row.selectable for row in notes)
+        painted = " ".join(line.strip() for line in view.render_lines_for_test())
+        assert choice.description in painted
+        assert "account profile saves" in painted and "community posts" in painted
+        assert "…" not in " ".join(row.text for row in notes)
 
 
 @pytest.mark.asyncio

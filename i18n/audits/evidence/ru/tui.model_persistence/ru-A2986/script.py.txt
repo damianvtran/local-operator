@@ -1,0 +1,100 @@
+"""Independent A: scoped official checks and plain Rich diagnostics, not native UI proof."""
+import hashlib, json, os, re, sys, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+from rich.console import Console
+from rich.text import Text
+ROOT = Path(sys.argv[1]).resolve()
+from local_operator.i18n import catalogues as cat, runtime, text
+from local_operator.i18n.messages import Msg
+from scripts.i18n import check
+NS='tui.model_persistence'
+for mod, rel in [(cat,'local_operator/i18n/catalogues.py'),(runtime,'local_operator/i18n/runtime.py'),(check,'scripts/i18n/check.py'),(text,'local_operator/i18n/text.py')]:
+    assert Path(mod.__file__).resolve()==ROOT/rel
+    print('MODULE',mod.__file__)
+print('ISOLATION',os.environ['HOME'],os.environ['LOCAL_OPERATOR_CONFIG_DIR'],'CMUX count',sum(k.startswith('CMUX_') for k in os.environ))
+paths={loc:ROOT/f'local_operator/i18n/catalogues/{loc}/{NS}.json' for loc in ('en','ru')}
+paths['context']=ROOT/f'local_operator/i18n/catalogues/en/{NS}.context.json'
+def hashes(): return {k:hashlib.sha256(v.read_bytes()).hexdigest() for k,v in paths.items()}
+before=hashes(); print('BEFORE',json.dumps(before,sort_keys=True))
+assert before=={'en':'4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff','context':'b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc','ru':'9d08bddeee59461ae1a9f27de2839c39dc7b0cad17b6171e26fd7cde82946940'}
+data={loc:cat.load_catalogue(loc,NS) for loc in ('en','ru')}
+ctx=cat.context('en',NS)
+with patch.object(cat,'namespaces',return_value=(NS,)),patch.object(cat,'locales',return_value=('en','ru')):
+    problems=check.check_catalogues()
+print('OFFICIAL check.check_catalogues namespace=en/ru tui.model_persistence:',problems)
+assert not problems
+keys=[NS+'.'+s for s in ('persist','settings','saved','with_model')]
+assert list(data['en'])==list(data['ru'])==list(ctx)==keys
+for key in keys:
+    assert cat.context_entry_problem(ctx[key]) is None
+    assert runtime.message_arguments(data['en'][key])==runtime.message_arguments(data['ru'][key])
+    for loc in ('en','ru'):
+        value=data[loc][key]
+        assert unicodedata.normalize('NFC',value)==value
+        ast=runtime.parse_message(value)
+        assert not any(getattr(n,'kind',None) in ('plural','select') for n in ast)
+        assert not runtime.plural_selectors(value)
+        assert re.findall(r'`[^`]*`|</?[^>]+>',value)==[]
+        assert not any(unicodedata.bidirectional(c) in ('LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI') for c in value)
+for loc in ('en','ru'):
+    for suffix,token in [('persist','/model default'),('settings','/settings'),('saved','/model saved')]:
+        value=data[loc][NS+'.'+suffix]
+        assert value.count(token)==1 and runtime.message_arguments(value)==()
+        assert runtime.render_message(value,{},loc)==value
+    value=data[loc][NS+'.with_model']
+    assert value.count('{label}')==value.count('{routes}')==1
+    assert runtime.message_arguments(value)==(('label','simple'),('routes','simple'))
+print('PASS key_count=4 ordered; args identical simple label/routes once; zero plural/select; NFC; no markup/backticks/bidi; commands exact')
+# Missing key and missing argument counterfactuals through unchanged official rules.
+load=cat.load_catalogue
+for kind in ('missing_key','missing_arg'):
+    modified=dict(data['ru'])
+    if kind=='missing_key': modified.pop(keys[0])
+    else: modified[keys[3]]=modified[keys[3]].replace('{routes}','')
+    def loader(locale,namespace): return modified if locale=='ru' and namespace==NS else load(locale,namespace)
+    with patch.object(cat,'namespaces',return_value=(NS,)),patch.object(cat,'locales',return_value=('en','ru')),patch.object(cat,'load_catalogue',side_effect=loader):
+        errors=check.check_catalogues()
+    assert errors
+    print('NEGATIVE official',kind,errors)
+for loc in ('en','ru'):
+    for arg in ('label','routes'):
+        params={'label':'p/m','routes':'already localized'}; params.pop(arg)
+        try: runtime.render_message(data[loc][keys[3]],params,loc)
+        except runtime.MessageFormatError as e: print('NEGATIVE render',loc,arg,type(e).__name__,str(e))
+        else: raise AssertionError('missing argument accepted')
+# Production resolver resilience, injected source maps only; no eligibility changes.
+for loc in ('en','ru'):
+    def sources(root,namespace,locale): return data[locale]
+    with patch.object(text._locale,'eligible_locale',return_value=loc),patch.object(text,'_sources',side_effect=sources):
+        result=text.tr_record(NS)(Msg(NS+'.missing_control'))
+        assert result.text==NS+'.missing_control' and result.source_locale is None
+        print('NEGATIVE unknown-key resolver',loc,result)
+# Human-only pseudo expansion; literal command and ICU tokens are protected.
+protected=re.compile(r'/model default|/model saved|/settings|\{(?:label|routes)\}')
+def pseudo(value):
+    pieces=protected.split(value); tokens=protected.findall(value)
+    return ''.join((piece+('~'*len(piece)) if piece.strip() else piece)+(tokens[i] if i<len(tokens) else '') for i,piece in enumerate(pieces))
+for key in keys:
+    p=pseudo(data['en'][key]); assert protected.findall(p)==protected.findall(data['en'][key])
+    assert runtime.message_arguments(p)==runtime.message_arguments(data['en'][key])
+    rendered=runtime.render_message(p,{'label':'opaque/[id]-v1','routes':'LOCALIZED ROUTES'},'en')
+    print('PSEUDO',key,repr(rendered))
+# English same-code control FIRST; widths are diagnostics, not invented maxCells.
+for loc in ('en','ru'):
+    for state,suffixes in [('ordinary',('persist','saved','settings')),('missing-model',('persist','settings')),('hosting-deadend',('settings',))]:
+        routes=' · '.join(runtime.render_message(data[loc][NS+'.'+s],{},loc) for s in suffixes)
+        if state=='hosting-deadend': assert '/model' not in routes
+        for label in ('p/m','provider/opaque-model-2026-11-22-long-identity-v1'):
+            out=runtime.render_message(data[loc][keys[3]],{'label':label,'routes':routes},loc)
+            assert out.count(label)==out.count(routes)==1
+            print('RENDER',loc,state,repr(out))
+            for width in (80,100,120):
+                lines=Text(out).wrap(Console(width=width,color_system=None),width,overflow='fold')
+                assert all(line.cell_len<=width for line in lines)
+                fold=[token for token in ('/model default','/model saved','/settings') if token in out and not any(token in line.plain for line in lines)]
+                print('RICH',loc,state,len(label),width,'rows',len(lines),'cells',[line.cell_len for line in lines],'command_fold',fold,'last',repr(lines[-1].plain))
+        print('NO-LABEL route-only',loc,state,repr(routes))
+after=hashes(); assert before==after
+print('AFTER',json.dumps(after,sort_keys=True))
+print('PASS scoped mechanical/render/negative/pseudo checks. No global, styled NoticeBlock, transcript-family, native UI or RTL qualification claimed.')

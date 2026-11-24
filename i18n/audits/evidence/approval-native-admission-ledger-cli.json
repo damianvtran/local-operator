@@ -1,0 +1,251 @@
+{
+  "preflight": {
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "-c",
+      "import local_operator; from scripts.i18n import generate as g; print(local_operator.__file__); print(g._shipped_locales()); print(g.SECURITY_HELD_LOCALES)"
+    ],
+    "returncode": 0,
+    "stdout": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy/local_operator/__init__.py\n['en']\nfrozenset()\n",
+    "stderr": ""
+  },
+  "append_export_commands": [
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-zh-CN.json",
+        "--expected-history-sha",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "--dry-run"
+      ],
+      "returncode": 2,
+      "stdout": "",
+      "stderr": "ledger.py: stale expected history for zh-CN/wire.settings\n"
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-zh-CN.json",
+        "--expected-history-sha",
+        "8f16f1cfb5478ca9c0f0f131a6ce3ee8f446ec13c982fb34be41c3b70d062bf5",
+        "--dry-run"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/zh-CN/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-zh-CN.json",
+        "--expected-history-sha",
+        "8f16f1cfb5478ca9c0f0f131a6ce3ee8f446ec13c982fb34be41c3b70d062bf5",
+        "--apply"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/zh-CN/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-fr.json",
+        "--expected-history-sha",
+        "a2b055c64e40eb35c911aca2b07cac1ac28aae2f098fd70f700b24149ca24946",
+        "--dry-run"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/fr/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-fr.json",
+        "--expected-history-sha",
+        "a2b055c64e40eb35c911aca2b07cac1ac28aae2f098fd70f700b24149ca24946",
+        "--apply"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/fr/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-ru.json",
+        "--expected-history-sha",
+        "abdd1471d89c16749441f467650be6c297d19ff630550e0382fab115cac34e21",
+        "--dry-run"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/ru/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-ru.json",
+        "--expected-history-sha",
+        "abdd1471d89c16749441f467650be6c297d19ff630550e0382fab115cac34e21",
+        "--apply"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/ru/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-hi.json",
+        "--expected-history-sha",
+        "ef43672336f1f3fbfa5f6097e8d5cd11ff26c8d5e7d5b8c9ddfa4b86408400ff",
+        "--dry-run"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/hi/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-hi.json",
+        "--expected-history-sha",
+        "ef43672336f1f3fbfa5f6097e8d5cd11ff26c8d5e7d5b8c9ddfa4b86408400ff",
+        "--apply"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/hi/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-ur.json",
+        "--expected-history-sha",
+        "e310cb1856e66d93eeddf45cb2fa5bcd18febed63fb7ec84c33dbbd89b0d7bdf",
+        "--dry-run"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/ur/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-ur.json",
+        "--expected-history-sha",
+        "e310cb1856e66d93eeddf45cb2fa5bcd18febed63fb7ec84c33dbbd89b0d7bdf",
+        "--apply"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/ur/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-es.json",
+        "--expected-history-sha",
+        "c6188b0c8acff65af00b60f2f7bb41c3f499213ee1c98b500f335d47cade90b3",
+        "--dry-run"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/es/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-es.json",
+        "--expected-history-sha",
+        "c6188b0c8acff65af00b60f2f7bb41c3f499213ee1c98b500f335d47cade90b3",
+        "--apply"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/es/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-vi.json",
+        "--expected-history-sha",
+        "4d8b819b3620ec33a3aa3eea2fe02adec721017acec5ac321799a8f3cd798e7f",
+        "--dry-run"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/vi/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-vi.json",
+        "--expected-history-sha",
+        "4d8b819b3620ec33a3aa3eea2fe02adec721017acec5ac321799a8f3cd798e7f",
+        "--apply"
+      ],
+      "returncode": 0,
+      "stdout": "i18n/audit-history/vi/wire.settings.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Users/damian/local-operator/.venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "export",
+        "--output",
+        "/Users/damian/.local-operator/sessions/c792e32f4cbd/scratchpad/admission-current-ledger.json"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ]
+}

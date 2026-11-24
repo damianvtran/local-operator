@@ -3863,6 +3863,103 @@ def test_a_stored_session_peek_is_served_from_the_journal_and_stays_cold(
         link.close("test")
 
 
+def test_peer_peek_shapes_over_a_real_link(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exercise the actual CLI parser, relay, authorization and owner journal."""
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.network import cli as network_cli
+    from local_operator.network.peek import SESSION_PEEK_REPLY_BUDGET_BYTES
+
+    owner, viewer, host, port = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="read")
+    admitted = record.member(viewer.identity.device_id)
+    assert admitted is not None and set(admitted.capabilities) == {"list", "view"}
+    _viewer(viewer)
+    texts = ["opening brief", "audit needle", *["filler"] * 120, "audit needle (later)"]
+    texts.append("x" * SESSION_PEEK_REPLY_BUDGET_BYTES)
+    ids = _seed_journal(owner.root, SESSION, texts)
+    link = _dial_to(viewer, record, host, port)
+    try:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(viewer.root))
+        base = [
+            "network",
+            "sessions",
+            "--peer",
+            owner.identity.device_id,
+            "--peek",
+            SESSION,
+            "--json",
+        ]
+        parser = argparse.ArgumentParser()
+        network_cli.add_parser(parser.add_subparsers())
+
+        def ask(*flags: str) -> dict[str, Any]:
+            capsys.readouterr()
+            assert network_cli.main(parser.parse_args([*base, *flags])) == 0
+            return json.loads(capsys.readouterr().out)
+
+        head = ask("--head=2")
+        assert [step["body"] for step in head["window"]["steps"]] == texts[:2]
+        query = ask("--query=audit n[e]+dle", "--regex", "--steps=3")
+        window = query["window"]
+        assert (window["match_id"], window["match_count"], window["match_count_complete"]) == (
+            ids[1],
+            2,
+            True,
+        )
+        assert len(window["steps"]) == 3
+        fold = ask("--digest")["digest"]["text"]
+        assert "digest fold (not the full transcript)" in fold
+        assert len(fold.splitlines()) <= 10
+        assert [
+            row["state"] for row in owner.local_session_rows() if row["session_id"] == SESSION
+        ] == ["stored"]
+        print(f"read-only relay: head={texts[:2]!r}; {window['note']}; {fold.splitlines()[0]}")
+
+        # Numeric sender decoration must not hide a real hit; array-valued
+        # searchable text beyond the one-step window must still be skipped.
+        journal = owner.root / "sessions" / SESSION / "transcript.jsonl"
+        good_row = {
+            "id": "peer-hit",
+            "ts": 1_700_001_000,
+            "type": "message",
+            "payload": {
+                "kind": "custom",
+                "custom_type": PEER_MESSAGE_MESSAGE_TYPE,
+                "details": {"sender": {"pid": 27182}, "body": "real peer hit"},
+            },
+        }
+        bad_row = {
+            "id": "malformed-neighbor",
+            "ts": 1_700_001_001,
+            "type": "message",
+            "payload": {
+                "kind": "message",
+                "role": "user",
+                "content": [{"text": ["real peer hit"]}],
+            },
+        }
+        with journal.open("a", encoding="utf-8") as handle:
+            for row in (good_row, bad_row):
+                handle.write(json.dumps(row) + "\n")
+        window = ask("--query=real peer hit", "--steps=1")["window"]
+        assert [(step["heading"], step["body"]) for step in window["steps"]] == [
+            ("peer ← 27182", "real peer hit")
+        ]
+        assert (window["match_id"], window["match_count"], window["match_count_complete"]) == (
+            "peer-hit",
+            1,
+            False,
+        )
+        assert "1 unrenderable row skipped; count is a lower bound" in window["note"]
+        print(
+            f"read-only relay, PID and malformed neighbor: {window['steps'][0]}; {window['note']}"
+        )
+    finally:
+        link.close("test")
+
+
 def test_the_session_plane_listing_has_a_header_and_says_the_state_in_words(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

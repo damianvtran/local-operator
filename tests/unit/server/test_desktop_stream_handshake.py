@@ -98,6 +98,16 @@ def test_the_route_acquires_before_any_response_exists() -> None:
     _assert_handshake_order(ROUTE.read_text())
 
 
+def _subscribe_before_acquire(source: str) -> str:
+    handler = _events_handler(source)
+    # Match the assignment at the handler's indentation, not its keywords or
+    # a substring of a nested assignment that would produce invalid Python.
+    anchor = re.compile(r"^    context = (?:host\(request\)|pool)\.session\(", re.MULTILINE)
+    assert len(anchor.findall(handler)) == 1, "the control anchors on the route's real acquire"
+    inverted = anchor.sub(lambda match: "    early = bridge.subscribe()\n" + match[0], handler)
+    return source.replace(handler, inverted, 1)
+
+
 def test_the_ordering_assertion_catches_a_subscription_taken_first() -> None:
     """The instrument's failing direction, on the REAL handler.
 
@@ -105,10 +115,7 @@ def test_the_ordering_assertion_catches_a_subscription_taken_first() -> None:
     here the way a regression would invert it -- the subscribe taken before the
     acquire -- and the instrument must refuse it.
     """
-    source = ROUTE.read_text()
-    acquire_call = "    context = pool.session(session_id, read=True, allow_draft=True)\n"
-    assert source.count(acquire_call) == 1, "the control anchors on the route's real acquire"
-    inverted = source.replace(acquire_call, "    early = bridge.subscribe()\n" + acquire_call)
+    inverted = _subscribe_before_acquire(ROUTE.read_text())
     with pytest.raises(AssertionError, match="acquired before the subscription"):
         _assert_handshake_order(inverted)
 
@@ -133,8 +140,7 @@ def test_the_ordering_assertion_cannot_be_satisfied_from_another_route() -> None
     )
     events_decorator = '@router.get("/v1/desktop/sessions/{session_id}/events")'
     assert source.count(events_decorator) == 1
-    acquire_call = "    context = pool.session(session_id, read=True, allow_draft=True)\n"
-    inverted = source.replace(acquire_call, "    early = bridge.subscribe()\n" + acquire_call)
+    inverted = _subscribe_before_acquire(source)
     decoyed = inverted.replace(events_decorator, decoy + events_decorator)
 
     with pytest.raises(AssertionError, match="acquired before the subscription"):

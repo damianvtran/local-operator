@@ -1,0 +1,3655 @@
+{
+  "locale": "vi",
+  "namespace": "tui.info",
+  "source_sha256": "909a00c7f98b291863ae6508648ede30b3edddf868e5c0d84a23999666e3cdaf",
+  "translator": {
+    "agent": "info-translate-vi",
+    "session": "685380b18640",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "provider quota failure; identity source: translator mechanical receipt, independently hash-matched"
+  },
+  "auditor": {
+    "agent": "info-audit-vi (translation-auditor)",
+    "session": "20062c0682f3",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-21",
+    "fallback_from": "anthropic/claude-opus-5-5",
+    "fallback_reason": "provider quota failure; actual model-switch event in this transcript",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "Independent full277-key tui.info Vietnamese audit only. Four MINOR copy groups (7 keys), plus 28 cell-growth triage risks. No unresolved blocker/major. Not App QA/design/CI, native frame fit, full-surface localization or release clearance. Minor dispositions belong to manager’s single batched wave. No repo edits.",
+  "commit": "e9e6c3711149cba6899083eab019342d98d5fa55",
+  "base": "ea92d3c2faa72ef44c3590e5f5503c8b04281811",
+  "context_sha256": "905690aae095d0ec8fe0b36f6dfe92db05e9c6e3bfdbc0fe87577a37002b9d11",
+  "target_sha256": "a61a967b3abbd7250f4fc220d5a806957abb843a09633784165297f243fa3174",
+  "keys_read": 277,
+  "contexts_read": 277,
+  "reader": {
+    "product_copy": "All EN and VI277 maps read through read_public_copy, then cached losslessly in own scratch; never raw-read product catalogue prose.",
+    "context": "Whole sidecar refused at 200000-character size cap, not a guardrail. 24 sequential audited context reads in300s plus specific safety keys; parent explicitly authorized normal local JSON parsing of EXACT public English context sidecar only. All277 role/tone/note/width/placeholder entries reviewed through lossless dedup references. context-lossless-final-corrected.json decodes exactly to original object; canonical SHA256 bc9693e1f6a11f0d55fff0cf103846b24ce4bbe27fa61472104557168615342e. No product-copy alternate path used."
+  },
+  "mechanical": {
+    "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/isolated-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/isolated-home/config\" PATH=\"$PATH\" PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-info-readout TERM=xterm-256color /Users/damian/local-operator/.venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/audit_vi_mechanics.py\"",
+    "actual_output_file": "/Users/damian/.local-operator/sessions/20062c0682f3/scratchpad/vi-mechanical-command-output.txt",
+    "keys": 277,
+    "plural_nodes": 47,
+    "select_nodes": 23,
+    "renders": 1848,
+    "cldr": [
+      "other"
+    ],
+    "errors": [],
+    "ordered_args_and_types": "277/277 exact",
+    "machine_select_arms": "23/23 exact and all combinations exercised",
+    "count_rendered_in_plural_branches": "47/47 other branches nonempty and render own count",
+    "source_provenance": "1848/1848 production tr_record source_locale=vi and text==runtime; no English fallback",
+    "negative_controls": {
+      "missing_argument": "MessageFormatError",
+      "renamed_arg_detected": true,
+      "lost_count_detected": true,
+      "wrong_select_detected": true
+    },
+    "NFC": "277/277",
+    "manual_bidi_controls": 0,
+    "number_date_skeleton_nodes": 0
+  },
+  "glossary": {
+    "session": "phiên",
+    "agent": "tác nhân",
+    "subagent": "tác nhân con",
+    "trajectory": "luồng xử lý (short luồng): active processing flow, confirmed busy session turns plus RUNNING children, excluding queued/history; not the tool-trace glossary dấu vết.",
+    "runtime": "runtime / label Runtime / terse rt: explicit recorded vi style guide lines75–77; executing process context throughout, not blanket permission for English prose.",
+    "heartbeat": "No kept-English policy found; four prose keys flagged VI-01, proposed tín hiệu hoạt động. Not a raw heartbeat_age_s identifier.",
+    "retained": "đã kết thúc (còn lưu), short đã kết thúc, terse xong: terminal retained roster records, not successful completion or all-time history. Completed riêng đã hoàn tất; failed thất bại; cancelled đã hủy.",
+    "known_bound": "cận dưới plus unchanged bound interpolation; unknown chưa rõ/— is not numeric zero.",
+    "proper_names_and_technical_borrowings": [
+      "Python official language name",
+      "Git official technology name",
+      "PyPI package index proper name",
+      "wheel Python distribution format: gói wheel, artifact type not ordinary prose",
+      "MCP protocol acronym",
+      "ID/pid/tty technical identifiers/acronyms",
+      "cache explicit accepted borrowing",
+      "sys.path identifier",
+      "lop, lop-update, /info, /reload, /stop, --pid, --force exact commands/flags",
+      "esc/q/r/ctrl+r and INFO_COPY_KEY chords unchanged",
+      "dimension x separator is technical not English prose"
+    ],
+    "register": "bạn only where source addresses user; other pronouns omitted, sentence case and no exclamation, NFC Vietnamese; same terms across labels/export except intentionally shortened nominal labels."
+  },
+  "findings": [
+    {
+      "id": "VI-01",
+      "severity": "minor",
+      "keys": [
+        "tui.info.not_answering_clause.no_rows",
+        "tui.info.not_answering_clause.remedy_one",
+        "tui.info.not_answering_clause.remedy_many",
+        "tui.info.not_answering_clause.full"
+      ],
+      "current": {
+        "tui.info.not_answering_clause.no_rows": "{count, plural, other {# phiên không phản hồi; số liệu tính đến heartbeat gần nhất của từng phiên}}",
+        "tui.info.not_answering_clause.remedy_one": "'lop stop --pid {pid}' yêu cầu dừng và gửi tín hiệu nếu không phản hồi; '/stop {pid}' trên màn hình này cũng vậy. Nếu tiến trình chủ vẫn gửi heartbeat nhưng không phản hồi, 'lop stop --pid {pid} --force' dừng tiến trình bằng tín hiệu, bỏ lượt đang xử lý",
+        "tui.info.not_answering_clause.remedy_many": "Chạy 'lop stop --pid N' cho từng pid ở trên để yêu cầu dừng và gửi tín hiệu nếu không phản hồi; '/stop N' trên màn hình này cũng vậy. Nếu tiến trình chủ vẫn gửi heartbeat nhưng không phản hồi, 'lop stop --pid N --force' dừng tiến trình bằng tín hiệu, bỏ lượt đang xử lý",
+        "tui.info.not_answering_clause.full": "{count, plural, other {# phiên không phản hồi — heartbeat runtime gần nhất {age} trước (pid {pids}); số liệu tính đến heartbeat tương ứng. {remedy}}}"
+      },
+      "proposed": {
+        "tui.info.not_answering_clause.no_rows": "{count, plural, other {# phiên không phản hồi; số liệu tính đến tín hiệu hoạt động gần nhất của từng phiên}}",
+        "tui.info.not_answering_clause.remedy_one": "'lop stop --pid {pid}' yêu cầu dừng và gửi tín hiệu nếu không phản hồi; '/stop {pid}' trên màn hình này cũng vậy. Nếu tiến trình chủ vẫn gửi tín hiệu hoạt động nhưng không phản hồi, 'lop stop --pid {pid} --force' dừng tiến trình bằng tín hiệu, bỏ lượt đang xử lý",
+        "tui.info.not_answering_clause.remedy_many": "Chạy 'lop stop --pid N' cho từng pid ở trên để yêu cầu dừng và gửi tín hiệu nếu không phản hồi; '/stop N' trên màn hình này cũng vậy. Nếu tiến trình chủ vẫn gửi tín hiệu hoạt động nhưng không phản hồi, 'lop stop --pid N --force' dừng tiến trình bằng tín hiệu, bỏ lượt đang xử lý",
+        "tui.info.not_answering_clause.full": "{count, plural, other {# phiên không phản hồi — tín hiệu hoạt động gần nhất của runtime {age} trước (pid {pids}); số liệu tính đến tín hiệu tương ứng. {remedy}}}"
+      },
+      "reason": "Heartbeat here is ordinary explanatory prose about periodic runtime liveness, not a literal field/code. Unlike runtime, it has no recorded kept-English exception in the Vietnamese style guide; use Vietnamese consistently to satisfy this slice’s no-English-prose intent. The existing wording is technically intelligible, so this is minor, not a wrong stop/remedy path.",
+      "evidence": "Read style guide kept-English lists and full/no_rows/remedy source; direct caller local_operator/info/render.py:238-279. Production full render retains the unapproved English term twice."
+    },
+    {
+      "id": "VI-02",
+      "severity": "minor",
+      "keys": [
+        "tui.info.export.build_age"
+      ],
+      "current": {
+        "tui.info.export.build_age": "  thời gian từ dựng {build_age_s}"
+      },
+      "proposed": {
+        "tui.info.export.build_age": "  tuổi bản dựng     {build_age_s}"
+      },
+      "reason": "The label “thời gian từ dựng” omits the grammatical link and reads like a compressed word-for-word translation; “tuổi bản dựng” is a concise natural diagnostic label.",
+      "evidence": "Read source build_age field and its format_duration parameter; clipboard label is not width-constrained by original English padding."
+    },
+    {
+      "id": "VI-03",
+      "severity": "minor",
+      "keys": [
+        "tui.info.tree_lines.deeper"
+      ],
+      "current": {
+        "tui.info.tree_lines.deeper": "  + {deeper, plural, other {# ở tầng sâu hơn}}"
+      },
+      "proposed": {
+        "tui.info.tree_lines.deeper": "  + {deeper, plural, other {# tác nhân ở tầng sâu hơn}}"
+      },
+      "reason": "“# ở tầng sâu hơn” leaves the counted noun implicit in an awkward Vietnamese fragment; explicitly count agents so it cannot be misread as a number of levels. Existing wording does not literally claim depth=#, so this is readability clarification, not semantic MAJOR.",
+      "evidence": "AgentsInfo.deeper counts hidden nodes (model.py:376-378); direct build_export with deeper=7 renders “+ 7 ở tầng sâu hơn”, while max_depth remains a different field."
+    },
+    {
+      "id": "VI-04",
+      "severity": "minor",
+      "keys": [
+        "tui.info.latest.behind_short"
+      ],
+      "current": {
+        "tui.info.latest.behind_short": "chưa mới nhất"
+      },
+      "proposed": {
+        "tui.info.latest.behind_short": "bản cũ"
+      },
+      "reason": "“chưa mới nhất” reads as a clipped negation rather than a native status label; “bản cũ” says the same older-than-latest fact and reduces the short rung from 13 cells to 6.",
+      "evidence": "Compare latest.behind_full “cũ hơn {latest}”; independent rich.cells widths: English behind=6, target current=13; full/short source caller is version comparison, not cache staleness."
+    }
+  ],
+  "width_risks": [
+    {
+      "key": "tui.info.label.built",
+      "en_cells": 5,
+      "vi_cells": 14
+    },
+    {
+      "key": "tui.info.label.config_dir",
+      "en_cells": 10,
+      "vi_cells": 16
+    },
+    {
+      "key": "tui.info.label.agent_home",
+      "en_cells": 10,
+      "vi_cells": 20
+    },
+    {
+      "key": "tui.info.label.log_dir",
+      "en_cells": 7,
+      "vi_cells": 15
+    },
+    {
+      "key": "tui.info.label.terminal",
+      "en_cells": 8,
+      "vi_cells": 17
+    },
+    {
+      "key": "tui.info.label.mobile_relay",
+      "en_cells": 12,
+      "vi_cells": 19
+    },
+    {
+      "key": "tui.info.label.credentials",
+      "en_cells": 11,
+      "vi_cells": 18
+    },
+    {
+      "key": "tui.info.status.bound_held",
+      "en_cells": 10,
+      "vi_cells": 17
+    },
+    {
+      "key": "tui.info.install.source_wheel",
+      "en_cells": 10,
+      "vi_cells": 17
+    },
+    {
+      "key": "tui.info.latest.behind_short",
+      "en_cells": 6,
+      "vi_cells": 13
+    },
+    {
+      "key": "tui.info.kind_of_runtime.daemon_full",
+      "en_cells": 41,
+      "vi_cells": 63
+    },
+    {
+      "key": "tui.info.import_path.editable_short",
+      "en_cells": 17,
+      "vi_cells": 26
+    },
+    {
+      "key": "tui.info.kind.editable_short",
+      "en_cells": 22,
+      "vi_cells": 35
+    },
+    {
+      "key": "tui.info.kind.non_editable",
+      "en_cells": 12,
+      "vi_cells": 19
+    },
+    {
+      "key": "tui.info.redirect.short",
+      "en_cells": 17,
+      "vi_cells": 28
+    },
+    {
+      "key": "tui.info.sessions.summary_full",
+      "en_cells": 16,
+      "vi_cells": 30
+    },
+    {
+      "key": "tui.info.sessions.summary_short",
+      "en_cells": 6,
+      "vi_cells": 16
+    },
+    {
+      "key": "tui.info.agents.quiet_full",
+      "en_cells": 23,
+      "vi_cells": 36
+    },
+    {
+      "key": "tui.info.env.mcp_empty",
+      "en_cells": 15,
+      "vi_cells": 25
+    },
+    {
+      "key": "tui.info.env.mobile_healthy",
+      "en_cells": 7,
+      "vi_cells": 13
+    },
+    {
+      "key": "tui.info.env.mobile_up",
+      "en_cells": 2,
+      "vi_cells": 9
+    },
+    {
+      "key": "tui.info.env.credentials_empty",
+      "en_cells": 11,
+      "vi_cells": 17
+    },
+    {
+      "key": "tui.info.report.degraded_count",
+      "en_cells": 8,
+      "vi_cells": 15
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "en_cells": 12,
+      "vi_cells": 20
+    },
+    {
+      "key": "tui.info.export.tree_unreadable",
+      "en_cells": 29,
+      "vi_cells": 50
+    },
+    {
+      "key": "tui.info.state.starting",
+      "en_cells": 8,
+      "vi_cells": 14
+    },
+    {
+      "key": "tui.info.state.pausing",
+      "en_cells": 7,
+      "vi_cells": 13
+    },
+    {
+      "key": "tui.info.state.live",
+      "en_cells": 4,
+      "vi_cells": 14
+    }
+  ],
+  "width_scope": "All1848 rendered strings measured in terminal cells; 28 growth triage rows with >=1.5x and >=6-cell expansion. No source maxCells budget asserted. InfoPanel _Body dynamically measures translated label max+2; headers select full/short/terse by measured cells. Growth flags are MINOR risk needing App frame checks, never pixel approval or proven overflow.",
+  "not_run": [
+    "No unit suite, full guard, generation, dependency install, repo edit or commit",
+    "No App/TUI process, native terminal rendering, browser, screenshot or pixel approval",
+    "No whole-UI English clearance, other namespaces, Urdu shaping/RTL validation, CI or ship-ready claim"
+  ],
+  "direct_caller_evidence": {
+    "script": "/Users/damian/.local-operator/sessions/20062c0682f3/scratchpad/vi_direct_export.py",
+    "output": "/Users/damian/.local-operator/sessions/20062c0682f3/scratchpad/vi-direct-export-command-output.txt",
+    "cases": [
+      "lower-bound: 2 runtime, >=3 trajectories =1 session+2 subagents,3 queued separate",
+      "unknown: — (1 of2 runtime did not report), never fabricated0",
+      "exact zero with queue:0 trajectories,3 queued separate",
+      "retained:4 đã kết thúc (còn lưu), independent failed child displays thất bại",
+      "hidden descendants7: +7 ở tầng sâu hơn, not depth7"
+    ]
+  },
+  "per_area_verdicts": [
+    {
+      "area": "heading",
+      "keys_read": 7,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "label",
+      "keys_read": 35,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "status",
+      "keys_read": 9,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "install",
+      "keys_read": 17,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "latest",
+      "keys_read": 10,
+      "verdict": "pass_with_minors",
+      "findings": [
+        "VI-04"
+      ]
+    },
+    {
+      "area": "kind_of_runtime",
+      "keys_read": 8,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "import_path",
+      "keys_read": 6,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "kind",
+      "keys_read": 7,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "session",
+      "keys_read": 6,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "approval",
+      "keys_read": 4,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "redirect",
+      "keys_read": 3,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "sessions",
+      "keys_read": 11,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "fleet_caveats",
+      "keys_read": 1,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "agents",
+      "keys_read": 38,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "env",
+      "keys_read": 18,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "report",
+      "keys_read": 3,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "info_hint",
+      "keys_read": 2,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "action_copy_report",
+      "keys_read": 2,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "latest_line",
+      "keys_read": 3,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "not_answering_clause",
+      "keys_read": 5,
+      "verdict": "pass_with_minors",
+      "findings": [
+        "VI-01"
+      ]
+    },
+    {
+      "area": "tree_lines",
+      "keys_read": 1,
+      "verdict": "pass_with_minors",
+      "findings": [
+        "VI-03"
+      ]
+    },
+    {
+      "area": "export",
+      "keys_read": 60,
+      "verdict": "pass_with_minors",
+      "findings": [
+        "VI-02"
+      ]
+    },
+    {
+      "area": "count",
+      "keys_read": 4,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "state",
+      "keys_read": 12,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "leaving",
+      "keys_read": 3,
+      "verdict": "clean",
+      "findings": []
+    },
+    {
+      "area": "update",
+      "keys_read": 2,
+      "verdict": "clean",
+      "findings": []
+    }
+  ],
+  "per_key_results": [
+    {
+      "key": "tui.info.heading.install",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.version",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.install_kind",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.install_path",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.interpreter",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.running_code",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.source",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.built",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.label.built",
+        "en_cells": 5,
+        "vi_cells": 14
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.python",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.platform",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.heading.this_session",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.session_id",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.kind",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.model",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.working_dir",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.answering",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.started",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.config_dir",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.label.config_dir",
+        "en_cells": 10,
+        "vi_cells": 16
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.cache_dir",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.agent_home",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.label.agent_home",
+        "en_cells": 10,
+        "vi_cells": 20
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.log_dir",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.label.log_dir",
+        "en_cells": 7,
+        "vi_cells": 15
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.control_port",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.heading.sessions_on_this_machine",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.heading.sessions_unavailable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.heading.agents_and_subagents",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.runtimes",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.trajectories",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Runtime process versus active processing trajectory distinction checked against model.py fleet_trajectories; luồng xử lý is appropriate for active token-spending processing flows, not historical tool traces."
+    },
+    {
+      "key": "tui.info.label.agent_profiles",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.teams",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.subagent_capacity",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.heading.environment",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.terminal",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.label.terminal",
+        "en_cells": 8,
+        "vi_cells": 17
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.theme",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.approvals",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.mcp_servers",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.browser",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.mobile_relay",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.label.mobile_relay",
+        "en_cells": 12,
+        "vi_cells": 19
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.multiplexer",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.guides",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.skills",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.label.credentials",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.label.credentials",
+        "en_cells": 11,
+        "vi_cells": 18
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.heading.could_not_read",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.status.leaving_silent",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.status.leaving_for_build",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.status.no_movement",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.status.leaving",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.status.bound_held",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.status.bound_held",
+        "en_cells": 10,
+        "vi_cells": 17
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.status.updating",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.status.updated",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.status.update_failed",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.status.moving_to_a_new_build",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.description",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.full_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.loading",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.unavailable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.shadow_label_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.shadow_label_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.shadow_label_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.shadow_meta_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.shadow_meta_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.shadow_meta_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.source_snapshot",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.source_snapshot_unknown",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.snapshot_note_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.snapshot_note_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.source_wheel",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.install.source_wheel",
+        "en_cells": 10,
+        "vi_cells": 17
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.build_age",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.install.shadow_explanation",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest.installed_unreadable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest.full_unknown",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest.unknown",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest.never_checked",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest.behind_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest.behind_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass_with_minor",
+      "findings": [
+        "VI-04"
+      ],
+      "width_risk": {
+        "key": "tui.info.latest.behind_short",
+        "en_cells": 6,
+        "vi_cells": 13
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest.current",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest.stale",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest.checked_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest.checked_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind_of_runtime.daemon_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.kind_of_runtime.daemon_full",
+        "en_cells": 41,
+        "vi_cells": 63
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind_of_runtime.daemon_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind_of_runtime.daemon_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind_of_runtime.attached_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind_of_runtime.attached_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind_of_runtime.exec_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind_of_runtime.exec_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind_of_runtime.exec_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.import_path.editable_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.import_path.editable_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.import_path.editable_short",
+        "en_cells": 17,
+        "vi_cells": 26
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.import_path.editable_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.import_path.shadowed_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.import_path.shadowed_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.import_path.shadowed_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind.editable_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind.editable_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.kind.editable_short",
+        "en_cells": 22,
+        "vi_cells": 35
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind.uv_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind.uv_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind.non_editable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.kind.non_editable",
+        "en_cells": 12,
+        "vi_cells": 19
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind.pip_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.kind.pip_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.session.description",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.session.description_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.session.failover_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.session.failover_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.session.started",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.session.protocol",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.approval.ask_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.approval.ask_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.approval.auto_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.approval.auto_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.redirect.full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.redirect.short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.redirect.short",
+        "en_cells": 17,
+        "vi_cells": 28
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.redirect.terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.loading",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.registry_loading",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.registry_unavailable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.summary_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.sessions.summary_full",
+        "en_cells": 16,
+        "vi_cells": 30
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.not_answering_clause",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.summary_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.sessions.summary_short",
+        "en_cells": 6,
+        "vi_cells": 16
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.empty",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.self",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.pid",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.build_skew",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.sessions.memory_unavailable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.fleet_caveats.lower_bound",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.loading_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.loading_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.loading_mid",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.loading_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.summary_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Runtime process versus active processing trajectory distinction checked against model.py fleet_trajectories; luồng xử lý is appropriate for active token-spending processing flows, not historical tool traces."
+    },
+    {
+      "key": "tui.info.agents.unknown_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.unknown_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.queued_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.queued_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.queued_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.quiet_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.agents.quiet_full",
+        "en_cells": 23,
+        "vi_cells": 36
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.quiet_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.runtimes",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.unreported_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.unreported_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.unreported_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.queued_suffix",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.queued_count",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.queued_count_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.trajectories_total",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Runtime process versus active processing trajectory distinction checked against model.py fleet_trajectories; luồng xử lý is appropriate for active token-spending processing flows, not historical tool traces."
+    },
+    {
+      "key": "tui.info.agents.unreported_suffix",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.roster_unreadable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.session_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.session_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.session_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.retained_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.retained_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.retained_terse",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.capacity",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.capacity_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.capacity_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.roster_failure",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.empty",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.waiting",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.tree_counts",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.tree_legacy",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.description",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.description_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.mcp_connected",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.mcp_connecting_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.mcp_connecting_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.mcp_failed_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.mcp_failed_short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.mcp_empty",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.env.mcp_empty",
+        "en_cells": 15,
+        "vi_cells": 25
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.none",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.mobile_installed",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.mobile_absent",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.mobile_healthy",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.env.mobile_healthy",
+        "en_cells": 7,
+        "vi_cells": 13
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.mobile_up",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.env.mobile_up",
+        "en_cells": 2,
+        "vi_cells": 9
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.credentials_unreadable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.credential_count",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.credentials_more",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.credentials_set",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.env.credentials_empty",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.env.credentials_empty",
+        "en_cells": 11,
+        "vi_cells": 17
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.report.degraded_count",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.report.degraded_count",
+        "en_cells": 8,
+        "vi_cells": 15
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.report.degraded",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.report.captured",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.info_hint.short",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.info_hint.full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.action_copy_report.loading",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.action_copy_report.redacted",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest_line.installed_unreadable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest_line.never_checked",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.latest_line.checked",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.not_answering_clause.no_rows",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass_with_minor",
+      "findings": [
+        "VI-01"
+      ],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.not_answering_clause.more",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.not_answering_clause.remedy_one",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass_with_minor",
+      "findings": [
+        "VI-01"
+      ],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.not_answering_clause.remedy_many",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass_with_minor",
+      "findings": [
+        "VI-01"
+      ],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.not_answering_clause.full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass_with_minor",
+      "findings": [
+        "VI-01"
+      ],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.tree_lines.deeper",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass_with_minor",
+      "findings": [
+        "VI-03"
+      ],
+      "width_risk": {
+        "key": "tui.info.tree_lines.deeper",
+        "en_cells": 12,
+        "vi_cells": 20
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.heading_install",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.version",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.latest_known",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.install_kind",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.install_path",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.interpreter",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.running_code",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.source",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.build_age",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass_with_minor",
+      "findings": [
+        "VI-02"
+      ],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.python",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.platform",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.heading_session",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.session_id",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.kind",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.pid",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.model",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.effective_model",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.uptime",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.working_dir",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.config_dir",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.cache_dir",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.agent_home",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.log_dir",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.control_port",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.protocol",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.heading_sessions",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.sessions_unavailable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.sessions_empty",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.sessions_summary",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.pid_fallback",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.heading_agents",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.runtimes",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.trajectories_unreported",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Runtime process versus active processing trajectory distinction checked against model.py fleet_trajectories; luồng xử lý is appropriate for active token-spending processing flows, not historical tool traces."
+    },
+    {
+      "key": "tui.info.export.queued_suffix",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.trajectories",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Runtime process versus active processing trajectory distinction checked against model.py fleet_trajectories; luồng xử lý is appropriate for active token-spending processing flows, not historical tool traces."
+    },
+    {
+      "key": "tui.info.export.profiles",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.teams",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.roster_unreadable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.session_counts",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.capacity",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.tree_heading",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.tree_unreadable",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.export.tree_unreadable",
+        "en_cells": 29,
+        "vi_cells": 50
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.tree_empty",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.tree_counts",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.tree_legacy",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.lower_bound",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.heading_environment",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.terminal",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.multiplexer",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.tty",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.theme",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.approvals",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.browser",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.mobile",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.mcp",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.guides",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.skills",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.credentials",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.heading_degraded",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.count.session",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.count.runtime",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.count.trajectory",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Runtime process versus active processing trajectory distinction checked against model.py fleet_trajectories; luồng xử lý is appropriate for active token-spending processing flows, not historical tool traces."
+    },
+    {
+      "key": "tui.info.count.subagent",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.running",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.starting",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.state.starting",
+        "en_cells": 8,
+        "vi_cells": 14
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.queued",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.pausing",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.state.pausing",
+        "en_cells": 7,
+        "vi_cells": 13
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.paused",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.completed",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.failed",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.cancelled",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.gone",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.live",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": {
+        "key": "tui.info.state.live",
+        "en_cells": 4,
+        "vi_cells": 14
+      },
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.stale",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.state.unknown",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.leaving.signal",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.leaving.build",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.leaving.overdue",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.update.target",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.update.done_target",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.agents.summary_full",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Runtime process versus active processing trajectory distinction checked against model.py fleet_trajectories; luồng xử lý is appropriate for active token-spending processing flows, not historical tool traces."
+    },
+    {
+      "key": "tui.info.agents.addends",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    },
+    {
+      "key": "tui.info.export.summary",
+      "english_read": true,
+      "target_read": true,
+      "context_and_placeholder_contract_read": true,
+      "result": "pass",
+      "findings": [],
+      "width_risk": null,
+      "mechanical_result": "pass",
+      "semantic_note": "Read for accuracy, native idiom, address form/register, glossary, count/state meaning and protected technical tokens."
+    }
+  ]
+}

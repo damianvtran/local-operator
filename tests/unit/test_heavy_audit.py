@@ -13,6 +13,7 @@ import asyncio
 import io
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -397,6 +398,54 @@ def test_trail_holds_no_argv_or_env_secret(env: dict[str, str]) -> None:
 )
 def test_command_label_keeps_only_program_and_subcommand(command: str, label: str) -> None:
     assert heavy_audit.command_label(command) == label
+
+
+INCIDENT_LINE = (
+    "FILES=$(grep -v \"a\\|b\" list.txt | tr '\\n' ' ') && ISO=$(mktemp -d /x/y.XXXX) && "
+    "env -i HOME=/h python -m pytest tests/unit -q | tail -4"
+)
+
+
+@pytest.mark.parametrize(
+    "command,label",
+    [
+        # The label names the heavy part, not the first command (2026-11-23: the
+        # slot holder of a pytest run was logged as `grep`).
+        ("grep -v foo x | pytest tests/unit", "pytest"),
+        (INCIDENT_LINE, "python"),
+        ("X=$(grep a b | tr a b) && vitest run", "vitest run"),
+        ("rm -rf out && echo go\nxcodebuild -scheme App", "xcodebuild"),
+        ("ls\ncd web\npnpm build", "pnpm build"),
+        ("for f in a; do\n  pytest tests/unit\ndone", "pytest"),
+        # `lop services heavy run -- bash -c '<script>'`: the script's heavy part.
+        ("bash -c 'cd x\ngrep -v a b | pytest tests/unit\ntail log'", "pytest"),
+        ("sh -lc 'echo hi; vitest run'", "vitest run"),
+        # No heavy segment: the first command, as before.
+        ("ls\ngrep x y\ncat f", "ls"),
+        ("cd web\ngrep x y", "grep x"),
+        ("echo pytest", "echo pytest"),
+        ("git commit -m 'a\npytest tests/unit'", "git commit"),
+        ("pytest --collect-only", "pytest"),
+        ("vitest --watch\nls", "vitest"),
+        # Privacy: nothing but the program and a verb-shaped word, on any line.
+        (f"env GITHUB_TOKEN={FAKE_TOKEN}\npytest tests/unit", "pytest"),
+        (f"export T={FAKE_TOKEN}\nlog {FAKE_TOKEN}\nvitest run", "vitest run"),
+        (f"echo hi\ncurl https://u:{FAKE_TOKEN}@host", "echo hi"),
+        (f"X=$(echo {FAKE_TOKEN} | tr a b); ls", "ls"),
+    ],
+)
+def test_command_label_names_the_heavy_part_of_a_multi_command_line(
+    command: str, label: str
+) -> None:
+    assert heavy_audit.command_label(command) == label
+    assert FAKE_TOKEN not in heavy_audit.command_label(command)
+
+
+def test_command_label_stops_nesting_shell_strings_at_a_bound() -> None:
+    command = "pytest tests/unit"
+    for _ in range(heavy_audit._MAX_LABEL_DEPTH + 3):
+        command = f"bash -c {shlex.quote(command)}"
+    assert heavy_audit.command_label(command) == "bash"
 
 
 # -- read surfaces ---------------------------------------------------------------

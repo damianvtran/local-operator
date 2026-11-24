@@ -525,6 +525,86 @@ async def test_active_bridge_is_never_evicted_or_duplicated(tmp_path, monkeypatc
         assert first not in pool.bridges
 
 
+def test_prompt_delivery_enum_validates_at_the_wire() -> None:
+    """``Prompt.delivery``: out-of-vocabulary is a 422-equivalent never-coerce."""
+    from pydantic import ValidationError
+
+    body = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi", delivery="queue")
+    assert body.delivery == "queue"
+    assert Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi").delivery is None
+    with pytest.raises(ValidationError):
+        Prompt(
+            request_id="12345678-1234-4678-9234-567812345678",
+            text="hi",
+            delivery=cast(Any, "whenever"),
+        )
+    with pytest.raises(ValidationError):
+        Prompt(
+            request_id="12345678-1234-4678-9234-567812345678",
+            text="hi",
+            delivery=cast(Any, ""),
+        )
+
+
+def test_prompt_without_delivery_dumps_byte_identically_to_before() -> None:
+    """The receipt fingerprint must not move for a body without delivery.
+
+    ``desktop_receipts`` hashes ``body.model_dump()`` bytes, so a same-id
+    retry claimed before the field existed reads as "different input" the
+    moment the field starts dumping ``"delivery": None``. The wrap
+    serializer omits the key when it is ``None``; this pins it with a REAL
+    ``Prompt`` (not a hand-built dict), because the property is the model's
+    own dump, not the receipts layer's.
+    """
+    import json
+
+    body = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi")
+    dump = body.model_dump()
+    assert "delivery" not in dump, dump
+    assert json.dumps(body.model_dump()) == json.dumps(
+        {
+            "request_id": "12345678-1234-4678-9234-567812345678",
+            "text": "hi",
+            "images": [],
+            "files": [],
+            "audio": [],
+            "mode": "prompt",
+            "input_mode": None,
+            "input_path": None,
+        }
+    )
+    # A pinned mode DOES ride, so the hash still distinguishes it.
+    pinned = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi", delivery="queue")
+    assert pinned.model_dump()["delivery"] == "queue"
+    assert json.dumps(pinned.model_dump()) != json.dumps(dump)
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_delivery_is_part_of_receipt_identity(tmp_path):
+    """Same-id replay: the pinned delivery hashes; a changed delivery conflicts."""
+    calls: list[dict[str, Any]] = []
+
+    async def op():
+        calls.append({"delivery": "queue"})
+        return {"result": "queued"}
+
+    receipts = DesktopReceipts(tmp_path)
+    body = {"text": "held", "delivery": "queue"}
+    assert (await receipts.run("s:id", body, op))["result"] == "queued"
+    replay = await receipts.run("s:id", body, op)
+    assert replay["replayed"] is True, replay
+    with pytest.raises(ReceiptConflict, match="different input"):
+        await receipts.run("s:id", {"text": "held", "delivery": "both"}, op)
+    with pytest.raises(ReceiptConflict, match="different input"):
+        await receipts.run("s:id", {"text": "held"}, op)
+    assert len(calls) == 1
+    # And a legacy body hashes as legacy: no key added, receipt unchanged.
+    legacy = DesktopReceipts(tmp_path)
+    legacy_body: dict[str, Any] = {"text": "held"}
+    assert (await legacy.run("s:legacy", legacy_body, op))["result"] == "queued"
+    assert (await legacy.run("s:legacy", legacy_body, op))["replayed"] is True
+
+
 @pytest.mark.asyncio
 async def test_receipts_survive_adapter_restart_and_reject_changed_body(tmp_path):
     calls = []
@@ -8965,6 +9045,61 @@ async def test_the_activity_sort_carries_the_just_used_conversation(draft_api) -
 
 
 @pytest.mark.asyncio
+async def test_an_unread_backlog_does_not_hold_page_one_against_todays_chats(draft_api) -> None:
+    """local-operator-ui#2069 Q3, at the route the sidebar actually reads.
+
+    The operator's shape: more unread completions than ``limit`` (here 60,
+    all stamped 45h+ ago) plus today's idle chats (20). The v2 key led with
+    every ``active`` row, so page 1 was 50 old unread rows and today's chats
+    arrived on page 2 -- drawn ABOVE rows already on screen. The v3 key leads
+    with running rows only, so page 1 is chronological: all 20 of today's
+    chats, then the newest 30 unread, and page 2 continues strictly older.
+    The capability advertises the narrowed order as ``session_catalogue_sort``
+    2 so a client can tell the two daemons apart.
+    """
+    from local_operator.session.attention import AttentionStore
+
+    client, root = draft_api
+    now = time.time()
+    attention = AttentionStore(root / "attention.db")
+    for index in range(60):
+        row = _bound_session(root, f"unread{index:06d}", created=now - 200_000.0)
+        stamp = now - 45 * 3600.0 - index * 60.0
+        os.utime(row / "transcript.jsonl", (stamp, stamp))
+        attention.publish(
+            f"session/{row.name}", str(uuid.uuid4()), f"anchor-{row.name}", "complete"
+        )
+    for index in range(20):
+        row = _bound_session(root, f"today{index:07d}", created=now - 7_200.0)
+        stamp = now - index * 300.0
+        os.utime(row / "transcript.jsonl", (stamp, stamp))
+
+    first = await client.get("/v1/desktop/sessions?sort=activity&limit=50")
+    assert first.status_code == 200, first.text
+    first_result = first.json()["result"]
+    first_ids = _ids(first)
+    second = await client.get(
+        "/v1/desktop/sessions?sort=activity&limit=50&cursor=" + first_result["next_cursor"]
+    )
+    assert second.status_code == 200, second.text
+    second_ids = _ids(second)
+
+    # The precondition, read back from the wire: the backlog really is active.
+    by_id = {row["id"]: row for row in first_result["sessions"]}
+    # ``active`` is what led the v2 key; it is still True on every backlog row
+    # (the census and the row's own fact are unchanged), only the order moved.
+    assert all(by_id[f"unread{index:06d}"]["active"] is True for index in range(30))
+    assert all(by_id[f"today{index:07d}"]["active"] is False for index in range(20))
+    assert first_ids[:20] == [f"today{index:07d}" for index in range(20)]
+    assert first_ids[20:] == [f"unread{index:06d}" for index in range(30)]
+    assert second_ids == [f"unread{index:06d}" for index in range(30, 60)]
+    assert second.json()["result"]["cursor_missing"] is False
+
+    features = (await client.get("/v1/capabilities")).json()["result"]["features"]
+    assert features["session_catalogue_sort"] == 2
+
+
+@pytest.mark.asyncio
 async def test_a_scope_name_at_the_bound_is_accepted(draft_api) -> None:
     """64 characters is the bound the profile and team registries use."""
     client, root = draft_api
@@ -9581,7 +9716,14 @@ def _install_ask_remote(app: FastAPI, remote: Any, *, remote_row: Any = None) ->
 
     class _Pool:
         @contextlib.asynccontextmanager
-        async def session(self, session_id: str, *, read: bool = False, allow_draft: bool = False):
+        async def session(
+            self,
+            session_id: str,
+            *,
+            read: bool = False,
+            allow_draft: bool = False,
+            control_only: bool = False,
+        ):
             del session_id, read, allow_draft
             yield bridge
 

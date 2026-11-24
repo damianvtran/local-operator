@@ -944,11 +944,12 @@ _CAPPED_COLLECTION_FIELDS = {
     # that could put the attach frame through the socket line without any
     # of it being wrong on its own. Nothing inside a row is ever cut: an ask
     # is answered whole, so the bound drops whole tail rows past a text
-    # budget, and the frame-level yield drops the whole field.
+    # budget, and the frame-level yield drops whole rows in steps (tail rows,
+    # then the head) and the asks_open tally only when even that cannot pay.
     "asks": (
-        "whole tail rows dropped past a text budget, and the list yielded when "
-        "the frame has no room (_bound_asks_in_place / "
-        "_yield_asks_when_the_frame_has_no_room)"
+        "whole tail rows dropped past a text budget, and the list graduated at "
+        "the frame (tail rows, then the head, the asks_open tally only last) "
+        "(_bound_asks_in_place / _yield_asks_when_the_frame_has_no_room)"
     ),
     "jobs": "trajectories stripped, receipts folded, free text clipped on the wire",
     # Swept at the RECORD (GOAL_HISTORY_MAX, newest-first) and yielded at the

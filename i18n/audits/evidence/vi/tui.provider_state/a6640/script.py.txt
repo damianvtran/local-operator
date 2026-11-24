@@ -1,0 +1,68 @@
+"""Scoped official catalogue validation; no application startup or eligibility mutation."""
+import hashlib, json, os, re, sys, unicodedata
+from pathlib import Path
+from rich.cells import cell_len
+from rich.text import Text
+from local_operator.i18n import catalogues, runtime
+from scripts.i18n import check
+ROOT = Path.cwd()
+NS = 'tui.provider_state'
+assert str(ROOT) in str(Path(check.__file__).resolve())
+assert str(ROOT) in str(Path(catalogues.__file__).resolve())
+print('interpreter:', sys.executable)
+print('module:', check.__file__)
+print('module:', catalogues.__file__)
+print('module:', runtime.__file__)
+print('isolated HOME:', os.environ['HOME'])
+assert not any(k.startswith('CMUX_') for k in os.environ)
+paths = [ROOT/'local_operator/i18n/catalogues'/loc/f'{NS}{suffix}.json' for loc,suffix in [('en',''),('en','.context'),('vi','')]]
+expected_hashes = ['113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912','67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be','74e6607520947d1910479a85be916e8fa3e0efa6104230d19cef8d74a3aa4867']
+for p,h in zip(paths, expected_hashes):
+    actual=hashlib.sha256(p.read_bytes()).hexdigest()
+    print('input', p.relative_to(ROOT), actual)
+    assert actual == h
+fixture=Path(os.environ['HOME'])/'catalogues'
+for p in paths:
+    dest=fixture/p.parent.name/p.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(p.read_bytes())
+catalogues._CATALOGUES=fixture
+source=catalogues.load_catalogue('en',NS)
+target=catalogues.load_catalogue('vi',NS)
+context=catalogues.context('en',NS)
+keys=[NS+'.'+k for k in ['logged_in','env_key','needs_login','local_ready','local_unconfigured']]
+assert list(source)==list(target)==list(context)==keys
+assert len(keys)==5
+problems=check.check_catalogues()
+print('official check_catalogues initial:', problems)
+assert not problems
+for key in keys:
+    en,vi=source[key],target[key]
+    assert runtime.message_arguments(en)==runtime.message_arguments(vi)==()
+    assert runtime.plural_selectors(en)==runtime.plural_selectors(vi)==()
+    assert len(runtime.parse_message(en))==len(runtime.parse_message(vi))==1
+    assert unicodedata.normalize('NFC',vi)==vi
+    protected=lambda s: re.findall(r'`[^`]*`|</?[^>]+>|--[\w-]+|/[A-Za-z][\w/-]*',s)
+    assert protected(en)==protected(vi)==[]
+    assert '[' not in en+vi and ']' not in en+vi
+    assert not any(unicodedata.category(c)=='Cf' for c in vi)
+    assert runtime.render_message(en,{},'en')==en
+    assert runtime.render_message(vi,{},'vi')==vi
+    assert Text.from_markup(vi).plain==vi
+    # Synthetic long-text diagnostic only; this is not an official pseudo locale.
+    pseudo='⟦'+vi+' '+('~'*((cell_len(vi)+2)//3))+'⟧'
+    assert Text.from_markup(pseudo).plain==pseudo
+    print(json.dumps({'key':key,'en':en,'vi':vi,'en_cells':cell_len(en),'vi_cells':cell_len(vi),'vi_chars':len(vi),'pseudo_cells':cell_len(pseudo),'maxCells':context[key].get('maxCells'),'arguments':[],'plural_select_branches':0,'NFC':True},ensure_ascii=False))
+vp=fixture/'vi'/f'{NS}.json'
+def replace_target(value):
+    vp.write_text(json.dumps(value,ensure_ascii=False),encoding='utf-8')
+missing=dict(target); missing.pop(keys[0]); replace_target(missing)
+problems=check.check_catalogues(); print('negative missing key:',problems)
+assert any('missing key' in p for p in problems)
+added=dict(target); added[keys[0]]+=' {unexpected}'; replace_target(added)
+problems=check.check_catalogues(); print('negative added argument:',problems)
+assert any('arg' in p for p in problems)
+replace_target(target)
+problems=check.check_catalogues(); print('official check_catalogues restored:',problems)
+assert not problems
+print('PASS: five keys; scoped official validation and negative controls; zero arguments/plural/select; NFC/protected tokens/plain Rich/English controls')

@@ -38,19 +38,22 @@
  * `asks/store.index_asks` asks a caller to keep in mind.
  */
 import { contentDir } from "../lib/content-direction";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getAsks } from "../api";
-import { AskCard } from "./ask-card";
+import { AskCard, askStateOf, askToneClass } from "./ask-card";
+import { AskIdFoot } from "./ask-id";
+import { Chevron } from "./ui/disclosure";
 import { Sheet } from "./ui/sheet";
 import {
 	isAnswerable,
 	askRowsSignature,
 	isDeadConversation,
 	isLapsed,
+	isOutstanding,
 	orderedForDisplay,
 	questionTally,
 } from "../lib/asks";
-import { messageRuntime, useAsksRevision, useProjection, useSessions } from "../store";
+import { messageRuntime, rememberAskChipSettled, useAsksRevision, useProjection, useSessions } from "../store";
 import type { PendingAsk } from "../types";
 
 /** How often the open sheet re-reads the aggregate as a deadline backstop. */
@@ -87,6 +90,30 @@ const RECEIPT_KEY = {
 	answered_in_chat: "relay.ask.dismiss.receipt_answered_in_chat",
 } as const;
 
+/** The body's own padding (`p-3`), so "scroll to the card" lands the card where
+    it sits at rest instead of flush against the sheet's header. */
+const BODY_PAD_PX = 12;
+
+/** The ask to open: the first that can still take an answer, else the first
+ *  lapsed one (whose only op is Dismiss). `orFirst` falls back to the head of the
+ *  band, so a queue of nothing but dead conversations still shows its sentence;
+ *  after an answer it does not, because an ask that cannot be acted on is not
+ *  somewhere to walk to. `exceptId` is the ask just settled. */
+function pickOpen(rows: PendingAsk[], exceptId: string, orFirst: boolean): PendingAsk | undefined {
+	const others = rows.filter((row) => row.ask_id !== exceptId);
+	return (
+		others.find((row) => String(row.status || "open") === "open" && !isDeadConversation(row)) ??
+		others.find(isLapsed) ??
+		(orFirst ? others[0] : undefined)
+	);
+}
+
+/** The start of an ask's first question, one line of it, for a collapsed row. */
+function questionStart(row: PendingAsk): string {
+	const first = Array.isArray(row.questions) ? row.questions[0]?.question : "";
+	return String(first ?? "").split("\n")[0].trim();
+}
+
 function failureText(error: unknown): string {
 	if (error instanceof TypeError) return messageRuntime.t("relay.asks.error.reach_failed");
 	const message = error instanceof Error ? error.message : String(error);
@@ -98,6 +125,7 @@ export function AsksSheet({
 	open,
 	onClose,
 	currentSessionId,
+	jumpAsk = null,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -105,6 +133,12 @@ export function AsksSheet({
 	    cross-conversation view the navigation drawer's Questions destination
 	    opens (UX review round 1, U1). */
 	currentSessionId: string;
+	/** The ask a chip in the transcript named: the sheet opens with THAT ask's
+	    card expanded (a settled row expands in place), scrolled to it, and with
+	    focus moved onto it — the reader pressed a control that promised this
+	    question, so landing anywhere else would make the tap a lie. `null` is
+	    every other door (the dock, the policy, the drawer). */
+	jumpAsk?: string | null;
 }) {
 	/* EMPTY MEANS ALL CONVERSATIONS, and that is a real mode rather than a
 	   missing argument: the drawer's destination is machine-wide. Passing "" into
@@ -159,6 +193,9 @@ export function AsksSheet({
 			const answer = await getAsks(signal);
 			setRows(Array.isArray(answer.asks) ? answer.asks : []);
 			setError("");
+			/* The transcript's chips read the same list for the one state no live
+			   frame and no receipt can name (a withdrawn ask). */
+			rememberAskChipSettled(answer.asks);
 		} catch (failure) {
 			if (failure instanceof DOMException && failure.name === "TimeoutError") {
 				setError(messageRuntime.t("relay.asks.error.read_timeout"));
@@ -183,6 +220,11 @@ export function AsksSheet({
 			/* A RECEIPT BELONGS TO ONE OPENING: reopening later must not present
 			   a dismissal from the last visit as though it just happened. */
 			setReceipt(null);
+			/* AND SO DOES THE EXPANSION CHOICE, as on the native panel (its
+			   `opening` action restarts from the first answerable ask): a reopen
+			   must not keep the last visit's card, which may be a settled row. */
+			setChoice(undefined);
+			setFocusAsk(null);
 			return;
 		}
 		void load();
@@ -227,42 +269,154 @@ export function AsksSheet({
 	/* THE HEAD FIRST, then the wire's own order (`orderedForDisplay`) — the
 	   order the minimized chip names (UX round 1, U8). */
 	const listed = useMemo(() => orderedForDisplay(rows), [rows]);
-	/* ONE HEADER PER CONVERSATION, NOT ONE PER ASK (UX review round 2, U6). In the
-	   cross-conversation view each row used to repeat its conversation's name AND
-	   the three-line not-running notice, so two asks from one conversation cost a
-	   full repeated block for the second. Rows are grouped into blocks in their
-	   FIRST-APPEARANCE order (so the head ask still leads), and the name and the
-	   wait are stated once, above that conversation's cards. The single-conversation
-	   view is one block, which renders exactly as before. */
-	const blocks = useMemo(() => {
-		const order: string[] = [];
-		const grouped = new Map<string, PendingAsk[]>();
+	/* TWO BANDS, in display order (ask-panel parity, the native panel's `askBands`):
+	   the asks that still show a card (waiting, lapsed, and an `expired` one drawn
+	   as a receipt), and the settled ones under "Settled". Splitting AFTER
+	   `orderedForDisplay` keeps the head ask first in its band. Settled asks are a
+	   band of their own because one that has nothing left to do belongs below
+	   everything that still does — it used to sit between the open card's options
+	   and its buttons. */
+	const bands = useMemo(() => {
+		const current: PendingAsk[] = [];
+		const done: PendingAsk[] = [];
 		for (const row of listed) {
-			const key = crossConversation ? String(row.session_id) : currentSessionId;
-			const bucket = grouped.get(key);
-			if (bucket) bucket.push(row);
-			else {
-				grouped.set(key, [row]);
-				order.push(key);
-			}
+			const status = String(row.status || "open");
+			(isOutstanding(status) || status === "expired" ? current : done).push(row);
 		}
-		return order.map((key) => ({
-			sessionId: key,
-			rows: grouped.get(key) as PendingAsk[],
-			/* The wait is a fact about the CONVERSATION, so it is decided once, from
-			   the first row the tap could actually answer: the same per-row predicate
-			   the strip used, applied to the block's first answerable member. */
-			waits: (grouped.get(key) as PendingAsk[]).some(
-				(row) =>
-					isAnswerable(String(row.status || "open")) &&
-					!isLapsed(row) &&
-					!isDeadConversation(row) &&
-					(ended || row.runtime_live === false),
-			),
-			name:
-				sessions.find((session) => session.session_id === key)?.conversation_name || key,
-		}));
-	}, [listed, crossConversation, currentSessionId, ended, sessions]);
+		return { current, done };
+	}, [listed]);
+	/* ONE ASK IS OPEN AT A TIME, and it is the one the pinned bar answers. The
+	   reader's own pick (`choice`) wins; until they make one, the first ask that
+	   can still be answered is open from the very first render (an effect would
+	   paint one collapsed frame first), and is then LATCHED, so a re-rank from a
+	   later read cannot move the card from under a half-typed answer. `null` is a
+	   deliberate "nothing open" (an answer cleared the last ask that could take
+	   one). */
+	const [choice, setChoice] = useState<string | null | undefined>(undefined);
+	/** The ask whose first question takes focus on mount: set when an answer moves
+	    the reader on to the next ask. */
+	const [focusAsk, setFocusAsk] = useState<string | null>(null);
+	const [closeFocus, setCloseFocus] = useState(0);
+	const defaultOpen = pickOpen(bands.current, "", true);
+	const choiceLive =
+		choice !== undefined && (choice === null || listed.some((row) => row.ask_id === choice));
+	const openId = choiceLive ? choice : (defaultOpen?.ask_id ?? null);
+	useEffect(() => {
+		if (!open || !loaded) return;
+		/* A choice whose row left the queue (settled elsewhere) is dropped, which
+		   lets the default re-latch. */
+		if (choice !== undefined && !choiceLive) setChoice(undefined);
+		else if (choice === undefined && defaultOpen) setChoice(defaultOpen.ask_id);
+	}, [open, loaded, choice, choiceLive, defaultOpen]);
+	/* A CHIP'S JUMP IS A ONE-SHOT INTENT, applied the first time its row is
+	   present. The sheet reads the aggregate asynchronously, so the id exists in
+	   `listed` a frame or two after the open; the effect waits for it rather than
+	   dropping the tap. AFTER IT LANDS IT IS SPENT: `listed` gets a new identity on
+	   every read (the 20 s backstop, `revision`, `rowsSignature`), so keying only
+	   on it re-applied the jump and pulled the reader back to the chip's ask —
+	   reproduced by jumping, tapping another row, and waiting one backstop tick.
+	   `jumpRowHere` is a BOOLEAN so the identity of the read cannot retrigger it;
+	   `jumped` holds the last consumed target, and a close resets both so
+	   reopening the same chip jumps again. */
+	const jumpTarget = typeof jumpAsk === "string" && jumpAsk !== "" ? jumpAsk : null;
+	const jumpRowHere =
+		jumpTarget !== null && listed.some((row) => row.ask_id === jumpTarget);
+	const jumped = useRef<string | null>(null);
+	/** The open card that still owes its jump one focus move; cleared by the
+	 *  scroll effect below, so a later re-render or read cannot move focus again. */
+	const jumpFocus = useRef<string | null>(null);
+	useEffect(() => {
+		if (!open) {
+			jumped.current = null;
+			jumpFocus.current = null;
+			return;
+		}
+		if (jumpTarget === null || jumped.current === jumpTarget || !jumpRowHere) return;
+		jumped.current = jumpTarget;
+		jumpFocus.current = jumpTarget;
+		setChoice(jumpTarget);
+		setFocusAsk(jumpTarget);
+	}, [open, jumpTarget, jumpRowHere]);
+	/* THE PINNED BAR'S ELEMENT. The open card portals its answering controls into
+	   it (`AskCard`'s `footerSlot`); a state rather than a ref so the card is
+	   re-rendered with the element once the bar mounts. */
+	const [barEl, setBarEl] = useState<HTMLElement | null>(null);
+	const scroller = useRef<HTMLDivElement>(null);
+	/* THE OPEN CARD STARTS AT THE TOP: when the sheet opens, and when the reader
+	   moves on to the next ask, so a long previous card does not leave them
+	   scrolled past the question they now have to read. Keyed on the open ask's
+	   id, never on a re-read, so the backstop poll does not move a reader who has
+	   scrolled on purpose. */
+	useEffect(() => {
+		if (!open || openId === null) return;
+		const region = scroller.current;
+		const card = Array.from(
+			region?.querySelectorAll<HTMLElement>('[data-testid="ask-card"]') ?? [],
+		).find((element) => element.dataset.askId === openId);
+		if (!region || !card) return;
+		region.scrollTop +=
+			card.getBoundingClientRect().top - region.getBoundingClientRect().top - BODY_PAD_PX;
+		/* FOCUS FOLLOWS A CHIP'S JUMP, and only a jump: moving the reader's place
+		   on every open would steal focus from the control they pressed (U2's
+		   rule for the close control is the same). The question text is the first
+		   thing the card says; a settled receipt has no question element of its
+		   own, so the card itself takes focus there (`tabIndex={-1}`). */
+		if (jumpFocus.current !== null && jumpFocus.current === openId) {
+			jumpFocus.current = null;
+			const target = card.querySelector<HTMLElement>('[data-testid="ask-question-text"]') ?? card;
+			target.focus({ preventScroll: true });
+		}
+	}, [open, openId]);
+	const sessionOf = (row: PendingAsk) =>
+		crossConversation ? String(row.session_id) : currentSessionId;
+	const nameOf = (row: PendingAsk) => {
+		const key = String(row.session_id);
+		return sessions.find((session) => session.session_id === key)?.conversation_name || key;
+	};
+	/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE (design round 1,
+	   D4 = UX U4; round-2 corrections below), now on the open card.
+
+	   ANSWERABLE, because a settled receipt offers nothing to answer, so a wait
+	   stated above it is noise about a tap that does not exist (UX round 2, U6).
+	   `runtime_live` widened it from `ended` alone to the merely-not-running
+	   conversation the operator actually hits.
+
+	   DURABILITY, because `runtime_live === false` is ALSO true of a conversation
+	   with no transcript at all — where the op is a terminal refusal and the promise
+	   of a ~30 s bring-up is a claim about a backend that does not exist (design
+	   round 2, D6). It is `isDeadConversation`, the CONJUNCTION of the two fields —
+	   not `durable` alone, which would silence the strip on a live conversation that
+	   answers fine (design round 3, D7).
+
+	   NOT LAPSED, because a lapsed card offers no answer (`isLapsed`), so "answering
+	   will bring it up" would promise a tap the card does not have. */
+	const waitsFor = (row: PendingAsk) =>
+		isAnswerable(String(row.status || "open")) &&
+		!isLapsed(row) &&
+		!isDeadConversation(row) &&
+		(ended || row.runtime_live === false);
+	/* WHAT SITS UNDER THE STATE LINE of the open card: the conversation's name
+	   (data, not copy — the projection's own name; UX round 2, U6) only when the
+	   sheet holds several conversations' asks, and the wait where there is one. */
+	const leadOf = (row: PendingAsk) => {
+		const name = crossConversation ? nameOf(row) : "";
+		const wait = waitsFor(row)
+			? ended
+				? messageRuntime.t("relay.asks.sheet.ended_wait")
+				: messageRuntime.t("relay.asks.sheet.not_running_wait")
+			: "";
+		if (name === "" && wait === "") return undefined;
+		return (
+			<>
+				{name ? (
+					<p dir={contentDir(name)} className="truncate text-meta font-medium text-ink-dim">
+						{name}
+					</p>
+				) : null}
+				{wait ? <p className="text-meta text-ink-dim">{wait}</p> : null}
+			</>
+		);
+	};
 	/* THE RECEIPT IS THE INSTANT ECHO, AND IT STANDS DOWN WHEN ITS ROW HAS
 	   SETTLED (SA-D8, design D1 = UX U2; review round 2, M2). Since §17 a
 	   dismissal taken before the ask's deadline KEEPS the row as a settled
@@ -314,18 +468,132 @@ export function AsksSheet({
 				? messageRuntime.t("relay.asks.sheet.title_lapsed", { count: lapsed })
 				: messageRuntime.t("relay.asks.sheet.title_plain");
 
+	/* The open ask's row, if it is in the current band (an expanded "Settled" row
+	   is drawn in place, not up here). */
+	const openRow = bands.current.find((row) => row.ask_id === openId);
+	const settled = (row: PendingAsk, kind: "respond" | "decline" | "dismiss") => {
+		/* A NON-DISMISSAL SETTLEMENT RETIRES THE RECEIPT (M1): after answering, an
+		   unretired "Dismissed — …" would describe the operator's previous act as
+		   though it were their last. */
+		if (kind !== "dismiss") setReceipt(null);
+		/* ANSWERING WALKS ON (design §5.3): the next ask that can still take an
+		   answer opens and takes the reader's place; none leaves the sheet showing
+		   what is settled. The re-read below is a round trip, so the next ask is
+		   chosen from the rows already here. */
+		const next = pickOpen(bands.current, row.ask_id, false);
+		setChoice(next ? next.ask_id : null);
+		setFocusAsk(next ? next.ask_id : null);
+		// Nothing to walk on to: the answered card (and the control that had
+		// focus) is gone, so the reader's place goes to the sheet's ✕.
+		if (!next) setCloseFocus((n) => n + 1);
+		void load();
+	};
+	const dismissed = (askId: string, reason: "moot" | "answered_in_chat" | undefined) =>
+		setReceipt({ askId, reason: reason ?? "lapsed" });
+	/** A collapsed ask: ONE line — the state sentence, then the start of the
+	    question, then the caret. A tap opens it (and closes the current one). A
+	    settled ask expands in place into its receipt, under the line. */
+	const collapsedRow = (row: PendingAsk, expanded: boolean) => {
+		const state = askStateOf(row, nowMs);
+		const asked = questionStart(row);
+		return (
+			<div key={`${sessionOf(row)}:${row.ask_id}`} className="flex flex-col gap-1">
+				{/* THE ID SITS BESIDE THE ROW, not inside it (spec §2, §4): the row is
+				    one button, and a copy control nested in a button is invalid HTML and
+				    unreachable as its own target. The foot keeps the click-to-copy door
+				    at the 44 px floor while the row keeps its whole-line press. */}
+				<div className="flex flex-wrap items-start gap-1">
+				<button
+					type="button"
+					aria-expanded={expanded}
+					data-testid="ask-row"
+					data-ask-id={row.ask_id}
+					onClick={() => setChoice(expanded ? undefined : row.ask_id)}
+					className="flex min-h-11 min-w-0 flex-1 items-start gap-2 rounded-sm py-1 text-start active:bg-surface"
+				>
+					{/* THE QUESTION LEADS, the state sentence follows on its own line and is
+					    never cut: a waiting row is read for WHAT it asks first, and the state
+					    sentence is the part that must stay whole. The conversation's name
+					    (data) is the row's own first line when the sheet holds several
+					    conversations. The caret stays on the first line, beside the text it
+					    opens, and mirrors in a right-to-left layout (`lo-directional`). */}
+					<span className="flex min-w-0 flex-1 flex-col">
+						{crossConversation ? (
+							<span dir={contentDir(nameOf(row))} className="truncate text-start text-meta text-ink-muted">
+								{nameOf(row)}
+							</span>
+						) : null}
+						{asked === "" ? null : (
+							<span
+								dir={contentDir(asked)}
+								className="line-clamp-2 text-start text-body-sm font-medium break-words text-ink"
+							>
+								{asked}
+							</span>
+						)}
+						<span className="text-start text-meta">
+							<span className={askToneClass(state.tone)}>{state.text}</span>
+							{row.urgent && !expanded ? (
+								<span className="font-medium text-warning"> {messageRuntime.t("relay.asks.card.urgent")}</span>
+							) : null}
+						</span>
+					</span>
+					<Chevron open={expanded} />
+				</button>
+					<AskIdFoot askId={row.ask_id} className="shrink-0" align="title" />
+				</div>
+				{expanded ? (
+					<AskCard
+						row={row}
+						sessionId={sessionOf(row)}
+						nowMs={nowMs}
+						hideState
+						hideId
+						onSettled={(kind) => settled(row, kind)}
+						onDismissed={dismissed}
+					/>
+				) : null}
+			</div>
+		);
+	};
+
 	return (
-		<Sheet open={open} onClose={onClose} title={title}>
+		<Sheet
+			open={open}
+			onClose={onClose}
+			title={title}
+			scrollerRef={scroller}
+			closeFocusSignal={closeFocus}
+			/* THE ANSWERING CONTROLS ARE PINNED, outside the scroller: content may
+			   scroll, the control that answers the card may not. The bar is empty (and
+			   collapsed) unless the open ask has something to answer with.
+
+			   ONLY WHILE A CARD IS DRAWN (QA Q-4): the sheet gives the scroller a
+			   reading floor whenever it has a footer, so offering one on the empty and
+			   loading states turned a one-line sheet into a blank slab. The bar mounts
+			   with the card; `setBarEl` hands the card its portal target on the next
+			   render, the same one-frame gap the always-mounted bar had on first open,
+			   and clears it when the card goes. */
+			footer={
+				openRow ? (
+					<div
+						ref={setBarEl}
+						data-testid="asks-bar"
+						className="px-3 py-2 empty:hidden"
+					/>
+				) : undefined
+			}
+		>
 			<div className="flex flex-col gap-3 p-3">
 				{error ? (
-					<div className="flex flex-wrap items-center gap-2">
-						<p className="text-body-sm text-danger">{error}</p>
+					<div className="flex flex-col items-start gap-2">
+						<p className="text-start text-body-sm text-danger">{error}</p>
 						{/* A RETRY, because a hung or failed read must not leave the sheet
 						   with closing as its only move (U6). */}
 						<button
 							type="button"
 							onClick={() => void load()}
-							className="flex min-h-11 items-center rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated"
+							className="flex min-h-11 items-center rounded-sm border border-control px-3 text-body-sm text-ink active:bg-surface"
 						>
 							{messageRuntime.t("relay.asks.sheet.retry")}
 						</button>
@@ -357,59 +625,37 @@ export function AsksSheet({
 						{messageRuntime.t("relay.asks.sheet.empty")}
 					</p>
 				) : null}
-				{blocks.map((block) => (
-					<div key={block.sessionId} className="flex flex-col gap-2">
-						{/* Data, not copy: the projection's own conversation name, once per
-						    conversation (UX round 2, U6). */}
-						{crossConversation ? (
-							<p dir={contentDir(block.name)} className="truncate px-1 text-meta font-medium text-ink-dim">{block.name}</p>
-						) : null}
-						{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
-						    (design round 1, D4 = UX U4; round-2 corrections below).
-
-						    ANSWERABLE, because a settled receipt offers nothing to answer, so
-						    a wait stated above it is noise about a tap that does not exist
-						    (UX round 2, U6). `runtime_live` widened it from `ended` alone to
-						    the merely-not-running conversation the operator actually hits.
-
-						    DURABILITY, because `runtime_live === false` is ALSO true of a
-						    conversation with no transcript at all — where the op is a
-						    terminal refusal and the promise of a ~30 s bring-up is a claim
-						    about a backend that does not exist (design round 2, D6). It is
-						    `isDeadConversation`, the CONJUNCTION of the two fields — not
-						    `durable` alone, which would silence the strip on a live
-						    conversation that answers fine (design round 3, D7).
-
-						    NOT LAPSED, because a lapsed card offers no answer (`isLapsed`),
-						    so "answering will bring it up" would promise a tap the card one
-						    element below does not have. */}
-						{block.waits ? (
-							<p className="text-meta text-ink-dim">
-								{ended
-									? messageRuntime.t("relay.asks.sheet.ended_wait")
-									: messageRuntime.t("relay.asks.sheet.not_running_wait")}
-							</p>
-						) : null}
-						{block.rows.map((row) => (
-							<AskCard
-								key={`${block.sessionId}:${row.ask_id}`}
-								row={row}
-								sessionId={block.sessionId}
-								nowMs={nowMs}
-								onSettled={(kind) => {
-									/* A NON-DISMISSAL SETTLEMENT RETIRES THE RECEIPT (M1): after
-									   answering, an unretired "Dismissed — …" would describe the
-									   operator's previous act as though it were their last. */
-									if (kind !== "dismiss") setReceipt(null);
-									void load();
-								}}
-								onDismissed={(askId, reason) =>
-									setReceipt({ askId, reason: reason ?? "lapsed" })
-								}
-							/>
-						))}
-					</div>
-				))}
+				{/* THE OPEN ASK, FIRST: one card, whichever position the queue holds it in —
+				    the reader opened it to read it, and it is the one the pinned bar answers. */}
+				{openRow ? (
+					<AskCard
+						key={`${sessionOf(openRow)}:${openRow.ask_id}`}
+						row={openRow}
+						sessionId={sessionOf(openRow)}
+						nowMs={nowMs}
+						footerSlot={barEl}
+						lead={leadOf(openRow)}
+						focusQuestion={focusAsk === openRow.ask_id}
+						onFocused={() => setFocusAsk(null)}
+						onSettled={(kind) => settled(openRow, kind)}
+						onDismissed={dismissed}
+					/>
+				) : null}
+				{/* The other asks still waiting (or lapsed), one line each. Opening one
+				    closes the current one. */}
+				{bands.current
+					.filter((row) => row.ask_id !== openId)
+					.map((row) => collapsedRow(row, false))}
+				{/* SETTLED ASKS go under their own heading, below everything that still
+				    waits, and expand IN PLACE into their receipt. */}
+				{bands.done.length > 0 ? (
+					<>
+						<h3 className="pt-1 text-meta font-medium text-ink-muted">
+							{messageRuntime.t("relay.asks.sheet.settled")}
+						</h3>
+						{bands.done.map((row) => collapsedRow(row, openId === row.ask_id))}
+					</>
+				) : null}
 			</div>
 		</Sheet>
 	);

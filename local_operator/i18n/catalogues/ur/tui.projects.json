@@ -94,6 +94,7 @@
   "tui.projects.start.filter_placeholder": "فلٹر کرنے کے لیے لکھیں",
   "tui.projects.start.legend": "فلٹر کرنے کے لیے لکھیں · ↑↓ حرکت · ↵ منتخب کریں · esc بند کریں",
   "tui.projects.start.more": "+{count} مزید",
+  "tui.projects.start.team_detail": "{manager} · {count, plural, one {{shown} کردار} other {{shown} کردار}}",
   "tui.projects.notice_read_only": "صرف پڑھنے کے لیے: اس گفتگو کا رن ٹائم کسی دوسرے ڈیوائس پر ہے، اس لیے یہاں پروجیکٹ میں تبدیلیاں دستیاب نہیں۔",
   "tui.projects.refusal_done_gate": "جب تک یہ سنگ میل کھلے ہیں مکمل نشان زد نہیں کیا جا سکتا: {names}"
 }

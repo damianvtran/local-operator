@@ -1,0 +1,73 @@
+{
+  "parsed_pairs": 895,
+  "icu_errors": [],
+  "argument_keys": {
+    "wire.settings.local_providers.base_url.label": [
+      [
+        "name",
+        "simple"
+      ]
+    ],
+    "wire.settings.local_providers.models.label": [
+      [
+        "name",
+        "simple"
+      ]
+    ]
+  },
+  "plural_keys": [],
+  "markup_differences": [],
+  "missing_argument_negative": [
+    [
+      "wire.settings.local_providers.base_url.label",
+      "MessageFormatError",
+      "message argument 'name' was not supplied (have: none)"
+    ],
+    [
+      "wire.settings.local_providers.models.label",
+      "MessageFormatError",
+      "message argument 'name' was not supplied (have: none)"
+    ]
+  ],
+  "vi_plural_samples": [
+    [
+      0,
+      "other"
+    ],
+    [
+      1,
+      "other"
+    ],
+    [
+      2,
+      "other"
+    ],
+    [
+      5,
+      "other"
+    ],
+    [
+      11,
+      "other"
+    ],
+    [
+      21,
+      "other"
+    ],
+    [
+      100,
+      "other"
+    ],
+    [
+      1.5,
+      "other"
+    ]
+  ],
+  "nfc_failures": [],
+  "maxCells_exceedances": [],
+  "render_attempts": 895,
+  "render_failures": [],
+  "pseudo_bidi_attempts": 895,
+  "pseudo_bidi_failures": [],
+  "rendering_limit": "Pure formatter string checks only, no pixels, real TUI/browser, clipping or native RTL fit validation"
+}

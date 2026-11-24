@@ -28,7 +28,7 @@ from local_operator.tui.widgets.transcript import (
     WorkingBlock,
     needs_gap_above,
 )
-from tests.unit.tui.conftest import StyledTranscriptApp
+from tests.unit.tui.conftest import StyledTranscriptApp, open_all_folds
 
 
 class _Stub(TranscriptBlock):
@@ -223,6 +223,9 @@ async def test_a_ledger_of_tool_rows_is_one_row_each_under_the_real_sheet(
         cards[3].mark_done("Overwrote src/parser.py.", {"added": 12, "removed": 3})
         await pilot.pause()
         await pilot.pause()
+        # The four rows fold under one run bar (slice 4); this test is about the
+        # rows' own pitch, so open it and measure them.
+        await open_all_folds(view, pilot)
 
         assert [card.size.height for card in cards] == [1, 1, 1, 1]
         # First meets the top edge; every following action takes its own row

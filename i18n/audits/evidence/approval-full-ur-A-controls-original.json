@@ -1,0 +1,156 @@
+{
+  "keys": 895,
+  "context_entries": 104,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "structure_mismatches": [],
+  "non_nfc": [],
+  "authored_bidi_controls": [],
+  "masked_keys": [],
+  "plural_keys": [],
+  "argument_keys": [
+    {
+      "key": "wire.settings.local_providers.base_url.label",
+      "arguments": [
+        [
+          "name",
+          "simple"
+        ]
+      ]
+    },
+    {
+      "key": "wire.settings.local_providers.models.label",
+      "arguments": [
+        [
+          "name",
+          "simple"
+        ]
+      ]
+    }
+  ],
+  "width_over_context": [],
+  "long_labels": [
+    {
+      "key": "wire.settings.classification_maxstatechars.label",
+      "source_cells": 17,
+      "target_cells": 29
+    },
+    {
+      "key": "wire.settings.compaction_resume_replay.label",
+      "source_cells": 13,
+      "target_cells": 21
+    },
+    {
+      "key": "wire.settings.max_learnings_history.label",
+      "source_cells": 21,
+      "target_cells": 41
+    },
+    {
+      "key": "wire.settings.monitor_maxdeltalines.label",
+      "source_cells": 15,
+      "target_cells": 26
+    },
+    {
+      "key": "wire.settings.network_listen_address.label",
+      "source_cells": 14,
+      "target_cells": 25
+    },
+    {
+      "key": "wire.settings.providers_openai_use_max_context_window.label",
+      "source_cells": 26,
+      "target_cells": 46
+    },
+    {
+      "key": "wire.settings.providers_openrouter_max_price.label",
+      "source_cells": 9,
+      "target_cells": 19
+    },
+    {
+      "key": "wire.settings.providers_openrouter_preferred_max_latency.label",
+      "source_cells": 15,
+      "target_cells": 25
+    },
+    {
+      "key": "wire.settings.retry_maxretries.label",
+      "source_cells": 11,
+      "target_cells": 28
+    },
+    {
+      "key": "wire.settings.session_cleanup_max_sessions.label",
+      "source_cells": 14,
+      "target_cells": 22
+    },
+    {
+      "key": "wire.settings.subagents_max_team_depth.label",
+      "source_cells": 21,
+      "target_cells": 34
+    },
+    {
+      "key": "wire.settings.supplements_denyprefixes.label",
+      "source_cells": 18,
+      "target_cells": 31
+    },
+    {
+      "key": "wire.settings.supplements_maxoutputtokens.label",
+      "source_cells": 19,
+      "target_cells": 29
+    },
+    {
+      "key": "wire.settings.supplements_maxturns.label",
+      "source_cells": 11,
+      "target_cells": 20
+    },
+    {
+      "key": "wire.settings.web_fetch_max_redirects.label",
+      "source_cells": 13,
+      "target_cells": 26
+    }
+  ],
+  "original_hashes": {
+    "en": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+    "ur": "79869c119f2cb73152c50a4a3ffb647441cd0b0db0fb1f49a76f29a15324bc5e"
+  },
+  "original_scoped_value_contains_redaction_marker": false,
+  "shipped_ur_plural_categories": [
+    "one",
+    "other"
+  ],
+  "malformed_icu_negative": "PASS",
+  "missing_argument_negative": "PASS",
+  "new_labels": {
+    "wire.settings.tool_approval_mode.choice.ask.label": {
+      "text": "پوچھیں",
+      "source_cells": 3,
+      "target_cells": 6,
+      "pseudo_cells": 10,
+      "bidi_isolate_cells": 6,
+      "arguments": [],
+      "plain_literal": true,
+      "pseudo": "synthetic expansion only; no real-layout claim",
+      "bidi": "synthetic FSI/PDI wrapper only; no rendered shaping claim"
+    },
+    "wire.settings.tool_approval_mode.choice.auto.label": {
+      "text": "خودکار",
+      "source_cells": 9,
+      "target_cells": 6,
+      "pseudo_cells": 10,
+      "bidi_isolate_cells": 6,
+      "arguments": [],
+      "plain_literal": true,
+      "pseudo": "synthetic expansion only; no real-layout claim",
+      "bidi": "synthetic FSI/PDI wrapper only; no rendered shaping claim"
+    }
+  },
+  "rendered_with_synthetic_params": 895,
+  "actual_argument_negative_controls": [
+    {
+      "key": "wire.settings.local_providers.base_url.label",
+      "missing_name": "PASS"
+    },
+    {
+      "key": "wire.settings.local_providers.models.label",
+      "missing_name": "PASS"
+    }
+  ],
+  "markup_code_token_mismatches": []
+}

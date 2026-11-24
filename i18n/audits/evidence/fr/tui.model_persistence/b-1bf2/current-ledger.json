@@ -1,0 +1,32 @@
+{
+  "locale": "fr",
+  "namespace": "tui.model_persistence",
+  "source_sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "1ca940cf73ba",
+    "model": null,
+    "date": null,
+    "provenance_note": "Session supplied by task; actual translator model/date not supplied; manager to retain verified translator provenance."
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "1bf2a3e4c433",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "1ca940cf73ba",
+    "independent_from_A_auditor_session": "0ecda03",
+    "independent_from_source_author_session": "a97c7f76d5ee",
+    "actual_model_source": "Host [model switch] message before copy assessment: provider failure: quota; switched from anthropic/claude-opus-5-5 to openai/gpt-6.1-sol",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "Independent French B audit, 4/4 keys, 0 unresolved blocker/major. Record: i18n/audits/evidence/fr/tui.model_persistence/b-1bf2/record.json. Plain-Rich only; native integration pending."
+}

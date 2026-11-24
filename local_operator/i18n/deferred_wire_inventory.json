@@ -11,7 +11,8 @@
         }
       ],
       "references": {
-        "settings_io.py": 884
+        "settings_io.py": 894,
+        "tui/app.py": 1
       }
     },
     "wire.settings.hub_defaults": {
@@ -206,8 +207,11 @@
         }
       ],
       "references": {
-        "remote_compute/cli.py": 51,
-        "remote_compute/config.py": 3
+        "remote_compute/cli.py": 36,
+        "remote_compute/config.py": 3,
+        "remote_compute/messages.py": 23,
+        "remote_compute/tiers.py": 4,
+        "server/routes/desktop_remote_compute.py": 5
       }
     },
     "wire.slash": {
@@ -225,7 +229,7 @@
         }
       ],
       "references": {
-        "slash_commands.py": 54
+        "slash_commands.py": 55
       }
     },
     "wire.slash.library": {
@@ -299,10 +303,30 @@
           "path": "local_operator/settings_io.py",
           "symbol": "settings_io._keymap_copy -> settings_io._t",
           "note": "hotkey row label/help merged into the settings registry as plain strings; /v1/settings carries the strings, never a code"
+        },
+        {
+          "path": "local_operator/keymap.py",
+          "symbol": "keymap._apply_send_copy -> keymap._keymap_t",
+          "note": "send-row label/help resolved into the registry so group_conflict names the other row in-process as a plain string; no code leaves the process"
         }
       ],
       "references": {
-        "settings_io.py": 12
+        "keymap.py": 8,
+        "settings_io.py": 52
+      }
+    },
+    "wire.settings.transcript_display": {
+      "reason": "transcript layout row label/help and its two choice labels/descriptions rendered by settings_io._t as plain strings; the slash command reuses the rendered label as a receipt, never a code",
+      "render_points": [
+        {
+          "path": "local_operator/settings_io.py",
+          "symbol": "settings_io._t",
+          "note": "the `display.transcript_display` row's label/help/choices merged into the settings registry as plain strings; /v1/settings carries the strings, never a code"
+        }
+      ],
+      "references": {
+        "settings_io.py": 8,
+        "tui/app.py": 4
       }
     },
     "wire.language_receipts": {
@@ -388,10 +412,16 @@
           "path": "local_operator/session/catalog.py",
           "symbol": "_terminal_label (render)",
           "note": "complete messages selected by CatalogEntry.status (terminal rungs via _stop_label/_error_label, and since PR #4334 the live rungs: approval/answer needed, wedged heartbeat, working, unseen completion, attached, ready/exec headless, dormant, complete, recent, waiting) and rendered by _terminal_label with the memoised config-owned label locale; clients receive finished status strings, not wire.session_status envelope identities. Reviewed reference census includes the whole-message selectors at this existing in-process boundary."
+        },
+        {
+          "path": "local_operator/i18n/duration_message.py",
+          "symbol": "format_duration (render callback)",
+          "note": "Shared four-branch duration selection immediately renders each generated key through the caller-owned callback and rejects non-string results. session/catalog.status_duration supplies _terminal_label with the config-owned locale; info/copy.info_duration supplies _duration_info_text with the active Info locale and actual source provenance. Both return finished strings, never envelope identities."
         }
       ],
       "references": {
-        "session/catalog.py": 33
+        "i18n/duration_message.py": 5,
+        "session/catalog.py": 28
       }
     },
     "wire.sessions": {

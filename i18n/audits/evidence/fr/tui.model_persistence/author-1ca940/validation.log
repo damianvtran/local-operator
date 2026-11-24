@@ -1,0 +1,17 @@
+Runtime module: /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/i18n/runtime.py
+Frozen input SHA-256 en/tui.model_persistence.json: 4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+Frozen input SHA-256 en/tui.model_persistence.context.json: b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+JSON/catalogue/key count and source order: OK (4 keys)
+tui.model_persistence.persist: ICU args=(); plural/select arms=0
+tui.model_persistence.settings: ICU args=(); plural/select arms=0
+tui.model_persistence.saved: ICU args=(); plural/select arms=0
+tui.model_persistence.with_model: ICU args=(('label', 'simple'), ('routes', 'simple')); plural/select arms=0
+Protected literal: '/model default' byte-exact (ASCII)
+Protected literal: '/settings' byte-exact (ASCII)
+Protected literal: '/model saved' byte-exact (ASCII)
+Scoped ICU render: modèle : openai/gpt-6.1-sol — /model default enregistre ce modèle pour les nouvelles sessions · appliquez à cette session le modèle par défaut au démarrage avec /model saved · /settings permet aussi de modifier le modèle par défaut au démarrage
+Scoped ICU render: modèle : provider/very-long-opaque-model-identity-2026-11-22:preview — /model default enregistre ce modèle pour les nouvelles sessions · appliquez à cette session le modèle par défaut au démarrage avec /model saved · /settings permet aussi de modifier le modèle par défaut au démarrage
+Settings-only clause: /settings permet aussi de modifier le modèle par défaut au démarrage
+No declared maxCells/maxChars; live NoticeBlock wrapping at 80/100/120 and UI integration are owner-owned, NOT validated here.
+Target SHA-256: 2d31f57fd8a19eb9c82b71b135fc0cd76c0056d80a0ab846a744da2467e7c002
+Scoped mechanical validation: OK. Translation status: translated; independent audits NOT performed.

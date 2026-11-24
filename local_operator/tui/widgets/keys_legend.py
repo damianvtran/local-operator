@@ -45,7 +45,9 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator import keymap as _keymap
 from local_operator.i18n.keys import tui_chrome_bindings as _x
+from local_operator.i18n.keys import tui_transcript_fold
 from local_operator.i18n.text import register_refresh, tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
@@ -55,6 +57,14 @@ from local_operator.tui.widgets.transcript import wrap_cells
 #: (``f9``, ``esc``, ``ctrl+a`` …) is a chord the terminal delivers, never prose,
 #: so it stays Latin in every locale.
 _t = tr("tui.chrome.bindings")
+#: The fold's legend rows resolve from the fold's OWN en-only namespace, not
+#: `tui.chrome.bindings`. A key added to a translated namespace changes its en
+#: source hash, which stalenesses every locale's audit entry for that namespace
+#: and un-ships all seven locales (measured: the generated shipped set collapsed
+#: to `en`). `tui.transcript_fold` is carried by `en` alone, so new copy there
+#: rides the per-namespace §2.5 fallback until its translation wave — the same
+#: trade the namespace list in `scripts/i18n/generate.py` records.
+_tf = tr("tui.transcript_fold")
 
 #: Horizontal padding cells, mirroring the ``padding: 1 2`` the stylesheet pins
 #: on ``KeysLegend``. Textual sizes BORDER-BOX, so every width/height pinned in
@@ -191,6 +201,19 @@ def _legend_sections() -> tuple[LegendSection, ...]:
                 ("ctrl+n/ctrl+s", _t(_x.legend_app_ctrl_n_ctrl_s())),
             ),
         ),
+        # The fold's own keyboard vocabulary. It cannot live in /help: every row
+        # here is scoped to a FOCUSED FOLD BAR (the printable `f`/`F`/`+`/`-`
+        # deliberately mean nothing while a composer has the keys), and a bare key
+        # row has no way to say that. A section heading does.
+        LegendSection(
+            heading=_tf(tui_transcript_fold.legend_heading()),
+            rows=(
+                ("enter/space", _tf(tui_transcript_fold.legend_enter())),
+                ("left/right", _tf(tui_transcript_fold.legend_left_right())),
+                ("f/F", _tf(tui_transcript_fold.legend_failed())),
+                ("+/-", _tf(tui_transcript_fold.legend_all())),
+            ),
+        ),
     )
 
 
@@ -199,12 +222,22 @@ LEGEND_SECTIONS: tuple[LegendSection, ...] = _legend_sections()
 
 #: Rows whose key is the DEFAULT of a remappable action, mapped to the keymap
 #: ids that can change it. Every other row's key is an unconditional binding
-#: that cannot drift; these two are the card's only rows that could become a
-#: lie after `lop config edit keymap.<id>` or the settings page (design round
-#: 1, D6), so they are resolved against the LIVE keymap at composition time.
+#: that cannot drift; the rows below are the ones that could become a lie
+#: after `lop config edit keymap.<id>` or the settings page (design round 1,
+#: D6), so they are resolved against the LIVE keymap at composition time.
+#: DESCRIPTIONS that name a chord (the sessions heading's `(f9)`, `f9 again
+#: returns`) are re-keyed by `keymap.substitute_keys` at the same paint, for
+#: the same reason and without retyping translated copy.
 #: `tests/unit/tui/test_keys_legend.py` asserts these ids exist in
 #: `KEY_ACTIONS`, which is the drift guard for the string pair.
 _REMAPPABLE_ROWS: dict[str, tuple[str, ...]] = {
+    "f9": ("keymap.focus_sidebar",),
+    "f10": ("keymap.toggle_pin",),
+    "f8": ("keymap.aside",),
+    "ctrl+b": ("keymap.toggle_sidebar",),
+    "ctrl+t": ("keymap.toggle_todos",),
+    "ctrl+g": ("keymap.toggle_subagents",),
+    "ctrl+l": ("keymap.clear_transcript",),
     "ctrl+n/ctrl+s": ("keymap.new_session", "keymap.resume"),
 }
 
@@ -307,11 +340,11 @@ def build_legend_rows(width: int, keymap: Mapping[str, str] | None = None) -> li
         # an extra painted row that `len(rows)` never counted, so the pinned
         # height under-counts and the hint row -- the only exit cue -- is the
         # first thing clipped (design round 1, D1).
-        for part in wrap_cells(section.heading, width) or [""]:
+        for part in wrap_cells(_keymap.substitute_keys(section.heading, keymap), width) or [""]:
             rows.append(Text(part, style=heading_ink))
         for key, description in section.rows:
             painted_key = resolve_key(key, keymap)
-            parts = wrap_cells(description, desc_width) or [""]
+            parts = wrap_cells(_keymap.substitute_keys(description, keymap), desc_width) or [""]
             if stacked:
                 rows.append(Text(painted_key, style=key_ink))
                 for part in parts:
@@ -402,6 +435,16 @@ class KeysLegend(Static):
         """
         screen_width, _ = overlay.screen_size(self)
         return min(natural_width(self._keymap_snapshot()), screen_width - 2)
+
+    def keymap_hints_changed(self) -> None:
+        """Recompose the card after a live remap (R1).
+
+        ``_repaint`` is the class's own composition path: the rows AND the key
+        column are functions of the keymap, so a plain ``refresh`` would repaint
+        the widget from the Text it was last given. A no-op while the card is
+        closed, which is why it is safe on every remap.
+        """
+        self._repaint()
 
     def _content_width(self) -> int:
         return max(1, self.panel_width() - PADDING_CELLS)

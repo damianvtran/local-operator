@@ -60,8 +60,10 @@ rather than double-parsing. It is bounded by the replay cache's own entry bound
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -69,6 +71,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.session.cold_metadata import safe_metadata_path
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.replay_cache import (
@@ -80,14 +83,20 @@ from local_operator.session.replay_cache import (
 )
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.tail_anchor import (
-    build_anchor,
+    NoAnchorPin,
+    build_anchor_settled,
+    pin_holds,
     preserve_selection_evidence,
     read_anchor,
     validate_anchor,
     write_anchor,
 )
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
-from local_operator.session.transcript_index import probe_index, start_refresh
+from local_operator.session.transcript_index import (
+    companion_first,
+    probe_index,
+    start_refresh,
+)
 
 if TYPE_CHECKING:
     # The return annotation of ``_cold_replay_key`` names it, so it must be BOUND for
@@ -142,6 +151,31 @@ PREWARM_MAX_LOAD_PER_CPU = 1.0
 #: the settlement — the write path appends or replaces, never rewrites in place, so
 #: this is a limit of the instrument rather than a case a writer reaches.
 _NO_ANCHOR_NEEDED: dict[str, tuple[int, int]] = {}
+
+#: Where the DURABLE half of that settlement lives:
+#: ``<config>/cache/prewarm_settled/<session>.json``, one small record per journal.
+#:
+#: WHY IT EXISTS (#4362 QA, observation O1). ``_NO_ANCHOR_NEEDED`` dies with the
+#: process, so after every serve start the selector re-picked the newest journals
+#: that carry a checkpoint row — and ``warm_index_cache`` then hydrated each one's
+#: whole transcript index (~1.2 ms of GIL-held CPU per journal MB; the operator's
+#: newest journals are 174-827 MB) exactly while the operator starts clicking. The
+#: record is keyed and validated like the cold-replay records beside it
+#: (``cold_metadata``: one file per session under ``cache/``, atomically replaced,
+#: any doubt is a miss): it holds a :class:`~local_operator.session.tail_anchor.
+#: NoAnchorPin` and is honoured only while ``tail_anchor.pin_holds`` accepts it.
+#:
+#: A CACHE DIRECTORY, NOT A SESSION SIDECAR, on purpose: session directories carry
+#: allow-lists (``network.sync``'s move manifest, ``retention``'s bookkeeping set)
+#: that every new file there must join, and this record is meaningless on another
+#: device anyway (it pins an inode). Losing it costs one re-scan, never an answer.
+SETTLED_DIRNAME = "prewarm_settled"
+
+#: Schema of a settled record; any other value is a miss.
+_SETTLED_SCHEMA = 1
+
+#: The id allow-list ``cold_metadata`` applies before an id becomes a path.
+_SETTLED_STEM = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 #: Single-flight guard for the anchor write, keyed by session directory.
 #:
@@ -441,12 +475,139 @@ def _anchor_current(directory: Path) -> bool:
         # Asked and answered in this process: this journal needs no sidecar (see
         # ``_NO_ANCHOR_NEEDED``). Without this the degraded pass spins on it forever.
         return True
+    if _settled_on_disk(directory) and _companion_answers(directory.parent.parent, directory.name):
+        # Asked and answered by an EARLIER process, and the pin still holds (see
+        # ``SETTLED_DIRNAME``): without this every serve start re-selected it and
+        # hydrated an index its open path no longer reads. COMPANION-FIRST ONLY,
+        # deliberately: a smaller journal's open reads the RESIDENT index first,
+        # so the per-start warm it gets by being re-selected is the warm the queue
+        # exists for, and it stays exactly as it was.
+        #
+        # AND ONLY WHILE THE COMPANION READS ``ready`` (PR #4398 QA, Q1). The
+        # record settles the ANCHOR question; it says nothing about the companion
+        # the open path actually reads. A companion that is missing or names
+        # another derivation (a read-model ``SCHEMA`` bump renames every one, a
+        # serve stopped before ``_publish_when_idle``, a pruned or failed publish)
+        # would otherwise never be rebuilt at boot, and the first click would pay
+        # the whole resident hydration. Falling through re-selects the journal, and
+        # ``warm_index_cache``'s own ``_companion_answers`` check then refreshes it.
+        # ``_companion_answers`` is itself size-gated (``companion_first``), and
+        # the selector runs on a worker thread, so its head read is allowed here.
+        return True
     if _rewritten_since_record(directory, stat):
         return False
     anchor = read_anchor(directory)
     if anchor is None:
         return False
     return anchor.checkpoint_absent and anchor.inode == stat.st_ino and anchor.size == stat.st_size
+
+
+def _settled_path(directory: Path) -> Path | None:
+    """The durable settlement record for the journal in ``directory``, or ``None``.
+
+    ``directory`` is ``<config>/sessions/<id>``, so the config dir is two levels up;
+    an id that cannot name a file has no record (and is simply re-asked).
+    """
+    if not _SETTLED_STEM.fullmatch(directory.name):
+        return None
+    return directory.parent.parent / "cache" / SETTLED_DIRNAME / f"{directory.name}.json"
+
+
+def settled_record_path(config_dir: str | Path, session_id: str) -> Path | None:
+    """The settlement record a session id names, for ``cleanup._drop_session_sidecars``.
+
+    The record lives under ``cache/``, outside the session directory, so removing
+    the directory never took it (PR #4398 review, m1); the remover clears it by
+    this name. ``None`` for an id the stem allow-list refuses, which never had one.
+    """
+    return _settled_path(Path(config_dir) / "sessions" / session_id)
+
+
+def _settled_on_disk(directory: Path) -> bool:
+    """Whether a persisted :class:`NoAnchorPin` still settles this journal.
+
+    A miss for every doubt — absent, unreadable, another schema, another reason, or
+    a pin ``tail_anchor.pin_holds`` refuses (replaced, shrunk, regrown over the
+    pinned row, or rewritten in place at the same size). A miss only means the
+    journal is asked again, which is the pre-record behaviour.
+    """
+    path = _settled_path(directory)
+    if path is None:
+        return False
+    try:
+        with path.open(encoding="utf-8") as handle:
+            recorded_ns = os.fstat(handle.fileno()).st_mtime_ns
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(raw, dict) or raw.get("schema") != _SETTLED_SCHEMA:
+        return False
+    inode, size, digest, reason = (raw.get(k) for k in ("inode", "size", "tail_digest", "reason"))
+    if type(inode) is not int or type(size) is not int:
+        return False
+    if not isinstance(digest, str) or not isinstance(reason, str):
+        return False
+    return pin_holds(directory, NoAnchorPin(inode, size, digest, reason), recorded_ns=recorded_ns)
+
+
+def _write_settled(directory: Path, pin: NoAnchorPin) -> bool:
+    """Persist ``pin`` atomically (PID-suffixed temp + ``os.replace``); never raises.
+
+    The same idiom ``cold_metadata.write_cold_metadata`` uses: two processes that
+    settle one journal each write a whole document, and the later one wins.
+    """
+    path = _settled_path(directory)
+    if path is None:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            path,
+            json.dumps(
+                {
+                    "schema": _SETTLED_SCHEMA,
+                    "inode": pin.inode,
+                    "size": pin.size,
+                    "tail_digest": pin.tail_digest,
+                    "reason": pin.reason,
+                }
+            ),
+            hidden=True,
+        )
+        return True
+    except OSError:
+        # The writer has already removed its own temp.
+        logger.debug("prewarm settlement not written for %s", directory, exc_info=True)
+        return False
+
+
+def _companion_answers(root: str | Path, session_id: str) -> bool:
+    """Whether the open path answers this journal from its companion, unhydrated.
+
+    WHY THE WARM SKIPS THESE (#4362 QA, observation O1). Since #4362 a journal at
+    or above ``transcript_index.COMPANION_FIRST_MIN_BYTES`` opens from the
+    persisted read-model companion and no longer arms a resident hydration, so a
+    warm that hydrates it buys the open nothing and costs ~1.2 ms of GIL-held serve
+    CPU per journal MB plus the index's RSS — seconds on the operator's 174-827 MB
+    journals, at boot, beside the first sidebar clicks.
+
+    ONLY A ``ready`` COMPANION COUNTS: ``index_read_model.header`` reads the cached
+    index's head and one stat of the journal, and answers ``ready`` only when the
+    companion for THAT derivation exists and the journal has not moved since. A
+    missing or stale companion keeps the warm, because then the refresh is real
+    catch-up work that publishes the companion the next open (and the next start)
+    reads. Below the line nothing changes: small journals still warm resident.
+    WORKER-THREAD ONLY (a file read).
+    """
+    from local_operator.session import index_read_model
+
+    if not companion_first(root, session_id):
+        return False
+    try:
+        return index_read_model.header(root, session_id).state == "ready"
+    except Exception:  # noqa: BLE001 — an unreadable companion means "warm as before"
+        logger.debug("index prewarm: companion check failed for %s", session_id, exc_info=True)
+        return False
 
 
 def _rewritten_since_record(directory: Path, journal: os.stat_result) -> bool:
@@ -535,6 +696,12 @@ async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -
             await asyncio.to_thread(write_tail_anchor, root, session_id)
         except Exception:  # noqa: BLE001 — an unwritable anchor is a slower read, not a failure
             logger.debug("tail anchor not written for %s", session_id, exc_info=True)
+        if await asyncio.to_thread(_companion_answers, root, session_id):
+            # The anchor half above still ran (cheap, and persisted); only the
+            # whole-index hydration is skipped — see ``_companion_answers``.
+            logger.debug("index prewarm: %s served by its companion; no hydration", session_id)
+            await asyncio.sleep(0)
+            continue
         try:
             task, was_started = start_refresh(root, session_id)
             await task
@@ -699,6 +866,22 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
     whether a NEW record was written.
     """
     directory = Path(root) / "sessions" / session_id
+    # The durable record exists only for companion-first journals (PR #4398 review,
+    # m1/m2): below that line the selector never honours it, so writing one costs a
+    # file per checkpointed session for nothing, and reading one would skip the
+    # scan on a size the record does not describe. One stat; the same gate
+    # ``_anchor_current`` applies through ``_companion_answers``.
+    durable = companion_first(root, session_id)
+    if durable and _settled_on_disk(directory):
+        # Settled by an earlier pass and still pinned: nothing to prove, and the
+        # backward scan below is the cost the record exists to skip. Mirrored into
+        # the in-process record so the selector's F11 rule holds for this process.
+        try:
+            stat = (directory / TRANSCRIPT_FILENAME).stat()
+        except OSError:
+            return False
+        _NO_ANCHOR_NEEDED[str(directory)] = (stat.st_ino, stat.st_size)
+        return False
     if validate_anchor(directory, read_anchor(directory)) is not None:
         try:
             journal = (directory / TRANSCRIPT_FILENAME).stat()
@@ -719,8 +902,13 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
             return False
         _ANCHOR_IN_FLIGHT.add(key)
     try:
-        anchor = build_anchor(directory)
+        anchor, pin = build_anchor_settled(directory)
         if anchor is None:
+            if pin is not None and durable:
+                # DURABLE when the reason survives any append (``NoAnchorPin``):
+                # the next serve start reads this instead of re-selecting the
+                # journal. The in-process record below still covers the rest.
+                _write_settled(directory, pin)
             # SETTLE IT (F11): ``build_anchor`` returns None for a journal that
             # already carries the checkpoint row (nothing to prove) or cannot be
             # described at all. Either way there is nothing to write, and recording

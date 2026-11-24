@@ -12,11 +12,9 @@ its token-level negation check are load-bearing and must not be forked — and
 nothing else. That split is the one ``tui/app.py``'s ``_loop_worker`` vs
 ``_loop_goal_worker`` already made for the same reason.
 
-The design principle this module implements: **the goal's active-ness is durable
-state; the judge is triggered by an edge.** Nothing here holds a long-lived task,
-so there is no in-memory driver for a restart to lose — which is what stops the
-judge needing the "checkpoint state is not an instruction to spend more tokens"
-exemption the retained LOOP state needs.
+The active record is durable, not the task. The runtime and wake supervisor
+use that record to deliver a paced recovery edge when a chain is interrupted.
+The healthy chain still reviews each completed continuation immediately.
 
 Bounded by construction, and every bound is a constant here rather than a config
 key: this is a spend control, and a number a user can raise is a number that will
@@ -260,10 +258,8 @@ def owns_the_session(session: Any) -> bool:
     return getattr(session, "runtime_locality", "unknown") == "this-process"
 
 
-#: The two judge states that mean WORK WAS ALREADY BEING SPENT, and so the only
-#: two a restart re-arms (RULINGS R3). ``waiting``/``stalled`` mean nothing was in
-#: flight, and *checkpoint state is not an instruction to spend more tokens*.
-_REARM_STATES = frozenset({"continuing", "judging"})
+#: Nonterminal judge records that authorize a later recovery probe.
+GOAL_REARM_STATES = frozenset({"waiting", "continuing", "judging", "stalled"})
 
 
 class GoalJudge:
@@ -288,6 +284,8 @@ class GoalJudge:
         judge_state: Callable[[], GoalJudgeState],
         loop_running: Callable[[], bool] = _never,
         continuations: Callable[[], bool] = _always,
+        context_available: Callable[[], bool] = _always,
+        recovery_idle: Callable[[], bool] = _always,
     ) -> None:
         self.judge = judge
         #: Admits ONE continuation turn and AWAITS it, so this driver never has
@@ -320,6 +318,8 @@ class GoalJudge:
         #: recorded as `waiting` and not turned into up to
         #: MAX_GOAL_CONTINUATIONS paid turns nobody asked the command for.
         self.continuations = continuations
+        self.context_available = context_available
+        self.recovery_idle = recovery_idle
         self._in_flight = False
         self._task: asyncio.Task[None] | None = None
         self._mirror: dict[str, Any] = {}
@@ -386,52 +386,23 @@ class GoalJudge:
     # -- trigger 3: session start / resume / adopt -----------------------------
 
     def needs_rearm(self) -> bool:
-        """Whether the RESTORED record says work was already in flight.
-
-        Trigger 3's eligibility, stated ONCE and read by both callers that have
-        to agree on it: :meth:`rearm_on_resume` itself, and the runtime host,
-        which must answer it BEFORE it schedules that call.
-
-        The host cannot simply schedule and let the probe decide, because it
-        registers the probe in the handle's ``_background_tasks`` — the set
-        ``is_busy`` reads as *work a clean exit would destroy*. A probe that
-        will immediately find nothing to do therefore makes an otherwise idle
-        runtime report busy for as long as the no-op takes, and ``is_busy`` is
-        exactly the term ``is_pristine`` and the reaper ask. Measured on this
-        fleet: a runtime that had just booted its empty ``Untitled
-        conversation`` failed ``is_pristine()`` on the pending probe alone, so
-        the session the user never used could not be retired as pristine.
-
-        Being a synchronous read of the durable record is what makes it usable
-        there: the host's plan cannot await, so the question has to be answerable
-        without one.
-        """
-        return self.judge_state().state in _REARM_STATES
+        """Whether an idle owner can recover this nonterminal goal."""
+        return (
+            self._enabled()
+            and not self.in_flight
+            and not self.loop_running()
+            and self.judge_state().state in GOAL_REARM_STATES
+        )
 
     async def rearm_on_resume(self) -> None:
-        """Re-engage ONCE when the restored record says a continuation was in flight.
-
-        RULINGS R3, and it is the whole of the operator's "the judge must
-        re-engage after a stop/resume" reconciled with this codebase's own rule
-        that *checkpoint state is not an instruction to spend more tokens*: only
-        the two judge states that mean "work was already being spent" re-arm
-        (``continuing``, ``judging``). A ``waiting`` or ``stalled`` goal is left
-        alone — nothing was in flight, so a restart is not a reason to spend —
-        and it re-arms on the next turn end like any other.
-
-        The streak is NOT reset: a resume is not a user-authored turn, and
-        zeroing it here would hand a resumed goal a fresh 12 continuations every
-        time the app is reopened.
-        """
-        if not self._claim():
+        """Run a single recovery trigger after the host's durable due check."""
+        if not self.needs_rearm() or not self._claim():
             return
         # Recorded so :meth:`settle` can wait out a resume's re-armed verdict the
         # same way it waits out a turn end's.
         self._task = asyncio.current_task()
         try:
-            if not self.needs_rearm():
-                return
-            await self._drive(error=False, aborted=False, reset_streak=False)
+            await self._drive(error=False, aborted=False, reset_streak=False, recovering=True)
         finally:
             self._release()
 
@@ -463,7 +434,9 @@ class GoalJudge:
 
     # -- the policy ------------------------------------------------------------
 
-    async def _drive(self, *, error: bool, aborted: bool, reset_streak: bool) -> None:
+    async def _drive(
+        self, *, error: bool, aborted: bool, reset_streak: bool, recovering: bool = False
+    ) -> None:
         """One trigger's decision: judge, or report why it will not."""
         if not self._enabled():
             return
@@ -487,6 +460,9 @@ class GoalJudge:
             # when it moved, because a turn end with nothing to say must not
             # journal.
             self._publish(run=0)
+        if recovering and record.state == "stalled":
+            # Both limits bound a burst, not the lifetime of a standing goal.
+            self._publish(run=0, failures=0)
         if error or aborted:
             # Trigger 2. No continuation, no judge call, and honest state: the
             # goal is still active but nothing is being spent on it until the
@@ -497,7 +473,7 @@ class GoalJudge:
         goal = self.goal()
         if not goal:  # pragma: no cover - `_enabled` already refused this
             return
-        await self._run(goal, self.token())
+        await self._run(goal, self.token(), recovering=recovering)
 
     def _enabled(self) -> bool:
         """Whether this trigger may judge at all.
@@ -518,7 +494,7 @@ class GoalJudge:
         """
         return bool(self.goal()) and self.status() in {"", "active"} and bool(self.token())
 
-    async def _run(self, goal: str, token: str) -> None:
+    async def _run(self, goal: str, token: str, *, recovering: bool) -> None:
         """One judge call plus the decision it earns — and the chain it starts.
 
         This is ``GoalLoop.run``'s shape without the loop control: judge →
@@ -530,7 +506,7 @@ class GoalJudge:
         """
         rearms = 0
         while True:
-            if self.token() != token:
+            if self.token() != token or not self._enabled():
                 # The goal was replaced or deleted before this iteration: the run
                 # is over, and the record now belongs to a DIFFERENT goal, so this
                 # driver must not write its state onto the new one.
@@ -547,7 +523,7 @@ class GoalJudge:
             captured = self.serial()
             self._publish(state="judging", verdict="")
             verdict, reason = await self._ask(goal)
-            if self.token() != token:
+            if self.token() != token or not self._enabled():
                 # The goal was replaced or deleted under the call. The verdict
                 # belongs to an objective nobody is pursuing: drop it, and leave
                 # the record alone — the new goal's own trigger publishes its
@@ -558,6 +534,9 @@ class GoalJudge:
             # or retrying it: a stale-context retry is legitimate only while no
             # loop owns the verdict. Both hosts supply a live ownership predicate.
             if self.loop_running():
+                self._publish(state="waiting")
+                return
+            if not self.context_available() or (recovering and not self.recovery_idle()):
                 self._publish(state="waiting")
                 return
             if self.serial() != captured:
@@ -590,18 +569,8 @@ class GoalJudge:
                 # (the record is the authority `_drive` reads its counters from).
                 self._publish(state="done", verdict="achieved", reason=reason, failures=0)
                 return
-            if verdict is False:
-                # A readable verdict clears the strike counter: the breaker is
-                # for consecutive MALFUNCTION, not for a judge healthily telling
-                # us to keep going (goal_loop.py:128's rule, reused).
-                self._publish(failures=0)
-            else:
+            if verdict is None:
                 failures = int(self._mirror["failures"]) + 1
-                # Fail-safe CONTINUE, which is the contract `_parse_loop_verdict`
-                # states for its own `None` return: an answer with no readable
-                # verdict is never a release and never a stop on its own, so the
-                # work continues — and the STRIKE is what stops a broken judge
-                # from spending indefinitely.
                 if failures >= GOAL_JUDGE_FAILURES:
                     # The BREAKER's own sentence, and NOT the parser's words:
                     # this verdict was unreadable, so quoting it as the reason a
@@ -615,7 +584,13 @@ class GoalJudge:
                         reason=STALLED_BREAKER_REASON,
                     )
                     return
-                self._publish(verdict="unknown", failures=failures, reason=NO_VERDICT_REASON)
+                # A broken reviewer is not evidence authorizing another work
+                # turn. Retry the fork on the next durable recovery tick.
+                self._publish(
+                    state="waiting", verdict="unknown", failures=failures, reason=NO_VERDICT_REASON
+                )
+                return
+            self._publish(failures=0, verdict="continue", reason=reason)
             if int(self._mirror["run"]) >= MAX_GOAL_CONTINUATIONS:
                 # The cap, NOT the breaker, and the reason says which: a surface
                 # that reported one for the other would send the user looking at
@@ -626,27 +601,15 @@ class GoalJudge:
                 self._publish(state="stalled", reason=STALLED_CAP_REASON)
                 return
             if not self.continuations():
-                # A headless run has ended (see `continuations`). The verdict is
-                # RECORDED — a readable CONTINUE keeps its reason — but no turn
-                # is admitted: the goal waits for the next turn end.
-                if verdict is False:
-                    self._publish(state="waiting", verdict="continue", reason=reason)
-                else:
-                    self._publish(state="waiting")
+                self._publish(state="waiting")
                 return
-            run = int(self._mirror["run"]) + 1
-            if verdict is False:
-                self._publish(state="continuing", verdict="continue", run=run, reason=reason)
-            else:
-                self._publish(state="continuing", verdict="unknown", run=run)
+            self._publish(state="continuing", run=int(self._mirror["run"]) + 1)
             try:
                 await self.prompt(goal_continuation_prompt(goal))
-            except Exception:  # noqa: BLE001 -- any refusal is a `waiting`, never a retry
-                # A REJECTED ADMISSION IS A `WAITING`, NEVER A RETRY. The
-                # interesting rejection is `TurnInFlight` — the session is
-                # genuinely still closing a turn — and retrying it here would
-                # spin; the next turn end re-arms the judge instead.
-                self._publish(state="waiting")
+            except Exception:  # noqa: BLE001 — retry only at the recovery cadence
+                # A failed or refused work turn is not a new review edge.
+                if self.token() == token and self._enabled():
+                    self._publish(state="waiting")
                 return
 
     async def _ask(self, goal: str) -> tuple[bool | None, str]:

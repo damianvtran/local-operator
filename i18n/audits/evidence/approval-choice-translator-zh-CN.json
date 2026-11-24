@@ -1,0 +1,73 @@
+{
+  "locale": "zh-CN",
+  "role": "translator",
+  "status": "LLM authoring complete; independent safety audits pending; not native approval",
+  "session_id": "bc0e0838eb86",
+  "agent": "approval-labels-author-zh-CN",
+  "actual_authoring_model": "openai/gpt-6.1-sol",
+  "host_fallback": {
+    "from": "anthropic/claude-opus-5-5",
+    "to": "openai/gpt-6.1-sol",
+    "reason": "provider failure: quota",
+    "disclosure": "Host switched before Chinese labels were authored; both new values authored by openai/gpt-6.1-sol in this session."
+  },
+  "head": "69b7e09c9b56924a7fefe561e283a73045b0a845",
+  "target": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+  "source_sha256": "298fc1100cb10bfa34909aa245307a735dad318f456e5bbfb5337fbcdb1e8962",
+  "context_sha256": "0283678394322a47243f1002c04f67f5d9b17bce6b07c0fb52b72b351ab6c582",
+  "target_before_sha256": "cba7d4afe5a3b22f229f3f31e8c3a7eb8dfcdc3aceb9562f78c07d76cfb4341b",
+  "target_after_sha256": "8d44389ff7b4b19be7fde38015eecb50caac7555a771ad6cc52fb1820d489f5a",
+  "selected_before_sha256": "528e62ca2b728e6ed06c2ebc9692c6c40bf4c8ee7b9f97f86556555fe04d11df",
+  "selected_after_sha256": "3dd1e07963471910edc08acafa8f587b01d94be19966634e5e3c63742bcbfc40",
+  "selected_digest_encoding": "UTF-8 JSON, ensure_ascii=false, sort_keys=true, separators=(',', ':')",
+  "key_count_before": 895,
+  "key_count_after": 895,
+  "changed_keys": [
+    "wire.settings.tool_approval_mode.choice.ask.label",
+    "wire.settings.tool_approval_mode.choice.auto.label"
+  ],
+  "retained_keys": [],
+  "prior_authors": "Unknown; no prior authorship attribution inferred or claimed.",
+  "choices": {
+    "wire.settings.tool_approval_mode.choice.ask.label": {
+      "before": "ask",
+      "after": "询问",
+      "backtranslation": "Ask / inquire",
+      "rationale": "A concise standard Chinese verb used as a mode label. It names the prompting behavior without adding always, every action, execution authorization, or an extra confirmation action. It is not the ask tool name or wire value.",
+      "cells": 4,
+      "synthetic_literal_pseudo": "⟦询问··⟧",
+      "synthetic_pseudo_cells": 8
+    },
+    "wire.settings.tool_approval_mode.choice.auto.label": {
+      "before": "auto",
+      "after": "自动",
+      "backtranslation": "Automatic",
+      "rationale": "The ordinary compact Chinese mode adjective, not a Latin machine token. It adds no allow-all, unconditional approval, bypass, or permission wording. Guardrail risk checks and mandatory person-only gates remain contextual constraints, not changed behavior.",
+      "cells": 4,
+      "synthetic_literal_pseudo": "⟦自动··⟧",
+      "synthetic_pseudo_cells": 8
+    }
+  },
+  "terminology": {
+    "guidance": ["i18n/style-guides/zh-CN.md", "i18n/glossary.md sections 1-2 (visible text only)", "approved input cache contexts for both keys"],
+    "invented_terms": [],
+    "choice_note": "No glossary-specific Ask/Automatic wording was supplied; chose established Chinese words, short unpunctuated labels consistent with the locale style. No Latin abbreviation retained.",
+    "redaction_handling": "Glossary read contained a redacted unrelated Hindi note; no attempt was made to decode, recover, or read around that text. Target copy came exclusively from the approved capture."
+  },
+  "authoring_controls": {
+    "approved_cache_selected_digests": "Matched canonical English and zh-CN selected maps to recorded digests.",
+    "original_full_file_pin": "Matched actual original target SHA to both approved cache and source-pin metadata before edit.",
+    "source_context_pins": "Matched actual full-file SHA values and both captured context entries to sidecar pins; HEAD matched frozen head.",
+    "unchanged_other_bytes": "Verified post-edit bytes with only the two exact value replacements reversed hash to the pinned original full file; key order unchanged and exactly two changed values.",
+    "icu": "Repository runtime.py parse_message accepted English, prior target, and new target literals; message_arguments and plural_selectors returned empty tuples for every selected value. Zero arguments, zero selectors; plurals N/A.",
+    "literal_render": "Repository render_message returned each new value unchanged for zh-CN with empty parameters.",
+    "negative_control": "Repository parser rejected synthetic malformed ICU '{broken' with MessageSyntaxError.",
+    "unicode_punctuation": "Both new values are NFC; no format/bidi controls, markup, escape sequences, braces, or sentence-final punctuation authored.",
+    "width": "Unicode East Asian Width calculation: 4 cells per real label; literal synthetic wrappers with two middle dots yield 8 cells each. This is a synthetic estimate, not rendered fit proof.",
+    "tooling_recovery": "First post-edit eval found its earlier kernel had been evicted and failed before validation with NameError; subsequent self-contained eval reconstructed the original bytes, verified their pinned SHA, and completed all listed controls.",
+    "wire_values": "No application code or machine values edited."
+  },
+  "overflow_risks": [],
+  "unverified": ["Real rendered UI fit (not dispatched under authoring-only scope)", "Two independent safety audits on the manager's common candidate head", "Native-speaker approval (not claimed)"],
+  "scope_exclusions": "No English/context/other locale/generation/ledger/application edits; no staging, commits, push, new worktree, dependencies, browser, native or full test runs."
+}

@@ -1,0 +1,94 @@
+"""Translator-only mechanical validation; not an independent audit or UI proof.
+Run using the primary venv, PYTHONPATH pointing at the assigned worktree,
+and an isolated HOME/config. Only the official checker's namespace/locale
+enumeration is narrowed; catalogue, context, ICU and rendering code is real.
+"""
+from pathlib import Path
+import hashlib
+import json
+import os
+import unicodedata
+from unittest.mock import patch
+import local_operator
+from local_operator.i18n import catalogues, messages, runtime, resolve
+from rich.cells import cell_len
+from rich.text import Text
+from scripts.i18n import check
+
+root = Path(__file__).resolve().parents[6]
+ns = 'tui.provider_state'
+assert Path(local_operator.__file__).resolve() == root / 'local_operator/__init__.py'
+assert not any(k.startswith('CMUX_') for k in os.environ)
+print('module:', local_operator.__file__)
+print('HOME:', os.environ['HOME'])
+print('config:', os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+print('scope: en/hi tui.provider_state only; no eligibility patch or global checks')
+base = root / 'local_operator/i18n/catalogues'
+for locale, expected in [('en', '113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912')]:
+    assert hashlib.sha256((base / locale / f'{ns}.json').read_bytes()).hexdigest() == expected
+assert hashlib.sha256((base / 'en' / f'{ns}.context.json').read_bytes()).hexdigest() == '67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be'
+print('primary interpreter:', __import__('sys').executable)
+print('modules:', catalogues.__file__, messages.__file__, runtime.__file__, check.__file__)
+for module in (catalogues, messages, runtime, check):
+    assert Path(module.__file__).resolve().is_relative_to(root)
+real_namespaces = catalogues.namespaces
+with patch.object(catalogues, 'namespaces', side_effect=lambda locale: (ns,) if locale in ('en', 'hi') else ()), patch.object(catalogues, 'locales', return_value=('en', 'hi')):
+    problems = check.check_catalogues()
+    print('official check.check_catalogues():', problems)
+    assert not problems
+    en = catalogues.load_catalogue('en', ns)
+    es = catalogues.load_catalogue('hi', ns)
+    context = catalogues.context('en', ns)
+    assert len(en) == len(es) == len(context) == 5
+    assert list(en) == list(es) == list(context)
+    assert resolve.eligible_locale('hi') == 'hi'
+    for key, source in en.items():
+        target = es[key]
+        assert runtime.message_arguments(source) == runtime.message_arguments(target) == ()
+        assert runtime.plural_selectors(source) == runtime.plural_selectors(target) == ()
+        assert not __import__('re').search(r'`[^`]*`|https?://\S+|%[sd]|<[^>]+>|\[[^]]+\]', source + target), 'protected-token scan: unexpected token requires explicit comparison'
+        assert unicodedata.normalize('NFC', target) == target
+        assert not any(unicodedata.bidirectional(c) in ('LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI') for c in target)
+        for locale, value in [('en', source), ('hi', target)]:
+            assert runtime.render_message(value, {}, locale) == value
+            result = messages.render_record(key, {}, locale=locale)
+            assert result.text == value and result.source_locale == locale
+        assert Text.from_markup(target).plain == Text(target).plain == target
+        assert Text.from_markup(source).plain == Text(source).plain == source
+        pseudo = '⟦' + target + ' ···⟧'
+        assert runtime.message_arguments(pseudo) == ()
+        assert runtime.render_message(pseudo, {}, 'hi') == pseudo
+        print(key, '| en:', source, '| hi:', target, '| args=0 plural/select=0 NFC=yes | cells en/hi/pseudo:', cell_len(source), cell_len(target), cell_len(pseudo))
+        # Context formula only: no invented maximum and no real pane assertion.
+        for provider in ('openrouter', 'ollama'):
+            budget = max(31 - cell_len(provider) - 4, 3)
+            en_fit = Text(source)
+            es_fit = Text(target)
+            en_fit.truncate(budget, overflow='ellipsis')
+            es_fit.truncate(budget, overflow='ellipsis')
+            print('  diagnostic pane=31 synthetic-id=', provider, 'budget=', budget, 'en-fit=', en_fit.plain, 'hi-fit=', es_fit.plain)
+    print('protected tokens: none in the five EN/hi values; key IDs retained exactly')
+    # Negative control proves the scoped official checker actually reads es.
+    original_load = catalogues.load_catalogue
+    def mutated_load(locale, namespace):
+        values = original_load(locale, namespace)
+        if locale == 'hi':
+            values = dict(values)
+            values[next(iter(values))] += ' {unexpected}'
+        return values
+    def missing_load(locale, namespace):
+        values = original_load(locale, namespace)
+        if locale == 'hi':
+            values = dict(values)
+            del values[next(iter(values))]
+        return values
+    with patch.object(catalogues, 'load_catalogue', side_effect=missing_load):
+        errors = check.check_catalogues()
+        assert any('missing key' in error for error in errors)
+        print('negative control rejected missing key:', errors)
+    with patch.object(catalogues, 'load_catalogue', side_effect=mutated_load):
+        errors = check.check_catalogues()
+        assert any('arguments' in error and 'unexpected' in error for error in errors)
+        print('negative control rejected added ICU argument:', errors)
+print('RESULT: mechanical validation successful; status translated ONLY; independent A/B audit pending')
+print('LIMITS: pure catalogue/ICU/render API and Rich width diagnostics; no settings/native/visual/network-isolation/release claim')

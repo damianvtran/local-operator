@@ -58,6 +58,7 @@ from local_operator.tui.widgets.transcript import (
     WakeBlock,
 )
 from local_operator.tui.widgets.welcome import WelcomeView
+from tests.unit.tui.conftest import open_all_folds
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_aside import AsideSession
 
@@ -602,8 +603,11 @@ async def test_comfortable_rows_keep_neighbouring_cards_separated(size: tuple[in
         for n in range(5):
             app._append_block(_card(f"bash{n}"))
         await _settle(pilot, 4)
-
         transcript = app.query_one(TranscriptView)
+        # The run folds under one bar (slice 4); the fused-slab property is about
+        # the CARDS, so open it and measure them.
+        await open_all_folds(transcript, pilot)
+
         visible = [
             c
             for c in app.query(ToolCard)

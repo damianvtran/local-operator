@@ -10,8 +10,10 @@
  *
  * FIT, THEN FULL SIZE. The transcript has no horizontal play (operator finding
  * B), so the inline drawing is laid out for the column's width (Pele reflows a
- * wide left-to-right chart top-to-bottom under 640 px) and its height is
- * clamped, with a fade and the labelled "Full size" button when it is. Full size
+ * wide left-to-right chart top-to-bottom under 640 px). Its height is clamped
+ * only for a genuinely tall drawing (`diagram-clip.ts`: a cap plus a tolerance, so
+ * a small chart is never sliced); a clamped drawing gets a fade AND a visible
+ * "Full size" pill over it, besides the footer button. Full size
  * is a viewer portaled to <body> like the attachment viewer: the author's own
  * layout at pixel size, panned in both directions by the viewer's own scroll
  * area. Nothing here captures a one-finger drag: the inline drawing only reacts
@@ -36,13 +38,11 @@ import {
 	type DiagramMode,
 	type DrawResult,
 } from "../lib/diagram-pele";
+import { inlineMaxHeight, mustClamp } from "../lib/diagram-clip";
 import { sanitizeSvg, serializeSvg } from "../lib/diagram-svg";
 import { PELE_THEME_STYLE, resolvedThemeDeclarations } from "../lib/diagram-theme";
 import { messageRuntime } from "../store";
 import { useModalLayer } from "./ui/use-modal-layer";
-
-/** The inline drawing's height cap. Taller drawings clip behind a fade and open full size. */
-const INLINE_MAX_HEIGHT = "32rem";
 
 /** How long "Copied" stays up. */
 const COPIED_MS = 2000;
@@ -296,7 +296,7 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 	const openRef = useRef<HTMLButtonElement>(null);
 	const [width, setWidth] = useState(0);
 	const [result, setResult] = useState<DrawResult | undefined>(undefined);
-	const [clipped, setClipped] = useState(false);
+	const [clamped, setClamped] = useState(false);
 	const [open, setOpen] = useState(false);
 
 	/* A drawing replaces a code block of a different height AFTER the transcript
@@ -348,10 +348,15 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 	useLayoutEffect(() => {
 		const el = clip.current;
 		if (!el) {
-			setClipped(false);
+			setClamped(false);
 			return;
 		}
-		const check = () => setClipped(el.scrollHeight > el.clientHeight + 1);
+		/* scrollHeight is the content's natural height whatever max-height is
+		   set, so deciding to clamp from it cannot feed back into itself. */
+		const check = () => {
+			const remPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+			setClamped(mustClamp(el.scrollHeight, remPx));
+		};
 		check();
 		if (typeof ResizeObserver === "undefined") return;
 		const observer = new ResizeObserver(check);
@@ -387,15 +392,26 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 					data-testid="diagram-tap"
 					onClick={() => setOpen(true)}
 					className="relative cursor-zoom-in overflow-hidden p-2"
-					style={{ maxHeight: INLINE_MAX_HEIGHT }}
+					style={{ maxHeight: inlineMaxHeight(clamped) }}
 				>
 					<SvgHost node={node} className="[&_svg]:mx-auto [&_svg]:block" />
-					{clipped ? (
+					{clamped ? (
 						<div
 							aria-hidden="true"
 							data-testid="diagram-fade"
-							className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-linear-to-t from-surface to-transparent"
-						/>
+							className="pointer-events-none absolute inset-x-0 bottom-0 flex h-16 items-end justify-center bg-linear-to-t from-surface via-surface/80 to-transparent pb-2"
+						>
+							{/* The fade alone read as polish, not as "this is cut". The pill
+							    names the way to the rest; it is decorative (the tap area above
+							    and the footer button do the opening, so no second control or
+							    duplicate accessible name) and reuses the footer's own label. */}
+							<span
+								data-testid="diagram-cut-hint"
+								className="rounded-full border border-hairline bg-surface px-3 py-1 text-body-sm text-ink-muted"
+							>
+								{messageRuntime.t("relay.diagram.full_size")}
+							</span>
+						</div>
 					) : null}
 				</div>
 				<div className="flex flex-wrap border-t border-hairline">

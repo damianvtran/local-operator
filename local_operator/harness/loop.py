@@ -71,6 +71,7 @@ from local_operator.harness.intent import (
 from local_operator.harness.provider_empty import is_provider_empty
 from local_operator.harness.redaction import PUBLIC_COPY_TOOLS, tool_source
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.request_admission import RequestAdmissionRefused
 from local_operator.harness.tool_names import (
     near_miss_tool,
     normalise_replay_tool_names,
@@ -5340,6 +5341,10 @@ class AgentLoop:
                     list(request._one_turn_secrets.values()),
                 )
             raise
+        except RequestAdmissionRefused:
+            # The policy declined before dispatch. Use the existing aborted
+            # terminal path without rendering or retrying a provider failure.
+            stop_reason = "aborted"
         except Exception as exc:
             # `error` below is handed straight to the UI, which prints it as a
             # single "× HTTP 400: ..." line. Re-emitting the same failure as a
@@ -7773,10 +7778,12 @@ class AgentLoop:
         """Run the guardrail checkpoint for one call; ``None`` means proceed.
 
         A fault INSIDE the guardrail fails closed for bash (the one tool whose
-        calls it classifies) and open for every other tool: refusing every
-        ``read`` because a user rule file is broken would be a harness outage,
-        while refusing a shell command the checkpoint could not vet is the
-        posture the incident asked for.
+        calls it classifies) and for a call that edits the guard's own policy
+        (``guardrails.policy.policy_hits``; also when that check itself raises),
+        and open for every other tool: refusing every ``read`` or ``write``
+        because a user rule file is broken would be a harness outage, while
+        refusing a shell command or a rule/hook edit the checkpoint could not
+        vet is the posture the incident asked for.
         """
         from local_operator.guardrails import check as guard_check
 
@@ -7784,6 +7791,15 @@ class AgentLoop:
         if tool is None:
             return None
         tool_context = context.tool_context
+        settings: Any = None
+        scratchpad: str | None = None
+        if tool.name in guard_check.FILE_DESTINATION_TOOLS:
+            # ``scratchpad://`` paths resolve through the pad, so the policy
+            # check needs the root the tool itself will use (set before the try:
+            # the fail-closed branch below reads it too).
+            from local_operator.scratchpad import scratchpad_dir_of
+
+            scratchpad = scratchpad_dir_of(tool_context)
         try:
             authorised = (
                 config.guard_override_authorised()
@@ -7796,7 +7812,6 @@ class AgentLoop:
                 )
             settings = guard_check.read_settings(authorised=frozenset(authorised))
             env: Mapping[str, str] = {}
-            scratchpad: str | None = None
             forge_auth = None
             if tool.name == "bash":
                 from local_operator.tools.builtin import (
@@ -7809,8 +7824,15 @@ class AgentLoop:
                 # session's shell does (field report 2026-11-17, node-2).
                 forge_auth = bash_guard_forge_auth(tool_context)
             session_id = (tool_context.session_id if tool_context is not None else "") or ""
+            cwd = (tool_context.cwd if tool_context is not None else None) or os.getcwd()
+            hits: tuple[Any, ...] = ()
+            if tool.name != "bash":
+                hits = self._policy_hits(tool.name, item.args, cwd, settings, scratchpad)
             operator = None
-            if tool.name == "bash":
+            # ``operator_brief`` scans up to 400 history rows: bash needs it for
+            # every call, a file/setting/eval call only when it touches the
+            # guard's own policy (the one judge that reads the operator's words).
+            if tool.name == "bash" or hits:
                 from local_operator.guardrails.provenance import operator_brief
 
                 # Trusted operator rows only (direct messages, store-verified ask
@@ -7824,7 +7846,7 @@ class AgentLoop:
                     cited=(item.intent or "", command if isinstance(command, str) else ""),
                 )
             ctx = guard_check.CallContext(
-                cwd=(tool_context.cwd if tool_context is not None else None) or os.getcwd(),
+                cwd=cwd,
                 env=env,
                 scratchpad=scratchpad,
                 session_id=session_id,
@@ -7847,13 +7869,41 @@ class AgentLoop:
         except Exception:
             logger.error("guardrail checkpoint raised for %s", tool.name, exc_info=True)
             if tool.name != "bash":
-                return None
+                # Narrow on purpose: only a call that edits the guard's own
+                # policy (or whose own check cannot be completed) closes.
+                try:
+                    cwd = (tool_context.cwd if tool_context is not None else None) or os.getcwd()
+                    if not self._policy_hits(tool.name, item.args, cwd, settings, scratchpad):
+                        return None
+                except Exception:  # noqa: BLE001 — an unanswerable check closes
+                    logger.error("guard-policy check raised for %s", tool.name, exc_info=True)
             return guard_check.GuardOutcome(
                 blocked=True,
                 text=f"{guard_check.BLOCK_MARKER} (error): the safety check failed, so this "
                 "command was not run. Ask the user how to proceed.",
                 rule="guardrail-error",
             )
+
+    @staticmethod
+    def _policy_hits(
+        tool_name: str, args: Any, cwd: str, settings: Any, scratchpad: str | None
+    ) -> tuple[Any, ...]:
+        """The guard-policy edits a non-bash call would make (``guardrails.policy``).
+
+        ``settings`` is ``None`` when ``read_settings`` itself raised: the rules
+        folder every install loads is then the only one this can name.
+        """
+        from local_operator.guardrails.policy import policy_hits
+        from local_operator.paths import config_dir
+
+        rules_dirs = settings.rules_dirs if settings is not None else (config_dir() / "rules",)
+        return policy_hits(
+            tool_name,
+            args if isinstance(args, Mapping) else {},
+            cwd=cwd,
+            rules_dirs=rules_dirs,
+            scratchpad=scratchpad,
+        )
 
     @staticmethod
     def _synthetic_result(

@@ -1,0 +1,8 @@
+{
+  "record_reference": "i18n/audits/evidence/fr/tui.model_persistence/a-0ecda03/record.json",
+  "artifact_kind": "audit_notes_not_execution_log",
+  "initial_tool": "read_public_copy",
+  "initial_response": "refused: local_operator/i18n/catalogues/fr/tui.model_persistence.json is not committed at HEAD; commit the public copy first",
+  "recovery_source": "parent message supplied committed admission HEAD 87d87ec8b02ef3c279fda673302ce775f4a0329e; subsequent approved reader returned all four values",
+  "initial_attempt_verdict": "admission_blocked_not_a_completed_audit"
+}

@@ -66,6 +66,11 @@ SOUND_COMMAND = "sound"
 #: namespace, the ``/library`` precedent, so the audited catalogue stays
 #: byte-identical. Exempted from the key walk; the exact count still pins it.
 NOTIFICATIONS_PAGE_COMMAND = "notifications"
+#: ``/transcript`` (the fold's layout switch) repeats the ``/sound`` shape: its
+#: description and its receipts live together in the TUI-only
+#: ``tui.transcript_display`` namespace, so the audited wire.slash catalogue is
+#: untouched. Exempted from the key walk; the exact count still pins its row.
+TRANSCRIPT_COMMAND = "transcript"
 #: ``/radient`` and ``/saver`` are the LO2 Saver command family: their copy lives
 #: in the ``wire.radient_saver`` namespace, deliberately out of the audited
 #: ``wire.slash`` catalogue — admitting them here would void every translated
@@ -161,10 +166,11 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # and `/view` are deliberately absent from wire.slash: their copy lives
     # in separate namespaces (tui.viewer is fully translated), preserving the
     # audited wire.slash hash. The census still catches an unaccounted row.
-    # +13: the ten commands above, the LO2 pair (/radient, /saver), whose
+    # +14: the eleven commands above, the LO2 pair (/radient, /saver), whose
     # copy lives in wire.radient_saver rather than in this audited namespace,
-    # and `/sound`, whose copy lives in tui.sound.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 13 == 66
+    # `/sound`, whose copy lives in tui.sound, and `/transcript`, whose copy
+    # lives in tui.transcript_display.
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 14 == 67
     for command in SLASH_COMMANDS:
         if command.name in (
             MEMORY_COMMAND,
@@ -177,6 +183,7 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
             TAG_COMMAND,
             TAGS_COMMAND,
             SOUND_COMMAND,
+            TRANSCRIPT_COMMAND,
             NOTIFICATIONS_PAGE_COMMAND,
             RADIENT_COMMAND,
             SAVER_COMMAND,
@@ -213,6 +220,7 @@ def test_each_generated_key_resolves_to_the_previous_english_under_en() -> None:
             TAG_COMMAND,
             TAGS_COMMAND,
             SOUND_COMMAND,
+            TRANSCRIPT_COMMAND,
             NOTIFICATIONS_PAGE_COMMAND,
             RADIENT_COMMAND,
             SAVER_COMMAND,

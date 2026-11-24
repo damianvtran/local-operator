@@ -376,6 +376,40 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "and a copy would hand another device a second refresher, which is the one thing "
         "the design's Fence 1 forbids.",
     ),
+    "local_operator/remote_compute/records.py": (
+        2,
+        "``RECORD_FILENAME`` ('runs.jsonl') is this DEVICE's record of the remote runs "
+        "it submitted, under <config>/remote-compute/ (the directory beside it, "
+        "``RECORD_SUBDIRECTORY``) -- machine state outside the session "
+        "directories, never an entry of one. It must not travel with a session: the "
+        "file answers 'what did this device send, and where is it now', and a copy "
+        "would let the destination report another machine's runs as its own. "
+        "``LOCK_FILENAME`` ('.runs.lock') is the side file the record's cross-process "
+        "flock is taken on -- beside that same file, machine-local by construction "
+        "and meaningless on another device.",
+    ),
+    "local_operator/remote_compute/repo.py": (
+        1,
+        "``REMOTE_NAME`` ('origin') is a GIT REMOTE's name -- a key in .git/config, "
+        "not a file or directory this product writes. Nothing under it is ever an "
+        "entry of a session directory.",
+    ),
+    "local_operator/remote_compute/errors.py": (
+        1,
+        "``ATTESTATION_CODE_PREFIX`` ('attestation_') is the prefix the server's "
+        "refusal CODES share, matched against a ``code`` field of a JSON answer -- a "
+        "vocabulary, not a path. Nothing is written under it, here or anywhere.",
+    ),
+    "local_operator/remote_compute/results.py": (
+        2,
+        "``REASON_ABSOLUTE_PATH`` ('absolute_path') and ``REASON_SPECIAL_FILE`` "
+        "('special_file') are REFUSAL REASON CODES: the ``reason`` an "
+        "``errors.UnsafeArchive`` carries and the ``error.code`` a surface branches on "
+        "when a results archive holds an entry this device will not extract. No code "
+        "path opens either spelling as a path. They read as path-shaped only because "
+        "the heuristic matches a name ending in ``_PATH``/``_FILE`` whose value is one "
+        "segment, which a code is.",
+    ),
     "local_operator/guardrails/provenance.py": (
         3,
         "LEDGER_DIRNAME ('guardrails'), LEDGER_FILENAME ('created.sqlite') and "
@@ -551,6 +585,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "(<config>/cache/) holding a session's deferred-open metadata record. A derived "
         "cache file, rebuilt from the journal on the next open, never an entry of a "
         "session directory and never part of what a sync copy carries.",
+    ),
+    "local_operator/session/index_prewarm.py": (
+        1,
+        "``SETTLED_DIRNAME`` ('prewarm_settled'): the segment under the DEVICE cache "
+        "root (<config>/cache/) holding the boot prewarm's per-journal settlement "
+        "record. It pins an inode, so it is meaningless on another device; a derived "
+        "cache file, never an entry of a session directory or part of a sync copy.",
     ),
     "local_operator/role_provenance.py": (
         2,
@@ -1096,11 +1137,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "or an entry of a session directory",
     ),
     "local_operator/asks/store.py": (
-        5,
+        6,
         "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
         "directories the queue's paths are built UNDER, never entries of a session "
-        "directory. Plus the three row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``, "
-        "and ``ask-relay-``, the watcher's settle-note row), "
+        "directory. Plus the four row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``, "
+        "``ask-relay-``, the watcher's settle-note row, and ``ask-withdrawn-``, the "
+        "display-only row an agent's withdrawal leaves), "
         "joined to a row id and never a bare filename. The third name constant in that "
         "module, ``ASKS_LOG_NAME`` "
         "(``asks.jsonl``), IS an entry of one and is classified instead — it sits in "
@@ -1610,7 +1652,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``compaction-carried`` prefixes the synthetic carried-tier row's message id in "
         "the live/replay context, never a filename or session entry",
     ),
-    "local_operator/keymap.py": (1, "``keymap.`` prefixes a config key name"),
+    "local_operator/keymap.py": (
+        2,
+        "``keymap.`` prefixes a config key name, and ``keymap.transcript_`` is the "
+        "printable-chord id prefix — the same kind of name, not a path",
+    ),
     "local_operator/mobile/peer_send.py": (1, "``peer-`` prefixes a message id"),
     "local_operator/mobile/push_payload.py": (1, "``attention-`` prefixes a push payload key"),
     "local_operator/network/invite.py": (1, "``lop1`` prefixes an invite token string"),

@@ -783,3 +783,189 @@ def test_a_rebuilt_card_takes_its_routing_from_the_live_metadata():
     assert (rebuilt.routed, rebuilt.routed_ask_ref, rebuilt.route_candidates) == (False, None, ())
     again = conversation._card_from_record(record, routed, ["bcmsg_abcdef0f"])
     assert again == routed
+
+
+def test_agent_display_refresh_replay_keeps_original_handoff_and_no_stored_label(
+    tmp_path, monkeypatch
+):
+    owner, config_dir, server, receiver = _rig(tmp_path, monkeypatch)
+    server.sender = {"account_id": "acc_peer", "kind": "agent", "display_label": "Endpoint (Owner)"}
+    _fail_marker_once(monkeypatch)
+    original = rig.FakeWire.conversation_body
+    fetches = []
+
+    async def body(self, cid, mid, **kwargs):
+        fetches.append(bool(kwargs.get("expected_account_id")))
+        result = await original(self, cid, mid, **kwargs)
+        result["agent_session"] = {"display_label": "EPHEMERAL_TASK_CANARY"}
+        return result
+
+    monkeypatch.setattr(rig.FakeWire, "conversation_body", body)
+    assert _handle(owner, config_dir, server)["action"] == "delivered"
+    bound = _handoff_ids(config_dir)[rig.MESSAGE_ID]
+    assert _handle(owner, config_dir, server)["action"] == "delivered"
+    assert receiver.dispatched == [bound, bound]
+    assert receiver.accepted == [bound]
+    assert "EPHEMERAL_TASK_CANARY" in receiver.accepted_text[0]
+    assert fetches == [False, True, False, True]
+    assert all("EPHEMERAL_TASK_CANARY" not in str(row) for row in rig._reservation_rows(config_dir))
+    before_duplicate = list(fetches)
+    assert _handle(owner, config_dir, server)["action"] == "duplicate"
+    assert not any(fetches[len(before_duplicate) :])  # no post-allow read for a duplicate
+    assert receiver.dispatched == [bound, bound]
+
+
+def test_coalesced_agent_session_names_are_presentation_only():
+    from dataclasses import replace
+
+    first = conversation.ConversationCardMetadata(
+        conversation_id=rig.CONVERSATION_ID,
+        tenant_id="tnt_1",
+        conversation_label="channel",
+        sender_label="Endpoint (Owner)",
+        sender_kind="agent",
+        mention=True,
+        message_id="bcmsg_first001",
+        conversation_seq=1,
+        session_agent_display="First task",
+    )
+    second = replace(
+        first, message_id="bcmsg_second01", conversation_seq=2, session_agent_display="Second task"
+    )
+    merged = coalesce.merge_metadata([first, second])
+    assert merged.session_agent_display is None
+    assert merged.sender_label == "several members"
+    assert merged.coalesced_message_ids == (first.message_id, second.message_id)
+    assert merged.message_id == second.message_id
+    record = conversation._card_record(merged)
+    assert "First task" not in record and "Second task" not in record
+    assert "session_agent_display" not in record
+    assert (
+        conversation._card_from_record(record, second, [first.message_id]).session_agent_display
+        is None
+    )
+
+
+@pytest.mark.parametrize("phase", ["initial", "owed"])
+@pytest.mark.parametrize("failure", ["403", "typed404", "body", "hash", "id", "source", "owner"])
+def test_agent_display_denial_never_wakes_initial_or_owed(tmp_path, monkeypatch, phase, failure):
+    owner, config_dir, server, receiver = _rig(tmp_path, monkeypatch)
+    server.sender = {"account_id": "acc_peer", "kind": "agent", "display_label": "Endpoint (Owner)"}
+    original = rig.FakeWire.conversation_body
+    reject = phase == "initial"
+    refreshes = []
+
+    async def body(self, cid, mid, **kwargs):
+        value = await original(self, cid, mid, **kwargs)
+        if not kwargs.get("expected_account_id"):
+            return value
+        refreshes.append(mid)
+        if reject:
+            if failure in ("403", "typed404"):
+                raise conversation.BridgeRefusal(
+                    "agent_not_permitted" if failure == "403" else "message_not_found",
+                    "fixture",
+                    http_status=403 if failure == "403" else 404,
+                    server_code_present=True,
+                )
+            if failure == "body":
+                value["body"] += "changed"
+            if failure == "hash":
+                value["body_hash"] = "0" * 64
+            if failure == "id":
+                value["message_id"] = "bcmsg_other001"
+            if failure == "source":
+                self._store = object()
+            if failure == "owner":
+                Store(config_dir).invalidate(owner)
+        value["agent_session"] = {"display_label": "Authorized task"}
+        return value
+
+    monkeypatch.setattr(rig.FakeWire, "conversation_body", body)
+    if phase == "owed":
+        _fail_marker_once(monkeypatch)
+        assert _handle(owner, config_dir, server)["action"] == "delivered"
+        reject = True
+    dispatched = list(receiver.dispatched)
+    assert _handle(owner, config_dir, server)["action"] == "hold"
+    assert receiver.dispatched == dispatched
+    assert len(refreshes) == (1 if phase == "initial" else 2)
+
+
+@pytest.mark.parametrize("phase", ["initial", "owed"])
+@pytest.mark.parametrize("status", [200, 401])
+def test_post_allow_real_client_never_replays_auth_refusal(tmp_path, monkeypatch, phase, status):
+    """Count physical requests, not helper calls, through HTTP and SQLite.
+
+    The second scripted response would succeed if OAuth replay accidentally
+    returned: a 401 must hold before that answer can hide the fresh denial.
+    """
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from tests.unit.team_bridge.test_client import FakeRow, FakeStore, _err, _ok
+
+    owner, config_dir, server, receiver = _rig(tmp_path, monkeypatch)
+    server.sender = {"account_id": "acc_peer", "kind": "agent", "display_label": "Endpoint (Owner)"}
+    auth = FakeStore(
+        [FakeRow(1, data={"access": "synthetic-token", "account_id": owner.account_id})],
+        refresh={"access": "synthetic-refreshed-token"},
+    )
+    requests = []
+    active_status = 200  # owed setup must first deliver, leaving its marker unpaid
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path.endswith(f"/messages/{rig.MESSAGE_ID}/body")
+        requests.append(request)
+        if active_status == 401 and len(requests) == 1:
+            return _err(401, "unauthorized")
+        return _ok(
+            {**server.body_response(), "agent_session": {"display_label": "Authorized task"}}
+        )
+
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed", lambda _: True
+    )
+    client = TeamBridgeClient(
+        base_url=owner.canonical_base_url,
+        store=auth,
+        credential_id=1,
+        transport=httpx.MockTransport(handler),
+    )
+    original = rig.FakeWire.conversation_body
+
+    async def body(self, cid, mid, **kwargs):
+        if not kwargs.get("expected_account_id"):
+            return await original(self, cid, mid, **kwargs)
+        # The rig's classification access is synthetic; this read uses a real,
+        # owner-pinned client access record, exercising _send/_authorized.
+        kwargs["access"] = await client.current_access()
+        return await client.conversation_body(cid, mid, **kwargs)
+
+    monkeypatch.setattr(rig.FakeWire, "conversation_body", body)
+    if phase == "owed":
+        _fail_marker_once(monkeypatch)
+        assert _handle(owner, config_dir, server)["action"] == "delivered"
+        assert len(requests) == 1
+        assert "Authorized task" in receiver.accepted_text[0]
+        requests.clear()
+    dispatched = list(receiver.dispatched)
+    active_status = status
+    result = _handle(owner, config_dir, server)
+    assert len(requests) == 1
+    forced_refreshes = sum(force for _, force in auth.refresh_calls)
+    assert forced_refreshes == 0
+    if status == 401:
+        assert result["action"] == "hold"
+        assert result["code"] == "display_authority_refused"
+        assert receiver.dispatched == dispatched  # no new card or wake handoff
+    else:
+        assert result["action"] == "delivered"
+        assert len(receiver.dispatched) == len(dispatched) + 1
+        assert "Authorized task" in receiver.accepted_text[0]
+    print(
+        f"POST_ALLOW phase={phase} status={status} GETs={len(requests)} "
+        f"forced_refreshes={forced_refreshes} action={result['action']} "
+        f"new_dispatches={len(receiver.dispatched) - len(dispatched)}"
+    )

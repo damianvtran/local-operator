@@ -49,5 +49,5 @@ def dismiss_receipt_moot() -> Msg:
     return Msg("relay.ask.dismiss.receipt_moot", {})
 
 
-def dismiss_title() -> Msg:
-    return Msg("relay.ask.dismiss.title", {})
+def dismiss_title(*, count: int | float) -> Msg:
+    return Msg("relay.ask.dismiss.title", {"count": count})

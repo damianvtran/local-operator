@@ -1,0 +1,7 @@
+{
+  "tui.transcript_display.save_failed": "无法保存会话记录显示方式：{reason}",
+  "tui.transcript_display.set": "会话记录：{mode}",
+  "tui.transcript_display.slash": "按轮次或按回复精简会话记录",
+  "tui.transcript_display.unknown": "未知模式{echo} · 请选择by-turn或by-response",
+  "tui.transcript_display.usage": "会话记录：{mode} · 请选择by-turn或by-response"
+}

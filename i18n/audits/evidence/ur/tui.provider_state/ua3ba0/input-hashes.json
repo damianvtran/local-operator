@@ -1,0 +1,14 @@
+{
+  "en": {
+    "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+    "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+  },
+  "context": {
+    "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+    "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+  },
+  "ur": {
+    "path": "local_operator/i18n/catalogues/ur/tui.provider_state.json",
+    "sha256": "fe5cfd731a80eedd50d066bce968adf6ddec24311af418fdad46db7644aef437"
+  }
+}

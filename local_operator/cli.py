@@ -3302,6 +3302,20 @@ def config_edit_command(args: argparse.Namespace) -> int:
         stored = settings_io.read_setting(config_manager, setting)
         echoed = matched_choice.label if matched_choice is not None else stored
         print(_cct(_cc.updated(key=args.key, value=str(echoed))))
+        # The settings PAGE warns when a hotkey lands on a chord the composer or
+        # a fixed app binding already owns (Q8). This command has no UI, and
+        # silently accepting a key the page would have flagged left the two
+        # writers disagreeing about what the user should know. The sentence is
+        # `keymap.conflict_note`'s own registry English — the same words the
+        # page paints, not new catalogue copy — printed AFTER the receipt and
+        # still accepting the write, which is the warn-and-allow contract.
+        if setting.kind is settings_io.Kind.HOTKEY:
+            from local_operator import keymap as keymap_mod
+            from local_operator.cli_style import WARNING
+
+            note = keymap_mod.conflict_note(setting.key, str(stored))
+            if note:
+                print(paint(f"Warning: {note}", WARNING, stream=sys.stderr), file=sys.stderr)
         if setting.key == "tool_approval_mode" and str(stored).strip().lower() == "auto":
             # Qualified on purpose (UX round 1, U4). "Successfully updated
             # tool_approval_mode to auto" reads as "my running agents are not
@@ -10945,15 +10959,13 @@ def _monitor_rows() -> "list[dict[str, Any]]":
 
     Reads the derived index rather than each transcript: the index exists
     exactly so this question can be answered without opening every session,
-    and it is rewritten on every persist and every open, so a stale row
-    self-heals rather than needing a repair path here (the ``_wake_rows``
-    rule). Health rides the row: ``disabled``/``disabled_reason`` and the
-    failure count are written by the same sync that rewrites the index, so a
-    disabled monitor cannot be invisible on this surface (§11.3).
+    and it is rewritten on every persist and every open. Overlay counters
+    because a quiet tick advances the clock and health without rewriting the
+    index or notifying the session.
     """
     import time as _time
 
-    from local_operator.monitors.store import is_held, read_index
+    from local_operator.monitors.store import effective_rows, is_held, read_index
     from local_operator.paths import config_dir
 
     root = config_dir()
@@ -10966,25 +10978,16 @@ def _monitor_rows() -> "list[dict[str, Any]]":
         # Aida engine for them — and ``is_held`` is the store's own spelling
         # for it, so this listing and the cleanup guards cannot disagree.
         dormant = is_held(entry)
-        for raw in entry.get("monitors") or ():
-            if not isinstance(raw, dict):
-                continue
+        for raw in effective_rows(root, session_id, entry):
             due = raw.get("next_due_at")
             due = due if isinstance(due, int) and not isinstance(due, bool) else None
             last = raw.get("last_check_at")
             last = last if isinstance(last, int) and not isinstance(last, bool) else 0
             rows.append(
                 {
-                    # THE INDEX ROW IS THE BASE (QA round 1, Q1). This listing used
-                    # to re-list the health fields by hand, and a hand-written list
-                    # can only ever be one change behind: it dropped ``failing`` and
-                    # ``empty_checks`` the moment they were added, so `lop monitor
-                    # status` kept printing "nothing has changed (confirm the call
-                    # observes what you expect)" for a watch that had been failing on
-                    # every tick — the incident's own sentence, in the one reader
-                    # that had the row in hand. Spreading it means any field added to
-                    # the index reaches every surface that shares
-                    # ``store.health_hint`` instead of reaching all but this one.
+                    # Forward the effective row: hand-selecting its fields here
+                    # previously dropped ``failing`` and ``empty_checks`` from
+                    # the CLI's shared health hint.
                     **raw,
                     "session_id": session_id,
                     "cwd": entry.get("cwd") or "",
@@ -11006,7 +11009,7 @@ def _monitor_rows() -> "list[dict[str, Any]]":
                     "unavailable_since": raw.get("unavailable_since") or 0,
                     "last_error": raw.get("last_error") or "",
                     # The blind state and the suppression counts: ``health_hint``
-                    # renders from the INDEX row, so a listing that dropped
+                    # renders from the status row, so a listing that dropped
                     # them could only ever say "nothing has changed" for a
                     # watch that was suppressing changes or comparing a
                     # truncated result.

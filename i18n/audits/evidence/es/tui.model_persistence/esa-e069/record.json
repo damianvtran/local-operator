@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "kind": "translation_author_receipt",
+  "locale": "es",
+  "namespace": "tui.model_persistence",
+  "audit_date": "2026-11-22",
+  "recorded_at": "2026-11-22T10:32:53.897005+00:00",
+  "key_count": 4,
+  "status": "translated",
+  "source_revision": "87d87ec8b02ef3c279fda673302ce775f4a0329e",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "e069889d36f8",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Runtime model-switch message in this session explicitly names openai/gpt-6.1-sol as temporary quota fallback; Spanish authorship and validation occurred after this message. No external provider telemetry queried.",
+    "independent_from_translator_session": false,
+    "role": "author; not an independent auditor"
+  },
+  "auditor": {
+    "agent": "i18n-translator",
+    "session": "e069889d36f8",
+    "model": "openai/gpt-6.1-sol",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_reason": "provider failure: quota",
+    "actual_model_source": "Runtime model-switch message in this session explicitly names openai/gpt-6.1-sol as temporary quota fallback; Spanish authorship and validation occurred after this message. No external provider telemetry queried.",
+    "independent_from_translator_session": false,
+    "role": "Author validation only; independent audit not performed"
+  },
+  "independent_audit_performed": false,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.json",
+      "sha256": "4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.model_persistence.context.json",
+      "sha256": "b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.model_persistence.json",
+      "sha256": "253fc1d487b648e6c778ac0f102ca5a49865dd8e223374ad31981f92ff97cce4"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esa-e069/author-notes.md",
+      "sha256": "18013fec33a37c5d4cd6850ef838c709b882fd3326c0c74c9edb99cd1502c46c"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esa-e069/validator.py.txt",
+      "sha256": "dae5884baa72d2732236b9504ce76470183df0e10423b8fc08dc84c4f7b31909"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.model_persistence/esa-e069/audit.log",
+      "sha256": "f521d3498c05c5a0fd47e0b4fcd20936636d2dc6cb45c64ea345f33e816b10da"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "note": "No independent audit verdict. Mechanical author validation exited 0; native NoticeBlock and integration remain untested."
+  },
+  "validation": {
+    "exit_code": 0,
+    "key_count": 4,
+    "plural_select_arm_count": 0,
+    "rich_case_count": 48,
+    "english_same_code_controls": true,
+    "native_noticeblock_certified": false,
+    "global_checker_run": false,
+    "scope_reason": "Explicit partial namespace author task; scoped official APIs only, no global/base checks."
+  },
+  "notes_kind": "audit_notes_not_execution_log",
+  "glossary_proposals": [
+    {
+      "term": "boot default",
+      "es": "modelo de inicio predeterminado",
+      "scope": "model for starting new sessions"
+    }
+  ],
+  "release_clearance": false
+}

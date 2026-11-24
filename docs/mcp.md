@@ -189,7 +189,17 @@ stored through the Settings screen but cannot be referenced — rename it to
   unless the server's schema declares it; other undeclared keys are dropped
   only when the schema sets `additionalProperties: false` explicitly (an
   absent or `{}` `additionalProperties` is open per JSON Schema and keeps all
-  args); empty optional placeholders (`None`, `""`, `{}`) are dropped.
+  args); empty optional placeholders (`None`, `""`, `{}`) are dropped. The
+  call still runs, and when a key the model supplied with a real value was
+  dropped by a strict schema, that call's result ends with a note naming the
+  key(s) and the argument names the tool declares (the `i` field and empty
+  placeholders are dropped silently). The note is for a model reading the
+  result, so it is left off where the harness parses the result text itself:
+  a monitor tick (`ToolContext.monitor_check` — the tick's text is compared
+  and must still parse as a JSON record envelope) and a built-in's delegated
+  call (`ToolContext.result_parsed_by_harness`, e.g. `web_search` through a
+  connected Tavily server). The key is still dropped there; only the note is
+  withheld.
 - **Tool cache:** `~/.local-operator/mcp_cache.db` — deliberately separate
   from `auth.db` because the cache is disposable while `auth.db` is
   credential-grade.

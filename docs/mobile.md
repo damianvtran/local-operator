@@ -519,12 +519,21 @@ core's display store and is read separately, keyed by that row:
             source?: "local" | "hub",
             hold?: {class: "awaiting_review" | "transient", held_for_s},
             reason?: "signed_out" | "other_account" | "not_member" | "deleted" | "hub_unsupported" | "offline"}],
-   more: int}                        // ≤20 items; a coalesced card's rest is counted here
+   more: int,                        // ≤20 items; a coalesced card's rest is counted here
+   card?: {received_at?: str,        // ISO-8601 UTC ("2026-11-21T14:56:48.454293Z") of the card's journal row
+           thread_reply: bool}}      // the card is a reply inside a thread
   ```
+
+  `card` is additive within `v: 1` and describes the card ROW, not a body: it
+  comes from the card's own journal row (no hub read), so it is present on every
+  answer for a found card — local-only, held, pending and every `unavailable`
+  reason alike — and absent only on the nothing-to-resolve answer below. The
+  relay transcript row carries no timestamp and no thread marker, so this is
+  where a client gets the time and thread-reply marker it shows beside the body.
 
 - **States are the server's word.** `held` with `hold.class: "transient"` means
   screening has not run yet (not a moderation decision); any other class is
-  "held by moderation". `refused` comes only from the hub's rejection and carries
+  "held for review" (a review hold can still be released or refused). `refused` comes only from the hub's rejection and carries
   no reason to show. `reason` qualifies `unavailable` (`deleted` = the message was
   deleted; `offline` = the computer could not reach Radient). A client maps an
   unknown state, an `admitted` item without a body, or a malformed frame to
@@ -538,10 +547,20 @@ core's display store and is read separately, keyed by that row:
   still missing. An empty `items` list with `more: 0` (a card from before
   receipts carried message ids) is "nothing to resolve": no panel, the receipt
   line alone, as in the TUI.
-- **No caching.** Read once per mount (re-asked only for a not-yet-written row,
-  above); a remount reads again; revocation (sign-out, leave, account switch,
-  hub delete) must show on the next read. Render the body as data under an
-  "External message · untrusted content" frame.
+- **Re-read while on screen, never cache past it.** `pending`, `held` (either
+  class) and `unavailable`/`offline` are NOT final: a pending body is handed off
+  at the receiving session's next turn, measured (n=4005) at p50 45 s, p90
+  21 min, p99 100 min, max 8 h. So a mounted card re-reads such an answer on a
+  5 s, 10 s, 20 s, 30 s, then every-60 s backoff with no overall give-up,
+  re-reads at once when the app becomes visible again, keeps the last answer on
+  screen during a re-read (no flash back to Loading), and stops on a final
+  answer, on a non-"not yet" 404, or on unmount (aborting the in-flight read).
+  A failed read (network, 5xx, malformed frame) is asked again on the same
+  backoff. Re-reading a pending/held item is a local read in core. A remount
+  reads again; revocation (sign-out, leave, account switch, hub delete) shows
+  on the next read. Policy module: `mobile/web/src/lib/bridge-card-reread.ts`
+  (the TUI's twin is `tui/bridge_card_body.py`). Render the body as data under
+  an "External message · untrusted content" frame.
 
 Desktop twin and resolution order: `docs/DESKTOP_API.md` (`.../bridge-cards/{entry_id}/body`).
 The web relay's card is `mobile/web/src/components/bridge-card-body.tsx` over

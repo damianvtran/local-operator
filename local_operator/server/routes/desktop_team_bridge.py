@@ -2041,6 +2041,17 @@ class ConversationRenameIn(ConversationOwnerIn):
     name: str = Field(max_length=128)
 
 
+class ConversationUpdateIn(ConversationOwnerIn):
+    """Partial metadata: absence, null and empty string have different wire meanings.
+
+    The upstream owns canonical validation (including grandfathered unchanged
+    values). Null is forwarded for its field-aware refusal, never dropped.
+    """
+
+    name: str | None = None
+    topic: str | None = None
+
+
 class ConversationSendIn(ConversationOwnerIn):
     client_ref: str = Field(min_length=1, max_length=128)
     #: Empty only for an image-only message (``attachment_ids`` non-empty).
@@ -2568,6 +2579,34 @@ async def conversation_rename(
         )
     )
     return reply(result)
+
+
+@router.patch(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_update(
+    conversation_id: str,
+    request: Request,
+    body: ConversationUpdateIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Relay one atomic metadata patch with the captured bearer-owner guard.
+
+    No local metadata cache, fallback to rename, or refusal translation: an old
+    hub must refuse rather than turn a two-field edit into a partial write.
+    """
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    if {"tenant_id", "expected_account_id"} & set(request.query_params):
+        _raise_read("invalid_request")
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).conversation_update(
+                conversation_id, **body.model_dump(exclude_unset=True)
+            )
+        )
+    )
 
 
 @router.delete(

@@ -83,6 +83,7 @@ from rich.cells import cell_len
 
 from local_operator import heavy_lease, memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
+from local_operator.atomic_files import atomic_write_text, discard_temp, unique_temp
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.guardrails import interrupted_worktree_add
 from local_operator.guardrails import spawned as guard_spawned
@@ -670,19 +671,22 @@ def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
     NEVER A DIRECTORY: ``root`` is the session's scratchpad, which lives under
     ``sessions/<id>/`` — the tree the session-deletion guard
     (``tests/unit/session/test_no_session_deletion.py``) protects. The only
-    entries this function unlinks or replaces are the two fixed names
-    ``bin/<launcher-name>`` and ``bin/.<launcher-name>.<pid>.tmp``, and each is
-    ``lstat``-ed first: anything that is a real directory (not a symlink to one)
-    makes the shim give up, so a user's or another tool's directory at either
-    name is left byte-for-byte alone and the call falls back to no injection.
+    entry this function replaces is the fixed name ``bin/<launcher-name>``, and it
+    is ``lstat``-ed first: a real directory there (not a symlink to one) makes
+    the shim give up, so a user's or another tool's directory is left
+    byte-for-byte alone and the call falls back to no injection. The staging
+    entry is a per-write name (:func:`local_operator.atomic_files.unique_temp`):
+    two bash calls of one process building the shim at once each stage their
+    own, ``symlink_to``/``copyfile`` cannot land on anything pre-existing at a
+    name nobody else picks, and the only thing ever removed is this call's own
+    staging entry after a failure.
     """
     bin_dir = root / "bin"
     target = bin_dir / launcher.name
-    staged = bin_dir / f".{launcher.name}.{os.getpid()}.tmp"
     desired = _stable_launcher(launcher)
     try:
         bin_dir.mkdir(parents=True, exist_ok=True)
-        if _is_real_directory(target) or _is_real_directory(staged):
+        if _is_real_directory(target):
             return None
         if target.is_symlink():
             # ``exists()`` follows the link: a pruned generation reads as gone.
@@ -690,14 +694,17 @@ def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
                 return bin_dir
         elif target.is_file():
             return bin_dir
-        with contextlib.suppress(FileNotFoundError):
-            staged.unlink()
+        staged = unique_temp(target, hidden=True)
         try:
-            staged.symlink_to(desired)
-        except OSError:
-            shutil.copyfile(launcher, staged)
-            staged.chmod(0o755)
-        os.replace(staged, target)
+            try:
+                staged.symlink_to(desired)
+            except OSError:
+                shutil.copyfile(launcher, staged)
+                staged.chmod(0o755)
+            os.replace(staged, target)
+        except BaseException:
+            discard_temp(staged)
+            raise
         return bin_dir
     except OSError:
         logger.debug("could not build the lop shim directory under %s", root, exc_info=True)
@@ -2771,9 +2778,7 @@ def _rg_config_path() -> str | None:
         if not path.exists() or path.read_text(encoding="utf-8") != body:
             # Atomic replace: a concurrent `bash` call in another task must never
             # read a half-written config (review n2).
-            tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-            tmp.write_text(body, encoding="utf-8")
-            os.replace(tmp, path)
+            atomic_write_text(path, body)
         return str(path)
     except Exception:  # noqa: BLE001 — a missing nicety must never fail the command
         return None
@@ -2895,6 +2900,20 @@ async def _acquire_heavy_lease(
                 )
             )
         return None
+    if heavy.polls_lease:
+        # Leasing this line would hold the slot its own loop waits on (the
+        # 2026-11-22 self-wait: ~21 min, two other sessions timed out). Refuse
+        # before taking a slot; the remedy is to split the wait from the build.
+        return _error(
+            tool_call_id,
+            "bash",
+            "HEAVY JOB NOT STARTED: this command is heavy and also polls the heavy-job "
+            "lease in a loop (`lop services status`). A heavy command holds the slot for "
+            "its whole run, so the loop would wait for the slot it is holding and never "
+            "finish.\nRun the heavy command on its own, without the loop: the bash tool "
+            "queues it for the slot and runs it when free, so no polling is needed. "
+            "Or run only the heavy part as `lop services heavy run -- <heavy command>`.",
+        )
     session_id = (getattr(context, "session_id", None) if context else None) or os.environ.get(
         "LOCAL_OPERATOR_SESSION_ID", ""
     )
@@ -20770,6 +20789,7 @@ from local_operator.session.peek import (  # noqa: E402,F401 — see the comment
     _PeekDigest,
     _PeekWindow,
     _walk_steps,
+    digest_receipt,
 )
 
 
@@ -20878,18 +20898,17 @@ def _sessions_peek_mesh_journal(
     # S-60 stamp below keys on it, as the tail renderer keys on ``rows``.
     peeked: bool
     if mode == "digest":
-        raw_digest = payload.get("digest")
-        digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
+        digest, text = digest_receipt(payload.get("digest"))
         details.update(
             steps_seen=digest.get("steps_seen"),
             tool_calls=digest.get("tool_calls"),
             has_older=digest.get("has_older"),
+            fold_version=digest["fold_version"],
         )
-        text = str(digest.get("text") or "")
         # Fail closed: only an owner's explicit "zero steps" counts as empty.
         peeked = digest.get("steps_seen") != 0
     else:
-        window = window_from_wire(payload.get("window") or {})
+        window = window_from_wire(payload.get("window") or {}, mode=mode)
         details.update(
             steps_shown=len(window.steps),
             has_older=window.has_older,
@@ -20899,6 +20918,10 @@ def _sessions_peek_mesh_journal(
             details["scanned_bytes"] = window.scanned_bytes
         if window.match_id:
             details["match_id"] = window.match_id
+        if mode == "search":
+            details.update(
+                match_count=window.match_count, match_count_complete=window.match_count_complete
+            )
         # A miss is this harness's own sentence about an empty window; any
         # step the owner returned is transcript content.
         peeked = bool(window.steps)
@@ -31034,10 +31057,63 @@ async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
         if problem is None or (problem.details or {}).get("error_code") == "tab_closed":
             state.surface_id = ""
             return ""
-        return f"{_host_label(host)} could not close the tab; ownership retained for retry"
+        # The host's OWN code and sentence, not a generic "could not close":
+        # the reason decides what unsticks the tab (a password-manager prompt
+        # the user must dismiss is not a wedged host), and the generic form hid
+        # it in every stranding incident of 2026-11-17. `problem` is already
+        # `format_error`'s rendering of the BridgeError, so its text carries
+        # the code; the code is appended only if that rendering ever omits it.
+        code = str((problem.details or {}).get("error_code") or "")
+        reason = " ".join(
+            str(getattr(part, "text", "")).strip() for part in problem.content
+        ).strip()
+        if code and code not in reason:
+            reason = f"{code}: {reason}" if reason else code
+        return (
+            f"{_host_label(host)} could not close the tab ({reason or 'no reason given'}); "
+            "ownership retained for retry"
+        )
     code, out = await _run_cmux(["close-surface", "--surface", surface])
     state.surface_id = ""
     return "" if code == 0 else out or f"cmux exited {code}"
+
+
+async def _close_stranded_quietly(resource: Any) -> list[str] | None:
+    """Retry the resource's stranded tabs; ``None`` when there were none.
+
+    Returns the host's per-tab failure reasons (empty when all closed). Never
+    raises: the caller is a user-facing action whose own outcome must not be
+    replaced by a fault in settling an OLDER tab — that tab stays owed in the
+    record for teardown and ``lop browser cleanup``.
+    """
+    from local_operator.browser_bridge.resources import STRANDED_FIELD
+
+    if not resource.record.get(STRANDED_FIELD):
+        return None
+    try:
+        return await resource.close_stranded()
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.warning("browser: retrying stranded tabs failed", exc_info=True)
+        return [str(exc) or type(exc).__name__]
+
+
+def _with_stranded_note(result: ToolResult, failures: list[str] | None) -> ToolResult:
+    """Tell the model what happened to its stranded tabs, if it had any."""
+    if failures is None:
+        return result
+    if failures:
+        note = (
+            f"{len(failures)} earlier tab(s) this session still owns could not be closed "
+            f"({'; '.join(failures)}); they stay owed and are retried at session end."
+        )
+    else:
+        note = "Also closed earlier tab(s) this session had lost track of."
+    # Appended in place (the same idiom the access-prompt copy uses) so the
+    # result's error flag and details survive; a "No browser surface open."
+    # that now reports real work is no longer elidable.
+    result.content.append(TextContent(text=f" {note}"))
+    result.useless = False
+    return result
 
 
 async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
@@ -31062,6 +31138,15 @@ async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> To
     surface = state.surface_id
     problem = await close_browser_surface(state)
     if problem:
+        # A host refusal already ends "ownership retained for retry"
+        # (`close_browser_surface`, whose text session teardown also shows);
+        # repeating the disposition here read as a stutter (QA Q1, PR #4189).
+        if state.surface_id and problem.endswith("ownership retained for retry"):
+            return _error(
+                tool_call_id,
+                "browser",
+                f"Browser surface {surface} could not be closed: {problem}.",
+            )
         disposition = "ownership retained" if state.surface_id else "dropped the handle"
         return _error(
             tool_call_id,
@@ -31498,11 +31583,22 @@ async def _execute_browser_owned(
         if resource.record.get("terminal"):
             return _error(tool_call_id, "browser", "Browser scope ended; resume before browsing.")
         if action == "open" and not state.surface_id:
+            # A fresh tab is about to take a host slot: first retry any older
+            # tab this session lost track of (see resources.STRANDED_FIELD), so
+            # a session cannot climb toward the host's tab cap one stranded tab
+            # at a time. Best-effort — the open must not fail because an OLD tab
+            # would not close; it stays owed for close/teardown/cleanup.
+            await _close_stranded_quietly(resource)
             resource.allocate()
         failed_close = False
         try:
             result = await _execute_browser(tool_call_id, args, signal, on_update, context)
             failed_close = action == "close" and result.is_error and bool(state.surface_id)
+            if action == "close":
+                # 'close' also settles tabs this session owns but no longer
+                # holds the live handle for; otherwise the model's explicit close
+                # (and its "No browser surface open.") would leave them behind.
+                result = _with_stranded_note(result, await _close_stranded_quietly(resource))
             if action in ("request_access", "await_access", "cancel_access"):
                 access_state = (result.details or {}).get("state")
                 if action == "cancel_access" and not result.is_error:
@@ -38015,44 +38111,9 @@ async def execute_ask(
     # so the blocking arm and the queued arm cannot disagree about what was asked.
     questions = list(params.questions or ())
     if callable(enqueue):
-        # THE ASK GATE (design docs/design/ask-gate.md §2.2), composed AROUND
-        # the unchanged enqueue: one awaited clearance check, whose ONLY
-        # diverting outcome is a ``clear``/``resolve`` mapping. Everything
-        # else — flag off, secret, re-raise, timeout, provider error,
-        # unparseable text — comes back as ``None`` and falls through to the
-        # enqueue call below, byte-for-byte today's.
-        #
-        # The try/except is the LAST line of the design's double guard (the
-        # callable owns the policy; this guard means even a contract breach —
-        # a broken gate that raises — cannot cost the ask). ``except
-        # Exception`` and not ``BaseException``, deliberately:
-        # ``asyncio.CancelledError`` must keep propagating so an aborted turn
-        # aborts.
-        gate: Any = getattr(context, "gate_ask", None) if context is not None else None
-        if callable(gate):
-            try:
-                # ``cast`` for the same reason the enqueue call below carries it:
-                # ``callable()`` narrows an ``Any`` to ``(...) -> object``, and
-                # an un-cast ``await`` on that narrowing is a pyright error
-                # about a value whose real shape is an awaited mapping-or-None.
-                verdict: Any = await cast("Any", gate)(
-                    questions, params.timeout, tool_call_id=tool_call_id
-                )
-            except Exception:  # noqa: BLE001 — a broken gate must never cost the ask
-                verdict = None
-            if isinstance(verdict, Mapping):
-                # THE DIVERSION: no enqueue, no queue entry, no events. The
-                # result carries the hidden marker (design §3) and the
-                # decision-point note, so the model learns what happened and
-                # every human surface filters the row pair (the marker is
-                # persisted with the result; predicates live in
-                # ``harness/rows.py``).
-                return _text(
-                    tool_call_id,
-                    "ask",
-                    str(verdict.get("text") or ""),
-                    details=dict(verdict.get("details") or {}),
-                )
+        # The agent can decide whether to ask before calling the tool. Once it
+        # does, only the queue can admit or refuse the question: a clearance
+        # fork cannot answer for the operator or hide a valid call.
         # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
         # ``Callable[..., object]``, which would make every ``outcome.get`` below
         # a type error on a value whose real shape is a mapping.

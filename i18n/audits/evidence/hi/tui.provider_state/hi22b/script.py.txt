@@ -1,0 +1,65 @@
+"""Reproducible five-key B mechanical audit; no catalogue or history writes.
+Official checker enumeration is narrowed in-process to en/hi and this namespace.
+Synthetic pseudo expansion is a harness control, not a shipped pseudo locale.
+"""
+import hashlib, json, os, re, sys, unicodedata
+from pathlib import Path
+from unittest.mock import patch
+from rich.text import Text
+from rich.cells import cell_len
+from local_operator.i18n import catalogues, runtime
+from scripts.i18n import check
+NS = 'tui.provider_state'
+ROOT = Path.cwd()
+print('interpreter:', sys.executable)
+print('module:', catalogues.__file__)
+assert Path(catalogues.__file__).resolve().is_relative_to(ROOT)
+assert os.environ['HOME'] != '/Users/damian'
+assert not any(k.startswith('CMUX_') for k in os.environ)
+print('isolated HOME/config; CMUX absent:', os.environ['HOME'])
+expected = {'en':'113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912', 'context':'67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be', 'hi':'6842f379ee5668e28c087ef764491411da67b5580ade695a03164975364da7b1'}
+for name in expected:
+    p = ROOT / 'local_operator/i18n/catalogues' / ('en' if name == 'context' else name) / (NS + ('.context.json' if name == 'context' else '.json'))
+    digest = hashlib.sha256(p.read_bytes()).hexdigest()
+    assert digest == expected[name], (name, digest)
+    print('input sha256', name, digest)
+en = catalogues.load_catalogue('en', NS)
+hi = catalogues.load_catalogue('hi', NS)
+assert list(en) == list(hi) and len(en) == 5
+original_loader = catalogues.load_catalogue
+def scoped(candidate=None):
+    def loader(locale, namespace):
+        return candidate if locale == 'hi' and candidate is not None else original_loader(locale, namespace)
+    with patch.object(catalogues, 'namespaces', return_value=(NS,)), patch.object(catalogues, 'locales', return_value=('en','hi')), patch.object(catalogues, 'load_catalogue', side_effect=loader):
+        return check.check_catalogues()
+problems = scoped()
+print('official check.check_catalogues scoped en/hi namespace:', problems)
+assert not problems
+missing = dict(hi); missing.pop(next(iter(hi)))
+problems = scoped(missing)
+print('missing-key negative:', problems)
+assert any('missing key' in p for p in problems)
+extra = dict(hi); extra[next(iter(hi))] += ' {invented}'
+problems = scoped(extra)
+print('added-argument negative:', problems)
+assert any('arguments' in p for p in problems)
+ctx = catalogues.context('en', NS)
+protected = re.compile(r'`[^`]*`|--[A-Za-z][\w-]*|https?://\S+|</?\w+[^>]*>|\[[^\]]+\]')
+for key in en:
+    target = hi[key]
+    assert runtime.message_arguments(en[key]) == runtime.message_arguments(target) == ()
+    assert runtime.plural_selectors(target) == runtime.plural_selectors(en[key]) == ()
+    assert all(type(node).__name__ == '_Text' for node in runtime.parse_message(target))
+    assert unicodedata.normalize('NFC',target) == target
+    assert not any(unicodedata.category(c) in ('Cc','Cf') for c in target)
+    assert protected.findall(en[key]) == protected.findall(target) == []
+    assert runtime.render_message(target, {}, 'hi') == target
+    assert Text(target).plain == Text.from_markup(target).plain == target
+    assert runtime.render_message(en[key], {}, 'en') == en[key]
+    assert Text(en[key]).plain == Text.from_markup(en[key]).plain == en[key]
+    pseudo = '[[' + en[key] + ' ~~~]]'
+    assert runtime.render_message(pseudo, {}, 'en') == pseudo
+    assert Text(pseudo).plain == pseudo
+    assert not any(x in ctx[key] for x in ('maxCells','maxChars'))
+    print(json.dumps({'key':key,'text':target,'args':0,'plural':0,'select':0,'NFC':True,'protected_tokens':0,'rich_plain_equal':True,'cell_len_diagnostic_only':cell_len(target),'declared_cap':None},ensure_ascii=False))
+print('PASS: official scoped catalogue/context/ICU checks, 2 rejecting controls, all 5 zero-argument renders, NFC/protected tokens, English and synthetic pseudo/plain Rich controls. Not native-font or live UI proof.')

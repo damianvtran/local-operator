@@ -56,14 +56,17 @@ from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
+from local_operator.agent_profiles import AgentFact, AgentFacts, agent_fact_record
+from local_operator.i18n import catalogues
 from local_operator.i18n.keys import tui_settings_view as _sv
 from local_operator.i18n.keys import tui_settings_view_chrome as _svc
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_sound as _sound_keys
-from local_operator.i18n.messages import Msg
+from local_operator.i18n.messages import Msg, _namespace_for
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Scope, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
+from local_operator.tui import hotkey_hints
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import score_command_text_match
 from local_operator.tui.error_text import error_text
@@ -73,6 +76,7 @@ from local_operator.tui.i18n_status import (
     localized_display,
     technical_display,
 )
+from local_operator.tui.provider_state import ProviderStateRow, provider_state_label
 from local_operator.tui.widgets.command_picker import ghost_for
 from local_operator.tui.widgets.model_picker import ModelRow, rank_rows
 from local_operator.tui.widgets.subagent_view import HintButton
@@ -463,8 +467,95 @@ class _Suggestion(NamedTuple):
 _PaneLine = list[tuple[str, "Style"]]
 
 
-def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _PaneLine:
-    """A profile row's facts, with the class marker painted one rung brighter.
+def _paint_facts(
+    facts: AgentFacts | str, room: int, *, muted: "Style", faint: "Style"
+) -> _PaneLine:
+    """Fit raw fact segments once, then project provenance at the paint boundary.
+
+    A legacy agent string is deliberately opaque. Only the explicitly selected
+    team adapter below retains the pre-existing team's display-token grammar.
+    Neither a model ID nor an unknown fact can acquire badge ink by coincidence.
+    """
+    if isinstance(facts, str):
+        return [(f"    {truncate_cells(facts, room)}", faint)]
+    line: _PaneLine = []
+    remaining = room
+    for index, fact in enumerate(facts):
+        record = agent_fact_record(fact)
+        separator = " · " if index else ""
+        raw = separator + record.text
+        fitted = truncate_cells(raw, remaining)
+        indent = "    " if index == 0 else ""
+        style = (
+            muted
+            if (fact.code, fact.value) in {("action_class", "proactive"), ("scope", "session")}
+            else faint
+        )
+        if separator and fitted.startswith(separator):
+            line.append((separator, faint))
+            fitted = fitted[len(separator) :]
+        if record.source_locale is None:
+            painted = technical_display(fitted).plain
+        else:
+            # Effort tiers are operator data, not the restricted ASCII command
+            # grammar of technical_literal_spans. Project complete occurrences
+            # as standalone technical text so Unicode/custom punctuation cannot
+            # crash paint. A clipped occurrence stays inside the prose isolate.
+            if fact.code == "effort" and record.source_locale == "ur" and fact.value:
+                painted = technical_display(fact.value).plain.join(
+                    _paint(part, source_locale="ur") for part in fitted.split(fact.value)
+                )
+            else:
+                painted = _paint(fitted, source_locale=record.source_locale)
+        line.append((indent + painted, style))
+        remaining -= cell_len(raw)
+        if remaining <= 0 or fitted.endswith("…"):
+            break
+    return line or [("    ", faint)]
+
+
+def _paint_facts_lines(
+    facts: AgentFacts | str, room: int, *, muted: "Style", faint: "Style"
+) -> list[_PaneLine]:
+    """Keep safety/scope facts whole; spend width on meaning before optional IDs.
+
+    Scope spills just as before. If a translated kind/provenance prefix would
+    clip the proactive marker, the marker gets its own line rather than being
+    silently weakened to a truncated word. The final _fit_pane guard counts
+    actual painted lines before reserving the read-only caption; the historical
+    conservative initial roster estimate remains unchanged.
+    """
+    if isinstance(facts, str):
+        return [_paint_facts(facts, room, muted=muted, faint=faint)]
+    head = list(facts)
+    spill: list[AgentFact] = []
+
+    def width(items: Sequence[AgentFact]) -> int:
+        return cell_len(" · ".join(agent_fact_record(f).text for f in items))
+
+    scope = AgentFact("scope", "session")
+    if scope in head and width(head) > room:
+        # Project out only the first occurrence, matching list.remove while
+        # keeping this local display transformation free of destructive calls.
+        scope_index = head.index(scope)
+        head = head[:scope_index] + head[scope_index + 1 :]
+        spill.append(scope)
+    marker = AgentFact("action_class", "proactive")
+    if marker in head and width(head[: head.index(marker) + 1]) > room:
+        marker_index = head.index(marker)
+        head = head[:marker_index] + head[marker_index + 1 :]
+        spill.insert(0, marker)
+    return [_paint_facts(tuple(head), room, muted=muted, faint=faint)] + [
+        _paint_facts((fact,), max(room, width([fact])), muted=muted, faint=faint) for fact in spill
+    ]
+
+
+def _paint_team_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _PaneLine:
+    """Legacy TEAM-only display grammar, retained without changing its geometry.
+
+    Agents never take this parser: team detail strings still carry the scope
+    token and aliases, and migrating that producer is deliberately separate.
+    The historical class marker is painted one rung brighter.
 
     The class is the one fact on this line that tells a user whether the agent
     may message them unprompted, so it survives truncation (the app orders it
@@ -500,7 +591,9 @@ def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _P
     return line
 
 
-def _paint_facts_lines(facts: str, room: int, *, muted: "Style", faint: "Style") -> list[_PaneLine]:
+def _paint_team_facts_lines(
+    facts: str, room: int, *, muted: "Style", faint: "Style"
+) -> list[_PaneLine]:
     """The facts line, plus a SECOND line for the scope token when it cannot fit.
 
     Design round 1 (D1) requires the class marker to survive; round 2 (D1/U2)
@@ -520,18 +613,16 @@ def _paint_facts_lines(facts: str, room: int, *, muted: "Style", faint: "Style")
     from local_operator.i18n.text import tr
 
     scope_token = tr("tui.authoring")(author_keys.scope_conversation())
-    # THE TOKEN IS LIFTED FROM WHEREVER IT SITS (round 2, D1): a configured role
-    # renders `role · proactive · this conversation · <model> · effort high`, so
-    # the scope fact is NOT last and a suffix-only test left exactly the rows
-    # with model/effort pins clipped. Parts are ` · `-delimited by construction in
-    # ``agent_listing_rows``; removing the token's own part keeps the rest of the
-    # line byte-identical to what the caller assembled.
+    # Team detail strings can put aliases after scope, so retain the legacy
+    # lift from ANYWHERE rather than only a suffix. Removing the token's part
+    # leaves the rest byte-identical. This compatibility parser is TEAM-only;
+    # structured agents never enter its display-text grammar.
     parts = facts.split(" · ")
     if scope_token not in parts or cell_len(facts) <= room:
-        return [_paint_facts(facts, room, muted=muted, faint=faint)]
+        return [_paint_team_facts(facts, room, muted=muted, faint=faint)]
     head = " · ".join(part for part in parts if part != scope_token)
     return [
-        _paint_facts(head, room, muted=muted, faint=faint),
+        _paint_team_facts(head, room, muted=muted, faint=faint),
         [(f"    {truncate_cells(scope_token, room)}", muted)],
     ]
 
@@ -1337,9 +1428,9 @@ class SettingsView(Vertical):
         self._pane = _PANE_TEAMS
         #: Read-only pane content, injected by the app (it owns the registries).
         self._teams: list[tuple[str, str, str]] = []
-        self._agents: list[tuple[str, str, str]] = []
+        self._agents: list[tuple[str, AgentFacts | str, str]] = []
         #: Provider login state, injected the same way and for the same reason.
-        self._providers: list[tuple[str, str]] = []
+        self._providers: list[tuple[str, str] | ProviderStateRow] = []
         #: The provider and model catalogues that feed the `hosting`/`model_name`
         #: suggestion dropdowns, injected by the app for the same reason the
         #: pane content is: the page never reaches into a registry or the
@@ -1525,8 +1616,9 @@ class SettingsView(Vertical):
         self,
         *,
         teams: Sequence[tuple[str, str, str]] = (),
-        agents: Sequence[tuple[str, str, str]] = (),
+        agents: Sequence[tuple[str, AgentFacts | str, str]] = (),
         providers: Sequence[tuple[str, str]] = (),
+        provider_states: Sequence[ProviderStateRow] | None = None,
         provider_catalogue: Sequence[tuple[str, str]] = (),
         model_catalogue: Sequence[ModelRow] = (),
     ) -> None:
@@ -1534,7 +1626,8 @@ class SettingsView(Vertical):
 
         Teams, agents and provider state are RESOLVED BY THE APP (they read the
         session's registries and the credential store) and handed here already
-        flattened to rows. The page never reaches into a registry itself, which
+        resolved as row snapshots, with agent facts deliberately unrendered.
+        The page never reaches into a registry itself, which
         is what keeps a repaint free of I/O — the same split ``OrgChartView``
         makes when the app resolves the org tree and the widget only paints it.
 
@@ -1546,11 +1639,33 @@ class SettingsView(Vertical):
         empty: a host that supplies neither simply gets the old bare free-text
         editor on those two rows, which still saves any value.
         """
+        # Legacy tuples are opaque display strings, even when their bytes look
+        # like state codes. Explicit coded input (including an empty sequence)
+        # owns the snapshot; mixing it with nonempty legacy input is ambiguous.
+        if provider_states is not None and providers:
+            raise ValueError("providers and provider_states cannot be combined")
         self._teams = list(teams)
         self._agents = list(agents)
-        self._providers = list(providers)
+        self._providers = list(provider_states) if provider_states is not None else list(providers)
         self._provider_catalogue = list(provider_catalogue)
         self._model_catalogue = list(model_catalogue)
+        self._repaint()
+
+    def set_teams(self, teams: Sequence[tuple[str, str, str]]) -> None:
+        """Replace ONLY the team rows and repaint.
+
+        Why a narrow setter rather than calling :meth:`load` again: team rows
+        are handed over already resolved to display strings (member count,
+        alias label, "no description" fallback), so a live language switch
+        must re-hand them or the Teams pane keeps the old language (PR #4508
+        R1/Q1). ``load`` would also replace agents, provider state and both
+        catalogues, which means re-resolving the credential store and model
+        catalogue on every language change for rows that do not need it —
+        agent facts are rendered at paint time, so they already follow the
+        locale. Cursor, pane and expansion state are untouched; ``_repaint``
+        clamps the selection exactly as it does for any other rebuild.
+        """
+        self._teams = list(teams)
         self._repaint()
 
     # -- rows ---------------------------------------------------------------
@@ -1699,12 +1814,13 @@ class SettingsView(Vertical):
                     # synthesised rather than registered (see `_choices_for`).
                     for choice in _choices_for(setting):
                         rows.append(_Row(kind="choice", setting=setting, choice=choice))
-                        if setting.key == "language" and getattr(choice, "description", ""):
-                            # The Urdu capability note is longer than the
-                            # narrowest list, and single-line fitting turned
-                            # it into "Terminal: best ef…" — dropping the
-                            # caveat. Unselectable rows keep one line per
-                            # index while showing the whole sentence.
+                        if _description_needs_its_own_rows(setting, choice):
+                            # The language row's Urdu capability note and the
+                            # auto mode's exemption are longer than their slot,
+                            # and single-line fitting turned the first into
+                            # "Terminal: best ef…" — dropping the caveat.
+                            # Unselectable rows keep one line per index while
+                            # showing the whole sentence.
                             rows.extend(_note_rows(choice.description, self._list_width()))
         return rows
 
@@ -2780,7 +2896,11 @@ class SettingsView(Vertical):
         normalized = (
             keymap_mod.normalize_desktop_key(key, action_id=capture.setting_key)
             if scope == "desktop"
-            else keymap_mod.normalize_key(key)
+            else (
+                keymap_mod.normalize_composer_key(key)
+                if scope == "composer"
+                else keymap_mod.normalize_key(key)
+            )
         )
         self._capture = capture._replace(key=normalized, refused="")
         self._repaint()
@@ -4393,20 +4513,7 @@ class SettingsView(Vertical):
             # difference alone does not survive a monochrome terminal, and
             # "which one am I on" is the question the expansion exists to answer.
             line.append("● " if chosen else "○ ", style=accent if chosen else dim)
-            choice_label = (
-                technical_display(str(row.choice.label)).plain
-                if row.setting.key == "language"
-                else _paint(
-                    row.choice.label,
-                    # BOOL labels carry the provenance resolved beside them;
-                    # registry choices are English-source fallback prose.
-                    source_locale=(
-                        _BOOL_SOURCES[bool(row.choice.value)]
-                        if row.setting.kind is Kind.BOOL
-                        else "en"
-                    ),
-                )
-            )
+            choice_label = _choice_label(row.setting, row.choice)
             line.append(choice_label, style=base)
             if row.choice.value == row.setting.default:
                 # Which member SHIPPED, named in the list rather than inferred
@@ -4417,11 +4524,14 @@ class SettingsView(Vertical):
                 # see the difference between "I chose this" and "this is what
                 # it came with" before touching anything.
                 line.append(_t(_x.settings_view_default_marker()), style=dim)
-            if row.choice.description and row.setting.key != "language":
+            if row.choice.description and not _description_needs_its_own_rows(
+                row.setting, row.choice
+            ):
                 line.append(f"  {_paint(row.choice.description, source_locale='en')}", style=faint)
-            # The language row's note is painted by `_note_rows` above it,
-            # wrapped whole; repeating it here is the truncated copy the
-            # expansion exists to stop showing.
+            # A description painted by `_note_rows` above it is shown whole,
+            # wrapped; repeating it here is the truncated copy the expansion
+            # exists to stop showing (the language row's rule, now shared with
+            # the auto mode's exemption).
             return line
 
         if row.kind == "chain" and row.chain is not None:
@@ -4538,20 +4648,26 @@ class SettingsView(Vertical):
                 else:
                     line.append(_t(_x.settings_view_press_key()), style=accent)
                 return line
-            # `display_key`, not `format_key_display`: a desktop value maps its
-            # platform tokens for display in its OWN scope (primary reads
-            # cmd/ctrl), where the app vocabulary would show it verbatim.
-            line.append(
-                keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
-                style=value_style,
-            )
+            # An unbound hotkey (the composer-scope send rows ship unbound)
+            # has an empty value: paint the page's "nothing to show" glyph
+            # in dim ink rather than a blank cell, which reads as an unset
+            # row the user has broken or never opened (D4). The empty string
+            # is the omission encoding of unbound, so it is the only case
+            # that paints this.
+            if not str(value):
+                line.append("—", style=dim)
+            else:
+                line.append(
+                    keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
+                    style=value_style,
+                )
             if selected:
                 # The same cursor-row-only affordance glyph the bool/enum rows
                 # carry, answering "what does `enter` do here?" before the
                 # press rather than after it.
                 line.append(" \u25b8", style=dim)
             return line
-        line.append(_render_value(value), style=value_style)
+        line.append(_render_value(value, setting=setting), style=value_style)
         if setting.kind in (Kind.BOOL, Kind.ENUM):
             if self._expanded == setting.key:
                 line.append(" ▾", style=dim)
@@ -5077,6 +5193,9 @@ class SettingsView(Vertical):
             lead: str
             lead_style: Style
             reason: str
+            # Bound on every path so the style line below reads a definite
+            # value; only the pending arm ever sets it True.
+            enhanced_hint = False
             if capture.refused:
                 # A refusal is a report that the press did not land, so it
                 # takes the danger ink: the one thing here that must not read
@@ -5101,6 +5220,19 @@ class SettingsView(Vertical):
                 # something stopped working. So it is named, and the user
                 # presses enter having read it.
                 reason = self._capture_conflict()
+                # A kitty-only chord needs its terminal limit stated where
+                # it is bound, not only in row help the user may never open
+                # (UX round 1, U1): without it a legacy terminal silently
+                # receives plain Enter for the very press that was bound.
+                # Painted as a hint (dim), not a refusal: it warns and
+                # stores, so the error ink would read as a rejection the
+                # capture never made.
+                if keymap_mod.scope_of(capture.setting_key) == "composer" and (
+                    keymap_mod.composer_chord_needs_enhanced_keys(capture.key)
+                ):
+                    need = _t_chrome(_svc.capture_needs_enhanced_keys())
+                    reason = f"{need} — {reason}" if reason else need
+                    enhanced_hint = not self._capture_conflict()
                 contract_text = _t_chrome(
                     _svc.capture_contract_confirm(save_key=_KEY_SAVE, cancel_key=_KEY_CANCEL)
                 )
@@ -5109,18 +5241,22 @@ class SettingsView(Vertical):
                 # column's `press a key…`; carrying both phrasings made a user
                 # check whether the difference was meaningful (design round 1,
                 # D7). The value column keeps the prompt, this line explains
-                # the way out.
-                lead, lead_style, reason = (
-                    _t_chrome(_svc.capture_listening()),
-                    dim + Style(bold=True),
-                    "",
-                )
+                # the way out. On a composer-scope row the lead teaches the
+                # chord grammar instead: a send chord that only works in
+                # kitty terminals must say so where the user binds it, and a
+                # legacy terminal would otherwise receive plain Enter for
+                # the very press the user believed was bound (UX round 1, U1).
+                if keymap_mod.scope_of(capture.setting_key) == "composer":
+                    lead = _t_chrome(_svc.capture_chord_grammar())
+                else:
+                    lead = _t_chrome(_svc.capture_listening())
+                lead_style, reason = dim + Style(bold=True), ""
                 contract_text = _t_chrome(_svc.capture_contract_cancel(cancel_key=_KEY_CANCEL))
 
             width = self._detail_width()
             contract_part = (contract_text, dim, False)
             lead_part = (lead, lead_style, False)
-            reason_style = error if reason else dim
+            reason_style = error if reason and not enhanced_hint else dim
             capture_rungs: list[list[tuple[str, Style, bool]]] = []
             if reason:
                 capture_rungs.append([lead_part, (reason, reason_style, False), contract_part])
@@ -5281,7 +5417,7 @@ class SettingsView(Vertical):
                 # finding names.
                 clause_style = _bridge_ink()
             width = self._detail_width()
-            help_text = _paint(row.setting.help, source_locale="en")
+            help_text = hotkey_hints.live_copy(self, _paint(row.setting.help, source_locale="en"))
             if row.setting.key == "notifications.sound.id":
                 # The registry help is SHARED with the desktop and `lop config`,
                 # so it names `lop sound add` / `lop sound doctor`. Inside the
@@ -5692,7 +5828,9 @@ class SettingsView(Vertical):
         if not settings_io.is_default(self._manager, setting):
             # `raw=True`: the value is a word INSIDE this sentence, so only the
             # sentence is projected (PR #4361 R1).
-            return _t_chrome(_svc.clause_default(value=_render_value(setting.default, raw=True)))
+            return _t_chrome(
+                _svc.clause_default(value=_render_value(setting.default, setting=setting, raw=True))
+            )
         return ""
 
     def _gated_off(self, setting: Setting) -> bool:
@@ -5870,7 +6008,14 @@ class SettingsView(Vertical):
         header: _PaneLine = [(_t_sv(_sv.pane_providers_header()), head)]
         provider_lines: list[_PaneLine] = []
         if self._providers:
-            for name, state in self._providers:
+            for provider in self._providers:
+                # The row type is the tag, never the contents of either string.
+                # Resolve each paint so language changes need no credential I/O.
+                if isinstance(provider, ProviderStateRow):
+                    name = provider.provider_id
+                    state = provider_state_label(provider.state_code)
+                else:
+                    name, state = provider
                 # Truncated per SEGMENT so the id survives and the state gives
                 # way: "anthropic" is what the row is about, and a clipped id
                 # is unreadable where a clipped state is merely terse.
@@ -5956,7 +6101,10 @@ class SettingsView(Vertical):
             shown, hidden = self._budget_pane_rows(rows, used=used + 1)
             for name, facts, summary in shown:
                 entry: list[_PaneLine] = [[(f"  {truncate_cells(name, room - 2)}", muted)]]
-                entry.extend(_paint_facts_lines(facts, room - 4, muted=muted, faint=faint))
+                if self._pane == _PANE_TEAMS and isinstance(facts, str):
+                    entry.extend(_paint_team_facts_lines(facts, room - 4, muted=muted, faint=faint))
+                else:
+                    entry.extend(_paint_facts_lines(facts, room - 4, muted=muted, faint=faint))
                 if summary:
                     entry.append([(f"    {truncate_cells(summary, room - 4)}", faint)])
                 entries.append(entry)
@@ -6208,8 +6356,8 @@ class SettingsView(Vertical):
         return text
 
     def _budget_pane_rows(
-        self, rows: Sequence[tuple[str, str, str]], *, used: int
-    ) -> tuple[list[tuple[str, str, str]], int]:
+        self, rows: Sequence[tuple[str, AgentFacts | str, str]], *, used: int
+    ) -> tuple[list[tuple[str, AgentFacts | str, str]], int]:
         """Split the roster into what fits above the caption, and the rest.
 
         Each entry costs up to three rows (name, facts, an optional summary),
@@ -6225,7 +6373,7 @@ class SettingsView(Vertical):
         if room <= 0:
             return ([], len(rows))
 
-        def cost(entry: tuple[str, str, str]) -> int:
+        def cost(entry: tuple[str, AgentFacts | str, str]) -> int:
             return 3 if entry[2] else 2
 
         def take(limit: int) -> int:
@@ -7074,6 +7222,24 @@ def _note_rows(text: str, width: int) -> list["_Row"]:
     return [_Row(kind="note", text=line) for line in wrap_cells(text, max(1, width - _NOTE_INDENT))]
 
 
+def _description_needs_its_own_rows(
+    setting: settings_io.Setting, choice: settings_io.Choice
+) -> bool:
+    """Whether a choice's description is painted as note rows rather than inline.
+
+    A description that does not fit its row is ellipsised, which is exactly how
+    the language row dropped "Terminal: best ef…" — the caveat, painted as the
+    cut. Both callers here need the whole sentence: the tool-approval mode's
+    auto gloss is 73 cells against a 55-cell slot at 80 columns, and the part
+    that would be cut is the EXEMPTION (which gates still ask a person).
+    """
+    if not getattr(choice, "description", ""):
+        return False
+    if setting.key == "language":
+        return True
+    return setting.key == "tool_approval_mode" and choice.value == "auto"
+
+
 _BOOL_CHOICES: tuple[settings_io.Choice, ...] = _bool_choices()
 _BOOL_SOURCES: dict[bool, str] = _bool_sources()
 
@@ -7244,7 +7410,37 @@ def _value_tail(text: str, cells: int) -> str:
     return "".join(reversed(kept))
 
 
-def _render_value(value: Any, *, raw: bool = False) -> str:
+def _choice_label(setting: Setting, choice: settings_io.Choice, *, raw: bool = False) -> str:
+    """Share the picker's human label without changing the value edited or saved.
+
+    Registry labels retain their message: resolve that message at paint time so
+    a live locale change and an English fallback carry their actual provenance.
+    Nested default sentences need unprojected text; projecting both the label
+    and its enclosing sentence would introduce nested bidi isolates in Urdu.
+    Native language names and unkeyed technical choices keep their own spelling.
+    """
+    if setting.key == "language":
+        label = str(choice.label)
+        return label if raw else technical_display(label).plain
+    message = getattr(choice.label, "message", None)
+    if isinstance(message, Msg):
+        # Reuse the wire renderer's root-aware cached namespace discovery, but
+        # the TUI's cached resolver for repaint: render_record/message_display
+        # would reread the catalogue for every visible choice on every frame.
+        namespace = _namespace_for(str(catalogues.catalogue_root()), message.code)
+        if namespace is not None:
+            record = tr_record(namespace)(message)
+            return record.text if raw else _paint(record.text, source_locale=record.source_locale)
+    label = str(choice.label)
+    if raw:
+        return label
+    return _paint(
+        label,
+        source_locale=_BOOL_SOURCES[bool(choice.value)] if setting.kind is Kind.BOOL else "en",
+    )
+
+
+def _render_value(value: Any, *, setting: Setting | None = None, raw: bool = False) -> str:
     """One vocabulary for every displayed value.
 
     Booleans read as ``on``/``off`` rather than ``True``/``False`` because that
@@ -7258,6 +7454,13 @@ def _render_value(value: Any, *, raw: bool = False) -> str:
     # choice can never disagree. `raw=True` returns plain text for a caller
     # that substitutes the word into another catalogued sentence; the default
     # is display-projected, for a value painted on its own.
+    # Only ENUM has a setting-specific human vocabulary. Resolve just the
+    # matching member (including tri-state None/bools), never translate wire
+    # tokens globally or feed human labels back into the editor/persistence.
+    if setting is not None and setting.kind is Kind.ENUM:
+        for choice in setting.resolved_choices:
+            if type(choice.value) is type(value) and choice.value == value:
+                return _choice_label(setting, choice, raw=raw)
     small = _raw_t if raw else _t
     chrome = _raw_chrome if raw else _t_chrome
     if value is None:

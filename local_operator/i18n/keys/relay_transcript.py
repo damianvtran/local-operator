@@ -61,6 +61,10 @@ def bridge_signed_out() -> Msg:
     return Msg("relay.transcript.bridge.signed_out", {})
 
 
+def bridge_thread_reply() -> Msg:
+    return Msg("relay.transcript.bridge.thread_reply", {})
+
+
 def bridge_unavailable() -> Msg:
     return Msg("relay.transcript.bridge.unavailable", {})
 
@@ -91,6 +95,14 @@ def fold_shell(*, count: int | float) -> Msg:
 
 def fold_unit(*, kind: str, count: int | float, name: str) -> Msg:
     return Msg("relay.transcript.fold.unit", {"kind": kind, "count": count, "name": name})
+
+
+def jump_latest() -> Msg:
+    return Msg("relay.transcript.jump.latest", {})
+
+
+def jump_latest_short() -> Msg:
+    return Msg("relay.transcript.jump.latest_short", {})
 
 
 def label_ask() -> Msg:

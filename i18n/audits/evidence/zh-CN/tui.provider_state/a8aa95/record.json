@@ -1,0 +1,99 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "key_count": 5,
+  "audit_kind": "independent_A",
+  "source_audit_revision": "a54ec02de48a94b68d6c3dc92e1307c97ea776ad",
+  "auditor": {
+    "agent": "i18n-auditor (independent A)",
+    "session": "8aa95e755693",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "298f6fe9722a",
+    "independent_from_translator": true,
+    "independent_from_english_source_author_session": "93b7b02899af",
+    "actual_model_source": "Host [model switch] in this audit session: provider failure: quota; not inferred from requested model",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "date": "2026-11-22",
+    "result": "passed",
+    "unresolved_blocker_major": 0
+  },
+  "translator_provenance_source": "i18n/audits/evidence/zh-CN/tui.provider_state/zh22author/record.json",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "298f6fe9722a",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host [model switch] message in this session; provider quota failure",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.provider_state.json",
+      "sha256": "ba73193e56b6b01a584418c0b8a392ee01af2c810789229f576895fbc978a5f1"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/a8aa95/report.md",
+      "sha256": "076155b6f573ac7222b4d581f951f69fdcac0f6910201ae6e40757a33fceeef4"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/a8aa95/audit.log",
+      "sha256": "3901402c96c4d853f16be15ab0574ff4cbf2e18d5a95bc14ddc40054f1017147"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/a8aa95/script.py.txt",
+      "sha256": "90d53048f9d72f7d74dedf2711ccb4fffb8d1bb148da6dbe25d3b8121aba83ea"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.provider_state/a8aa95/ledger-receipt.json",
+      "sha256": "c5d64a88d7554ce916cc2d9b7dc84106abcc08b8de1aaec6afa690adb89f9d93"
+    }
+  ],
+  "artifact_semantics": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual execution stdout/stderr, exit codes and command invocations",
+    "script.py.txt": "exact executed mechanical program, adapted author rig plus independent negative controls",
+    "ledger-receipt.json": "actual ledger append contract, dry-run only",
+    "receipt.json": "companion hashes with explicit reference to this record; excluded here to avoid circular hashes"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "validation": {
+    "official_scoped_catalogue_problems": [],
+    "ordered_key_count": 5,
+    "icu_argument_count": 0,
+    "plural_select_count": 0,
+    "render_cases": 10,
+    "negative_controls": [
+      "missing-key rejected",
+      "added-argument rejected"
+    ],
+    "command_exit_code": 0,
+    "ledger_append_dry_run_exit_code": 0,
+    "ledger_applied": false,
+    "native_settings_or_release_approval": false,
+    "network_isolation_certified": false
+  },
+  "retention": "New repo-only evidence bundle; uncommitted until owner stages/commits. No existing evidence modified."
+}

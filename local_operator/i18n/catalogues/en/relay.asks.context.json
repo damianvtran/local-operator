@@ -51,32 +51,32 @@
   },
   "relay.asks.status.lapsed_body": {
     "role": "explanation shown after a timeout",
-    "tone": "Preserve casing, lowercase start.",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Names what the agent does after a timeout without claiming a default it may not have used."
   },
   "relay.asks.card.gone": {
     "role": "terminal sentence when the ask's conversation no longer exists",
-    "tone": "Preserve casing, lowercase start, em dash; keep 'ask' as the verb/noun the product uses.",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Mirrors daemon._ASK_GONE_RESPONSE so the card can state the permanent verdict before a guaranteed refusal."
   },
   "relay.asks.card.secret_notice": {
     "role": "reassurance above a secret answer field",
-    "tone": "Preserve casing, lowercase start, em dash.",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. The answer is sent directly and never written to the transcript."
   },
   "relay.asks.card.secret_notice_persisted": {
     "role": "reassurance above a secret answer field that is also saved",
-    "tone": "Preserve casing, lowercase start, em dash.",
-    "note": "Owned relay SPA asks copy. Same fact as the sibling key plus the credential-store write; used only when the question sets persist."
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
+    "note": "Owned relay SPA asks copy. Same fact as the sibling key plus the write to the agent computer's long-term store; used only when the question sets persist. 'On the computer' means that store, not the browser: the relay never keeps a typed secret in the browser. Same wording as the native app's mobile.asks.secret_notice_saved."
   },
   "relay.asks.card.placeholder_secret": {
     "role": "secret answer input placeholder",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. The field is masked; a credential is pasted here."
   },
   "relay.asks.card.placeholder_answer": {
     "role": "free-text answer input placeholder",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Used for ordinary questions with no options."
   },
   "relay.asks.card.other": {
@@ -86,57 +86,57 @@
   },
   "relay.asks.card.recommended": {
     "role": "badge suffix on a recommended option",
-    "tone": "Preserve the leading middle dot and the lowercase word.",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Marks the option the model recommends; the dot separates it from the option label."
   },
   "relay.asks.card.choose_any": {
     "role": "multi-select hint",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. States that more than one option may be selected."
   },
   "relay.asks.card.urgent": {
     "role": "urgent marker beside the state line",
-    "tone": "Preserve the leading middle dot and the lowercase word.",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Advisory only; it does not change the answer controls."
   },
   "relay.asks.card.dismiss": {
     "role": "dismissal action label",
-    "tone": "Preserve casing, lowercase, em dash.",
-    "note": "Owned relay SPA asks copy. The label is also the control's width; keep it short. Dismissal sends no reply."
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
+    "note": "Owned relay SPA asks copy. The button on a TIMED-OUT question, the only action there; it sends no reply and asks no reason. A waiting question's quieter link is relay.ask.dismiss.open. Same word as the native app's mobile.asks.dismiss."
   },
   "relay.asks.card.skip": {
     "role": "skip-one-question action label",
-    "tone": "Preserve casing, lowercase, em dash.",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Submits an empty list for one question without answering it."
   },
   "relay.asks.card.unskip": {
     "role": "undo-skip action label",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Reverses the sibling skip control."
   },
   "relay.asks.card.nothing_left": {
     "role": "empty answerable-fields notice",
-    "tone": "Preserve casing, lowercase, em dash.",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Explains that another surface has taken every question; it replaces a permanently disabled send."
   },
   "relay.asks.card.cold_wait": {
     "role": "in-flight notice while a stopped session is brought up",
-    "tone": "Preserve casing, lowercase, em dash and the ~30 s bound.",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Shown only while answering a cold conversation, where the operation really does cost about 30 seconds."
   },
   "relay.asks.card.send_answers": {
     "role": "submit action label for a multi-question ask",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (first letter capital), no final full stop. Half-width button in the pinned bottom bar; keep it short.",
     "note": "Owned relay SPA asks copy. One submit answers every question in the form."
   },
   "relay.asks.card.send_answer": {
     "role": "submit action label for a single-question ask",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (first letter capital), no final full stop. Half-width button in the pinned bottom bar; keep it short.",
     "note": "Owned relay SPA asks copy. Singular sibling of send_answers."
   },
   "relay.asks.card.decline": {
     "role": "decline action label",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (first letter capital), no final full stop. Half-width button in the pinned bottom bar; keep it short.",
     "note": "Owned relay SPA asks copy. Declining answers the agent that the user refused."
   },
   "relay.asks.card.timed_out_badge": {
@@ -146,42 +146,42 @@
   },
   "relay.asks.sheet.title_waiting": {
     "role": "asks sheet title with a live count",
-    "tone": "Preserve the leading section noun and its ' · ' separator, and lowercase. The section noun names the SHEET (asks, approvals and secrets all live here), so a locale must not reuse the question word as the section noun. The count is an ICU plural over questions.",
-    "note": "Owned relay SPA asks copy. Counts questions, not asks, matching the dock and the session header."
+    "tone": "Sentence case (first letter capital), no final full stop. Same wording as relay.asks.dock.waiting. The count is an ICU plural over questions.",
+    "note": "Owned relay SPA asks copy. Counts questions, not asks, matching the dock and the session header; reads \"1 question waiting\" in English."
   },
   "relay.asks.sheet.title_lapsed": {
     "role": "asks sheet title when only lapsed questions remain",
-    "tone": "Preserve the leading section noun and its ' · ' separator, and lowercase. The section noun is the sheet's name, not the question count word.",
+    "tone": "Sentence case (first letter capital), no final full stop. Same wording as relay.asks.dock.timed_out. The count is an ICU plural over questions.",
     "note": "Owned relay SPA asks copy. Lapsed questions are read-only; the title says what the sheet holds."
   },
   "relay.asks.sheet.title_plain": {
     "role": "asks sheet title with nothing waiting or lapsed",
-    "tone": "Preserve casing, lowercase. This is the section noun alone.",
-    "note": "Owned relay SPA asks copy. The bare sheet name."
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
+    "note": "Owned relay SPA asks copy. The bare sheet title, shown when only answered questions are listed."
   },
   "relay.asks.sheet.loading": {
     "role": "asks sheet loading line",
-    "tone": "Preserve casing, lowercase. The ellipsis is U+2026.",
+    "tone": "Sentence case (first letter capital), no final full stop. The ellipsis is U+2026.",
     "note": "Owned relay SPA asks copy. Prevents the empty state from appearing while the first read is in flight."
   },
   "relay.asks.sheet.empty": {
     "role": "asks sheet empty state",
-    "tone": "Preserve casing, lowercase, em dash.",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Shown only after a successful read returns no rows."
   },
   "relay.asks.sheet.retry": {
     "role": "retry action after a failed read",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (first letter capital), no final full stop.",
     "note": "Owned relay SPA asks copy. A failed read must not leave closing as the only move."
   },
   "relay.asks.sheet.ended_wait": {
     "role": "warning before answering in an ended conversation",
-    "tone": "Preserve casing, lowercase, em dash, and the ~30 s bound.",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Answering reopens the conversation; the wait is stated before the tap."
   },
   "relay.asks.sheet.not_running_wait": {
     "role": "warning before answering in a stopped conversation",
-    "tone": "Preserve casing, lowercase, em dash, and the ~30 s bound.",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Answering brings the runtime up; used when the conversation exists but is not live."
   },
   "relay.asks.dock.waiting": {
@@ -196,7 +196,7 @@
   },
   "relay.asks.row.told": {
     "role": "label over the detail sent to the agent",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Expands under a settled ask row."
   },
   "relay.asks.pending.kind_approval": {
@@ -251,17 +251,17 @@
   },
   "relay.asks.error.reach_failed": {
     "role": "network failure fallback",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. Used when fetch rejects without a daemon sentence."
   },
   "relay.asks.error.no_reason": {
     "role": "refusal fallback with no daemon sentence",
-    "tone": "Preserve casing, lowercase.",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. A bare HTTP status is not a reason; this names that honestly."
   },
   "relay.asks.error.read_timeout": {
     "role": "asks sheet read timeout",
-    "tone": "Preserve casing, lowercase, em dash.",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
     "note": "Owned relay SPA asks copy. The bounded aggregate read did not answer."
   },
   "relay.asks.error.session_timeout": {
@@ -408,5 +408,109 @@
     "role": "small note under the command when the clipboard write failed",
     "tone": "Plain, calm, lowercase after the em dash.",
     "note": "Owned relay SPA asks copy. The card has selected the command text so the platform's own copy gesture works; the note says so. Preserve the em dash."
+  },
+  "relay.asks.sheet.settled": {
+    "role": "heading above the settled questions in the asks sheet",
+    "tone": "Sentence case (capital first letter). No final full stop.",
+    "maxCells": 16,
+    "note": "Owned relay SPA asks copy. Sits above the one-line rows of questions that are already answered, declined, dismissed or withdrawn, below everything still waiting. Same word as the native app's mobile.asks.settled."
+  },
+  "relay.asks.card.progress_tally": {
+    "role": "quiet line in the pinned bar while Send is disabled, multi-question ask",
+    "tone": "Sentence case (capital first letter). A label or clause: no final full stop; no em or en dash as a separator.",
+    "maxCells": 34,
+    "note": "Owned relay SPA asks copy. {answered} and {total} are integers (answered < total) counting the question's own ask's questions. A skipped question counts as answered. Explains why Send is grey. Keep the placeholders in this order. Same wording as the native app's mobile.asks.progress.tally."
+  },
+  "relay.asks.card.progress_pick_or_type": {
+    "role": "quiet line in the pinned bar while Send is disabled, single question with options",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
+    "maxCells": 60,
+    "note": "Owned relay SPA asks copy. Says what it takes to enable Send: pick one of the options or type an own answer in the Other row. Same wording as the native app's mobile.asks.progress.pick_or_type."
+  },
+  "relay.asks.card.progress_type": {
+    "role": "quiet line in the pinned bar while Send is disabled, single free-text question",
+    "tone": "Sentence case (capital first letter). Full sentences end with a full stop; no em or en dash as a separator.",
+    "maxCells": 60,
+    "note": "Owned relay SPA asks copy. Says what it takes to enable Send on a question with no options: type an answer, or skip the question. Same wording as the native app's mobile.asks.progress.type."
+  },
+  "relay.asks.card.other_kept": {
+    "role": "hint on the closed Other row while it still holds typed text",
+    "tone": "Sentence case (capital first letter). No final full stop.",
+    "maxCells": 34,
+    "note": "Owned relay SPA asks copy. Shown beside 'Other' after the reader closed the Other row with text in it: the text is kept in the card but is not part of the answer. Same wording as the native app's mobile.asks.other_kept."
+  },
+  "relay.asks.id.copy_label": {
+    "role": "accessible name of the copy control beside an ask id at the foot of a card or row",
+    "tone": "Sentence case (capital first letter). No final full stop: this is a control label.",
+    "maxCells": 40,
+    "note": "Owned relay SPA asks copy. {id} is the ask's own id exactly as the runtime wrote it (a- and four lower-case hex digits, e.g. a-e53b); never translate or reformat it. The button it names is the quiet id line on an ask card or a settled ask row."
+  },
+  "relay.asks.id.copied": {
+    "role": "the copy control's confirmation mark after a successful copy",
+    "tone": "Sentence case (capital first letter). One word; no final full stop.",
+    "maxCells": 12,
+    "note": "Owned relay SPA asks copy. Replaces the copy glyph beside the id for two seconds. It is aria-hidden; the screen-reader sentence is relay.asks.id.copied_named."
+  },
+  "relay.asks.id.copied_named": {
+    "role": "screen-reader announcement after an ask id was copied",
+    "tone": "Sentence case (capital first letter). No final full stop, matching the native app's toast.",
+    "maxCells": 24,
+    "note": "Owned relay SPA asks copy. {id} is the ask id verbatim (e.g. a-e53b). Says WHICH id was copied because a screen can hold several ask ids."
+  },
+  "relay.asks.id.copy_failed": {
+    "role": "the copy control's failure note when the clipboard is unavailable",
+    "tone": "Sentence case (capital first letter). Preserve the em dash. No final full stop.",
+    "maxCells": 72,
+    "note": "Owned relay SPA asks copy. The relay can be served over plain HTTP on a LAN address, where the clipboard API does not exist; the id is then selected so the platform's own copy works. Same shape as relay.asks.card.command.copy_failed."
+  },
+  "relay.asks.chip.open": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"open\"."
+  },
+  "relay.asks.chip.answered": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"answered\"."
+  },
+  "relay.asks.chip.declined": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"declined\"."
+  },
+  "relay.asks.chip.timed_out": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"timed out\"."
+  },
+  "relay.asks.chip.late": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"late\"."
+  },
+  "relay.asks.chip.dismissed": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"dismissed\"."
+  },
+  "relay.asks.chip.withdrawn": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"withdrawn\"."
+  },
+  "relay.asks.chip.expired": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"expired\"."
+  },
+  "relay.asks.chip.label": {
+    "role": "help",
+    "maxCells": 120,
+    "note": "Accessible name of an ask-id chip in the agent's prose when this session knows the ask. {id} is the id such as a-745e (never translated); {state} is the one-word state already translated; {question} is the first question's own text, copied verbatim. Ends with an instruction to activate the chip, which opens the asks sheet at that ask."
+  },
+  "relay.asks.chip.label_bare": {
+    "role": "help",
+    "maxCells": 64,
+    "note": "Same accessible name as the chip label, for an ask this session knows but whose question text it does not hold. {id} is the ask id, {state} the one-word state. Ends with an instruction to activate the chip."
   }
 }

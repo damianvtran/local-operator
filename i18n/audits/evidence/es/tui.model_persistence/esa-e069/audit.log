@@ -1,0 +1,72 @@
+COMMAND: ["/Users/damian/local-operator/.venv/bin/python", "-c", "import runpy,sys; runpy.run_path(sys.argv[1], run_name=\"__main__\")", "/Users/damian/local-operator/.worktrees/i18n-model-persist-notice/i18n/audits/evidence/es/tui.model_persistence/esa-e069/validator.py.txt"]
+CWD: /Users/damian/.local-operator/sessions/e069889d36f8/scratchpad/es-validation
+ENV: HOME/config isolated; PYTHONPATH=/Users/damian/local-operator/.worktrees/i18n-model-persist-notice; CMUX_*/LOP_* stripped; PYTHONDONTWRITEBYTECODE=1
+python: /Users/damian/local-operator/.venv/bin/python
+module: /Users/damian/local-operator/.worktrees/i18n-model-persist-notice/local_operator/__init__.py
+HOME: /Users/damian/.local-operator/sessions/e069889d36f8/scratchpad/es-validation
+config: /Users/damian/.local-operator/sessions/e069889d36f8/scratchpad/es-validation/config
+CMUX/LOP inherited keys: 0
+frozen: tui.model_persistence.json 4a8206d8eee6b97ed175d85941864ed9b3a2f9f8b6cf1889e091a9e2e2c62bff
+frozen: tui.model_persistence.context.json b1add11b7a553f3f17da185584b5936f388817c7827e07a84bccc2fa996331bc
+key: tui.model_persistence.persist args= () text= /model default guarda este modelo para nuevas sesiones
+key: tui.model_persistence.settings args= () text= /settings también cambia el modelo de inicio predeterminado
+key: tui.model_persistence.saved args= () text= cambia al modelo de inicio predeterminado con /model saved
+key: tui.model_persistence.with_model args= (('label', 'simple'), ('routes', 'simple')) text= modelo: {label} — {routes}
+PASS scoped official catalogue/context/ICU checks: 4 keys; plural/select arms=0; negative missing-argument control rejected
+RICH en ordinary short width= 80 lines= 2 cells= [77, 64] lone-final-command= False
+RICH en ordinary short width= 100 lines= 2 cells= [97, 44] lone-final-command= False
+RICH en ordinary short width= 120 lines= 2 cells= [120, 20] lone-final-command= False
+RICH en ordinary long width= 80 lines= 5 cells= [7, 80, 80, 77, 56] lone-final-command= False
+RICH en ordinary long width= 100 lines= 4 cells= [7, 100, 99, 94] lone-final-command= False
+RICH en ordinary long width= 120 lines= 4 cells= [7, 120, 117, 56] lone-final-command= False
+RICH en missing-model short width= 80 lines= 2 cells= [78, 16] lone-final-command= False
+RICH en missing-model short width= 100 lines= 1 cells= [94] lone-final-command= False
+RICH en missing-model short width= 120 lines= 1 cells= [94] lone-final-command= False
+RICH en missing-model long width= 80 lines= 5 cells= [7, 80, 80, 75, 11] lone-final-command= False
+RICH en missing-model long width= 100 lines= 4 cells= [7, 100, 99, 47] lone-final-command= False
+RICH en missing-model long width= 120 lines= 4 cells= [7, 120, 115, 11] lone-final-command= False
+RICH en absent-hosting short width= 80 lines= 1 cells= [49] lone-final-command= False
+RICH en absent-hosting short width= 100 lines= 1 cells= [49] lone-final-command= False
+RICH en absent-hosting short width= 120 lines= 1 cells= [49] lone-final-command= False
+RICH en absent-hosting long width= 80 lines= 4 cells= [7, 80, 80, 41] lone-final-command= False
+RICH en absent-hosting long width= 100 lines= 4 cells= [7, 100, 98, 3] lone-final-command= False
+RICH en absent-hosting long width= 120 lines= 3 cells= [7, 120, 81] lone-final-command= False
+RICH en unknown-hosting short width= 80 lines= 1 cells= [49] lone-final-command= False
+RICH en unknown-hosting short width= 100 lines= 1 cells= [49] lone-final-command= False
+RICH en unknown-hosting short width= 120 lines= 1 cells= [49] lone-final-command= False
+RICH en unknown-hosting long width= 80 lines= 4 cells= [7, 80, 80, 41] lone-final-command= False
+RICH en unknown-hosting long width= 100 lines= 4 cells= [7, 100, 98, 3] lone-final-command= False
+RICH en unknown-hosting long width= 120 lines= 3 cells= [7, 120, 81] lone-final-command= False
+RENDER en model: x/y — /model default saves this for new sessions · switch to the boot default with /model saved · /settings edits the boot default too
+DEAD-END en /settings edits the boot default too
+RICH es ordinary short width= 80 lines= 3 cells= [80, 79, 31] lone-final-command= False
+RICH es ordinary short width= 100 lines= 2 cells= [98, 93] lone-final-command= False
+RICH es ordinary short width= 120 lines= 2 cells= [117, 74] lone-final-command= False
+RICH es ordinary long width= 80 lines= 6 cells= [8, 80, 80, 79, 79, 24] lone-final-command= False
+RICH es ordinary long width= 100 lines= 5 cells= [8, 100, 99, 94, 49] lone-final-command= False
+RICH es ordinary long width= 120 lines= 4 cells= [8, 120, 119, 103] lone-final-command= False
+RICH es missing-model short width= 80 lines= 2 cells= [80, 49] lone-final-command= False
+RICH es missing-model short width= 100 lines= 2 cells= [99, 31] lone-final-command= False
+RICH es missing-model short width= 120 lines= 2 cells= [116, 14] lone-final-command= False
+RICH es missing-model long width= 80 lines= 5 cells= [8, 80, 80, 80, 41] lone-final-command= False
+RICH es missing-model long width= 100 lines= 4 cells= [8, 100, 99, 82] lone-final-command= False
+RICH es missing-model long width= 120 lines= 4 cells= [8, 120, 120, 41] lone-final-command= False
+RICH es absent-hosting short width= 80 lines= 1 cells= [73] lone-final-command= False
+RICH es absent-hosting short width= 100 lines= 1 cells= [73] lone-final-command= False
+RICH es absent-hosting short width= 120 lines= 1 cells= [73] lone-final-command= False
+RICH es absent-hosting long width= 80 lines= 4 cells= [8, 80, 80, 64] lone-final-command= False
+RICH es absent-hosting long width= 100 lines= 4 cells= [8, 100, 100, 24] lone-final-command= False
+RICH es absent-hosting long width= 120 lines= 3 cells= [8, 120, 104] lone-final-command= False
+RICH es unknown-hosting short width= 80 lines= 1 cells= [73] lone-final-command= False
+RICH es unknown-hosting short width= 100 lines= 1 cells= [73] lone-final-command= False
+RICH es unknown-hosting short width= 120 lines= 1 cells= [73] lone-final-command= False
+RICH es unknown-hosting long width= 80 lines= 4 cells= [8, 80, 80, 64] lone-final-command= False
+RICH es unknown-hosting long width= 100 lines= 4 cells= [8, 100, 100, 24] lone-final-command= False
+RICH es unknown-hosting long width= 120 lines= 3 cells= [8, 120, 104] lone-final-command= False
+RENDER es modelo: x/y — /model default guarda este modelo para nuevas sesiones · cambia al modelo de inicio predeterminado con /model saved · /settings también cambia el modelo de inicio predeterminado
+DEAD-END es /settings también cambia el modelo de inicio predeterminado
+PASS render matrix: 48 same-code English controls included
+LIMITATION: plain Rich wrapping only, not native NoticeBlock, transcript-family budgets, layout, shaping, independent audit or release clearance
+target SHA256: 253fc1d487b648e6c778ac0f102ca5a49865dd8e223374ad31981f92ff97cce4
+
+EXIT: 0

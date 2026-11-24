@@ -32,17 +32,21 @@ from local_operator.harness.types import (
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
+    ToolContext,
     ToolResult,
 )
 from local_operator.harness.verifier import (
+    NOT_DISPATCHED_DETAIL,
     VERDICT_REQUEST_RESERVE,
     VERIFIER_INSTRUCTIONS,
     VERIFIER_ROLE,
     VerifierLimits,
     build_verifier_prompt,
+    counted_host_tools,
     parse_verdict,
     verifier_profile,
 )
+from local_operator.harness.verifier_evidence import VerifierEvidence
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from tests.unit.session.test_launch_subagent import MODEL, wait_for
@@ -1158,3 +1162,251 @@ def test_a_verdict_challenge_without_named_requirements_stays_the_findings() -> 
     assert text.startswith("An independent check of your deliverable reported (INCONCLUSIVE):")
     assert "could not open the file" in text
     assert "Finishing again without addressing" not in text
+
+
+# -- the command budget is disclosed, counted in every result, and honest -------
+#
+# Nine of nine recorded checks spent all ten host commands without ever having
+# been told there were ten, and two of them paid a command for a call the
+# inspector refused before it reached the host.
+
+
+@pytest.mark.parametrize("budget", [3, 7])
+def test_prompt_states_the_command_budget_from_the_limits_object(budget: int) -> None:
+    """The number in the prompt is read from the object that enforces it:
+    change the budget and the text follows, with no literal to keep in step."""
+
+    limits = VerifierLimits(max_commands=budget)
+    text = build_verifier_prompt(
+        request="r", claim="c", target_tools=("inspect_command",), limits=limits
+    )
+    assert f"BUDGET: at most {budget} commands through inspect_command" in text
+    notice = limits.command_budget_notice(("inspect_command",))
+    assert notice is not None and notice in text
+
+
+def test_no_host_tools_means_no_command_budget_text() -> None:
+    """Nothing counts against ``max_commands`` without host tools, so the
+    ordinary local check's prompt is byte-identical with and without limits."""
+
+    assert VerifierLimits().command_budget_notice(()) is None
+    assert build_verifier_prompt(
+        request="r", claim="c", limits=VerifierLimits()
+    ) == build_verifier_prompt(request="r", claim="c")
+    assert "BUDGET" not in build_verifier_prompt(request="r", claim="c", target_tools=("t",))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed", [False, True])
+async def test_child_is_told_its_budget_and_every_result_counts_it(
+    tmp_path, config_dir, typed: bool
+) -> None:
+    """The real launch path, plain and typed: the first message states the
+    budget ``verify_completion`` was given, and each command result ends with
+    the running count against that same number."""
+
+    calls: list[dict[str, Any]] = []
+
+    def reply(request: ChatRequest) -> list[Any]:
+        done = len(tool_results(request))
+        if done < 2:
+            return tool_turn("inspect_command", {"command": f"cat f{done}"})
+        return text_turn("B2 holds 42\nVERDICT: PASS")
+
+    stream = TreeStream(reply)
+    parent = make_parent(tmp_path, stream)
+    verdict = await parent.verify_completion(
+        request="r",
+        claim="c",
+        host_tools=[inspect_tool(calls)],
+        limits=VerifierLimits(max_commands=3, wall_s=30),
+        typed_evidence=VerifierEvidence() if typed else None,
+    )
+
+    assert verdict.job_id is not None
+    made = stream.by_job[verdict.job_id]
+    assert "BUDGET: at most 3 commands through inspect_command" in first_user_text(made[0])
+    results = tool_results(made[-1])
+    assert len(calls) == 2 and verdict.commands == 2
+    assert "\n[1 of 3 commands used]" in results[0], results[0]
+    assert "\n[2 of 3 commands used]" in results[1], results[1]
+    await parent.dispose()
+
+
+def _block_texts(result: ToolResult) -> list[str]:
+    return [block.text for block in result.content if isinstance(block, TextContent)]
+
+
+def _refusing_tool(ran: list[str]) -> AgentTool:
+    """A host tool that turns ``bad`` away before its host, as the evaluation
+    inspector does for a write pattern or invalid arguments."""
+
+    async def execute(tool_call_id, args, signal=None, on_update=None, context=None):
+        if args.get("command") == "bad":
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name="inspect_command",
+                content=[TextContent(text="Refused: not a read.")],
+                is_error=True,
+                details={NOT_DISPATCHED_DETAIL: True},
+            )
+        if args.get("command") == "boom":
+            ran.append("boom")
+            raise RuntimeError("host went away")
+        ran.append(args["command"])
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="inspect_command",
+            content=[TextContent(text="out")],
+        )
+
+    return inspect_tool([]).model_copy(update={"execute": execute})
+
+
+@pytest.mark.asyncio
+async def test_a_call_refused_before_the_host_is_not_charged_and_the_next_one_runs() -> None:
+    """Regression for the two recorded checks that lost a command to a
+    refusal: with a budget of ONE, two refused calls must leave it whole, the
+    valid command after them must still reach the host, and only then is the
+    budget spent."""
+
+    ran: list[str] = []
+    admitted: list[int] = []
+    exhausted: list[int] = []
+    [tool], used = counted_host_tools(
+        [_refusing_tool(ran)],
+        limit=1,
+        on_call=admitted.append,
+        on_exhausted=lambda: exhausted.append(1),
+    )
+
+    for call_id in ("c1", "c2"):
+        refused = await tool.execute(call_id, {"command": "bad"}, None, None, ToolContext())
+        assert refused.is_error and _block_texts(refused) == [
+            "Refused: not a read.",
+            "\n[not counted: 0 of 1 commands used]",
+        ]
+        assert used() == 0
+    assert exhausted == []
+
+    ok = await tool.execute("c3", {"command": "cat f"}, None, None, ToolContext())
+    assert not ok.is_error and ran == ["cat f"]
+    assert _block_texts(ok) == ["out", "\n[1 of 1 commands used; that was the last one]"]
+    assert used() == 1
+
+    over = await tool.execute("c4", {"command": "cat g"}, None, None, ToolContext())
+    assert over.is_error and "Command budget used (1 of 1)" in over.text
+    assert ran == ["cat f"] and exhausted == [1] and used() == 1
+    # ``on_call`` fires at the reservation: every admitted call, refunded or not.
+    assert admitted == [1, 1, 1]
+
+
+@pytest.mark.asyncio
+async def test_a_host_call_that_raises_keeps_its_charge() -> None:
+    """Only a call the tool SAYS never reached the host is refunded; one that
+    raised may have run, so the budget still bounds what touched the host."""
+
+    ran: list[str] = []
+    [tool], used = counted_host_tools(
+        [_refusing_tool(ran)], limit=2, on_call=lambda _n: None, on_exhausted=lambda: None
+    )
+    with pytest.raises(RuntimeError):
+        await tool.execute("c1", {"command": "boom"}, None, None, ToolContext())
+    assert ran == ["boom"] and used() == 1
+
+
+@pytest.mark.asyncio
+async def test_the_cap_holds_when_calls_of_one_request_run_concurrently() -> None:
+    """The reason the slot is reserved BEFORE the tool runs (review R1-m1):
+    the calls of one request are gathered, so three calls against a budget of
+    two are all in flight before any returns. Exactly two may reach the tool,
+    the count may never pass the limit, and a call the tool then reports as
+    not dispatched gives back exactly ONE slot -- no more, no fewer."""
+
+    entered: list[str] = []
+    both_in = asyncio.Event()
+    release = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal=None, on_update=None, context=None):
+        command = args["command"]
+        entered.append(command)
+        if len(entered) == 2:
+            both_in.set()
+        # Held open so every sibling is admitted or refused while these are
+        # still in flight: the interleaving a sequential test cannot produce.
+        await release.wait()
+        if command == "bad":
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name="inspect_command",
+                content=[TextContent(text="Refused: not a read.")],
+                is_error=True,
+                details={NOT_DISPATCHED_DETAIL: True},
+            )
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="inspect_command",
+            content=[TextContent(text="out")],
+        )
+
+    admitted: list[int] = []
+    exhausted: list[int] = []
+    [tool], used = counted_host_tools(
+        [inspect_tool([]).model_copy(update={"execute": execute})],
+        limit=2,
+        on_call=admitted.append,
+        on_exhausted=lambda: exhausted.append(1),
+    )
+
+    gathered = asyncio.gather(
+        tool.execute("c1", {"command": "cat a"}, None, None, ToolContext()),
+        tool.execute("c2", {"command": "bad"}, None, None, ToolContext()),
+        tool.execute("c3", {"command": "cat c"}, None, None, ToolContext()),
+    )
+    await asyncio.wait_for(both_in.wait(), timeout=5)
+    # Both slots are held by calls that have not returned; the third call was
+    # never let through to the tool.
+    assert entered == ["cat a", "bad"] and used() == 2
+    release.set()
+    first, refunded, over = await asyncio.wait_for(gathered, timeout=5)
+
+    assert entered == ["cat a", "bad"]
+    assert not first.is_error and _block_texts(first)[0] == "out"
+    assert _block_texts(refunded)[0] == "Refused: not a read."
+    assert _block_texts(refunded)[-1].startswith("\n[not counted: ")
+    assert over.is_error and "Command budget used (2 of 2)" in over.text
+    assert admitted == [1, 2] and max(admitted) <= 2
+    assert exhausted == [1]
+    # One charged, one refunded: exactly one slot is free again...
+    assert used() == 1
+
+    again = await tool.execute("c4", {"command": "cat d"}, None, None, ToolContext())
+    assert not again.is_error
+    assert _block_texts(again) == ["out", "\n[2 of 2 commands used; that was the last one]"]
+    # ...and only one: the call after it is refused before the tool.
+    spent = await tool.execute("c5", {"command": "cat e"}, None, None, ToolContext())
+    assert spent.is_error and "Command budget used (2 of 2)" in spent.text
+    assert entered == ["cat a", "bad", "cat d"] and used() == 2
+    assert admitted == [1, 2, 2] and exhausted == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_usage_line_is_never_registered_as_typed_evidence() -> None:
+    """A typed check registers every block of a successful result as citable
+    evidence; the count is the launcher's line, not something observed."""
+
+    typed = VerifierEvidence()
+    [tool], _used = counted_host_tools(
+        [inspect_tool([])],
+        limit=2,
+        on_call=lambda _n: None,
+        on_exhausted=lambda: None,
+        on_result=typed.record_result,
+    )
+    result = await tool.execute("c1", {"command": "ls"}, None, None, ToolContext())
+    assert _block_texts(result) == [
+        "Evidence ID: inspection-1",
+        "B2 = 42",
+        "\n[1 of 2 commands used]",
+    ]
+    assert set(typed.registry) == {"inspection-1"}

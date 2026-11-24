@@ -1,0 +1,602 @@
+{
+  "session": "375f43e81aa6",
+  "role": "coder/mechanical-integrator",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback_from": "anthropic/claude-opus-5-5",
+  "fallback_reason": "host provider failure: quota before integration",
+  "integration_parent": "e1d7a0fa0d8a62d43dccdc7d1d6053ea9b7c1e2c",
+  "classification": "bounded integration fix; 45 minute allocation",
+  "source_sha256": "e53e4c156c9c079e38672440742a6e973fba0dc469fc95d37542118b56a94434",
+  "context_sha256": "aee21715fca769227b3bda5b500a5e81e51763cf86817f741baff8b1a5ef0ae7",
+  "history_rows_appended": 24,
+  "append_method": "scripts/i18n/ledger.py history-sha; append --dry-run for all 24; append --apply with fresh expected digest per row; export/readback",
+  "locale_checks": {
+    "zh-CN": {
+      "target_sha256": "697cd28a1ebab12ce0c9709d954c118ab819666c4749ed7bf115a1e6700249d8",
+      "keys": 277,
+      "ordered_values_unchanged_from_integration_parent": true,
+      "statuses": [
+        "failed",
+        "failed",
+        "failed",
+        "passed",
+        "passed"
+      ],
+      "independent_approvals": [
+        {
+          "auditor": {
+            "agent": "translation-auditor / info-zh-native-R3-A / session 7d6230d7a347",
+            "model": "openai/gpt-6.1-sol",
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "fallback_reason": "Host model-switch: provider failure: quota; all current audit decisions after fallback",
+            "date": "2026-11-21",
+            "result": "passed",
+            "findings": 0,
+            "unresolved_blocker_major": 0
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r3-A-zh-CN-original.json",
+            "sha256": "5a64ee006bcd66ce64a4a50478e1bfd1b66b4f2bac5a2abe6d0776bea4fc4634"
+          }
+        },
+        {
+          "auditor": {
+            "agent": "translation-auditor / info-zh-native-R3-B / session d0b68676578c",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-21",
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "fallback_evidence": "Direct HOST [model switch], provider failure: quota; switch occurred before audit/source-target judgments. Not inferred from requested role.",
+            "result": "passed",
+            "findings": 0,
+            "unresolved_blocker_major": 0,
+            "retained_deferred_minor_count": 1
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r3-B-zh-CN-original.json",
+            "sha256": "5519e3755e2ae839b1765cee99232b0f3dd60ae3db0c2e2eff0e716eb556a57e"
+          }
+        }
+      ]
+    },
+    "fr": {
+      "target_sha256": "f27b54408cc8b9efbe08aabdc341544f7853196f029dd9f2a03e0f81c57898fe",
+      "keys": 277,
+      "ordered_values_unchanged_from_integration_parent": true,
+      "statuses": [
+        "passed",
+        "passed",
+        "passed"
+      ],
+      "independent_approvals": [
+        {
+          "auditor": {
+            "agent": "info-r2-cache-A-fr / translation-auditor",
+            "session": "e27453d08b46",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-21",
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "fallback_evidence": "Host [model switch] notice in this current conversation: provider failure: quota; openai/gpt-6.1-sol now running.",
+            "result": "passed",
+            "findings": 0
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-A-fr-original.json",
+            "sha256": "b495fd10c0aa3e2e9dbeba2bb5895518f12cf282599d2f65f5a2fa7e718a0961"
+          }
+        },
+        {
+          "auditor": {
+            "agent": "info-r2-cache-B-fr / translation-auditor",
+            "model": "openai/gpt-6.1-sol",
+            "session": "74b5dead1da3",
+            "date": "2026-11-21",
+            "result": "clean with non-gating fit follow-up; terminal semantic/safety audit",
+            "findings": 0,
+            "minor_findings": 1,
+            "nit_findings": 0,
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "model_evidence": "Host model-switch message: You are now running as openai/gpt-6.1-sol (was anthropic/claude-opus-5-5). Reason: provider failure: quota. Parent must independently verify fresh-run model metadata; not inferred from requested role header."
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-B-fr-original.json",
+            "sha256": "4a5ed6c06fc268f539c56cb77d917291a581e0ceef616bd4828ab9f1e3de7b7e"
+          }
+        }
+      ]
+    },
+    "es": {
+      "target_sha256": "6d7db1f3fe45f99f638cbd51bdc304e5412cd3f548733df8b6d347fefc1ce327",
+      "keys": 277,
+      "ordered_values_unchanged_from_integration_parent": true,
+      "statuses": [
+        "passed",
+        "passed",
+        "passed"
+      ],
+      "independent_approvals": [
+        {
+          "auditor": {
+            "agent": "translation-auditor/info-r2-cache-A-es",
+            "session": "8226700e4a90",
+            "model": "openai/gpt-6.1-sol",
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "fallback_reason": "provider failure: quota; explicit host model-switch message in this session",
+            "date": "2026-11-21",
+            "result": "passed",
+            "findings": 0
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-A-es-original.json",
+            "sha256": "ef45a92ca3f4431ba3a965ae7ea3ef2d4b6b900eb13d942faa462c08b0db5a13"
+          }
+        },
+        {
+          "auditor": {
+            "agent": "translation-auditor/info-r2-cache-B-es",
+            "session": "f1e2ba1d3ae5",
+            "model": "openai/gpt-6.1-sol",
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "fallback_reason": "provider failure: quota",
+            "model_provenance": "Current host-delivered message: You are now running as openai/gpt-6.1-sol (was anthropic/claude-opus-5-5). Reason: provider failure: quota. Not inferred from historical receipts or the initial header.",
+            "date": "2026-11-21",
+            "result": "passed",
+            "findings": 0
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-B-es-original.json",
+            "sha256": "82b4a4a5e9beefbb61028e140f79c4052b723e727a3a9d6a2bcce94f79fd6ab0"
+          }
+        }
+      ]
+    },
+    "ru": {
+      "target_sha256": "76d33638ccd3a9f6490babea6c6c0c761bad1d6db80aa5a18c508eef765c773f",
+      "keys": 277,
+      "ordered_values_unchanged_from_integration_parent": true,
+      "statuses": [
+        "failed",
+        "passed",
+        "passed"
+      ],
+      "independent_approvals": [
+        {
+          "auditor": {
+            "agent": "translation-auditor / info-r2-cache-A-ru; session e97a76d8eb05",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-21",
+            "result": "passed",
+            "findings": 0,
+            "unresolved_blocker_major": 0,
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "model_proof": "Explicit host [model switch] notice in this fresh session: provider failure quota; actual fallback openai/gpt-6.1-sol, not inferred from requested role/header"
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-A-ru-original.json",
+            "sha256": "80d27ec86d5d3c363cf6e1752646963769af0b0feeb36e39d862790c06e81d99"
+          }
+        },
+        {
+          "auditor": {
+            "agent": "translation-auditor / info-r2-cache-B-ru",
+            "session": "2cb1ce08cca6",
+            "model": "openai/gpt-6.1-sol",
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "fallback_proof": "Host [model switch] message: You are now running as openai/gpt-6.1-sol (was anthropic/claude-opus-5-5). Reason: provider failure: quota.",
+            "date": "2026-11-21",
+            "result": "passed",
+            "findings": 0,
+            "unresolved_blocker_major": 0,
+            "minor_count": 1
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-B-ru-original.json",
+            "sha256": "ff0504ebebbfa19a2dc82e1e9acf1409645d92132c8f716982ab010b23dc04cf"
+          }
+        }
+      ]
+    },
+    "vi": {
+      "target_sha256": "7e0f97d45840a223868d89907d4d5da6010931b1fd486ab399728a0a091ab15b",
+      "keys": 277,
+      "ordered_values_unchanged_from_integration_parent": true,
+      "statuses": [
+        "passed",
+        "passed",
+        "passed"
+      ],
+      "independent_approvals": [
+        {
+          "auditor": {
+            "agent": "info-r2-cache-A-vi / translation-auditor",
+            "session": "386d8d3d80de",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-21",
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "fallback_reason": "Host model-switch notice: provider failure quota, after first guidance read; semantic reading and controls performed under actual GPT fallback",
+            "result": "passed",
+            "findings": 0
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-A-vi-original.json",
+            "sha256": "5bbf38b5a6ac5590a6f3b7ce4de6aa534c781f4fed556869841ba188c32c199f"
+          }
+        },
+        {
+          "auditor": {
+            "agent": "translation-auditor / info-r2-cache-B-vi",
+            "session": "d1b11927b624",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-21",
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "fallback_reason": "Current host model-switch card: provider failure: quota. Actual fallback disclosed; no model-default changes made.",
+            "result": "passed",
+            "findings": 0
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-B-vi-original.json",
+            "sha256": "ed1428b457d9f417790d9b694f347e3c0fe88bf752b5d5d23d57dde09192e737"
+          }
+        }
+      ]
+    },
+    "hi": {
+      "target_sha256": "1a841571a322478b0294935ea760abe48d7984accd3fd5839d47af7d129697d2",
+      "keys": 277,
+      "ordered_values_unchanged_from_integration_parent": true,
+      "statuses": [
+        "failed",
+        "passed",
+        "passed"
+      ],
+      "independent_approvals": [
+        {
+          "auditor": {
+            "agent": "translation-auditor / info-r2-cache-A-hi / session 62fc4a10e1ba",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-21",
+            "result": "passed",
+            "findings": 0,
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "model_evidence": "Current user/host model-switch notice: provider failure quota; not inferred from original R1 identity"
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-A-hi-original.json",
+            "sha256": "04af9ae0811e2412a4727b228a45f9c24b499beb2bc3ddaef56fc44b587b61da"
+          }
+        },
+        {
+          "auditor": {
+            "agent": "translation-auditor / info-r2-cache-B-hi / session 3a194798c645",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-21",
+            "result": "passed",
+            "findings": 0,
+            "minor_findings": 1,
+            "nit_findings": 0,
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "host_provenance": "Fresh user-channel host model switch: You are now running as openai/gpt-6.1-sol (was anthropic/claude-opus-5-5). Reason: provider failure: quota. This is the model actually used for this audit, not inferred from a role header or R1 history. Parent to cross-check fresh role/model row."
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-B-hi-original.json",
+            "sha256": "22b5cbe8e39e79b5fc1df995e5721d32c10eedae275ee1075267e53e8a6f0d43"
+          }
+        }
+      ]
+    },
+    "ur": {
+      "target_sha256": "ccc8fd0eca869fbd1f70785b070e0d2ff59578241393d75477a84e5cce2efc03",
+      "keys": 277,
+      "ordered_values_unchanged_from_integration_parent": true,
+      "statuses": [
+        "failed",
+        "passed",
+        "blocked",
+        "passed"
+      ],
+      "independent_approvals": [
+        {
+          "auditor": {
+            "agent": "translation-auditor / info-r2-cache-A-ur",
+            "session": "a96fdedd3a8f",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-21",
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "fallback_reason": "provider quota; explicit host model-switch message in current session",
+            "identity_evidence": "Session ID supplied by host; current model switch supplied by host, not inferred from R1 metadata. Parent to cross-check fresh-run metadata.",
+            "result": "passed",
+            "findings": 0
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-A-ur-original.json",
+            "sha256": "eb1808d9b1024406ca1b880c63654cd40cda8b33ed6e5b41baa044a4ac6204b1"
+          }
+        },
+        {
+          "auditor": {
+            "agent": "translation-auditor / B-UR public-access supplement",
+            "session": "46af6e60ec74",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-21",
+            "fallback_from": "anthropic/claude-opus-5-5",
+            "fallback_reason": "Explicit host model-switch: provider failure: quota"
+          },
+          "evidence": {
+            "path": "i18n/audits/evidence/pr4420-native-r2-B-ur-public-supplement.json",
+            "sha256": "1d2126af03bcd401f12671c807595e15fd28447ef07deb3af1fc481ca4dc4867"
+          }
+        }
+      ]
+    }
+  },
+  "immutable_originals": [
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-A-es-original.json",
+      "sha256": "ef45a92ca3f4431ba3a965ae7ea3ef2d4b6b900eb13d942faa462c08b0db5a13"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-initial-native-hi-r1.json",
+      "sha256": "48286c48e1177445c188598de7f72332a5b4af98de03bf11c64997da9a96fb70"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-initial-native-ur-r1.json",
+      "sha256": "48821abc3de3a44616b8fdea228bfae6816cbc5fb4002398fcfbe73d05e32d0f"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-initial-native-vi-r1.json",
+      "sha256": "badaedcead8223b0fa5dd39a011afaa806871648a6b674f44d0455e77f6f68cd"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-initial-native-zh-CN-r1.json",
+      "sha256": "19c9ef75f5ccb23a16a07a6131ce6d8fbbc1a9e28f3b3cafde82bd73a55f19ee"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-B-hi-original.json",
+      "sha256": "22b5cbe8e39e79b5fc1df995e5721d32c10eedae275ee1075267e53e8a6f0d43"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-A-ur-original.json",
+      "sha256": "eb1808d9b1024406ca1b880c63654cd40cda8b33ed6e5b41baa044a4ac6204b1"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-initial-native-fr-r1.json",
+      "sha256": "4f8c4fe01049c8b51e480c188ccc2d4fae1873ef695b8c0dec6b2e2b8a9bab20"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-A-vi-original.json",
+      "sha256": "5bbf38b5a6ac5590a6f3b7ce4de6aa534c781f4fed556869841ba188c32c199f"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-A-ru-original.json",
+      "sha256": "80d27ec86d5d3c363cf6e1752646963769af0b0feeb36e39d862790c06e81d99"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-B-fr-original.json",
+      "sha256": "4a5ed6c06fc268f539c56cb77d917291a581e0ceef616bd4828ab9f1e3de7b7e"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-A-zh-CN-original.json",
+      "sha256": "30918dc8de0ebf0be0f0108c82b0158b24a09d8dfc3fb74efc8db63fc0b4ec48"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-B-zh-CN-original.json",
+      "sha256": "ae4c954a91ec3d2054d8486f60192da251687c99eea2b8c29f4fa1201e2fcd17"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-B-ur-original.json",
+      "sha256": "05321728e1ff0882d790af8a73c2cc72f96033f61d3757d1f280e61554b861a9"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-A-fr-original.json",
+      "sha256": "b495fd10c0aa3e2e9dbeba2bb5895518f12cf282599d2f65f5a2fa7e718a0961"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-B-ur-public-supplement.json",
+      "sha256": "1d2126af03bcd401f12671c807595e15fd28447ef07deb3af1fc481ca4dc4867"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-B-vi-original.json",
+      "sha256": "ed1428b457d9f417790d9b694f347e3c0fe88bf752b5d5d23d57dde09192e737"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-B-ru-original.json",
+      "sha256": "ff0504ebebbfa19a2dc82e1e9acf1409645d92132c8f716982ab010b23dc04cf"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-initial-native-es-r1.json",
+      "sha256": "4ae475094ce63c92a91616e27fe882ef0ba4641e2af5ba39b764ca9cf5185922"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-B-es-original.json",
+      "sha256": "82b4a4a5e9beefbb61028e140f79c4052b723e727a3a9d6a2bcce94f79fd6ab0"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-initial-native-ru-r1.json",
+      "sha256": "a64c550be43ef8b58e72e9ea9862fd7c3bb38ddc6f4c557af6923865738873cd"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r2-A-hi-original.json",
+      "sha256": "04af9ae0811e2412a4727b228a45f9c24b499beb2bc3ddaef56fc44b587b61da"
+    }
+  ],
+  "r3_originals": [
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r3-A-zh-CN-original.json",
+      "sha256": "5a64ee006bcd66ce64a4a50478e1bfd1b66b4f2bac5a2abe6d0776bea4fc4634"
+    },
+    {
+      "path": "i18n/audits/evidence/pr4420-native-r3-B-zh-CN-original.json",
+      "sha256": "5519e3755e2ae839b1765cee99232b0f3dd60ae3db0c2e2eff0e716eb556a57e"
+    }
+  ],
+  "generator": {
+    "generate_rc": 0,
+    "check_rc": 0,
+    "check_output": "generate.py --check: 197 artifact(s) byte-identical",
+    "tracked_generated_diff": [],
+    "all_client_typecheck": false
+  },
+  "targeted_tests": {
+    "command": "python scripts/run_bounded.py --contract command-status --timeout 550 --run-id pr4420-integration-serial -- python -m pytest tests/unit/i18n/test_info_readout.py tests/unit/i18n/test_runtime.py::test_rendered_parts_keep_interpolation_owners_in_selected_order tests/unit/i18n/test_text.py::test_set_active_locale_flips_resolution_and_runs_refreshers_once tests/unit/i18n/test_text.py::test_a_shipped_locale_missing_its_namespace_falls_back_to_english tests/unit/tui/test_info_i18n_refresh.py -n0 -q",
+    "output": "[run_bounded] memory budget 3886 MiB (auto); sampled owned child group and escaped descendants\nlocal stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).\n........................................                                 [100%]\n=============================== warnings summary ===============================\ntests/unit/tui/test_info_i18n_refresh.py::test_mounted_info_repaints_without_refetching[False-command]\n  /Users/damian/local-operator/.worktrees/i18n-info-readout/local_operator/types.py:426: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/\n    @validator(\n\ntests/unit/tui/test_info_i18n_refresh.py::test_mounted_info_repaints_without_refetching[False-command]\n  /Users/damian/local-operator/.worktrees/i18n-info-readout/local_operator/types.py:446: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/\n    @validator(\"end_time_utc\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n40 passed, 2 warnings in 8.98s\n[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=4a98062961554deaba6abd8762012186 completion=/Users/damian/.local-operator/sessions/375f43e81aa6/scratchpad/run-bounded-runs/4a98062961554deaba6abd8762012186.completion.json\n",
+    "earlier_integration_run": "Same selectors accidentally used default xdist: 40 passed, 8 warnings, 4.80s; authoritative serial rerun above. No code change between runs."
+  },
+  "production_probes": {
+    "fr_missing_duration_lines": [
+      "<details><summary>rapport /info — relevé à inconnue</summary>",
+      "  dernière connue   inconnue (version installée illisible)",
+      "  âge de la compilation  inconnu",
+      "  durée d’activité  inconnue",
+      "  (les autres sessions indiquent uniquement l’activité, l’attente et la mémoire)"
+    ],
+    "stable_machine_prefix": "local-operator unknown · unknown install",
+    "fr_measured_zero_lines": [
+      "  âge de la compilation  0 s",
+      "  durée d’activité  0 s",
+      "  (les autres sessions indiquent uniquement l’activité, l’attente et la mémoire)"
+    ],
+    "same_input_source_fit": {
+      "en": {
+        "source_identity_preserved": true,
+        "max_row_cells": 49
+      },
+      "fr": {
+        "source_identity_preserved": true,
+        "max_row_cells": 51
+      },
+      "es": {
+        "source_identity_preserved": true,
+        "max_row_cells": 51
+      },
+      "zh-CN": {
+        "source_identity_preserved": true,
+        "max_row_cells": 46
+      },
+      "vi": {
+        "source_identity_preserved": true,
+        "max_row_cells": 49
+      },
+      "hi": {
+        "source_identity_preserved": true,
+        "max_row_cells": 46
+      },
+      "ru": {
+        "source_identity_preserved": true,
+        "max_row_cells": 47
+      },
+      "ur": {
+        "source_identity_preserved": true,
+        "max_row_cells": 49
+      }
+    },
+    "nested_remedy": {
+      "51": {
+        "whole_actual_pid_islands": [
+          true,
+          true,
+          true
+        ],
+        "max_row_cells": 51
+      },
+      "126": {
+        "whole_actual_pid_islands": [
+          true,
+          true,
+          true
+        ],
+        "max_row_cells": 126
+      },
+      "1000": {
+        "whole_actual_pid_islands": [
+          true,
+          true,
+          true
+        ],
+        "max_row_cells": 393
+      }
+    },
+    "real_pid_classification": {
+      "missing_pid_fresh_heartbeat": "stale",
+      "own_live_pid_old_heartbeat": "wedged"
+    },
+    "legacy_held": "unproven"
+  },
+  "probe_setup_failures": [
+    "Initial probe used nonexistent info.models import; corrected to info.model before successful run.",
+    "Probe initially put uptime_s on SessionsInfo; corrected to ProcessInfo before successful run. Neither was a product failure."
+  ],
+  "i18n_check": {
+    "command": "python scripts/i18n/check.py --audit-base origin/main",
+    "base_sha": "9a7f612c7281bf604e25e23c68003279bb165717",
+    "rc": 1,
+    "last_lines": [
+      "audit history: audit suffix file deletion is forbidden",
+      "check.py: FAILED — 0 ratchet finding(s) in the enforced scope, 1 catalogue problem(s) (112 advisory finding(s) outside it). Extract the string, add `# i18n: ignore <reason>`, or (for a file-level exemption) record it in i18n/allowlist.toml with a reason."
+    ],
+    "missing_upstream_suffix_paths": [
+      "i18n/audit-history/en/wire.team_integrations.json",
+      "i18n/audit-history/es/tui.settings_view.chrome.json",
+      "i18n/audit-history/es/tui.tool_card.extra.json",
+      "i18n/audit-history/es/wire.providers.connect.json",
+      "i18n/audit-history/es/wire.remote_compute.json",
+      "i18n/audit-history/es/wire.team_integrations.json",
+      "i18n/audit-history/fr/tui.settings_view.chrome.json",
+      "i18n/audit-history/fr/tui.tool_card.extra.json",
+      "i18n/audit-history/fr/wire.providers.connect.json",
+      "i18n/audit-history/fr/wire.remote_compute.json",
+      "i18n/audit-history/fr/wire.team_integrations.json",
+      "i18n/audit-history/hi/tui.settings_view.chrome.json",
+      "i18n/audit-history/hi/tui.tool_card.extra.json",
+      "i18n/audit-history/hi/wire.providers.connect.json",
+      "i18n/audit-history/hi/wire.remote_compute.json",
+      "i18n/audit-history/hi/wire.team_integrations.json",
+      "i18n/audit-history/ru/tui.settings_view.chrome.json",
+      "i18n/audit-history/ru/tui.tool_card.extra.json",
+      "i18n/audit-history/ru/wire.providers.connect.json",
+      "i18n/audit-history/ru/wire.remote_compute.json",
+      "i18n/audit-history/ru/wire.team_integrations.json",
+      "i18n/audit-history/ur/tui.settings_view.chrome.json",
+      "i18n/audit-history/ur/tui.tool_card.extra.json",
+      "i18n/audit-history/ur/wire.providers.connect.json",
+      "i18n/audit-history/ur/wire.remote_compute.json",
+      "i18n/audit-history/ur/wire.team_integrations.json",
+      "i18n/audit-history/vi/tui.settings_view.chrome.json",
+      "i18n/audit-history/vi/tui.tool_card.extra.json",
+      "i18n/audit-history/vi/wire.providers.connect.json",
+      "i18n/audit-history/vi/wire.remote_compute.json",
+      "i18n/audit-history/vi/wire.team_integrations.json",
+      "i18n/audit-history/zh-CN/tui.settings_view.chrome.json",
+      "i18n/audit-history/zh-CN/tui.tool_card.extra.json",
+      "i18n/audit-history/zh-CN/wire.providers.connect.json",
+      "i18n/audit-history/zh-CN/wire.remote_compute.json",
+      "i18n/audit-history/zh-CN/wire.team_integrations.json"
+    ],
+    "disposition": "FAIL retained; branch predates these main suffixes. No ledger override, baseline increase, hand-copy of upstream history, mid-cycle rebase or claimed green. Manager owns one base convergence at merge gate.",
+    "missing_paths_classification": {
+      "all_36_new_on_main_since_fork": true,
+      "branch_deleted_suffix_files": [],
+      "fork": "7e5da6775c41d867365347f380e2d01fbbeeab29"
+    }
+  },
+  "source_compatibility": "EN/context/all 7 locale ordered values, product code, API, tests, generated artifacts and ratchet files byte-identical to integration parent; this commit only appends history and evidence. Existing product remedies in 8f1e45a3a98c are exercised, not reimplemented.",
+  "not_run": [
+    "Independent formal round-2 code/QA/design/UX; manager dispatches on pushed head",
+    "New App/browser/native build/capture",
+    "Native Urdu shaping/whole-interface RTL/renderer clearance",
+    "All-client testing",
+    "Full CI suite/merge/release/version bump"
+  ],
+  "environment": "Primary venv; worktree PYTHONPATH verified; env -i HOME/config scratch isolated, CMUX/LOP/XPC inherited values stripped. No installs or git/gh under scratch HOME. No servers or browsers started.",
+  "branch_scope_check": {
+    "command": "python scripts/i18n/check.py --audit-base 7e5da6775c41d867365347f380e2d01fbbeeab29",
+    "rc": 0,
+    "output": "check.py: ok — 239 file(s) scanned, 2723 literal(s) at or below the baseline, catalogues consistent; 112 advisory finding(s) (report-only until activated)",
+    "meaning": "Branch-change-scope append-only check ONLY; does not replace strict actual-main/CI merge-tree check."
+  },
+  "github_pre_push": {
+    "base": "0200503ac420007c4226d23a4981d3ecce69bbf3",
+    "head": "e9e6c3711149cba6899083eab019342d98d5fa55",
+    "mergeable": false,
+    "mergeable_state": "dirty",
+    "source": "gh api repos/damianvtran/local-operator/pulls/4420; second read after gh pr view UNKNOWN"
+  }
+}

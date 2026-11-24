@@ -1073,6 +1073,70 @@ async def test_mock_client_ask_marker_settles_after_its_tool_result() -> None:
     ]
 
 
+async def test_mock_client_markers_ignore_an_ephemeral_request_tail() -> None:
+    """A request-local ``_ephemeral`` tail is not the user's instruction.
+
+    The voice session appends its spoken-summary note as the LAST request
+    message of a dictated turn (flagged ``_ephemeral``, never stored). Reading
+    that tail as the newest message answered the dictated turn at once with no
+    tool call, so a steer landed on a finished turn (QA round 2, Q1).
+    """
+    client = MockClient()
+    note = Message.user("(the spoken-summary note)")
+    note._ephemeral = True
+    dictated = Message.user("please [bash:1] list files")
+
+    # The dictated text still selects the marker with the note behind it.
+    events = await _collect(
+        client.stream(ChatRequest(model=_spec("test", "mock"), messages=[dictated, note]), None)
+    )
+    tool_events = [e for e in events if isinstance(e, StreamToolCallDelta)]
+    assert tool_events[0].name == "bash"
+    assert json.loads("".join(e.argument_delta for e in tool_events if e.argument_delta)) == {
+        "command": "sleep 1"
+    }
+    assert events[-1].stop_reason == "toolUse"
+
+    # No ephemeral tail: the same message behaves identically.
+    plain = await _collect(
+        client.stream(
+            ChatRequest(
+                model=_spec("test", "mock"), messages=[Message.user("please [bash:1] list files")]
+            ),
+            None,
+        )
+    )
+    plain_events = [e for e in plain if isinstance(e, StreamToolCallDelta)]
+    assert plain_events[0].name == "bash"
+    assert json.loads("".join(e.argument_delta for e in plain_events if e.argument_delta)) == {
+        "command": "sleep 1"
+    }
+    assert plain[-1].stop_reason == "toolUse"
+
+    # And the note is not "the newest message": once the tool result is the
+    # newest real message the turn completes, exactly as without the note.
+    settled = await _collect(
+        client.stream(
+            ChatRequest(
+                model=_spec("test", "mock"),
+                messages=[
+                    dictated,
+                    Message(
+                        role="tool",
+                        tool_call_id="call_mock_bash",
+                        tool_name="bash",
+                        content=[TextContent(text="done")],
+                    ),
+                    note,
+                ],
+            ),
+            None,
+        )
+    )
+    assert not [e for e in settled if isinstance(e, StreamToolCallDelta)]
+    assert settled[-1].stop_reason == "stop"
+
+
 async def test_mock_client_hang_branch_never_ends_the_stream() -> None:
     """``[hang]``: the one request that never returns — the drain's reap shape.
 
@@ -1586,6 +1650,166 @@ async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
     # output_tokens_details.reasoning_tokens is the thinking slice of output.
     assert usage.reasoning_tokens == 4
     assert events[-1].stop_reason == "toolUse"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "base_url", "api_mode", "placement"),
+    [
+        ("openai", "gpt-6.2-astra", "https://api.openai.com/v1", "responses", "input"),
+        ("openai", "gpt-6.10-sol", "https://api.openai.com/v1", "responses", "input"),
+        ("openai", "gpt-6.2-sol", "https://gateway.invalid/v1", "responses", "instructions"),
+        ("openrouter", "gpt-6.2-sol", "https://api.openai.com/v1", "responses", "instructions"),
+        ("openai", "gpt-6.2-unknown", "https://api.openai.com/v1", "responses", "instructions"),
+        ("openai", "gpt-6.2-sol", "https://api.openai.com/v1", "chat_completions", "chat"),
+        ("openai-device", "gpt-6.2-sol", "https://api.openai.com/v1", "codex", "input"),
+        ("openai", "gpt-6.2-sol", "https://gateway.invalid/v1", "codex", "instructions"),
+    ],
+)
+async def test_responses_developer_instructions_are_scoped_to_official_models_and_endpoint(
+    provider: str, model_id: str, base_url: str, api_mode: str, placement: str
+) -> None:
+    from local_operator.model.configure import build_model_spec
+    from local_operator.providers.clients import CODEX_RESPONSES_URL
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        stream = (
+            _sse([{"choices": [{"delta": {}, "finish_reason": "stop"}]}])
+            if placement == "chat"
+            else _public_responses_sse()
+        )
+        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
+
+    # Official models resolve through the same discovery fallback as a session.
+    # Force Responses only for the negative controls so we exercise the body gate.
+    spec = build_model_spec(provider, model_id)
+    if placement == "instructions" and not spec.supports_responses_api:
+        spec = spec.model_copy(update={"supports_responses_api": True})
+    request = ChatRequest(
+        model=spec, system_blocks=["Reusable guidance."], messages=[Message.user("hi")]
+    )
+    access = (
+        OAuthAccess(access_token="fixture", credential_id=1, org_id="org", kind="oauth")
+        if api_mode == "codex"
+        else None
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient(
+            base_url, http_client=http, openai_api="responses" if access else api_mode
+        )
+        await _collect(client.stream(request, "fixture", access))
+
+    body = captured["body"]
+    if placement == "chat":
+        assert captured["url"] == f"{base_url}/chat/completions"
+        assert body["messages"][0] == {"role": "system", "content": "Reusable guidance."}
+        assert "instructions" not in body and "input" not in body
+    else:
+        assert captured["url"] == (CODEX_RESPONSES_URL if access else f"{base_url}/responses")
+        if placement == "input":
+            assert "instructions" not in body
+            assert body["input"][0] == {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "Reusable guidance."}],
+            }
+            assert body["input"][1]["role"] == "user"
+        else:
+            assert body["instructions"] == "Reusable guidance."
+            assert body["input"][0]["role"] == "user"
+
+
+@pytest.mark.parametrize(
+    ("model_id", "base_url", "api_mode", "route", "developer_prefix", "cache_key"),
+    [
+        ("gpt-6.2-sol", None, "responses", "responses", True, False),
+        ("gpt-6.2-sol", None, "chat_completions", "chat/completions", False, False),
+        (
+            "gpt-6.2-sol",
+            "https://gateway.invalid/v1",
+            "responses",
+            "chat/completions",
+            False,
+            False,
+        ),
+        ("gpt-6.1-sol", None, "responses", "responses", False, True),
+        ("gpt-5.6-sol", None, "responses", "responses", False, True),
+    ],
+    ids=["default-responses", "explicit-chat", "custom-base", "older-discovered", "catalogue"],
+)
+async def test_openai_model_preserves_endpoint_and_cache_key_contract(
+    model_id: str,
+    base_url: str | None,
+    api_mode: str,
+    route: str,
+    developer_prefix: bool,
+    cache_key: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.model import configure, discovery, prices
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        stream = (
+            _public_responses_sse()
+            if request.url.path.endswith("/responses")
+            else _sse([{"choices": [{"delta": {}, "finish_reason": "stop"}]}])
+        )
+        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
+
+    # Public /v1/models can expose an ID before the pricing catalogue has a row.
+    # Exercise that path without allowing live catalogue data to mask the regression.
+    monkeypatch.setattr(configure, "_catalogue_credential", lambda *a, **kw: ("", False, None))
+    monkeypatch.setattr(
+        discovery,
+        "available_models",
+        lambda *a, **kw: ([discovery.DiscoveredModel(model_id)], "live"),
+    )
+    monkeypatch.setattr(prices, "price_catalogue_row", lambda *a, **kw: None)
+    configure.invalidate_model_info_cache()
+    try:
+        spec = configure.build_model_spec("openai", model_id)
+    finally:
+        configure.invalidate_model_info_cache()
+    if base_url is not None:
+        spec = spec.model_copy(update={"base_url": base_url})
+    request = ChatRequest(
+        model=spec,
+        system_blocks=["Reusable guidance."],
+        messages=[Message.user("hi")],
+        prompt_cache_key="lineage-123",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = client_for_spec(spec, http_client=http, openai_api=api_mode)
+        await _collect(client.stream(request, "fixture"))
+
+    assert captured["url"] == f"{base_url or 'https://api.openai.com/v1'}/{route}"
+    body = captured["body"]
+    assert "prompt_cache_retention" not in body
+    if cache_key:
+        assert body["prompt_cache_key"] == "lineage-123"
+    else:
+        assert "prompt_cache_key" not in body
+    if developer_prefix:
+        assert "instructions" not in body
+        assert body["input"][0] == {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "Reusable guidance."}],
+        }
+        assert body["input"][1]["role"] == "user"
+    elif route == "responses":
+        assert body["instructions"] == "Reusable guidance."
+        assert body["input"][0]["role"] == "user"
+    else:
+        assert body["messages"][0] == {"role": "system", "content": "Reusable guidance."}
+        assert "instructions" not in body and "input" not in body
 
 
 def _enum_members(node: Any) -> list[Any]:

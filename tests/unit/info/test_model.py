@@ -94,6 +94,26 @@ def test_snapshot_blocks_are_independent_instances() -> None:
     assert first.sessions is not second.sessions
 
 
+def test_package_renderer_exports_resolve_to_the_original_functions() -> None:
+    """Lazy package exports must keep callers on the actual renderer API."""
+    probe = """\
+import sys
+import local_operator.info as info
+assert 'local_operator.info.render' not in sys.modules
+from local_operator.info import build_export, relativise_home, render
+assert build_export is render.build_export
+assert relativise_home is render.relativise_home
+assert info.build_export is build_export
+assert info.relativise_home is relativise_home
+assert not hasattr(info, 'missing_export')
+assert {'build_export', 'relativise_home'} <= set(info.__all__)
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=str(REPO)
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+
 def test_model_module_imports_nothing_heavy() -> None:
     """Run in a FRESH subprocess.
 

@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from local_operator.action_class import class_from_tags
+from local_operator.agent_profiles import AgentFact
 from local_operator.agents import AgentRegistry
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
@@ -211,11 +212,26 @@ def test_the_pane_paints_the_class_marker_one_rung_brighter() -> None:
 
     muted = Style(color="red")
     faint = Style(color="blue")
-    line = _paint_facts("role · proactive · claude-opus-5", 27, muted=muted, faint=faint)
+    line = _paint_facts(
+        (
+            AgentFact("kind", "role"),
+            AgentFact("action_class", "proactive"),
+            AgentFact("model", "claude-opus-5"),
+        ),
+        27,
+        muted=muted,
+        faint=faint,
+    )
     assert ("proactive", muted) in line
     assert all(style is faint for text, style in line if text.strip(" ·") != "proactive"), line
-    plain = _paint_facts("role · claude-opus-5", 27, muted=muted, faint=faint)
-    assert plain == [("    role · claude-opus-5", faint)]
+    plain = _paint_facts(
+        (AgentFact("kind", "role"), AgentFact("model", "claude-opus-5")),
+        27,
+        muted=muted,
+        faint=faint,
+    )
+    assert "".join(text for text, _ in plain) == "    role · claude-opus-5"
+    assert all(style is faint for _, style in plain)
 
 
 def test_the_facts_indent_is_paid_once_however_many_parts() -> None:
@@ -238,7 +254,15 @@ def test_the_facts_indent_is_paid_once_however_many_parts() -> None:
         "proactive · model · high",
         "proactive · medium · 3 tools · model/name",
     ):
-        line = _paint_facts(facts, 80, muted=muted, faint=faint)
+        line = _paint_facts(
+            (
+                AgentFact("action_class", "proactive"),
+                AgentFact("model", facts.removeprefix("proactive · ")),
+            ),
+            80,
+            muted=muted,
+            faint=faint,
+        )
         plain = "".join(part for part, _style in line)
         assert plain == "    " + facts
         assert cell_len(plain) == cell_len(facts) + 4
@@ -261,7 +285,16 @@ def test_a_budgeted_facts_line_drops_the_tail_whole_and_keeps_the_marker() -> No
     faint = Style(color="blue")
     facts = "proactive · model · high"
     room = 20  # the caller's own window at this point
-    line = _paint_facts(facts, room, muted=muted, faint=faint)
+    line = _paint_facts(
+        (
+            AgentFact("action_class", "proactive"),
+            AgentFact("model", "model"),
+            AgentFact("effort", "high"),
+        ),
+        room,
+        muted=muted,
+        faint=faint,
+    )
     plain = "".join(part for part, _style in line)
     assert plain.startswith("    proactive")
     assert "high" not in plain
@@ -439,12 +472,24 @@ def test_the_scope_token_takes_a_second_facts_row_when_it_cannot_fit() -> None:
     muted = Style(color="red")
     faint = Style(color="blue")
 
-    fits = _paint_facts_lines("role · this conversation", 27, muted=muted, faint=faint)
+    fits = _paint_facts_lines(
+        (AgentFact("kind", "role"), AgentFact("scope", "session")),
+        27,
+        muted=muted,
+        faint=faint,
+    )
     assert len(fits) == 1
     assert ("this conversation", muted) in fits[0]
 
     narrow = _paint_facts_lines(
-        "specialist · proactive · this conversation", 27, muted=muted, faint=faint
+        (
+            AgentFact("kind", "specialist"),
+            AgentFact("action_class", "proactive"),
+            AgentFact("scope", "session"),
+        ),
+        27,
+        muted=muted,
+        faint=faint,
     )
     assert len(narrow) == 2
     assert "".join(part for part, _style in narrow[0]) == "    specialist · proactive"
@@ -458,7 +503,13 @@ def test_the_scope_token_takes_a_second_facts_row_when_it_cannot_fit() -> None:
     # the 4-cell indent — so this pins the lift, not a truncation (at the pane's
     # 27 the head itself must truncate, which is correct and is the case above).
     configured = _paint_facts_lines(
-        "role · proactive · this conversation · claude-opus-5 · effort high",
+        (
+            AgentFact("kind", "role"),
+            AgentFact("action_class", "proactive"),
+            AgentFact("scope", "session"),
+            AgentFact("model", "claude-opus-5"),
+            AgentFact("effort", "high"),
+        ),
         52,
         muted=muted,
         faint=faint,

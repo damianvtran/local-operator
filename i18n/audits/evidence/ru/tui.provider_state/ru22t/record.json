@@ -1,0 +1,120 @@
+{
+  "kind": "translation_author_record",
+  "locale": "ru",
+  "namespace": "tui.provider_state",
+  "audit_date": "2026-11-22",
+  "key_count": 5,
+  "status": "translated",
+  "source_worktree_revision": "a54ec02de48a94b68d6c3dc92e1307c97ea776ad",
+  "source_author_session_prefix": "93b7",
+  "author": {
+    "agent": "i18n-translator",
+    "session": "29d4fc18d1a7",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host [model switch] message: now running as openai/gpt-6.1-sol (was anthropic/claude-opus-5-5); provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "translation_method": "native LLM reasoning; no MT/API/service"
+  },
+  "auditor": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "independent_from_translator_session": null,
+    "actual_model_source": null,
+    "status": "not_performed",
+    "note": "Independent A/B audits remain required; author mechanical validation is not self-approval."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/tui.provider_state.json",
+      "sha256": "8536b96d908eb3f80192801d4444b283bf6a024668247f14a2ed7cb0ecf8558b"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22t/notes.md",
+      "sha256": "0941a59b5836eed3bf076ec961b325fb404fc77f01fcf636bc4a281a77390dfc"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22t/validator.py.txt",
+      "sha256": "489217ddf71b13373cc3df42f26b36d33e8723955e8b9e3374521623cb5dd316"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22t/audit.log",
+      "sha256": "b4c396af5485e9a4925fd67caec0303aa1d9581ad387d178369953353ecd192c"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/tui.provider_state/ru22t/failed-rig-1.log",
+      "sha256": "f800650ca4f169df6fafbf8e7264e718c2ef331a409b8e6d9a99b641333a9865"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "translated",
+    "unresolved_blocker_major_count": null,
+    "finding_ids": [],
+    "note": "No independent audit verdict; mechanical validation exit 0 only."
+  },
+  "validation": {
+    "official_entry": "scripts/i18n/check.py::check_catalogues",
+    "scope": {
+      "locales": [
+        "en",
+        "ru"
+      ],
+      "namespaces": [
+        "tui.provider_state"
+      ]
+    },
+    "method": "in-process discovery restriction; official catalogue/context/ICU/parity/plural checks unchanged",
+    "exit_code": 0,
+    "negative_controls": [
+      "missing key rejected",
+      "added argument rejected"
+    ],
+    "rendering": "actual ICU render_message and plain Rich; illustrative width only",
+    "native_or_styled_app_proof": false
+  },
+  "notes_kind": "audit_notes_not_execution_log",
+  "width_cells": {
+    "en": [
+      9,
+      7,
+      11,
+      17,
+      16
+    ],
+    "ru": [
+      13,
+      17,
+      14,
+      15,
+      16
+    ]
+  },
+  "glossary_proposals": [
+    "login completion: вход выполнен",
+    "login required: требуется вход",
+    "environment-sourced key: ключ из окружения",
+    "configured server: сервер настроен",
+    "configure server: настроить сервер"
+  ],
+  "claims_excluded": [
+    "independent A/B language audit",
+    "eligibility",
+    "fixed universal cell cap",
+    "native geometry/font/no-wrap certification",
+    "producer integration"
+  ]
+}

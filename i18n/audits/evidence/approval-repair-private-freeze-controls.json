@@ -1,0 +1,80 @@
+{
+  "schema": "approval-repair-private-freeze-controls/v1",
+  "head": "4880031aeed59ef17ae6ffccc15d28e1fc0db104",
+  "source_base": "90009effa833836ce4471e99d90d3b6438de7f60",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback": "explicit host quota switch; no role/default changes",
+  "worktree": "/Users/damian/local-operator/.worktrees/i18n-approval-choice-copy",
+  "commands": "local git show/diff/status and Python hash/key/byte metadata; seven serial official read_public_copy calls; no repo tests/framework/native/generator imports",
+  "negative_controls": {
+    "clean": {
+      "NFC": true,
+      "no_bidi": true,
+      "no_ICU_tokens": true
+    },
+    "NFC_negative": {
+      "NFC": false,
+      "no_bidi": true,
+      "no_ICU_tokens": true
+    },
+    "bidi_negative": {
+      "NFC": true,
+      "no_bidi": false,
+      "no_ICU_tokens": true
+    },
+    "placeholder_detection": {
+      "NFC": true,
+      "no_bidi": true,
+      "no_ICU_tokens": false
+    }
+  },
+  "locale_value_counts": {
+    "zh-CN": 50,
+    "fr": 34,
+    "es": 32,
+    "ru": 47,
+    "vi": 57,
+    "hi": 63,
+    "ur": 75
+  },
+  "total": 358,
+  "ICU_scope": "All changed values, their original targets and English counterparts have zero brace tokens; ICU/plural/select structures untouched. Does not claim CLDR runtime correctness.",
+  "all_primary_author_source_context_pins_present": true,
+  "original_audit_receipts_hash_verified": 21,
+  "original_all_14_namespace_FAIL_preserved": true,
+  "retained_hi_major_counterclaims": [
+    "wire.settings.classification_vendor.choice.typesafe.description",
+    "wire.settings.hub_auto_update_agents.choice.true.description",
+    "wire.settings.hub_auto_update_teams.choice.true.description",
+    "wire.settings.local_providers.base_url.help",
+    "wire.settings.local_providers.base_url.label",
+    "wire.settings.local_providers.description",
+    "wire.settings.network_advertise_hosts.label",
+    "wire.settings.network_port.help",
+    "wire.settings.providers_openrouter_zdr.choice.true.description",
+    "wire.settings.web_search_searxng_endpoint.label"
+  ],
+  "hi_repaired_major_disposition_count": 45,
+  "initial_input_hashes_preserved": true,
+  "approved_capture_manifest": "i18n/audits/evidence/approval-repair-postauthor-inputs/manifest.json",
+  "approved_capture_manifest_sha256": "ded49b2ba05e698f284de1676ee4fa16ee5f89a91dc23be4fc714f4175595390",
+  "private_freeze_receipt": "i18n/audits/evidence/approval-repair-private-freeze-sourcebinding.json",
+  "private_freeze_receipt_sha256": "db1fd63d4e0e453c940942c66e8b617f50217bc938a868eed30d76293d3278fc",
+  "author_exclusion_session_ids": [
+    "811ce9672eb0",
+    "a81f7a3e8d73",
+    "22f04bc8ec0d",
+    "c1a5d7b1fa3c",
+    "08046d0f2aac",
+    "0b83e6902e55",
+    "c8c42578bc8c"
+  ],
+  "pending": [
+    "independent native linguistic A/B delta review, different from all seven authors",
+    "root disposition of technical counterclaims",
+    "append-only history pass",
+    "generation/check after semantic/history pass",
+    "rendered native/RTL/pseudo proof",
+    "PR/review/CI/merge/release, none authorized in this lane"
+  ]
+}

@@ -1,0 +1,64 @@
+{
+ "schema": 1,
+ "audit_id": "askparity-r1-b7ef3c226fc6",
+ "audit_kind": "independent semantic audit of the PR #4495 English delta; unchanged keys carried by byte proof",
+ "locale": "vi",
+ "namespace": "relay.ask",
+ "status": "passed",
+ "verdict": "passed",
+ "pr": "damianvtran/local-operator#4495",
+ "audited_revision": "1697a373b",
+ "catalogue_state": "1697a373b bytes, unmodified by this audit",
+ "scope": "the 9 key(s) whose en or vi bytes differ between base 43dab8a03 and 1697a373b, read against the en source, en/relay.ask.context.json, i18n/glossary.md, i18n/style-guides/vi.md and local-operator-mobile origin/main 849c61cf src/i18n/catalogues/vi/mobile.asks.json; the other 2 key(s) are byte-identical in en and vi to base 43dab8a03, whose last ledger row was passed with source 2ead3ad3 = sha256(en at 43dab8a03); that row records no target hash; the base target file was last changed at or before the row's audit (es/fr/hi/ru/vi 38698adcc 2026-10-23, ur d8a1a183a 2026-10-24, zh-CN a1bcb8407 2026-10-24) and unchanged from then to base",
+ "keys_audited": [
+  "relay.ask.dismiss.answered_in_chat",
+  "relay.ask.dismiss.answered_in_chat_note",
+  "relay.ask.dismiss.cancel",
+  "relay.ask.dismiss.moot_note",
+  "relay.ask.dismiss.open",
+  "relay.ask.dismiss.receipt",
+  "relay.ask.dismiss.receipt_answered_in_chat",
+  "relay.ask.dismiss.receipt_moot",
+  "relay.ask.dismiss.title"
+ ],
+ "keys_total": 11,
+ "mechanical_checks": [
+  "key set and order parity with en",
+  "ICU argument names parity",
+  "plural categories exactly the CLDR set for the locale",
+  "NFC",
+  "no bidi/zero-width/control characters",
+  "no ASCII ellipsis",
+  "sentence case on the rewritten strings",
+  "em/en dash only where the en source or an unchanged sibling has it",
+  "vi NFC precomposed tone marks",
+  "byte parity with mobile.asks where the en string is identical",
+  "cell width via rich.cells.cell_len against context maxCells (advisory: progress line wraps, ask-card.tsx:1362)"
+ ],
+ "translator": {
+  "agent": "lopdev coder (PR #4495 commits bc826fc62..0e439855a); identity and model as stated in the lopdev manager's audit brief, not recorded in the commits",
+  "model": "anthropic/claude-sonnet-5-5",
+  "fallback": "unknown (not recorded in the commits)",
+  "date": "2026-11-23"
+ },
+ "auditor": {
+  "agent": "independent i18n auditor (lopdev reviewer role, session b7ef3c226fc6; not the translator)",
+  "session": "b7ef3c226fc6",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none observed in this session",
+  "date": "2026-11-23",
+  "result": "passed",
+  "findings": 1,
+  "unresolved_blocker_major": 0,
+  "minor": 0,
+  "nit": 1
+ },
+ "findings_note": "V1 NIT accepted: 'Đóng…' (dismiss) now differs from skip 'Bỏ qua (…)', resolving the old collision; bare 'Đóng…' could read as closing the sheet, but the title 'Đóng câu hỏi' and the reason step disambiguate, nothing is sent before a reason, and it matches vi relay.asks.card.dismiss/status.dismissed and mobile.asks.dismiss_open. The 3 receipt keys changed with en unchanged (Đã bỏ qua -> Đã đóng) for verb consistency and were audited as changed keys.",
+ "report": "manager report, lopdev team task (not posted to GitHub)",
+ "source_sha256": "a79fa2b558172f58f329da3cbc30b795c4129cab1ecbb417767d105476662494",
+ "target_sha256": "e8e925dfbae2a1976ff38770fabe4bc59f63acad9e594770b2172d2ac36b7ed7",
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/relay.ask.json",
+  "target": "local_operator/i18n/catalogues/vi/relay.ask.json"
+ }
+}

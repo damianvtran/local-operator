@@ -25,6 +25,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
     BaseModel,
@@ -135,6 +136,7 @@ from local_operator.server.utils.store_failures import (
 from local_operator.session import open_trace, transcript_index
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import (
+    BULK_RECEIPT_SESSION_ID_PATTERN,
     SUPERSEDED_TOKEN_CODE,
     SupersededCompletionToken,
 )
@@ -176,9 +178,18 @@ from local_operator.supplements.contract import (
 )
 
 if TYPE_CHECKING:
+    from typing import TypedDict
+
     # Type-only: the ``cast`` on each ``diff_bindings`` unpack names it as a string, so
     # this route module keeps its lazy ``tools.diff_archive`` import at runtime.
     from local_operator.tools.diff_archive import DiffBindingReadOptions
+
+    class _AnswerSessionOptions(TypedDict, total=False):
+        control_only: bool
+
+    class _EventsSessionOptions(TypedDict, total=False):
+        ingress_trace: open_trace.DesktopEventsIngressTrace
+
 
 logger = logging.getLogger(__name__)
 
@@ -1421,10 +1432,35 @@ class Prompt(Input):
     # place the same rule lives, and a message the READER refuses is a dropped
     # row, not a refused request, so the refusal belongs at the door.
     input_mode: Literal["typed", "dictated", "mixed"] | None = None
+    # THE BUSY-SEND DELIVERY MODE: how a send to a busy session is delivered.
+    # ``steer`` is today's urgent behaviour; ``queue`` never cancels a running
+    # tool; ``both`` is ``queue`` until it has waited, then urgent. The enum is
+    # enforced HERE, at the wire, so a value outside the vocabulary gets a 422
+    # before anything is admitted — never coerced into a mode nobody sent.
+    # Absent/empty reads as ``steer``; ignored when the session is idle.
+    #
+    # RETRY CONTRACT: the receipt journal fingerprints the WHOLE request body
+    # (``server/utils/desktop_receipts.py``), so a retry under the same
+    # ``request_id`` must repeat these bytes BYTE-FOR-BYTE — a pinned delivery
+    # is part of the retry identity, like ``input_mode`` above.
+    delivery: Literal["steer", "queue", "both"] | None = None
     # An OPEN string on purpose (see ``Message.input_path``): the STT cascade
     # owns this vocabulary and the carriage must not fork it behind an enum.
     # Absent/null = the classic server-transcription path.
     input_path: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_delivery(self, handler: Any, info: Any) -> Any:
+        # The receipt journal fingerprints ``model_dump()`` bytes, so a
+        # same-id retry claimed BEFORE the delivery field existed must not
+        # read as a changed body after an upgrade. ``None`` is the absent
+        # reading, so it leaves the dump exactly as the pre-field build
+        # wrote it (the wrap-serializer pattern ``PromptImage.
+        # _omit_absent_origin`` already uses for the same reason).
+        data = handler(self)
+        if isinstance(data, dict) and data.get("delivery") is None:
+            data.pop("delivery", None)
+        return data
 
     @model_validator(mode="after")
     def nonempty(self):
@@ -2162,8 +2198,22 @@ async def _queue_or_refuse(
       delivery nothing is going to make;
     * the message carries attachments: an inbox row is text
       (``inbox.InboxLine``), and dropping the pictures or files to queue the
-      words would answer a question the user did not ask.
+      words would answer a question the user did not ask;
+    * the send pinned a delivery mode the spool cannot carry
+      (``body.delivery`` is ``queue``/``both``): the row below writes
+      ``InboxLine(mode='steer'|...)`` with NO delivery field, so the live
+      drain would deliver it as an URGENT steer (``process._run_owner_prompt``
+      joins it to the turn in flight) — a silent downgrade of the mode the
+      composer watched the user pick. The busy refusal is the honest answer
+      here: the renderer's resend applies, and a resend after the turn moves
+      admits normally.
     """
+    if body.delivery in ("queue", "both"):
+        # See the third arm above: the spool vehicle is text
+        # (``InboxLine.mode``) and carries no delivery mode, so accepting
+        # this send would answer "queued" for a message delivered urgently.
+        # Refuse, never downgrade.
+        raise error
     if body.images or body.files or body.audio:
         raise error
     from local_operator.session.runtime.inbox import (
@@ -2907,8 +2957,10 @@ async def list_sessions(
     cursor: str = Query(default=""),
     # THE ORDER THE PAGE IS READ IN. Absent means the rank order -- byte for
     # byte the answer that existed before this parameter -- and "activity" is
-    # the desktop sidebar's own head order (rows that need the reader first,
-    # then everything else newest-activity-first), which is what keeps a
+    # the desktop sidebar's own head order (running rows first, then
+    # everything else -- unread and attached rows included -- newest-
+    # activity-first; ``CatalogEntry.activity_key`` says why unread rows
+    # no longer lead, local-operator-ui#2069 Q3), which is what keeps a
     # reader's recent conversations inside the first page on a store whose
     # cold population a wake band would otherwise fill. Declared as a plain
     # string and refused BY NAME below (``_requested_sort``), the same rule
@@ -4421,10 +4473,14 @@ async def bridge_card_body(
     """What one inbound Team Bridge card's messages are to THIS viewer.
 
     ``{v:1, items:[{message_id, conversation_id, state, body?, source?, hold?,
-    reason?}], more}`` (bridge-body design §4; feature key
-    ``team_bridge_card_body``). ``state`` is one of admitted, pending, held,
-    refused, not_admitted, unavailable; ``body`` is UNTRUSTED third-party
-    markdown, present only when admitted. A READ: keyed by the transcript row
+    reason?}], more, card?: {received_at?, thread_reply}}`` (bridge-body design
+    §4; feature key ``team_bridge_card_body``). ``card`` is additive within
+    ``v:1``: facts of the card's own journal row (``received_at`` ISO-8601 UTC,
+    ``thread_reply`` bool), present on every answer for a found card so a client
+    can show when and where beside the body (``card_body._card_facts``).
+    ``state`` is one of admitted, pending, held, refused, not_admitted,
+    unavailable; ``body`` is UNTRUSTED third-party markdown, present only when
+    admitted. A READ: keyed by the transcript row
     the caller can already page, so it cannot be used to probe message ids.
     The display store and the hub's admitted-only history read are the only
     sources; the screener's classification fetch (``/messages/{id}/body``) is
@@ -4653,6 +4709,136 @@ async def attachment_waveform(session_id: str, digest: AttachmentDigest, request
     )
 
 
+#: The closed query of the session notification-avatar route: exactly these two
+#: names, each once, each from its own closed set. A frozen desktop<->core
+#: contract (agent notification avatars, 2026-11-23); a widened query is a new
+#: capability version, never a silently accepted parameter.
+_SESSION_NOTIFICATION_AVATAR_QUERY = frozenset({"size", "theme"})
+#: Developer-facing 422 diagnostics (the desktop main process is the only
+#: caller and never shows them; the app's validation handler answers its own
+#: catalogued sentence).
+_SESSION_NOTIFICATION_AVATAR_DIAGNOSTICS = {
+    "names": "Exactly size and theme are accepted",  # i18n: ignore protocol diagnostic
+    "repeated": "Each parameter must appear once",  # i18n: ignore protocol diagnostic
+    "size": "Input should be 64 or 256",  # i18n: ignore protocol diagnostic
+    "theme": "Input should be 'light' or 'dark'",  # i18n: ignore protocol diagnostic
+}
+
+
+def _session_notification_avatar_query(request: Request) -> tuple[int, Literal["light", "dark"]]:
+    """``(size, theme)`` from the closed query, or a 422 naming the offender."""
+    query = request.query_params
+    names = set(query)
+    problem: tuple[str, str] | None = None
+    if names != _SESSION_NOTIFICATION_AVATAR_QUERY:
+        extra = sorted(names - _SESSION_NOTIFICATION_AVATAR_QUERY)
+        missing = sorted(_SESSION_NOTIFICATION_AVATAR_QUERY - names)
+        problem = (extra or missing)[0], "names"
+    else:
+        repeated = [name for name in sorted(names) if len(query.getlist(name)) != 1]
+        if repeated:
+            problem = repeated[0], "repeated"
+        elif query["size"] not in ("64", "256"):
+            problem = "size", "size"
+        elif query["theme"] not in ("light", "dark"):
+            problem = "theme", "theme"
+    if problem is not None:
+        name, kind = problem
+        message = _SESSION_NOTIFICATION_AVATAR_DIAGNOSTICS[kind]
+        raise RequestValidationError(
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("query", name),
+                    "msg": message,
+                    "input": query.getlist(name) if name in names else None,
+                }
+            ]
+        )
+    return int(query["size"]), cast(Literal["light", "dark"], query["theme"])
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/notification-avatar",
+    responses={
+        200: {"content": {"image/png": {}}},
+        304: {"description": "Not modified"},
+        404: {"description": "Unknown session, no bound agent, or no usable agent picture"},
+        422: {"description": "Query outside the closed set"},
+        503: {"description": "Renderer busy (transient)"},
+    },
+)
+async def session_notification_avatar(session_id: str, request: Request) -> Response:
+    """The OS-banner image for a session bound to an agent with its own picture.
+
+    Capability ``desktop_session_notification_avatar``. WHY: a banner about a
+    session whose agent has a stored profile picture should read as "your
+    agent is messaging you" rather than as a generic session notice, so the
+    desktop main process (never the renderer, never a URL handed to the OS)
+    fetches this ONE PNG -- the agent's picture circle-cropped with the Local
+    Operator mark in the bottom-right badge, the Team Bridge banner's visual
+    language minus its agent marker -- and passes it as the notification icon.
+
+    Contract (frozen with the desktop half):
+
+    * Closed query ``size=64|256`` and ``theme=light|dark``, each exactly once;
+      anything else is a 422 before any disk read.
+    * 404 with the ``agent_avatar`` refusal envelope (``not_found``) for an
+      unknown session, a session with no bound agent, or an agent with no
+      valid stored picture. There is deliberately no glyph fallback: the
+      desktop's answer to a 404 is today's banner, unchanged.
+    * ``ETag`` is derived from the agent picture's VERIFIED sha256 plus size
+      and theme, so a picture change, or a theme flip, can never revalidate a
+      stale composite; ``If-None-Match`` answers 304 without rendering.
+    * The desktop waits at most its 250 ms budget for this (the Team Bridge
+      pattern), so the render runs off the event loop under the shared,
+      bounded renderer; overload is a transient 503 ``renderer_busy`` that the
+      desktop treats like any other miss.
+
+    Cache headers: the route sets ``no-cache`` (local data, revalidatable),
+    but ``managed_desktop_boundary`` rewrites EVERY ``/v1/desktop/`` response to
+    ``no-store``; that is the stricter of the two and is left to win -- the
+    desktop's own in-memory cache keyed on the ETag is the only retention.
+    """
+    from local_operator import agent_avatar
+    from local_operator.i18n.http import etag_matches
+    from local_operator.team_bridge import notification_avatar as na
+
+    size, theme = _session_notification_avatar_query(request)
+    try:
+        picture, sha = await host(request).agent_notification_picture(session_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=agent_avatar.refusal_envelope(agent_avatar.NOT_FOUND)
+        )
+    # The composite's validator: same picture at another size or theme is a
+    # different body, so both ride in the tag.
+    tag = f"{sha}-notification-{size}-{theme}"
+    headers = {
+        "ETag": agent_avatar.etag(tag),
+        "Cache-Control": "no-cache",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if etag_matches(request.headers.get("if-none-match", ""), tag):
+        return Response(status_code=304, headers=headers)
+    try:
+        data = await na.render_agent_picture(picture, theme=theme, size=size)
+    except na.RendererBusy:
+        raise HTTPException(
+            status_code=503,
+            # The machine code IS the payload: only desktop main reads it
+            # (it never shows this text), so no new user-facing copy.
+            detail=_wd.desktop_refusal(error="renderer_busy").envelope(code="renderer_busy"),
+        )
+    except na.AvatarImageRejected:
+        # Digest-verified but outside the decode ceilings (or not a PNG/JPEG):
+        # for the banner that is the same as "no usable picture".
+        raise HTTPException(
+            status_code=404, detail=agent_avatar.refusal_envelope(agent_avatar.NOT_FOUND)
+        )
+    return Response(content=data, media_type="image/png", headers=headers)
+
+
 @router.get("/v1/desktop/sessions/{session_id}/supplements/{digest}/document")
 async def supplement_document(session_id: str, digest: AttachmentDigest, request: Request):
     """The assembled HTML document of one stored supplement component, as ``{html}``.
@@ -4796,6 +4982,11 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                             # owner from before the carriage never sees the keys.
                             input_mode=body.input_mode,
                             input_path=body.input_path,
+                            # Busy-send delivery mode, omitted from the attach frame
+                            # when absent/``steer`` (``admit_prompt`` drops it), so a
+                            # legacy-sender frame stays byte-identical and an owner
+                            # from before the modes never sees the key.
+                            delivery=body.delivery,
                         )
                         admitted = True
                         # Admission can bind a cold viewer while an event
@@ -5290,7 +5481,15 @@ async def answer(session_id: str, body: Answer, request: Request):
     # ``answer_gate`` is the only consumer; the queued-ask branch below answers
     # from the ask log and is not subject to it.
     deadline = time.monotonic() + DESKTOP_ANSWER_BUDGET_S
-    async with errors(request), host(request).session(session_id) as bridge:
+    # A queued ask is addressed by durable ID, not by the display epoch. Its
+    # control transport must remain usable when an older owner's canonical
+    # snapshot exceeds the line limit; the pool still owns lookup and retirement.
+    # Keep the key absent for gate answers, and don't infer that this bool can
+    # fill unrelated pool keywords (such as the events-only ingress trace).
+    session_options: _AnswerSessionOptions = (
+        {"control_only": True} if body.ask_id is not None else {}
+    )
+    async with errors(request), host(request).session(session_id, **session_options) as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
             # A QUEUED ASK (design §2.4/§4). Answered by id, BEFORE the epoch
@@ -5528,7 +5727,7 @@ class SeenItem(Input):
     later, unseen result.
     """
 
-    session_id: Annotated[str, Field(pattern=r"^[a-f0-9]{12}$")]
+    session_id: Annotated[str, Field(pattern=BULK_RECEIPT_SESSION_ID_PATTERN)]
     completion_token: RequestID
 
 
@@ -5536,7 +5735,7 @@ class SeenMany(Input):
     #: 1..500, and the bound is the CATALOGUE's own maximum page
     #: (``GET /v1/desktop/sessions?limit=``, ``le=500``), so a client can always
     #: send every row it holds in one call and never has to chunk a single user
-    #: gesture. The worst-case body is ~30 KB against the 900 KB control-frame
+    #: gesture. The worst-case body is under 60 KB against the 900 KB control-frame
     #: limit.
     items: Annotated[list[SeenItem], Field(min_length=1, max_length=500)]
 
@@ -6780,6 +6979,14 @@ async def events(
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
+    scope = getattr(request, "scope", None)
+    ingress_trace = (
+        scope.get(early_paint_hold.TRACE_SCOPE_KEY)
+        if open_trace.enabled() and scope is not None and open_frame == 1
+        else None
+    )
+    if ingress_trace is not None:
+        ingress_trace.start()
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
     # ``allow_draft``: the pane's subscription is the bridge user that holds a
@@ -6809,8 +7016,14 @@ async def events(
     # middleware stack (``server.early_paint_hold``). Dropped only AFTER the
     # route's hold is taken, so the count never reaches zero in between, and
     # from here on the snapshot-frame release above is the only one owed.
-    early_paint_hold.hand_off(getattr(request, "scope", None))
-    context = pool.session(session_id, read=True, allow_draft=True)
+    early_paint_hold.hand_off(scope)
+    # Keep one acquire for the OPEN handshake. Omit the trace keyword on the
+    # untraced path; otherwise carry this request's trace explicitly because the
+    # single-flight lookup and bridge are shared by concurrent streams.
+    session_options: _EventsSessionOptions = (
+        {} if ingress_trace is None else {"ingress_trace": ingress_trace}
+    )
+    context = pool.session(session_id, read=True, allow_draft=True, **session_options)
     try:
         async with errors(request):
             bridge: DesktopSessionBridge = await context.__aenter__()

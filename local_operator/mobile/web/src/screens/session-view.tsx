@@ -24,9 +24,11 @@
  */
 import { contentDir } from "../lib/content-direction";
 import { flushSync } from "react-dom";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { HttpError, setSessionPin, setSessionTemporary, startSession } from "../api";
 import { AskDock } from "../components/ask-dock";
+import { AskChipHostProvider } from "../components/ask-id";
+import { askChipFacts } from "../lib/ask-chip";
 import { AsksSheet } from "../components/asks-sheet";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer, ComposerFrame } from "../components/composer";
@@ -67,6 +69,7 @@ import {
 	getDraft,
 	messageRuntime,
 	noteViewedSession,
+	projectionRevealEpoch,
 	recordTemporaryTombstone,
 	setDraft,
 	useCapabilities,
@@ -75,6 +78,7 @@ import {
 	retainSessionListStream,
 	usePinMarks,
 	useProjection,
+	useAskChipSettled,
 	useLocaleSnapshot,
 	useRouteTitle,
 	useSessions,
@@ -558,6 +562,28 @@ export function SessionScreen({
 	   time, without a word to learn it from). `answerableAsks` is the whole
 	   outstanding set: it is what the open policy's dismissal memory records. */
 	const answerableAsks = outstandingAsks(projection?.asks);
+	/* THE CHIP'S OWN READING OF THIS SESSION'S ASKS. The live frame, the settled
+	 * receipts the transcript already drew, and (after the sheet has been opened
+	 * once) the aggregate it last read — for `withdrawn`, the one settled state no
+	 * receipt carries. Ids of other conversations are dropped inside the rule.
+	 *
+	 * `open` is the chip's ONE action: open the asks sheet on that ask. It goes
+	 * through the same door as the dock so the open policy and the Back entry see
+	 * one kind of open, and it names the ask so the sheet can land on it. */
+	const chipSettled = useAskChipSettled();
+	const chipFacts = useMemo(
+		() =>
+			askChipFacts(
+				{
+					frame: projection?.asks,
+					transcript: projection?.transcript,
+					settled: chipSettled,
+				},
+				sessionId,
+			),
+		[projection?.asks, projection?.transcript, chipSettled, sessionId],
+	);
+	const [askJump, setAskJump] = useState<string | null>(null);
 	const [modelsOpen, setModelsOpen] = useState(false);
 	/* The model sheet's search text lives HERE (UX round 2, U5): a fresh open
 	   clears it, while the effort view's back control returns to the same sheet
@@ -612,11 +638,27 @@ export function SessionScreen({
 	   view's pending decision, so a frame that lands afterwards cannot open a sheet
 	   over them a second time (clause 6: opening by policy is not pressing the
 	   door, and pressing the door is not something the policy gets to repeat). */
-	const openAsks = useCallback(() => {
+	const openSheet = useCallback(() => {
 		askOpenPolicy.noteUserOpened(sessionId);
 		claimAsksEntry();
 		setAsksOpen(true);
 	}, [sessionId, claimAsksEntry]);
+	/* THE DOCK, THE DRAWER AND A CHIP ALL REACH THIS ONE DOOR. A chip names its ask
+	   immediately after, so a chip press uses `openAskAt` below; the plain door
+	   must clear any earlier jump or a later open would land on the ask the LAST
+	   chip named. */
+	const openAsks = useCallback(() => {
+		setAskJump(null);
+		openSheet();
+	}, [openSheet]);
+	const openAskAt = useCallback(
+		(askId: string) => {
+			setAskJump(askId);
+			openSheet();
+		},
+		[openSheet],
+	);
+	const chipHost = useMemo(() => ({ facts: chipFacts, open: openAskAt }), [chipFacts, openAskAt]);
 	/* THE POLICY'S OWN OPEN. The same sheet and the same Back behaviour as the
 	   door, minus the "a user pressed it" bookkeeping. The entry is claimed only if
 	   this history entry does not already carry one: React's StrictMode (the dev
@@ -644,6 +686,7 @@ export function SessionScreen({
 	}, [claimAsksEntry]);
 	const closeAsks = useCallback(() => {
 		noteAsksDismissed();
+		setAskJump(null);
 		setAsksOpen(false);
 		/* Give the entry back when the user closes by hand (✕, scrim, Escape), so
 		   the next Back is not eaten by a sheet that is already closed. */
@@ -665,6 +708,7 @@ export function SessionScreen({
 			const here =
 				landed.name === "session" && landed.sessionId === sessionId && landed.jobId === undefined;
 			if (here) noteAsksDismissed();
+			setAskJump(null);
 			setAsksOpen(false);
 		};
 		window.addEventListener("popstate", onPop);
@@ -979,21 +1023,24 @@ export function SessionScreen({
 					</p>
 				</div>
 			) : (
-				<Transcript
-					pid={sessionId}
-					entries={projection.transcript}
-					peerCycles={projection.peer_cycles === 1}
-					headPinned={projection.transcript_head_pinned}
-					pending={pendingEchoes}
-					streaming={projection.streaming}
-					topInset={0}
-					supplements={projection.supplements}
-					projectionPid={projection.pid}
-					/* A frame with no rows yet but a turn running (the first frame of a
-					   switch, or a decode that dropped every row) used to paint only the
-					   top hairline — a blank column that reads as broken. */
-					emptyContent={projection.streaming ? <TranscriptSkeleton /> : undefined}
-				/>
+				<AskChipHostProvider value={chipHost}>
+					<Transcript
+						pid={sessionId}
+						entries={projection.transcript}
+						peerCycles={projection.peer_cycles === 1}
+						headPinned={projection.transcript_head_pinned}
+						pending={pendingEchoes}
+						streaming={projection.streaming}
+						revealEpoch={projectionRevealEpoch(projection, connected)}
+						topInset={0}
+						supplements={projection.supplements}
+						projectionPid={projection.pid}
+						/* A frame with no rows yet but a turn running (the first frame of a
+						   switch, or a decode that dropped every row) used to paint only the
+						   top hairline — a blank column that reads as broken. */
+						emptyContent={projection.streaming ? <TranscriptSkeleton /> : undefined}
+					/>
+				</AskChipHostProvider>
 			)}
 
 			{/* THE WORKING LINE LIVES HERE, NOT IN THE TRANSCRIPT'S SCROLLING TAIL. It
@@ -1132,6 +1179,7 @@ export function SessionScreen({
 				open={asksOpen}
 				onClose={closeAsks}
 				currentSessionId={sessionId}
+				jumpAsk={askJump}
 			/>
 			</>}
 		</div>

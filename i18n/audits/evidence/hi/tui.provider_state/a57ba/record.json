@@ -1,0 +1,99 @@
+{
+  "locale": "hi",
+  "namespace": "tui.provider_state",
+  "audit_id": "a57ba",
+  "audit_date": "2026-11-22",
+  "execution_timestamp_utc": "2026-11-22T12:36:51.856669+00:00",
+  "key_count": 5,
+  "source_audit_revision": "2b924d84f0e663302fd93a7b36411ee6035576fe",
+  "auditor": {
+    "agent": "i18n-auditor (Hindi A)",
+    "session": "57ba373043b9",
+    "model": "openai/gpt-6.1-sol",
+    "configured_model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "independentFromAuthor": true,
+    "translator_session": "520071768802",
+    "actual_model_source": "Host model-switch message in this session: openai/gpt-6.1-sol, provider failure: quota. Per-response served-provider metadata not available/independently verified; configured Claude is not asserted as served.",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota",
+      "per_response_identity_verified": false
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "520071768802",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Fresh served-response transcript payload.usage.provider/model_id, extracted during this task; see provenance.json",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota; model-switch notice before authoring"
+    },
+    "independent_from_translator_session": false
+  },
+  "translator_provenance": {
+    "path": "i18n/audits/evidence/hi/tui.provider_state/hi22a/record.json",
+    "sha256": "6d7e9e1450e2552b9cf15427f1dc6189aa8d746cb78d62593e60c3a501d19d33"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.json",
+      "sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.provider_state.context.json",
+      "sha256": "67c6fda3895610bb57008f7fb97fce0f66f4b68cc9d23b70f87ab5d5abb7b7be"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/hi/tui.provider_state.json",
+      "sha256": "6842f379ee5668e28c087ef764491411da67b5580ade695a03164975364da7b1"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/a57ba/report.md",
+      "sha256": "34dbbba42060c1c64207b35fcbfaf0b3dd188a8ad5df0e5281950ef9ce7e5e91"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/a57ba/script.py.txt",
+      "sha256": "2da275d549499cfdebf072051dc820e4b2773922d72340d7a8515fddec30a6cb"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/a57ba/audit.log",
+      "sha256": "60a591a591712864ab77de77dc597cb0a865e501faf7d99338c09506155c487f"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/tui.provider_state/a57ba/directledger-receipt.json",
+      "sha256": "ccb675f4f998c62daa652c1d6eb79d5a02dfea7db2d8aeef759813996eb4c6db"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "five_key_assessment": {
+    "logged_in": "passed: completed login status",
+    "env_key": "passed: environment-variable credential source",
+    "needs_login": "passed: requirement status",
+    "local_ready": "passed: configured server, not health",
+    "local_unconfigured": "passed: polite configuration instruction"
+  },
+  "report_kind": "audit_notes_not_execution_log",
+  "execution_log": "audit.log",
+  "execution_return_code": 0,
+  "independent_b_pass_claimed": false,
+  "ledger_applied": false,
+  "current_bytes_match_audited_hashes": true,
+  "limitations": [
+    "native-font/whole-UI geometry unverified",
+    "all-seven-locale admission unverified",
+    "B pass not performed",
+    "producer/resolver wiring not audited",
+    "release unverified"
+  ],
+  "tracked_commit_exists": false
+}

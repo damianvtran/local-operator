@@ -49,7 +49,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
@@ -160,9 +160,8 @@ async def list_monitors(
     """Every conversation on this machine that has monitors.
 
     Every disk read for the whole listing happens in ONE worker thread — an
-    index read, a bounded name scan and a transcript existence check per entry,
-    none of which may run on the event loop (a sidebar poll here must not be
-    able to stall the loop that serves every other request).
+    index and counter reads, a bounded name scan and a transcript existence
+    check per entry. A listing must not stall the loop serving other requests.
     """
     root = request.app.state.config_manager.config_dir
     async with errors(request):
@@ -214,7 +213,7 @@ async def delete_monitor_route(session_id: str, monitor_id: MonitorId, request: 
 
 
 def _collect_listing(config_dir: Path, limit: int, include_dormant: bool) -> dict[str, Any]:
-    from local_operator.monitors.store import is_held, read_index_report
+    from local_operator.monitors.store import effective_rows, is_held, read_index_report
     from local_operator.resume import session_name, session_origin
     from local_operator.wakes.supervisor import _session_exists
 
@@ -232,7 +231,7 @@ def _collect_listing(config_dir: Path, limit: int, include_dormant: bool) -> dic
             continue
         session_dir = Path(config_dir) / "sessions" / session_id
         cwd = str(raw.get("cwd") or "")
-        monitors = _monitor_rows(raw, now_ms, dormant)
+        monitors = _monitor_rows(effective_rows(config_dir, session_id, raw), now_ms, dormant)
         entries.append(
             MonitorEntry(
                 session_id=session_id,
@@ -265,13 +264,13 @@ def _collect_listing(config_dir: Path, limit: int, include_dormant: bool) -> dic
     }
 
 
-def _monitor_rows(entry: Mapping[str, Any], now_ms: int, dormant: bool) -> list[MonitorRow]:
+def _monitor_rows(
+    effective: Iterable[Mapping[str, Any]], now_ms: int, dormant: bool
+) -> list[MonitorRow]:
     from local_operator.monitors import store as monitor_store
 
     rows: list[MonitorRow] = []
-    for raw in entry.get("monitors") or ():
-        if not isinstance(raw, Mapping):
-            continue
+    for raw in effective:
         due = _as_int(raw.get("next_due_at"))
         last = _as_int(raw.get("last_check_at")) or 0
         disabled = bool(raw.get("disabled"))

@@ -452,15 +452,47 @@ async def test_family_removes_clean_tree_with_zero_judge_calls(
     assert judge.prompts == []
 
 
-def test_child_cannot_remove_parents_tree_with_unverified_ignored_files(
-    home: Path, infra: Path
+@pytest.mark.parametrize(
+    ("creator", "remover", "held"),
+    [(P, C, False), (C, P, False), (K, C, True), (U, C, True)],
+    ids=["child-removes-parent", "parent-removes-child", "sibling", "unrelated"],
+)
+def test_regenerable_ignored_output_is_shed_only_by_the_owning_family(
+    home: Path, infra: Path, creator: str, remover: str, held: bool
 ) -> None:
+    """PR #4493: ``node_modules/`` is the creator family's build output.
+
+    Ancestors and descendants share ownership (``owned_record``), so their
+    plain removal settles. A sibling's (``kin``) or unrelated tree keeps
+    #4240's rule: a regenerable-looking name is no witness for someone
+    else's bytes.
+    """
+    wt = _add_tree(home, infra / "services", creator)
+    (wt / "node_modules" / "pkg").mkdir(parents=True)
+    (wt / "node_modules" / "pkg" / "index.js").write_text("module.exports = 1\n")
+    _restamp(wt)
+    verdict = _rank(home, _remove(wt), remover)
+    target = verdict.targets[0]
+    if held:
+        assert target.cleanup_hold, verdict.reasons
+        assert "ignored entry the guard cannot prove regenerable" in target.reason
+    else:
+        assert not target.cleanup_hold, verdict.reasons
+        assert verdict.risk is Risk.LOW, verdict.reasons
+
+
+def test_child_removes_parents_tree_with_unverified_ignored_files(home: Path, infra: Path) -> None:
+    """Operator directive 2026-11-23 (PR #4493): the creator FAMILY cleans up
+    after itself with no approval, ignored files included. A sibling or an
+    unrelated session still holds: see
+    ``test_regenerable_ignored_output_is_shed_only_by_the_owning_family``.
+    """
     wt = _add_tree(home, infra / "services", P)
     _ignore_only(wt)
     assert prov.worktree_state(str(wt), own=True) == "clean"
     verdict = _rank(home, _remove(wt), C)
-    assert verdict.risk is Risk.HIGH and verdict.targets[0].cleanup_hold, verdict.reasons
-    assert "ignored entries the guard cannot prove regenerable" in verdict.targets[0].reason
+    assert not verdict.targets[0].cleanup_hold, verdict.reasons
+    assert verdict.risk is Risk.LOW, verdict.reasons
 
 
 def test_child_removes_parents_tree_with_tracked_change_is_high(home: Path, infra: Path) -> None:
@@ -486,13 +518,14 @@ def test_child_removes_parents_tree_with_open_mr_is_critical(
 
 
 def test_rm_rf_of_parents_tree_with_ignored_env_is_judged(home: Path, infra: Path) -> None:
-    """Exact plain cleanup holds ignored payloads; raw deletion keeps its legacy ranks."""
+    """Raw deletion keeps its legacy ranks. Exact plain cleanup by the creator
+    family sheds the ignored payload (operator directive 2026-11-23, PR #4493:
+    agents clean up after themselves with no approval)."""
     wt = _add_tree(home, infra / "services", P)
     _ignore_only(wt)
     assert _rank(home, f"rm -rf {wt}", C).risk is Risk.HIGH
     plain = _rank(home, _remove(wt), C)
-    assert plain.risk is Risk.HIGH and plain.targets[0].cleanup_hold, plain.reasons
-    assert "the guard cannot prove regenerable" in plain.targets[0].reason
+    assert plain.risk is Risk.LOW and not plain.targets[0].cleanup_hold, plain.reasons
     assert _rank(home, f"rm -rf {wt}", P).risk is Risk.LOW
 
 

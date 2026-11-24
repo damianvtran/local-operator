@@ -12,6 +12,14 @@ import { contentDir } from "../lib/content-direction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
+import {
+	busyDeliverySupported,
+	deliveryForSend,
+	getDeliveryMode,
+	nextDeliveryMode,
+	setDeliveryMode,
+	type DeliveryMode,
+} from "../lib/delivery";
 import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	QUEUED_DETAIL,
@@ -181,19 +189,55 @@ export function isSlashDraft(text: string, imageCount: number): boolean {
 type DictationState = "idle" | "recording" | "transcribing";
 
 /**
- * The failure copy for one transcription attempt.
+ * The relay's own request-body cap, BELOW the daemon's audio cap.
  *
- * 402/413/422/503 carry the DAEMON's own actionable sentence (top up, shorten,
- * wrong format, no path) and are shown verbatim — the user can act on every
- * one. 502/500 and transport failures are transient or diagnostic, so they get
- * the one retry sentence; the server's upstream diagnostics belong in a log,
- * not on a phone.
+ * The tunnel gateway answers 413 to any body over 10 MiB
+ * (`local_operator/tunnels/gateway.py`), while the daemon accepts 20 MiB of
+ * audio — so a take in between can never reach the daemon at all, and an offer
+ * to "try again" with it would be a lie the user pays for twice.
  */
-function dictationErrorCopy(error: unknown): string {
-	if (error instanceof HttpError && [402, 413, 422, 503].includes(error.status)) {
-		return error.message;
+const TUNNEL_MAX_BODY_BYTES = 10 * 1024 * 1024;
+/** The failure row's own sentence for a transient refusal (shown WITH Retry). */
+const DICTATION_FAILED = "Transcription failed";
+/** Said instead of a retry when the take can never fit through the tunnel. */
+const DICTATION_TOO_LONG = "That recording is too long to send. Discard it and record a shorter one.";
+
+/** The focus ring both failure-row actions paint for a KEYBOARD (D6). The shape
+    matches the app's document-level 2px accent outline, spelled out here so the
+    two actions never depend on a default focus paint to be visible. */
+const DICTATION_ACTION_FOCUS =
+	"focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
+
+/** One failed take as the status row presents it: the sentence, and whether a
+    retry can honestly help. */
+type DictationFailure = { message: string; retry: boolean };
+
+/** Classify one failed transcription attempt for the failure row.
+
+    402/422/503 carry the DAEMON's own actionable sentence (top up, wrong
+    format, no path) and are shown verbatim: a retry would answer them word for
+    word, so they get Discard alone. 413, and any retained take over the
+    tunnel's own cap, can never be sent, so they say that instead of pretending
+    a retry could work. Every OTHER 5xx is transient — the same rule the desktop
+    applies (500-599) — so a tunnel's 504 gets a Retry too, and the row says
+    "Transcription failed" rather than repeating the server's diagnostics (those
+    belong in a log, not on a phone). An unknown status outside 5xx (a 418, a
+    stray 409) keeps Discard alone and says the same short sentence: "Try
+    again" would offer a retry the row does not draw. */
+function dictationFailureFor(error: unknown, blob: Blob): DictationFailure {
+	if ((error instanceof HttpError && error.status === 413) || blob.size > TUNNEL_MAX_BODY_BYTES) {
+		return { message: DICTATION_TOO_LONG, retry: false };
 	}
-	return "Couldn't transcribe that. Try again.";
+	if (error instanceof HttpError) {
+		if ([401, 402, 422, 503].includes(error.status)) return { message: error.message, retry: false };
+		if (error.status >= 500 && error.status <= 599) return { message: DICTATION_FAILED, retry: true };
+		return { message: DICTATION_FAILED, retry: false };
+	}
+	/* fetch rejects with a TypeError when it never reached the daemon (offline,
+	   DNS, a dropped connection): the one class where the same bytes are worth
+	   sending again. */
+	if (error instanceof TypeError) return { message: DICTATION_FAILED, retry: true };
+	return { message: DICTATION_FAILED, retry: false };
 }
 
 /**
@@ -409,6 +453,71 @@ function EffortSheet({
 	);
 }
 
+/** The busy-send delivery-mode picker (busy-delivery-v1). One row per mode,
+    the chosen one marked with the same accent dot effort uses. The mode is a
+    per-device preference (`lib/delivery.ts`), never a command: choosing it
+    writes localStorage and closes; the next busy send carries it. */
+function DeliverySheet({
+	open,
+	onClose,
+	value,
+	onChoose,
+}: {
+	open: boolean;
+	onClose: () => void;
+	value: DeliveryMode;
+	onChoose: (mode: DeliveryMode) => void;
+}) {
+	const modes: Array<{ mode: DeliveryMode; labelKey: "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both"; hintKey: "relay.composer.delivery.steer_hint" | "relay.composer.delivery.queue_hint" | "relay.composer.delivery.both_hint" }> = [
+		{ mode: "steer", labelKey: "relay.composer.delivery.steer", hintKey: "relay.composer.delivery.steer_hint" },
+		{ mode: "queue", labelKey: "relay.composer.delivery.queue", hintKey: "relay.composer.delivery.queue_hint" },
+		{ mode: "both", labelKey: "relay.composer.delivery.both", hintKey: "relay.composer.delivery.both_hint" },
+	];
+	return (
+		<Sheet
+			open={open}
+			onClose={onClose}
+			title={messageRuntime.t("relay.composer.delivery.label")}
+		>
+			<div className="flex flex-col p-2">
+				{modes.map(({ mode, labelKey, hintKey }) => (
+					<button
+						key={mode}
+						type="button"
+						onClick={() => {
+							onChoose(mode);
+							onClose();
+						}}
+						/* The muted hint names what the mode DOES (D1): a bare
+						   word does not say that queue never interrupts tools,
+						   and "queue, then steer" does not say when it steers.
+						   `min-h-11` is the 44 px touch floor; the hint wraps to
+						   two lines at 280 px without pushing the row taller
+						   (sheet padding absorbs it). */
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 py-1 text-start active:bg-surface"
+					>
+						<span
+							className={cn(
+								"size-2 shrink-0 rounded-full",
+								mode === value ? "bg-accent" : "bg-hairline",
+							)}
+							aria-hidden
+						/>
+						<span className="min-w-0 flex-1">
+							<span className="block text-body text-ink">
+								{messageRuntime.t(labelKey)}
+							</span>
+							<span className="block text-body-sm text-ink-dim">
+								{messageRuntime.t(hintKey)}
+							</span>
+						</span>
+					</button>
+				))}
+			</div>
+		</Sheet>
+	);
+}
+
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
 const SLASH_ERROR = "Couldn’t run that command. Try again.";
@@ -569,7 +678,11 @@ const COMPOSER_LEADING = "-ms-1.5";
    (`SessionStatus` compact), so nothing on the line needs to wrap. */
 const COMPOSER_CHIP_ROW =
 	"order-last flex min-w-0 basis-full items-center gap-1 overflow-x-clip short-column:order-none short-column:basis-0 short-column:flex-1";
-const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
+/* The chip's colour is ONE class, never a stacked override (D4): the
+   generated stylesheet's order let `text-ink-dim` win over an appended
+   `text-accent`, so the non-default mode never looked accent. */
+const COMPOSER_CHIP = (accent: boolean) =>
+	cn("flex min-h-11 min-w-11 items-center text-meta tabular-nums", accent ? "text-accent" : "text-ink-dim");
 
 /** The composer's box, empty, for the frames before a session's projection.
 
@@ -622,7 +735,7 @@ export function ComposerFrame() {
 		<div className={COMPOSER_INPUT_ROW}>
 			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={placeholder} dir={textDirection(placeholder)} className={COMPOSER_FIELD} /></div>
 			<span className={cn(COMPOSER_ROUND, COMPOSER_LEADING, "text-ink-disabled")}><PaperclipGlyph /></span>
-			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
+			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP(false)} /></div>
 			<div className={COMPOSER_ACTION_CLUSTER}>
 				{/* The mic's box is held whenever the live composer will hold or draw it
 				    (`micSlot`, the same rule): a browser or daemon that cannot dictate
@@ -830,6 +943,30 @@ export function Composer({
 	/* The `$name` catalogue. Empty while the capability is absent or the fetch
 	   failed — both mean "no picker", never a banner (SKM-D5). */
 	const [skills, setSkills] = useState<SkillEntry[]>([]);
+	/* The busy-send delivery mode (busy-delivery-v1): a per-device preference,
+	   read from localStorage once per composer mount. Re-read when streaming
+	   changes so a mode picked in another conversation applies here without
+	   a reload; a fresh send pins it into the envelope at submit time. */
+	const [delivery, setDelivery] = useState<DeliveryMode>(() => getDeliveryMode());
+	const [deliveryOpen, setDeliveryOpen] = useState(false);
+	const deliveryLabelKey = (delivery === "queue" ? "relay.composer.delivery.queue" : delivery === "both" ? "relay.composer.delivery.both" : "relay.composer.delivery.steer") as "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both";
+	/* The chip's VISIBLE text for queue-then-steer: the full label ("queue,
+	   then steer") runs the composer row past 280 px, so this one mode shows the
+	   short form. The accessible name above and the sheet row keep the full
+	   label; only the glyph-sized chip shortens. */
+	const deliveryChipKey: typeof deliveryLabelKey | "relay.composer.delivery.both_chip" =
+		delivery === "both" ? "relay.composer.delivery.both_chip" : deliveryLabelKey;
+	const deliveryVisibleText = messageRuntime.t(deliveryChipKey);
+	/* WCAG 2.5.3, label in name: the accessible name must CONTAIN the text on
+	   the chip. For `both` the chip reads `queue→steer` while the name carried
+	   only the full label, so a voice-control user saying what the chip shows
+	   could not reach it. Both parts are existing keys — the full mode label
+	   first, the chip's own text after it — so no third string is authored and
+	   the shortened chip stays a display-only decision. */
+	const deliveryAriaLabel =
+		delivery === "both"
+			? `${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}: ${deliveryVisibleText}`
+			: `${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}`;
 	/* Set by a tray pick, consumed by the [text] layout effect to put the caret
 	   where the insertion left it. A ref because it is an instruction to an
 	   effect, not rendered state. */
@@ -891,6 +1028,10 @@ export function Composer({
 	imagesRef.current = images;
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	/* The dictation status row, focusable by script only (`tabIndex={-1}` while a
+	   failure is shown): the Retry press removes the button that had focus, and
+	   focus must land here rather than fall to <body>. */
+	const dictationRowRef = useRef<HTMLDivElement>(null);
 	/* THE PRIMARY SLOT'S ROLE (slot B of the action cluster). One occupant, so
 	   send / steer / stop are never drawn together; see `primaryRole`. */
 	const [dictation, setDictation] = useState<DictationState>("idle");
@@ -1041,6 +1182,16 @@ export function Composer({
 	/* U5: the in-flight transcribe request, so the status row's cancel aborts
 	   it rather than only hiding the wait. Null whenever nothing is in flight. */
 	const transcribeAbortRef = useRef<AbortController | null>(null);
+	/* THE LAST COMPLETE TAKE, kept while its transcription is REFUSED so Retry
+	   resends exactly those bytes instead of asking the user to speak again. A
+	   ref, not state: handlers read it and the row renders through
+	   `dictationFailure`. Released on success, Discard, a new take, a cancel, a
+	   route change and unmount, so a recording never outlives its attempt. */
+	const lastTakeRef = useRef<Blob | null>(null);
+	/* The failed take as the status row presents it (message + whether Retry is
+	   honest). Lives in the status row, NOT the danger alert: a failed take is
+	   recoverable in place, and the alert row's dismiss would throw it away. */
+	const [dictationFailure, setDictationFailure] = useState<DictationFailure | null>(null);
 	/* U1: set when a transcript has just been committed, consumed by the [text]
 	   layout effect to reveal the appended span (scroll, never focus). */
 	const revealAppendRef = useRef(false);
@@ -1325,6 +1476,9 @@ export function Composer({
 		}
 		releaseDictationTracks();
 		chunksRef.current = [];
+		/* A cancel is a discard: the retained take goes with it. */
+		lastTakeRef.current = null;
+		setDictationFailure(null);
 		setDictation("idle");
 		setRecordSeconds(0);
 		setDictationNotice("");
@@ -1332,6 +1486,10 @@ export function Composer({
 
 	const startDictation = async () => {
 		if (dictationRef.current !== "idle" || !micAvailable) return;
+		/* A fresh take replaces a failed one: the retained blob is released, so a
+		   Retry can never resend speech the user has already moved past. */
+		lastTakeRef.current = null;
+		setDictationFailure(null);
 		setError("");
 		setNotice("");
 		setDictationNotice("");
@@ -1438,19 +1596,41 @@ export function Composer({
 			setRecordSeconds(0);
 			return;
 		}
-		const blob = new Blob(chunks, { type: recorder.mimeType });
+		await transcribeTake(new Blob(chunks, { type: recorder.mimeType }));
+	};
+
+	/** Transcribe ONE complete take and put its words in the box.
+
+	    The single path a fresh recording AND a Retry run: the blob is the only
+	    input, so a retry resends the same bytes through the same append, the same
+	    provenance note and the same completion notice. `dictationCancelledRef` is
+	    the attempt's guard, so a cancel or a send during a retry drops the result
+	    exactly as it does during a first attempt. */
+	const transcribeTake = async (blob: Blob) => {
+		setDictationFailure(null);
+		setDictation("transcribing");
+		setRecordSeconds(0);
 		/* U5: the request is abortable, so the status row's own cancel reaches
 		   the network rather than only hiding the wait. */
 		const controller = new AbortController();
 		transcribeAbortRef.current = controller;
 		let result: { text: string; path: string };
 		try {
-			result = await transcribeAudio(blob, controller.signal);
+			result = await transcribeAudio(blob, {
+				signal: controller.signal,
+				sessionId: projection.session_id,
+			});
 		} catch (e) {
 			if (dictationCancelledRef.current) return;
 			dictationActiveRef.current = false;
 			endDictatedSend();
-			setError(dictationErrorCopy(e));
+			/* KEEP THE TAKE: a refusal that answers the same way twice still gets
+			   a Discard, and the transient classes get a Retry that resends these
+			   exact bytes. The blob is released by success, Discard, a new take,
+			   a cancel, a route change or unmount — never left to linger. */
+			lastTakeRef.current = blob;
+			setDictationNotice("");
+			setDictationFailure(dictationFailureFor(e, blob));
 			setDictation("idle");
 			setRecordSeconds(0);
 			return;
@@ -1464,6 +1644,9 @@ export function Composer({
 		   a clobber by another name. */
 		if (dictationCancelledRef.current) return;
 		dictationActiveRef.current = false;
+		/* The take is spent: the words are in the box, so there is nothing left
+		   for a Retry to resend. */
+		lastTakeRef.current = null;
 		const previous = textRef.current;
 		const joined = joinDraft(previous, result.text);
 		const cleaned = result.text.trim();
@@ -1507,6 +1690,39 @@ export function Composer({
 		setRecordSeconds(0);
 	};
 
+	/** Resend the retained take through the SAME path a fresh one uses.
+
+	    It NEVER sends, even when the take came from a "Send recording" press:
+	    the press is dropped first (`endDictatedSend`, idempotent), so a retry
+	    after a failed send APPENDS the words and the user reviews them. A retry
+	    of a failed send must not turn into the message they thought had failed. */
+	const retryDictation = () => {
+		const take = lastTakeRef.current;
+		if (take === null || dictationRef.current !== "idle") return;
+		/* This is a FRESH attempt: clear the previous attempt's cancel guard
+		   before the request goes out (a cancel after this still wins). */
+		dictationCancelledRef.current = false;
+		dictationActiveRef.current = true;
+		endDictatedSend();
+		setDictationNotice("");
+		void transcribeTake(take);
+		/* The Retry button unmounts with the failure row: hand focus to the status
+		   row that outlives it, or the browser drops focus to <body> and a hardware
+		   keyboard loses its place in the form. The row, not the field: focusing
+		   the textarea here would raise the soft keyboard over the wait. */
+		dictationRowRef.current?.focus();
+	};
+
+	/** Throw the failed take away. Quiet, like every other deliberate discard:
+	    the user knows what they tapped, and the words are gone by design. */
+	const discardDictationTake = () => {
+		lastTakeRef.current = null;
+		setDictationFailure(null);
+		dictationActiveRef.current = false;
+		setDictation("idle");
+		setRecordSeconds(0);
+	};
+
 	/** "SEND RECORDING": stop the take, transcribe it and submit the words in one
 	    press. Only the PRESS lives here; the send is the effect below, run against
 	    the render in which the transcript is in the box. */
@@ -1546,6 +1762,15 @@ export function Composer({
 		return () => cancelDictation();
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- refs + stable setters only
 	}, []);
+
+	/* A different conversation is a different composer: the failed take was
+	   recorded into this one, so a route change releases it. Unmount (a sign-out
+	   reloads the SPA) is covered by the cleanup above. */
+	useEffect(() => {
+		lastTakeRef.current = null;
+		setDictationFailure(null);
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- a ref and a stable setter
+	}, [pid]);
 
 	const send = async (raw: string, op?: "prompt" | "steer") => {
 		/* SEND CANCELS AN IN-FLIGHT DICTATION: tracks released and a result still
@@ -1632,6 +1857,11 @@ export function Composer({
 					text: trimmed,
 					images: payloadImages,
 				};
+				/* The busy-send delivery mode is pinned into the envelope for a FRESH
+				   send only (a retained retry replays its stored mode, never the
+				   composer's current preference). `deliveryForSend` keeps `steer`,
+				   idle and unsupported sends byte-identical to the legacy frame. */
+				const deliveryPin = deliveryForSend(delivery, projection.streaming, busyDeliverySupported(capabilities));
 				const receipt = await submitContinuation(
 					pid,
 					submittedEnvelope.op,
@@ -1639,7 +1869,7 @@ export function Composer({
 					payloadImages,
 					/* The annotation is consulted only for a FRESH send (a retry replays
 					   the stored envelope's own bytes, annotation included). */
-					annotationForSend(provenanceRef.current),
+					{ ...annotationForSend(provenanceRef.current), ...(deliveryPin && deliveryPin !== "steer" ? { delivery: deliveryPin } : {}) },
 					/* The user's message leaves the composer HERE, into a row of its own,
 					   before the daemon has answered — the whole point of the optimistic
 					   path. It is painted under the ENVELOPE's id rather than a fresh one,
@@ -1774,7 +2004,15 @@ export function Composer({
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(
-				/* A skill set over the relay's body budget is a REFUSAL WITH A REMEDY,
+				/* A 400 that names the delivery modes is a REFUSAL with a remedy,
+				   rendered verbatim rather than swallowed as a generic retry line:
+				   the relay could not honour queue/both for this owner, and the
+				   user must see that sentence. Any other 400 keeps the generic
+				   copy below. Keyed on status + message shape so no mode string
+				   is special-cased. */
+				failure instanceof HttpError && failure.status === 400 && failure.message.includes("delivery")
+					? failure.message
+					: /* A skill set over the relay's body budget is a REFUSAL WITH A REMEDY,
 				   not a transient failure: retrying the same draft is refused again,
 				   so the one retry sentence pointed at an action that cannot work and
 				   hid the cause (UX review U6). Keyed on the wire's typed code, so the
@@ -2143,9 +2381,81 @@ export function Composer({
 			    move the line (design round 1, D3). `role="status"` (polite) so a
 			    screen reader hears the state without stealing focus; colour is never
 			    the only carrier (dot + word + timer). */}
-			{dictation !== "idle" || dictationNotice ? (
-				<div className="flex min-h-11 items-center gap-2 px-0.5">
-					{dictation === "recording" ? (
+			{dictation !== "idle" || dictationFailure !== null || dictationNotice ? (
+				<div
+					ref={dictationRowRef}
+					/* Focusable by script only, for the row's WHOLE life: the state
+					   change that REMOVES the focused Retry button hands focus here, or
+					   the browser drops it to <body> and a hardware keyboard loses its
+					   place in the form. The attribute must outlive the failure row:
+					   Retry clears `dictationFailure` while this same row stays (the
+					   transcribing line, then the outcome notice), and Chrome resets
+					   activeElement to <body> the moment the FOCUSED element loses its
+					   tabIndex — Gecko keeps it, so only a real Chrome shows it. */
+					tabIndex={-1}
+					className={cn(
+						"flex min-h-11 items-center gap-2 px-0.5",
+						/* A long sentence and two 44 px actions cannot share one line at
+						   200% text: unwrapped, the message was squeezed to one letter per
+						   line at 320 px (Q1/Q2/D5). Wrapped, the actions move to a second
+						   line, right-aligned, only when they do not fit on the first. */
+						dictationFailure !== null && "flex-wrap",
+					)}
+				>
+					{dictationFailure !== null ? (
+						<>
+							{/* The failed take is recoverable IN PLACE: the row keeps the same
+							    min-h-11 line the live states use (D3), so retrying does not move
+							    anything, and role="alert" is preserved from the alert row this
+							    moved out of. */}
+							{/* `flex-auto` (auto basis), not `flex-1` (zero basis): a zero basis
+							    fits itself beside the actions and then grows, so the row would
+							    ALWAYS wrap onto two lines. Auto basis lets a short sentence keep
+							    one line at 100%, and the min-width forces the wrap before the
+							    message can be squeezed narrow. `min()` keeps that floor inside
+							    the row when 200% text grows 12rem past a 320 px viewport. */}
+							<p
+								role="alert"
+								aria-live="assertive"
+								className="min-w-[min(12rem,100%)] flex-auto break-words text-body-sm text-danger"
+							>
+								{dictationFailure.message}
+							</p>
+							{/* One group for both actions (D1): `gap-4` keeps Retry and Discard
+							    apart, `ml-auto` right-aligns the group on its own line, and
+							    `self-end` bottoms it against a multi-line message instead of
+							    vertically centring Discard against the text. */}
+							<div className="ml-auto flex items-end gap-4 self-end">
+								{dictationFailure.retry ? (
+									/* A quiet bordered pill (D1): the retry is the row's only
+									   positive action, so it reads as a control without the accent
+									   fill of Send. */
+									<button
+										type="button"
+										onClick={retryDictation}
+										aria-label="retry transcription"
+										className={cn(
+											"flex min-h-11 shrink-0 items-center rounded-full border border-control px-3 text-body-sm text-ink active:bg-elevated",
+											DICTATION_ACTION_FOCUS,
+										)}
+									>
+										Retry
+									</button>
+								) : null}
+								<button
+									type="button"
+									onClick={discardDictationTake}
+									aria-label="discard recording"
+									className={cn(
+										"flex min-h-11 shrink-0 items-center rounded-sm px-2 text-body-sm text-ink-muted active:text-ink",
+										DICTATION_ACTION_FOCUS,
+									)}
+								>
+									Discard
+								</button>
+							</div>
+						</>
+					) : dictation === "recording" ? (
 						<>
 							<p
 								role="status"
@@ -2364,10 +2674,47 @@ export function Composer({
 					   width a `shrink-0` chip would take the whole label's width); every
 					   other level lets it grow into what is left. The mic is an action
 					   and keeps its full touch target at every level. */}
-					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
+					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP(false), foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
 						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
 						<span data-ltr className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
 					</button>
+					{/* The busy-send delivery-mode chips (busy-delivery-v1) render AFTER
+					   the model chip (D5): a streaming-only chip ahead of the model
+					   pushed its left edge from x=64 idle to x=170 streaming at
+					   375 px and clipped the label to `claude-sonne…` at 280 px;
+					   after the model, the label keeps its edge and the chips take
+					   what is left. Visible ONLY
+					   while the agent is working AND the relay advertised the feature:
+					   an older relay or an idle session never offers a control whose
+					   send would be refused. One tap cycles steer → queue → both and
+					   persists per device. The worded options are the sheet, opened by
+					   a second visible affordance — the sheet button beside the chip
+					   is the door, never a hidden gesture. */}
+					{projection.streaming && busyDeliverySupported(capabilities) ? (
+						<>
+							<button
+								type="button"
+								onClick={() => {
+									const next = nextDeliveryMode(delivery);
+									setDelivery(next);
+									setDeliveryMode(next);
+								}}
+								aria-label={deliveryAriaLabel}
+								className={cn(COMPOSER_CHIP(delivery !== "steer"), "shrink-0 gap-1 px-2")}
+							>
+									<span aria-hidden data-delivery-glyph>‹</span>
+									<span>{deliveryVisibleText}</span>
+								</button>
+								<button
+									type="button"
+									onClick={() => setDeliveryOpen(true)}
+									aria-label={messageRuntime.t("relay.composer.delivery.label")}
+									className={cn(COMPOSER_CHIP(false), "shrink-0 px-1")}
+								>
+									<span aria-hidden>⋯</span>
+								</button>
+							</>
+					) : null}
 					<SessionStatus projection={projection} compact short={short} mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "full"} />
 				</div>
 
@@ -2410,6 +2757,12 @@ export function Composer({
 				onPick={onSlashPick}
 				onSpace={onSlashSpace}
 				query={slashQuery(text) ?? ""}
+			/>
+			<DeliverySheet
+				open={deliveryOpen}
+				onClose={() => setDeliveryOpen(false)}
+				value={delivery}
+				onChoose={(mode) => { setDelivery(mode); setDeliveryMode(mode); }}
 			/>
 			<UsageSheet open={usageOpen} onClose={() => setUsageOpen(false)} />
 			<EffortSheet

@@ -388,6 +388,7 @@ _AMBIENT_VARS = (
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    "LOP_RUNTIME_GOAL_WAKE_DUE",
     # The wake supervisor's per-invocation ownership stamp (#3028,
     # ``wakes/owned_runtimes.OWNER_ENV``) and the flag that lets ``launch``
     # propagate it. serve() sets both in its own environment, so a suite run

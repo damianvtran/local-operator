@@ -36,12 +36,13 @@ import shutil
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
 from local_operator.i18n import catalogues, resolve, text
 from local_operator.tui import bindings
-from local_operator.tui.widgets.tool_card import ToolCard
+from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
 
 NS = "tui.tool_card.extra"
 EN_ROOT = Path(catalogues.__file__).resolve().parent / "catalogues"
@@ -278,6 +279,42 @@ def test_translated_fetch_and_search_rows_keep_their_styling(fr_extra) -> None:
     search = _search_card()._build_content(140)
     assert _styles_over(search, "FR Provider: brave (api_key)") == {search_dim}
     assert _styles_over(search, "FR Sources:") == {search_dim}
+
+
+@pytest.mark.parametrize(
+    ("locale", "lead", "redirect", "close", "cache"),
+    [
+        ("en", "Fetched: ", "(final: ", ")", "cache miss"),
+        ("fr", "Récupéré\u202f: ", "(URL finale\u202f: ", ")", "cache miss"),
+        ("zh-CN", "已获取：", "（重定向至", "）", "缓存miss"),
+    ],
+)
+def test_shipped_fetched_rows_style_only_interpolated_urls(
+    locale: str, lead: str, redirect: str, close: str, cache: str
+) -> None:
+    final_url = "https://example.org/destination"
+    metadata = "https://metadata.example"
+    signal, dim = bindings.style("tool.fetch.signal"), bindings.style("tool.fetch.dim")
+    try:
+        text.set_active_locale(locale)
+        card = _fetch_card(final_url=final_url, content_type=metadata)
+        content = card._build_content(140)
+        expected = f"{lead}{URL}  {redirect}{final_url}{close}  ·  200 · {metadata} · {cache}"
+        assert expected in [line.lstrip() for line in content.plain.splitlines()]
+        assert _styles_over(content, URL, after=lead) == {signal}
+        assert _styles_over(content, final_url, after=redirect) == {signal}
+        for fragment in (lead, redirect, f"{close}  ·  200 · {metadata} · {cache}"):
+            assert _styles_over(content, fragment, after=lead) == {dim}
+
+        for prefix, anchor in ((lead, URL), (f"{lead}{URL}  {redirect}", final_url)):
+            clipped_url = anchor[:12] + "…"
+            clipped_row = prefix + clipped_url
+            width = cell_len(clipped_row) + OUTPUT_INDENT + 2
+            clipped = card._build_content(width)
+            assert clipped_row in [line.lstrip() for line in clipped.plain.splitlines()]
+            assert _styles_over(clipped, clipped_url, after=prefix) == {signal}
+    finally:
+        text.set_active_locale("en")
 
 
 SHIPPED = ("fr", "es", "zh-CN", "ru", "vi", "hi", "ur")

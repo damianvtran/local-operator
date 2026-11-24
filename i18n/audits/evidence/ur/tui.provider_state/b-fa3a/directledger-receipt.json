@@ -1,0 +1,41 @@
+{
+  "locale": "ur",
+  "namespace": "tui.provider_state",
+  "source_sha256": "113c0264cd259c7a946e89cbd8a80577bfbdd7d8d2fadc9ac14a7e80da7f7912",
+  "status": "passed",
+  "translator": {
+    "agent": "i18n-translator",
+    "task": "provider-state-ur-author",
+    "session": "ab6b56b73e1e",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Fresh host-delivered model-switch notice in this session transcript: now running openai/gpt-6.1-sol (was anthropic/claude-opus-5-5), reason provider failure: quota.",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "provider_request_id": null,
+    "additional_served_telemetry": "not available; no configured-header inference",
+    "method": "native LLM reasoning; no translation API/SDK/MT service"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "provider-state-ur-audit-B",
+    "session": "fa3a49851fe9",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Host-delivered model-switch notice: openai/gpt-6.1-sol from anthropic/claude-opus-5-5, provider failure: quota",
+    "fallback": {
+      "used": true,
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    },
+    "independent_per_response_telemetry": "unavailable; unknown beyond host notice",
+    "provider_request_id": null
+  },
+  "audit_date": "2026-11-22",
+  "unresolved_blocker_major_count": 0,
+  "note": "Independent Urdu B ALL5 lexical/mechanical pass; record i18n/audits/evidence/ur/tui.provider_state/b-fa3a/record.json. Native glyph/integration proof unperformed; no release/admission clearance."
+}

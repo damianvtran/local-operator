@@ -908,21 +908,34 @@ FRESH_BODY = "the message that just arrived"
 class _OrderingWire:
     """One fake hub in both roles: the connector's wire and the tool's client.
 
-    ``calls`` records only the two calls this test orders (a body read and an
-    admit), and ``cancel_after`` models a wake window closing during one of
-    them: the call that would be the (``cancel_after`` + 1)th raises
-    ``CancelledError``, exactly as a stop does mid-spine.
+    ``calls`` records body reads and admissions. Cancellation names a message
+    and a protocol phase, so an optional fresh display read cannot accidentally
+    close a window intended to reach the review half.
     """
 
-    def __init__(self, bodies: dict[str, str], *, cancel_after: int | None = None) -> None:
+    def __init__(
+        self,
+        bodies: dict[str, str],
+        *,
+        cancel_phase: str | None = None,
+        cancel_message_id: str | None = None,
+    ) -> None:
         self.bodies = bodies
         self.order = list(bodies)
         self.admitted: set[str] = set()
         self.calls: list[tuple[str, str]] = []
-        self.cancel_after = cancel_after
+        self.cancel_phase = cancel_phase
+        self.cancel_message_id = cancel_message_id
+        self.cancelled_phases: list[tuple[str, str]] = []
 
     def _call(self, kind: str, message_id: str) -> None:
-        if self.cancel_after is not None and len(self.calls) >= self.cancel_after:
+        phase = kind
+        if kind == "body":
+            # Admission is the semantic boundary: the later read refreshes
+            # display metadata, while a held message's first read is review.
+            phase = "post_allow_refresh" if message_id in self.admitted else "review_body"
+        if self.cancel_phase == phase and self.cancel_message_id == message_id:
+            self.cancelled_phases.append((phase, message_id))
             raise asyncio.CancelledError
         self.calls.append((kind, message_id))
 
@@ -1101,9 +1114,7 @@ def test_a_window_closing_mid_review_redrive_has_already_admitted_fresh_work(
     bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
     bodies["bcmsg_fresh01"] = FRESH_BODY
     fresh = "bcmsg_fresh01"
-    # Two calls is exactly the fresh message's body read and its admit; the
-    # third (a review-held body re-read) is where the window closes.
-    wire = _OrderingWire(bodies, cancel_after=2)
+    wire = _OrderingWire(bodies, cancel_phase="review_body", cancel_message_id="bcmsg_review00")
     a, config_dir, _store, _review_ids = _ordering_rig(tmp_path, monkeypatch, wire)
 
     with pytest.raises(asyncio.CancelledError):
@@ -1247,13 +1258,11 @@ def test_a_204_iteration_still_runs_the_review_half(
 def test_the_feed_refs_are_consumed_before_the_review_half(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A window that closes during a review re-drive must not replay the fresh ref."""
+    """Cancel at bcmsg_review00's first review-held body read, after fresh consumption."""
 
     bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
     bodies["bcmsg_fresh01"] = FRESH_BODY
-    # Two recorded calls are the fresh message's body read and its admit; the
-    # third is the first review-held body re-read, where the window closes.
-    wire = _OrderingWire(bodies, cancel_after=2)
+    wire = _OrderingWire(bodies, cancel_phase="review_body", cancel_message_id="bcmsg_review00")
     a, config_dir, store, _review_ids = _ordering_rig(tmp_path, monkeypatch, wire, real_feed=True)
 
     with pytest.raises(asyncio.CancelledError):
@@ -1262,6 +1271,78 @@ def test_the_feed_refs_are_consumed_before_the_review_half(
     assert wire.admitted == {"bcmsg_fresh01"}
     remaining = store.drain_feed_refs(a, upto_seq=1)
     assert remaining == [], "the fresh ref was deleted before the review half ran"
+
+
+def test_post_allow_refresh_cancellation_retains_the_ref_until_card_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancel the fresh post-ALLOW display refresh, then resume its exact durable ref."""
+    from local_operator.team_bridge.connector.wake import CARD_HANDOFF
+    from local_operator.team_bridge.store import CARD_OWED, CARD_POSTED
+    from local_operator.team_bridge.types import feed_seq
+
+    fresh = "bcmsg_fresh01"
+    wire = _OrderingWire(
+        {fresh: FRESH_BODY}, cancel_phase="post_allow_refresh", cancel_message_id=fresh
+    )
+    a, config_dir, store, _review_ids = _ordering_rig(tmp_path, monkeypatch, wire, real_feed=True)
+    original_refs = store.drain_feed_refs(a, upto_seq=1)
+    assert len(original_refs) == 1
+    attempts: list[str] = []
+    accepted: list[str] = []
+
+    async def record_acceptance(owner: Any, payload: str, **kwargs: Any) -> str:
+        handoff = CARD_HANDOFF.get()
+        assert handoff is not None
+        identity = handoff.message_id
+        assert identity.startswith("peer-")
+        attempts.append(identity)
+        if identity not in accepted:
+            accepted.append(identity)
+        return "delivered and woke the session"
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", record_acceptance)
+    with pytest.raises(asyncio.CancelledError):
+        _iterate(a, config_dir)
+
+    assert wire.cancelled_phases == [("post_allow_refresh", fresh)]
+    assert wire.calls == [("body", fresh), ("admit", fresh)]
+    assert wire.calls.count(("admit", fresh)) == 1
+    assert store.body_card_status(a, CID, fresh) == CARD_OWED
+    reservation = store.body_reservation(a, CID, fresh)
+    assert reservation is not None and reservation["state"] == "pending"
+    assert reservation["card_posted_at"] is None
+    assert store.drain_feed_refs(a, upto_seq=1) == original_refs, "cancel must retain the exact ref"
+    assert accepted == [], "no card was accepted before refresh cancellation"
+    assert attempts == []
+
+    # Do not re-seed: only the ref retained by the cancelled iteration can
+    # drive this attempt. Reservation alone is not a wake or completed delivery.
+    wire.cancel_phase = None
+    resumed = _iterate(a, config_dir)
+    assert resumed["handled"][0]["action"] == "delivered"
+    # The handler re-attempts idempotent hub admission before checking the
+    # reservation. Count logical messages here, not at-least-once admit calls.
+    assert wire.admitted == {fresh}
+    assert len(attempts) == 1, "resuming must attempt the owed card"
+    assert accepted == attempts, "exactly one card acceptance"
+    identity = attempts[0]
+    assert store.card_handoff_bindings(a, CID, [fresh]) == {fresh: identity}
+    assert store.body_card_status(a, CID, fresh) == CARD_POSTED
+    assert store.drain_feed_refs(a, upto_seq=1) == []
+
+    # A hub replay of that same ref after posting is quiet. This does not
+    # assert zero retries for an accepted card whose posted-marker write fails.
+    store.record_feed_batch(a, feed_seq(1), original_refs, resync_required=False)
+    assert store.drain_feed_refs(a, upto_seq=1) == original_refs
+    replayed = _iterate(a, config_dir)
+    assert replayed["handled"][0]["action"] == "duplicate"
+    assert wire.admitted == {fresh}
+    assert attempts == [identity]
+    assert accepted == [identity], "posted replay must not accept a second card"
+    assert store.card_handoff_bindings(a, CID, [fresh]) == {fresh: identity}
+    assert store.body_card_status(a, CID, fresh) == CARD_POSTED
+    assert store.drain_feed_refs(a, upto_seq=1) == []
 
 
 def test_a_failing_fresh_ref_does_not_skip_the_review_half(

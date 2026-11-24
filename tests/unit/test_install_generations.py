@@ -34,6 +34,7 @@ from typing import Any
 
 import pytest
 
+from local_operator import atomic_files
 from local_operator import update as update_mod
 
 # ``_real`` is the non-raising realpath the layout itself compares with; these
@@ -307,20 +308,20 @@ class TestTheFlip:
         reader would be looking. A ``current`` written as unlink-then-create is
         absent at exactly this point, which is the failure a ``lop`` exec would
         report as "No such file or directory"; a staging symlink plus
-        ``os.rename`` leaves the old generation named until the replacement
-        lands.
+        ``os.replace`` (``atomic_files.atomic_symlink``) leaves the old
+        generation named until the replacement lands.
         """
         first = _install("0.51.9")
         second = _install("0.52.0")
         observed: list[Path | None] = []
-        real_rename = os.rename
+        real_replace = os.replace
 
         def _observe(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
             if str(dst) == str(update_mod.pointer_path()):
                 observed.append(update_mod.current_generation())
-            real_rename(src, dst)
+            real_replace(src, dst)
 
-        monkeypatch.setattr(update_mod.os, "rename", _observe)
+        monkeypatch.setattr(os, "replace", _observe)
         update_mod.flip_pointer(first)
         assert observed == [second]
         assert update_mod.current_generation() == first
@@ -2321,13 +2322,19 @@ class TestPruning:
         pointer = update_mod.pointer_path()
         stale = pointer.with_name(f"{pointer.name}.tmp-999999")
         fresh = pointer.with_name(f"{pointer.name}.tmp-999998")
-        for link in (stale, fresh):
+        # The per-write name ``flip_pointer`` stages today
+        # (``atomic_files.unique_temp(..., marker="tmp")``) must keep the
+        # ``current.tmp-*`` shape this sweep finds, or a killed flip leaks forever.
+        stale_unique = atomic_files.unique_temp(pointer, marker="tmp")
+        for link in (stale, fresh, stale_unique):
             os.symlink(generation, link)
         old = time.time() - update_mod._PARTIAL_TTL_S - 60
-        os.utime(stale, (old, old), follow_symlinks=False)
+        for link in (stale, stale_unique):
+            os.utime(link, (old, old), follow_symlinks=False)
 
         update_mod.prune_generations(now=time.time())
         assert not stale.exists(), "an interrupted flip left litter in the stable root"
+        assert not stale_unique.is_symlink(), "a per-write staging link was not swept"
         assert fresh.is_symlink(), "a concurrent flip's staging link must survive"
 
     def test_a_failed_removal_is_not_summarised_as_nothing_to_remove(

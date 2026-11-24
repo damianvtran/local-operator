@@ -1,0 +1,3 @@
+{
+  "cli.network_send.still_starting": "Phiên {session_id} vẫn đang khởi động trên {peer}; tin nhắn KHÔNG được đưa vào hàng đợi"
+}

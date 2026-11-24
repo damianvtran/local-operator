@@ -1,0 +1,22 @@
+{
+  "auditor": {"agent": "i18n-auditor (lopdev team)", "session": "08f810e0820c", "model": "anthropic/claude-opus-5-5 (no fallback observed)", "date": "2026-11-23", "independent_from_translator": true},
+  "repo": {"worktree": "~/local-operator/.worktrees/i18n-model-persist-notice", "head": "32270f862ee7"},
+  "audited_input": "~/.local-operator/sessions/7d612eac3fe3/scratchpad/zhcn-suggest/translation.json (translator session d0ab5f79ba1d)",
+  "source_sha256": {
+    "local_operator/i18n/catalogues/en/tui.settings_view.json": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+    "local_operator/i18n/catalogues/en/tui.settings_view.chrome.json": "5a6afa145f08d9a3020ec8b758b93becc322bf92dc6c72d36d667a1c9fa9d616"
+  },
+  "per_namespace": {
+    "tui.settings_view": {"result": "clean", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [],
+      "notes": "suggest_long: placeholders {browse_keys,complete_key,save_key,cancel_key} identical to EN; rendered '↑↓浏览建议 · tab补全 · enter保存 · esc' = 38 cells (was 36). Over the ~23-cell slot, but the sidecar says wider forms are dropped, not cropped, and the EN long form is wider still, so this is not a fit finding. suggest_medium bare 浏览 matches the decision's verb-slot rule. suggest_short unchanged. Repo validator not run (value not yet applied to a catalogue); placeholder parity checked by script."},
+    "tui.settings_view.chrome": {"result": "clean", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [],
+      "notes": "No delta. footer.suggestions 浏览建议 = 8 cells <= maxCells 14; footer.complete 补全 = 4 <= 12; now verbatim-consistent with editor.suggest_long."}
+  },
+  "term_decision": "agree — EN context for both keys says the arrows 'browse the suggestions' while tab completes and enter saves; 选 implies selecting/committing, which ↑↓ does not do, and collides with 选择. 浏览 is the idiomatic verb for moving through a list. Glossary and zh-CN style guide have no prior suggestion/browse entry, so no conflict; recording it under Locale calls is appropriate.",
+  "other_occurrences": [
+    "zh-CN/tui.settings_view.json editor.suggest_long — 选建议 (the defect; fixed by this delta)",
+    "zh-CN/tui.settings_view.chrome.json footer.suggestions — 浏览建议 (already consistent)",
+    "zh-CN/tui.settings_view.json editor.suggest_medium — bare 浏览 (verb-slot form, consistent)",
+    "No other rendering found: grep of all zh-CN catalogues for 选建议/浏览/候选/建议 shows only unrelated concepts (浏览器 browser; tui.community 浏览 = browse community; wire.memory 召回建议 = recall suggestions; wire.settings 候选数 = classification candidates; advisory 建议). EN catalogues contain 'suggestions' only in the two target keys plus wire.memory.suggest.label (a different concept)."
+  ]
+}

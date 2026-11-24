@@ -73,6 +73,21 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
+        "local_operator/network/file_release_coordinator.py::FileReleaseCoordinator._write",
+        "os.replace",
+        "Only state.json/initialized.json in the no-follow owner-domain directory: supplied "
+        "dir-fd must match a fresh validated domain open; source is its O_EXCL regular "
+        "single-link UUID stage, destination metadata rejects directories/symlinks. No session "
+        "path accepted; regular-file rename also refuses a raced directory destination.",
+    ),
+    (
+        "local_operator/network/file_release_coordinator.py::FileReleaseCoordinator._write",
+        "os.unlink",
+        "Only this call's UUID .state.json/.initialized.json stage basename relative to "
+        "the freshly identity-checked owner-domain dir-fd, after successful O_EXCL creation; "
+        "never accepts a session path, and unlink refuses even a substituted directory.",
+    ),
+    (
         "local_operator/remote_files/cache.py::evict",
         "os.unlink",
         "Removes only 32-hex digest blobs/sidecars relative to a held cache/remote-files "
@@ -270,19 +285,10 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # The receiver's runtime record (which build is running): a config-dir
     # sidecar published by atomic replace, the same pattern as the counter above.
     # Every ``_write`` caller passes ``record_path(config_dir)`` =
-    # ``<config_dir>/team_bridge/connector_runtime.json``; its temp sibling is
-    # that fixed name plus ``.{pid}.tmp``. No caller input reaches either path,
-    # so neither can be a session directory or a transcript.
-    (
-        "local_operator/team_bridge/connector/runtime_record.py::_write",
-        "os.replace",
-        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ runtime record",
-    ),
-    (
-        "local_operator/team_bridge/connector/runtime_record.py::_write",
-        "<path>.unlink",
-        "Clears only that write's own .{pid}.tmp FILE beside the record; never a session path",
-    ),
+    # ``<config_dir>/team_bridge/connector_runtime.json`` and publishes it through
+    # ``atomic_files.atomic_write_text`` (its replace/cleanup rows are that
+    # module's). No caller input reaches the path, so it cannot be a session
+    # directory or a transcript.
     (
         "local_operator/team_bridge/connector/runtime_record.py::clear_own_record",
         "<path>.unlink",
@@ -293,33 +299,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # ``JamTracker._path`` is ``jam_path(config_dir)`` =
     # ``<config_dir>/team_bridge/connector-jam.json``; ``_write_marker`` writes
     # ``marker_path(config_dir)`` = ``<config_dir>/team_bridge/connector-restart.json``.
-    # Each temp sibling is that fixed name plus ``.{pid}.tmp``. Every literal
+    # Both publish through ``atomic_files.atomic_write_text``. Every literal
     # component is a module constant and no caller input reaches either path,
     # so none can be a session directory or a transcript.
     (
         "local_operator/team_bridge/connector/jam.py::JamTracker._clear",
         "<path>.unlink",
         "Removes the fixed team_bridge/connector-jam.json FILE on recovery; never a session path",
-    ),
-    (
-        "local_operator/team_bridge/connector/jam.py::JamTracker._write",
-        "os.replace",
-        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ jam report",
-    ),
-    (
-        "local_operator/team_bridge/connector/jam.py::JamTracker._write",
-        "<path>.unlink",
-        "Clears only that write's own .{pid}.tmp FILE beside the jam report; never a session path",
-    ),
-    (
-        "local_operator/team_bridge/connector/stale_restart.py::_write_marker",
-        "os.replace",
-        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ restart marker",
-    ),
-    (
-        "local_operator/team_bridge/connector/stale_restart.py::_write_marker",
-        "<path>.unlink",
-        "Clears only that write's own .{pid}.tmp FILE beside the restart marker; never sessions/",
     ),
     # The reply guard's per-install digest key (#3377, review round 1 S-3) is
     # created atomically: random bytes go to a ``tempfile.mkstemp`` FILE in
@@ -373,17 +359,8 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only the failed write's own mkstemp temp FILE beside the inventory sidecar",
     ),
     # -- deferred cold-open metadata: a DERIVED cache file, not session state --
-    # ``write_cold_metadata`` publishes one session's replay-metadata record by
-    # renaming its own pid-suffixed temp FILE onto ``<config>/cache/cold_replay/
-    # <id>.json``. Both paths are built from the CONFIG ROOT, never from a
-    # session directory, and the record is regenerated from the journal on the
-    # next open, so nothing here can name or displace anything under ``sessions/``.
-    (
-        "local_operator/session/cold_metadata.py::write_cold_metadata",
-        "<path>.replace",
-        "Atomic swap of a sibling pid-temp FILE onto the derived cache record "
-        "under <config>/cache; never a session path.",
-    ),
+    # ``write_cold_metadata`` publishes one session's replay-metadata record at
+    # ``<config>/cache/cold_replay/<id>.json`` (through ``atomic_files``).
     # ``_record_absence`` publishes the absence-proof sidecar beside that record:
     # ``<config>/cache/cold_replay/<id>.absence.json``, named by
     # ``absence_proof_path`` (``with_name`` on the record path, so the same
@@ -445,14 +422,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Atomic plant of <venv>/bin/'Local Operator'; both paths are venv-derived",
     ),
     (
-        "local_operator/tools/builtin.py::_rg_config_path",
-        "os.replace",
-        # Atomic write of the generated ripgrep exclude config. Both paths come
-        # from `config_dir()/cache/` plus a fixed basename — no session id, no
-        # caller input — so neither can name a path under `sessions/`.
-        "Atomic replace of <config_dir>/cache/rg-search-excludes.conf; both paths config-derived",
-    ),
-    (
         "local_operator/procname.py::_plant_hardlink",
         "os.unlink",
         # THREE calls, and each is the SAME ``tmp`` name (``.<brand>.<pid>.tmp``)
@@ -464,16 +433,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         # from a session id or a config dir.
         "Clears this pid's own .tmp link in <venv>/bin before, after and on error",
         3,
-    ),
-    (
-        "local_operator/procname.py::_plant_libpython",
-        "os.replace",
-        "Atomic plant of <venv>/lib/libpython3.X.dylib; both paths are venv-derived",
-    ),
-    (
-        "local_operator/procname.py::_plant_libpython",
-        "os.unlink",
-        "Clears this pid's own .tmp symlink in <venv>/lib before linking",
     ),
     (
         "local_operator/procname.py::_sweep_orphan_temps",
@@ -567,11 +526,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Renames a corrupt <config>/notifications.db beside itself; no session path involved",
     ),
     (
-        "local_operator/code_requests/ledger.py::_write_json",
-        "<path>.replace",
-        "Atomic pid-temp replace of one <config>/code_requests/<stem>.json (index or cache)",
-    ),
-    (
         "local_operator/code_requests/ledger.py::write_index",
         "<path>.unlink",
         "Drops <config>/code_requests/<stem>.json when the session has no rows left",
@@ -605,11 +559,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # quoted-filename stem; no caller string can contribute a separator, and the
     # files are cached fetch state, regenerable by the next refresh pass — a
     # deleted entry is one conditional request away from being rebuilt.
-    (
-        "local_operator/code_requests/cache.py::_write_json",
-        "os.replace",
-        "Atomic pid-temp replace of one <config>/cache/code_requests/<host>/<file>.json",
-    ),
     (
         "local_operator/code_requests/cache.py::drop_entry",
         "<path>.unlink",
@@ -789,17 +738,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # directory, and no path here is derived from a session id beyond the eight
     # characters sanitised into the directory's own label.
     # The bash tool's `lop` shim (own_launcher_path_injection) lives in the
-    # session scratchpad, i.e. under sessions/<id>/, so these two calls DO sit in
-    # the protected tree. They are safe because both operate only on the two fixed
-    # entry names inside <scratchpad>/bin, and _launcher_shim_dir lstat-checks
-    # each and returns before either call when one is a real directory
-    # (test_shell_env.py::test_a_directory_at_the_shim_names_is_never_touched).
-    (
-        "local_operator/tools/builtin.py::_launcher_shim_dir",
-        "<path>.unlink",
-        "Removes only <scratchpad>/bin/.<launcher>.<pid>.tmp, this process's staged shim "
-        "entry, after an lstat check proved it is not a directory; unlink rejects directories.",
-    ),
+    # session scratchpad, i.e. under sessions/<id>/, so this call DOES sit in the
+    # protected tree. It is safe because it only renames this call's own per-write
+    # staging entry (atomic_files.unique_temp) onto the fixed <scratchpad>/bin/
+    # <launcher> name, and _launcher_shim_dir lstat-checks that name and returns
+    # before the rename when it is a real directory
+    # (test_shell_env.py::test_a_directory_at_the_shim_name_is_never_touched).
+    # A failed staging entry is removed by atomic_files.discard_temp (its row).
     (
         "local_operator/tools/builtin.py::_launcher_shim_dir",
         "os.replace",
@@ -924,22 +869,9 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     # The relay's deliberate-stop marker (`network/relay.py`, #3069): one FILE,
     # `<config>/run/relay-stop-requested.json`, beside the relay's own run/peers
-    # records. Written before a stop verb signals the unit, consumed by the relay
-    # as it exits (so its exit status says whether the stop was asked for). Each
-    # call below reaches only that file or its writer's own staging file -- file
-    # operations, never a directory removal, never anything under sessions/.
-    (
-        "local_operator/network/relay.py::mark_deliberate_stop",
-        "os.replace",
-        "Atomic replacement of the stop-marker FILE <config>/run/relay-stop-requested.json "
-        "from its own pid-named staging file; never a directory and never under sessions/",
-    ),
-    (
-        "local_operator/network/relay.py::mark_deliberate_stop",
-        "<path>.unlink",
-        "Removes only its own `relay-stop-requested.json.<pid>.tmp` staging FILE in "
-        "<config>/run after a failed write or replace",
-    ),
+    # records, written through `atomic_files` before a stop verb signals the unit
+    # and consumed by the relay as it exits (rows below). File operations only,
+    # never a directory removal, never anything under sessions/.
     # The owner-side create-key index (`network/create_keys.py`): ONE fixed-name
     # FILE, `<config>/network/create-keys.json`, rewritten atomically from a
     # mkstemp sidecar in the same directory. A sibling of `sessions/`, never a
@@ -1069,31 +1001,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # call minted. Every replace target and every unlink target is a regular FILE
     # (or a symlink planted in a sound's slot, unlinked as the link itself); no
     # call names a directory, and none can resolve under `sessions/`.
-    # `record_forwarding_origin`: the target is `_origins_path(root)` =
-    # <config>/remote-attention-origins.json (a fixed basename joined to the relay's
-    # config root, never a session id), and the source is the sibling
-    # `.remote-attention-origins.json.<pid>.tmp` FILE this same call created with
-    # O_CREAT. `os.replace` onto a regular file cannot displace a directory, and
-    # neither path can resolve under `sessions/`.
-    (
-        "local_operator/notifications/remote_attention.py::record_forwarding_origin",
-        "os.replace",
-        "Atomic replace of <config>/remote-attention-origins.json from its sibling "
-        "pid-suffixed tmp FILE; never a directory and never under sessions/",
-    ),
-    # `origin_baselines_ms`: the target is `Path(root) / BASELINES_FILE` =
-    # <config>/remote-attention-baselines.json (a fixed basename joined to the
-    # watcher's config root — tui/app.py and server/app.py pass their config dir,
-    # never a session id), and the source is the sibling
-    # `.remote-attention-baselines.json.<pid>.tmp` FILE this same call created
-    # with O_CREAT under the flock. `os.replace` onto a regular file cannot
-    # displace a directory, and neither path can resolve under `sessions/`.
-    (
-        "local_operator/notifications/remote_attention.py::origin_baselines_ms",
-        "os.replace",
-        "Atomic replace of <config>/remote-attention-baselines.json from its sibling "
-        "pid-suffixed tmp FILE; never a directory and never under sessions/",
-    ),
     (
         "local_operator/notifications/custom_sounds.py::_write_index",
         "os.replace",
@@ -1298,17 +1205,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only this call's own .<name>.<pid>.<tid>.<token>.tmp sidecar after "
         "the replace, in the same directory under <config>/network/",
-    ),
-    (
-        "local_operator/network/rollouts.py::_write_record",
-        "os.replace",
-        # S3a's rollout record write: the path is <config>/network/rollouts/
-        # ro_<id>.json — config-root- and record-derived, never a session id —
-        # and this is ``os.replace``, which refuses DIRECTORIES outright
-        # (EISDIR/ENOTEMPTY), so no directory under `sessions/` can be
-        # removed through it.
-        "Atomic replace of <config>/network/rollouts/ro_<id>.json; "
-        "os.replace cannot target a directory",
     ),
     # The session move's working-set transfer (#4245, workset_move.py and
     # workset_transfer.py). Its own state lives under <config>/network/
@@ -1719,31 +1615,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # -- the session STAMP: `sessions/<id>/mesh.json` ------------------------
     # THE ONE MESH FILE THAT REALLY IS INSIDE A SESSION DIRECTORY, so it is argued
     # here and not in the block above. `stamp_path` joins the literal
-    # `MESH_STAMP_NAME` as the LAST component, so neither call can name a session
-    # DIRECTORY: `os.replace` puts a tmp FILE over the mesh.json FILE (a replace
-    # over a regular file never removes or renames its parent), the unlink removes
-    # only that call's own tmp sidecar, and `remove_stamp` unlinks mesh.json alone —
+    # `MESH_STAMP_NAME` as the LAST component, so no call can name a session
+    # DIRECTORY: `write_stamp_into` publishes the mesh.json FILE through
+    # `atomic_files.atomic_write_bytes` (a replace over a regular file never
+    # removes or renames its parent), and `remove_stamp` unlinks mesh.json alone —
     # an absence `read_stamp` documents as the ordinary "unplaced" state, which is
     # the pre-mesh behaviour, not a session that lost its transcript or its record.
     # This is the design's own stamp lifecycle (mesh-session-mobility.md §1.2/§5.1):
     # the WRITE is how `net_session_create` records `home_device` on the session the
     # peer just asked for, and the removal belongs to the move/fork path, which is
     # the next slice and not in this build.
-    (
-        "local_operator/session/placement.py::write_stamp_into",
-        "os.replace",
-        "tmp FILE -> mesh.json FILE; the directory is written INTO, never named, and a "
-        "failed write deliberately leaves no stamp at all. Renamed from `write_stamp` when "
-        "the move needed a stamp written into its STAGING directory (so the promote is one "
-        "rename): one writer taking that directory, with `write_stamp` delegating to it "
-        "with `sessions/<id>`.",
-    ),
-    (
-        "local_operator/session/placement.py::write_stamp_into",
-        "os.unlink",
-        "Removes only this call's own .mesh.json.<pid>.tmp sidecar before re-raising the "
-        "failed write",
-    ),
     (
         "local_operator/session/placement.py::remove_stamp",
         "<path>.unlink",
@@ -1770,22 +1651,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "files whose shape+size+age passed",
     ),
     #
-    # Two FILE unlinks, both named by the function that owns the sidecars' paths:
-    # the per-session scan cache and the spool write lock. Neither path can be a
-    # session directory — the first comes from `session_files.ledger.cache_path`
-    # (`<config>/cache/session_files/<id>.json`) and the second from
-    # `spooled.lock_name` (`<config>/wakes/spooled/.<id>.lock`) — and both are
-    # written OUTSIDE the session directory by the modules that own them. The
-    # call runs only after `_bounded_rmtree` has already removed THIS session's
+    # Three FILE unlinks, each named by the module that owns the sidecar's path:
+    # `session_files.ledger.cache_path` names the scan cache at
+    # `<config>/cache/session_files/<id>.json`; `index_prewarm.settled_record_path`
+    # names the settlement record at `<config>/cache/prewarm_settled/<id>.json`;
+    # `spooled.lock_name` names the spool lock at `<config>/wakes/spooled/.<id>.lock`.
+    # All three are OUTSIDE the session directory, and unlink rejects directories.
+    # The call runs only after `_bounded_rmtree` has already removed THIS session's
     # directory, and it is keyed by that session's id: a sidecar whose session
-    # directory still exists is never touched.
+    # directory still exists is never touched. The spool lock is unlinked only
+    # while held; a busy or unopenable lock remains in place.
     (
         "local_operator/session/cleanup.py::_drop_session_sidecars",
         "<path>.unlink",
-        "Unlinks the removed session's own file-scan cache entry and spool lock — "
-        "regular files named by the owning modules' path helpers, never a directory, "
-        "and only for a session whose directory this removal just deleted",
-        2,
+        "Unlinks the removed session's own file-scan cache entry, prewarm settlement "
+        "record and held spool lock — regular files named by the owning modules' path "
+        "helpers, never a directory, and only for a session whose directory this "
+        "removal just deleted",
+        3,
     ),
     # -- transcript compression ----------------------------------------------
     # The compression pass RENAMES nothing and REMOVES nothing but the two files
@@ -2205,20 +2088,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # paths come from `keys.key_path()`, which is `config_dir()/secrets/` plus
     # a fixed basename — no caller input and no session id reaches either, so
     # neither can name a path under sessions/.
-    # The tail-anchor sidecar: an atomic write of a session's OWN file. Both paths
-    # are that directory's own children (``tail-anchor.v1.json`` and its
-    # ``.<name>.<pid>.tmp``), and the target is a regular file inside the session —
-    # never the directory the store walks, and never another session's.
-    (
-        "local_operator/session/tail_anchor.py::write_anchor",
-        "os.replace",
-        "Atomic write of <session>/tail-anchor.v1.json; both paths are its own children",
-    ),
-    (
-        "local_operator/session/tail_anchor.py::write_anchor",
-        "<path>.unlink",
-        "Clears this pid's own .tmp sidecar in the same directory after a failed write",
-    ),
     (
         "local_operator/secrets/keys.py::replace_master_key",
         "os.replace",
@@ -2637,7 +2506,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # `.tmp` FILE renamed onto a FILE, never a directory. `_staged_write`'s
     # target is `<config>/run/<ns>/<pid>.json` or `<session>/runtime-stop.json`,
     # i.e. a file INSIDE a directory that already exists (the same shape as
-    # `resume.py::write_session_title`'s row below), and it never creates or
+    # `resume.py::write_session_title`'s sidecar write), and it never creates or
     # moves that directory; `_reap_dead_record`'s receiver is the run
     # directory's own `reaped/` subdirectory, built from `run_dir()` and the
     # record's pid — nothing here is derived from a session id or a transcript.
@@ -2790,6 +2659,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/transcript.py::Transcript._replace_file",
         "os.replace",
         "compaction temp FILE -> transcript.jsonl inside the same session directory",
+    ),
+    (
+        "local_operator/session/transcript.py::Transcript._rewrite_without_lines",
+        "os.replace",
+        "fold-on-open temp FILE (transcript.jsonl.fold) -> transcript.jsonl inside "
+        "the same session directory",
+    ),
+    (
+        "local_operator/session/transcript.py::Transcript._rewrite_without_lines",
+        "<path>.unlink",
+        "removes its own fold-on-open temp FILE (transcript.jsonl.fold), never a directory",
     ),
     (
         "local_operator/session_lease.py::acquire_session_lease",
@@ -3021,36 +2901,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "pane marker FILE",
     ),
     (
-        "local_operator/resume.py::_save_origin_cache",
-        "<path>.replace",
-        "temp FILE -> origin-verdicts.json",
-    ),
-    (
-        "local_operator/resume.py::_write_origin_scan_sentinel",
-        "<path>.replace",
-        "temp FILE -> sentinel in a session",
-    ),
-    (
-        "local_operator/resume.py::_write_title_scan_sentinel",
-        "<path>.replace",
-        "temp FILE -> sentinel in a session",
-    ),
-    (
-        "local_operator/resume.py::write_session_attachment",
-        "<path>.replace",
-        "temp FILE -> attachment.json",
-    ),
-    (
-        "local_operator/resume.py::write_goal_record",
-        "<path>.replace",
-        "temp FILE -> goal.json",
-    ),
-    (
-        "local_operator/resume.py::write_session_title",
-        "<path>.replace",
-        "temp FILE -> title.json in a session",
-    ),
-    (
         "local_operator/session/retention.py::release_session",
         "<path>.unlink",
         ".session.pid marker FILE",
@@ -3103,11 +2953,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/runtime/viewers.py::unpublish_viewer",
         "<path>.unlink",
         "own run/viewers/<pid>.json FILE",
-    ),
-    (
-        "local_operator/session/search_index.py::_save",
-        "<path>.replace",
-        "temp FILE -> search index FILE",
     ),
     # -- transcript index cache (derived, regenerable; never a session entry) --
     # Both paths are built from `config_dir()/cache/transcript_index/<sid>.json`
@@ -3279,46 +3124,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "a fixed basename under the cache dir — never a session path",
     ),
     (
-        "local_operator/update.py::flip_pointer",
-        "<path>.unlink",
-        "<stable>/current.tmp-<pid> — this call's own staged SYMLINK",
-        2,
-    ),
-    (
-        "local_operator/update.py::flip_pointer",
-        "os.rename",
-        "staged symlink -> <stable>/current; both under the stable root, no directory moves",
-    ),
-    (
-        "local_operator/update.py::_rebind_scripts",
-        "<path>.unlink",
-        "<gen>/…/bin/<script>.rebind-<pid> temp FILE, unlinked when its rename fails",
-    ),
-    (
         "local_operator/update.py::_undo_migration",
         "<path>.unlink",
         "<stable>/current pointer and <stable>/bin/python3 shim, undone on a failed migration",
         2,
     ),
     (
-        "local_operator/update.py::_rebind_scripts",
-        "os.rename",
-        "<gen>/…/bin/<script>.rebind-<pid> FILE -> the script; only text FILES under bin/",
-    ),
-    (
         "local_operator/update.py::_sweep_staging_links",
         "<path>.unlink",
         "<stable>/current.tmp-<pid> SYMLINK left by an interrupted flip; the stable root, aged",
-    ),
-    (
-        "local_operator/update.py::_atomic_symlink",
-        "os.rename",
-        "<local bin>/<entry>.tmp-<pid> -> <local bin>/<entry> symlink; no directory moves",
-    ),
-    (
-        "local_operator/update.py::_atomic_symlink",
-        "<path>.unlink",
-        "a previous run's own staging symlink beside the launcher, before re-linking",
     ),
     (
         "local_operator/update.py::_write_executable",
@@ -3477,7 +3291,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "cleanup of this function's own mkstemp temp FILE",
     ),
     (
-        "local_operator/wakes/install.py::uninstall",
+        "local_operator/wakes/install.py::ensure_supervisor_installed",
+        "<path>.unlink",
+        "the fixed .wake-supervisor-uninstalled FILE at the store root, cleared on rearm",
+    ),
+    (
+        "local_operator/wakes/install.py::_uninstall_locked",
         "<path>.unlink",
         "the LaunchAgent plist, or the systemd SERVICE + TIMER units, or the "
         "recorded Windows task definition — one platform's set, never a directory",
@@ -3772,6 +3591,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         2,
     ),
     (
+        "local_operator/tui/tool_fold.py::ToolFoldLayer._remove_bar",
+        "<path>.remove",
+        "widget.remove() on a FoldBarBlock the layer mounted; no filesystem path",
+    ),
+    (
+        "local_operator/tui/tool_fold.py::ToolFoldLayer._remove_foot",
+        "<path>.remove",
+        "widget.remove() on a TurnFootBlock the layer mounted; no filesystem path",
+    ),
+    (
         "local_operator/mcp/credentials.py::store_credentials.persist",
         "<path>.remove",
         "list.remove(key) — drops a written id from the failed-ids list",
@@ -3994,13 +3823,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "sessions/); unlink rejects directories",
     ),
     (
-        "local_operator/network/carry.py::_write_marker",
-        "os.replace",
-        "Atomic write of a session's own desktop.json cwd marker at the promote, "
-        "through a sibling pid-temp file. It rewrites ONE field of a bookkeeping "
-        "file the copy already carried; the transcript is never edited",
-    ),
-    (
         "local_operator/network/mobility.py::_promote",
         "<path>.unlink",
         "Removes the move's own ready.json boot marker from the just-adopted session "
@@ -4105,11 +3927,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only this call's own mkstemp temp FILE after a failed write; unlink "
         "rejects directories",
     ),
-    (
-        "local_operator/network/sync.py::write_replica_cursor",
-        "os.replace",
-        "Atomic tmp -> sync.json inside one network/replicas/<id>/ directory",
-    ),
     # The handoff journal's own atomic writer (see the module's fail-closed rule):
     # both the replacement and the temp cleanup are under <config>/network/.
     (
@@ -4178,24 +3995,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         # row was rewritten (the live rows are still the "before" copy).
         "Removes <config_dir>/projects/.migrations-backup-<stamp> after a failed "
         "backup; config-derived, never sessions/",
-    ),
-    # The eval tool's cross-process restart marker (``tools/eval.py``): the same
-    # atomic-write shape as ``registry._staged_write`` above — a
-    # ``<session>/eval-kernel.json.<pid>.tmp`` FILE renamed onto the
-    # ``<session>/eval-kernel.json`` FILE, both built from the context's session
-    # directory plus a literal basename and this pid. The target is the session
-    # directory's own ENTRY, never the directory itself: ``os.replace`` onto a
-    # directory fails (EISDIR/ENOTEMPTY) instead of removing it, and the unlink
-    # clears only the temp file this same call just wrote.
-    (
-        "local_operator/tools/eval.py::_write_marker",
-        "os.replace",
-        "tmp FILE -> <session>/eval-kernel.json FILE; cannot rename a directory",
-    ),
-    (
-        "local_operator/tools/eval.py::_write_marker",
-        "os.unlink",
-        "clears the pid-suffixed .tmp FILE this call just wrote, on the failure path",
     ),
     # Aida's small stores: ``<config>/aida/state.json``, ``onboarding.json``,
     # ``escalate.json``. Every path in the package is built from
@@ -4313,11 +4112,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     # The Library packages (backend core) write only under <config>/cache/library:
     # the derived index's atomic replace and a thumbnail cache temp file. Neither
-    # builds a path from a session id or a caller-supplied directory.
+    # builds a path from a session id or a caller-supplied directory. Each
+    # atomic writer (index, thumbnail, waveform) also unlinks its own
+    # ``unique_temp`` on failure: that name is minted per write beside the
+    # cache target, so the unlink can only ever reach that writer's temp.
     (
         "local_operator/library/index.py::_write",
         "os.replace",
         "tmp FILE -> <config>/cache/library/index.json FILE; cache-derived, never sessions/",
+    ),
+    (
+        "local_operator/library/index.py::_write",
+        "<path>.unlink",
+        "removes only its OWN failed-write temp (atomic.unique_temp, beside "
+        "<config>/cache/library/index.json); never sessions/",
     ),
     (
         "local_operator/library/indexer.py::LibraryIndexer._drop_legacy_index",
@@ -4329,6 +4137,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/library/store.py::LibraryStore.ensure_thumbnail",
         "os.replace",
         "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/thumbs; never sessions/",
+    ),
+    (
+        "local_operator/library/store.py::LibraryStore.ensure_thumbnail",
+        "<path>.unlink",
+        "removes only its OWN failed-encode temp (atomic.unique_temp, beside the "
+        "WebP under <config>/cache/library/thumbs); never sessions/",
     ),
     (
         "local_operator/library/store.py::LibraryStore._swap_in_database",
@@ -4358,6 +4172,42 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/library/service.py::waveform",
         "os.replace",
         "tmp FILE -> a peaks cache FILE under <config>/cache/library/peaks/; never sessions/",
+    ),
+    (
+        "local_operator/library/service.py::waveform",
+        "<path>.unlink",
+        "removes only its OWN failed-write temp (atomic.unique_temp, beside the "
+        "peaks JSON under <config>/cache/library/peaks/); never sessions/",
+    ),
+    # -- the shared temp-then-replace writer (``local_operator/atomic_files.py``) --
+    # Every whole-file publish that used a pid-only temp now goes through these
+    # three calls, so they are argued ONCE here instead of per writer. None can
+    # remove or displace a DIRECTORY: the replace SOURCE is always a name
+    # ``unique_temp`` just minted beside the target (a regular file or symlink
+    # this call created with O_EXCL / ``os.symlink``), and ``os.replace`` of a
+    # file or symlink onto a directory fails (EISDIR/ENOTDIR) rather than removing
+    # it -- so a caller that passed a session directory as ``target`` gets an
+    # error, never a deletion. ``discard_temp``'s ``os.unlink`` is handed only that
+    # minted temp, and ``unlink`` refuses directories. Callers that publish a file
+    # INSIDE a session (title/goal/attachment sidecars, tail anchor, mesh stamp,
+    # eval marker, scratchpad ``bin/lop`` shim) replace that FILE entry only.
+    (
+        "local_operator/atomic_files.py::atomic_write_bytes",
+        "os.replace",
+        "this call's own unique_temp FILE -> the caller's target FILE; a directory "
+        "target fails (EISDIR) instead of being displaced",
+    ),
+    (
+        "local_operator/atomic_files.py::atomic_symlink",
+        "os.replace",
+        "this call's own unique_temp SYMLINK -> the caller's link path; a directory "
+        "target fails instead of being displaced",
+    ),
+    (
+        "local_operator/atomic_files.py::discard_temp",
+        "os.unlink",
+        "removes only a unique_temp name the caller just minted (failed write or "
+        "staging); unlink refuses directories",
     ),
     # The Library VIEW's flagged calls are heap/Textual operations, not
     # filesystem ones: the viewport cursor is an in-memory integer, the
@@ -5104,16 +4954,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         2,
     ),
     (
-        "local_operator/session/index_read_model.py::write_naming",
-        "<path>.replace",
-        "tmp FILE -> the naming sidecar's 32-hex cache path under cache/, never a session path",
-    ),
-    (
-        "local_operator/session/index_read_model.py::write_naming",
-        "<path>.unlink",
-        "Removes only the sidecar's own .tmp sibling; the token names a cache file",
-    ),
-    (
         "local_operator/session/index_read_model.py::collect",
         "<path>.unlink",
         "Unlinks an unreferenced companion/sidecar cache FILE by its 32-hex stem",
@@ -5146,8 +4986,8 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # Heavy-job lease holder records. The only production directory is
     # `heavy_lease.lease_dir()` (`<config_dir>/run/heavy-jobs`, passed by
     # tools/builtin.py and services.py); try_acquire builds the record path as
-    # `directory / f"slot-{slot}.json"` with an integer slot, and _write_record's
-    # temp is that name plus `.<pid>.<id>.tmp`. No session id enters either path.
+    # `directory / f"slot-{slot}.json"` with an integer slot, and _write_record
+    # publishes it through `atomic_files`. No session id enters the path.
     (
         "local_operator/heavy_lease.py::Lease.release",
         "<path>.unlink",
@@ -5155,16 +4995,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "the path never carries a session id, and unlink rejects directories.",
     ),
     (
-        "local_operator/heavy_lease.py::_write_record",
+        "local_operator/remote_compute/records.py::_compact_if_grown",
         "os.replace",
-        "Publishes the run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp regular file over "
-        "slot-<int>.json; os.replace rejects a directory target.",
+        "Publishes the run-record FILE over itself: config_dir/remote-compute/runs.jsonl, "
+        "from a same-directory mkstemp temp. records_path() is the only path this module "
+        "builds and it never leaves <config>/remote-compute/, so no session directory is "
+        "reachable; os.replace refuses to put a file over a directory.",
     ),
     (
-        "local_operator/heavy_lease.py::_write_record",
-        "<path>.unlink",
-        "Removes only this call's failed run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp "
-        "temp FILE; unlink rejects directories.",
+        "local_operator/remote_compute/records.py::_compact_if_grown",
+        "os.unlink",
+        "Removes only this call's own failed mkstemp temp FILE in that same "
+        "<config>/remote-compute/ directory; unlink refuses directories, and the record "
+        "rows are not session state.",
+    ),
+    (
+        "local_operator/remote_compute/results.py::extract",
+        "os.replace",
+        "Renames this call's OWN mkdtemp staging directory onto the results destination. "
+        "The source is a directory this call created (mkdtemp, 0700, this call's random "
+        "suffix); the destination is refused unless it is ABSENT immediately before the "
+        "rename, and a results destination is <config>/remote-compute/results/<run id> or "
+        "an operator-supplied dest_dir — nothing here derives a path from a session id. "
+        "The one thing os.replace could still overwrite is an EMPTY directory appearing in "
+        "that check-then-rename window, and copying into sessions/ goes through "
+        "restore_session, not this path.",
+    ),
+    (
+        "local_operator/remote_compute/results.py::extract",
+        "shutil.rmtree",
+        "Removes ONLY the staging directory this call created, on the refusal path, by the "
+        "exact path it captured from mkdtemp - a name that did not exist before this call "
+        "and carries its random suffix. No session directory can carry that name, so this "
+        "can never remove one.",
     ),
     # Heavy-lease audit trail rotation. Every caller of heavy_audit.record passes
     # the same `heavy_lease.lease_dir()`; `audit_path(directory)` is the fixed
@@ -5359,12 +5222,6 @@ def test_no_session_directory_removal_outside_cleanup() -> None:
 #: in ``write_session_title`` rode on that function's existing row).
 _NEAR_DISPLACERS: frozenset[str] = frozenset(
     {
-        "local_operator/resume.py::write_session_title",  # tmp -> title.json
-        "local_operator/resume.py::write_session_attachment",  # tmp -> attachment.json
-        "local_operator/resume.py::write_goal_record",  # tmp -> goal.json
-        "local_operator/resume.py::_write_origin_scan_sentinel",  # tmp -> origin-scan.json
-        "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
-        "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         # tmp -> the session's own transcript archive / a cache meta FILE /
         # sessions/last-compression.json; never a session directory (see the
         # allow-list rows above for the full argument).
@@ -5374,7 +5231,6 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # receiver is a companion token path built from the config root, never a
         # session directory (see the allow-list rows below for the full argument).
         "local_operator/session/index_read_model.py::publish",
-        "local_operator/session/index_read_model.py::write_naming",
         # tmp FILE -> sessions/<id>/inbox.jsonl inside the session it was handed;
         # the commit swaps one spool file, never a directory.
         "local_operator/session/runtime/inbox.py::commit_inbox_batch",
@@ -5400,15 +5256,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/session_tags.py::_write",
         # tmp -> auto-tag.json, a FILE inside the child's own session directory
         "local_operator/session/auto_tag.py::record_fork",
-        # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
-        "local_operator/session/tail_anchor.py::write_anchor",
-        # tmp FILE -> <config>/cache/cold_replay/<id>.json: the deferred cold-open
-        # metadata record. A DERIVED cache file beside the store, never in it: the
-        # receiver is the config dir plus the session id, and it names a FILE
-        # under cache/, so neither side can be a session directory.
-        "local_operator/session/cold_metadata.py::write_cold_metadata",
         # tmp FILE -> <config>/cache/cold_replay/<id>.absence.json: the absence-proof
-        # sidecar beside that record, same directory, same derived-cache argument.
+        # sidecar beside the cold-open metadata record -- a DERIVED cache FILE under
+        # cache/, built from the config dir plus the session id, never a session
+        # directory.
         "local_operator/session/replay_cache.py::_record_absence",
         # tmp -> update-window.json (the update window's handover marker)
         "local_operator/session/runtime/inbox.py::write_update_window",
@@ -5440,7 +5291,6 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/runtime/rescue.py::write_ledger",  # tmp -> rescue/<id>.json
         "local_operator/session/runtime/registry.py::_reap_dead_record",  # -> reaped/ FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
-        "local_operator/session/search_index.py::_save",  # tmp -> index FILE
         "local_operator/session/transcript_index.py::write_index",  # tmp -> index FILE
         "local_operator/session/transcript_index.py::_publish_store",  # tmp -> snapshot FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
@@ -5457,17 +5307,12 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # cannot rename a session directory.
         "local_operator/session_factory.py::_write_store_maintenance_stamp",
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
+        # fold-on-open tmp FILE -> transcript.jsonl in the same session directory
+        "local_operator/session/transcript.py::Transcript._rewrite_without_lines",
         "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE
-        # The mesh's session stamp: a tmp FILE -> mesh.json inside that session's
-        # own directory, written by the placement writer. Declared here for the same
-        # reason as its allow-list row above — the receiver is a FILE inside the
-        # session directory it belongs to, never a directory rename. The entry was
-        # carried on the mesh branch and lost when `main` touched this same file,
-        # which is exactly the class this guard exists to catch.
-        "local_operator/session/placement.py::write_stamp_into",  # tmp -> mesh.json
-        # The handoff journal: the same shape as the stamp above, one directory up
-        # (``<config>/network/pending-move.json``). Its receiver is that file, and
-        # the move's own reader turns a missing one into "no handoff in flight".
+        # The handoff journal: a tmp FILE -> ``<config>/network/pending-move.json``.
+        # Its receiver is that file, and the move's own reader turns a missing one
+        # into "no handoff in flight".
         "local_operator/session/placement.py::_write_journal",  # tmp -> journal FILE
         # tmp -> approvals.json, a FILE inside the conversation's own directory
         # (the atomic-write shape every other sidecar writer here uses).

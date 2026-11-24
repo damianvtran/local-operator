@@ -1,0 +1,26 @@
+import scripts.probe_isolation as isolation
+import json,os,hashlib
+from pathlib import Path
+from local_operator.i18n import catalogues
+from local_operator.i18n.text import set_active_locale
+from local_operator.tui.i18n_status import technical_display,localized_display
+ROOT=Path('/Users/damian/.local-operator/sessions/ff0e39d33743/scratchpad')
+current=catalogues.catalogue_root
+catalogues.catalogue_root=lambda:ROOT/'baseline-catalogues'
+out=[]
+for locale,namespace in [('fr','wire.settings'),('fr','tui.small'),('fr','tui.settings_view.chrome')]:
+ try: data=catalogues.load_catalogue(locale,namespace);out.append({'locale':locale,'namespace':namespace,'accepted_keys':len(data)})
+ except Exception as e:out.append({'locale':locale,'namespace':namespace,'refusal':type(e).__name__,'reason':str(e)})
+catalogues.catalogue_root=current
+set_active_locale('ur')
+for token in ('shell_environment.mode','providers.openrouter.enforce_distillable_text','PATH/HOME/SHELL/TERM/USER/LOGNAME','/login <provider>'):
+ text=technical_display(token).plain
+ out.append({'technical':token,'paint':text,'raw_recovered':text.replace('\u2066','').replace('\u2069','')==token,'balanced':text.count('\u2066')==text.count('\u2069')})
+ assert text.replace('\u2066','').replace('\u2069','')==token and text.count('\u2066')==text.count('\u2069')
+a=json.loads((ROOT/'after-capture-result.json').read_text());b=json.loads((ROOT/'before-capture-result.json').read_text())
+for x in a:
+ if x['locale']=='ur' and not x.get('compact'):
+  for field in ('detail','summary','pane'):
+   text=x[field]; opens=sum(text.count(c) for c in '\u2066\u2067\u2068'); closes=text.count('\u2069');out.append({'actual_ur_key':x['key'],'field':field,'isolate_open':opens,'isolate_close':closes,'balanced':opens==closes});assert opens==closes
+print(json.dumps(out,ensure_ascii=False,indent=2))
+(ROOT/'private-controls-result.json').write_text(json.dumps(out,ensure_ascii=False,indent=2))

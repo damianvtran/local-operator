@@ -70,6 +70,7 @@ from local_operator.harness.types import (
 )
 from local_operator.incidents import CONTEXT_LENGTH_MARKERS
 from local_operator.model import tariff
+from local_operator.model.ids import openai_developer_instructions_model
 from local_operator.model.speed import (
     DIALECT_ANTHROPIC_SPEED,
     DIALECT_SERVICE_TIER,
@@ -3778,17 +3779,38 @@ class OpenAICompatClient:
         return (
             not self._codex_responses_mode(oauth_access)
             and self._openai_api == "responses"
-            and request.model.supports_responses_api
+            and (
+                request.model.supports_responses_api
+                # Discovery can omit the capability for newer GPT-6 models.
+                # Keep this exception on the built-in public route; automatic
+                # caching there does not require changing cache-key eligibility.
+                or self._uses_developer_instructions(request.model, f"{self._base_url}/responses")
+            )
+        )
+
+    def _uses_developer_instructions(self, model: ModelSpec, endpoint: str) -> bool:
+        if not openai_developer_instructions_model(model.model_id):
+            return False
+        if endpoint == "https://api.openai.com/v1/responses":
+            return model.provider == "openai"
+        # Codex's standard HTTP client also moved its base instructions into
+        # input (openai/codex#51156). Restrict that contract to the built-in
+        # subscription route, not a compatible client with a custom base.
+        return (
+            endpoint == CODEX_RESPONSES_URL
+            and self._base_url == "https://api.openai.com/v1"
+            and model.provider in {"openai", "openai-device"}
         )
 
     def _build_responses_body(
         self, request: ChatRequest, *, endpoint: str | None = None, scope: str | None = None
     ) -> dict[str, Any]:
-        """Public Responses body using native input items and flat tools."""
+        """Responses body using native input items and flat tools."""
         affinity_request = request
+        actual_endpoint = endpoint or f"{self._base_url}/responses"
         request = bind_native_context(
             request,
-            endpoint or f"{self._base_url}/responses",
+            actual_endpoint,
             "openai-responses",
             scope,
             _estimate_slope(request.model),
@@ -3800,18 +3822,27 @@ class OpenAICompatClient:
             "input": _messages_to_openai_responses(
                 wire_messages,
                 request.model,
-                endpoint or f"{self._base_url}/responses",
+                actual_endpoint,
                 scope,
                 request=request,
             ),
         }
         if request.system_blocks:
-            # Preserve the established legacy layout. Current Codex also has
-            # Lite developer input items, but that changes reasoning context
-            # and showed no benefit in our probes (docs/OPENAI_CACHING.md).
-            # Public breakpoint/TTL support is a different contract: current
-            # OAuth probes reject explicit markers even with the Lite header.
-            body["instructions"] = "\n\n".join(request.system_blocks)
+            instructions = "\n\n".join(request.system_blocks)
+            # GPT-6.2+ places top-level instructions after the last eligible
+            # cache breakpoint. Keep the exact reusable text first in input
+            # without changing history, retention or breakpoint placement.
+            if self._uses_developer_instructions(request.model, actual_endpoint):
+                body["input"].insert(
+                    0,
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": instructions}],
+                    },
+                )
+            else:
+                body["instructions"] = instructions
         if request.tools:
             body["tools"] = _tools_to_openai_responses(request.tools)
             body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
@@ -3840,13 +3871,11 @@ class OpenAICompatClient:
             # The public API's default respects the organization's data policy;
             # forcing 24h can override ZDR's in-memory default or be unsupported
             # on older/unknown models. Leave custom gateways' contract untouched.
-            actual_endpoint = endpoint or f"{self._base_url}/responses"
             if not (
                 request.model.provider == "openai"
                 and actual_endpoint == "https://api.openai.com/v1/responses"
             ):
                 body["prompt_cache_retention"] = "24h"
-        actual_endpoint = endpoint or f"{self._base_url}/responses"
         if actual_endpoint == "https://api.openai.com/v1/responses" and body.get(
             "prompt_cache_key"
         ):
@@ -7359,7 +7388,23 @@ class MockClient:
         # fresh runaway and a follow-up after Esc looped identically (round 2,
         # U6/N2). A real provider decides per request; the mock's closest
         # analogue is the newest instruction.
-        last_user = next((m for m in reversed(messages) if m.role == "user"), None)
+        #
+        # ``_ephemeral`` messages are request-local tails, never the user's
+        # words: the voice session appends its spoken-summary note as the LAST
+        # message of a dictated turn. Reading that tail as the newest message
+        # hid every marker in the dictated text, so the turn answered at once
+        # and a steer landed on a finished turn (QA round 2, Q1). Both the
+        # marker text and the "newest message" test skip them; a real provider
+        # reads the note as an instruction, not as the user's request.
+        newest = next((m for m in reversed(messages) if not getattr(m, "_ephemeral", False)), None)
+        last_user = next(
+            (
+                m
+                for m in reversed(messages)
+                if m.role == "user" and not getattr(m, "_ephemeral", False)
+            ),
+            None,
+        )
         # ``[hang]``: a request that NEVER returns. The one shape that leaves a
         # runtime busy with nothing this process can read as a step — the
         # parent's own provider request is not a term of
@@ -7372,12 +7417,7 @@ class MockClient:
         # end without it. Scoped to the NEWEST user instruction, like
         # ``[bash:N]`` and for its reason: a marker that stayed in the
         # transcript would hang every later request of the session.
-        hangs = (
-            last_user is not None
-            and messages
-            and messages[-1] is last_user
-            and "[hang]" in last_user.text
-        )
+        hangs = last_user is not None and newest is last_user and "[hang]" in last_user.text
         if hangs:
             # Park forever: the consumer sees a request in flight and nothing
             # else, which is the marker's whole contract. Cancellation at
@@ -7386,13 +7426,13 @@ class MockClient:
             await asyncio.Event().wait()
             return
         wants_tool = last_user is not None and "[tool]" in last_user.text
-        # ``[bash:N]`` fires ONCE per prompt: only when the newest message is
-        # the user's. After the tool result comes back the newest message is
-        # the tool row, and the mock answers with text so the turn completes
-        # instead of sleeping again forever.
+        # ``[bash:N]`` fires ONCE per prompt: only when the newest real message
+        # is the user's. After the tool result comes back the newest real
+        # message is the tool row, and the mock answers with text so the turn
+        # completes instead of sleeping again forever.
         sleep_for = (
             _mock_bash_sleep(last_user.text)
-            if last_user is not None and messages and messages[-1] is last_user
+            if last_user is not None and newest is last_user
             else None
         )
         if sleep_for is not None:
@@ -7421,7 +7461,7 @@ class MockClient:
         # production path. Scoped to the newest USER message for the same reason
         # as ``[bash:N]``: the marker remains in history, and after the tool
         # result the newest message is the tool row, so the follow-up completes.
-        askable = last_user is not None and bool(messages) and messages[-1] is last_user
+        askable = last_user is not None and newest is last_user
         ask_kind = _mock_ask_kind(last_user.text) if askable and last_user is not None else None
         if ask_kind is not None:
             question: dict[str, Any] = (

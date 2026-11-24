@@ -5201,6 +5201,21 @@ async def _prepare(
         acquire_session_lease(transcript_dir) if transcript_dir.parent.name == "sessions" else None
     )
 
+    goal_wake_due: int | None = getattr(args, "goal_wake_due", None)
+    if goal_wake_due is not None:
+        from local_operator.session.runtime.launch import RuntimeStartupError
+        from local_operator.wakes.goals import permits_wake
+
+        # The supervisor and launcher both yield before the owner holds the
+        # transcript lease. Refuse stale work before claiming or opening it.
+        try:
+            if session_lease is None or not permits_wake(transcript_dir, goal_wake_due):
+                raise RuntimeStartupError("automatic goal wake is no longer eligible")
+        except BaseException:
+            if session_lease is not None:
+                session_lease.release()
+            raise
+
     # CLAIM BEFORE creating the directory, and in that order. The claim marker
     # is what tells anything scanning the store (the user-enabled cleanup
     # policy, the picker, the mobile daemon) that this directory belongs to a
@@ -5363,6 +5378,7 @@ async def _prepare(
         settings=config_manager.get_config().values,
         session_id=transcript_dir.name,
         cache_lineage_id=fork_parent(transcript_dir) or None,
+        use_auto_effort=not getattr(args, "prefer_birth_effort", False),
     )
 
     # --- session-scoped roles (LOH-9) ---------------------------------------
@@ -5588,14 +5604,18 @@ async def _prepare(
     # a gate miss leaves the field None and the createIf behaves as before.
     from local_operator.team_bridge.host import bridge_runtime_for_session
 
+    # One host-resolved name snapshot, shared by construction and dispatch.
+    bridge_session_agent_display = agent.name if agent is not None else None
     bridge_runtime = bridge_runtime_for_session(
         config_manager=config_manager,
         session_id=transcript.directory.name,
+        session_agent_display=bridge_session_agent_display,
     )
     # One value, both roles: the table assembled below inspects this context for
     # PRESENCE, and the Session executes against the same runtime. Two
     # resolutions here would be two answers waiting to disagree.
     tool_context.bridge_runtime = bridge_runtime
+    tool_context.bridge_session_agent_display = bridge_session_agent_display
     tools = create_tools(tool_context)
     # The mesh credential binding recorder: created with the transcript in hand
     # (it appends the durable rows), gated on THIS root holding a credential
@@ -5721,6 +5741,7 @@ async def _prepare(
         skill_resolver=_make_knowledge_resolver(hooks),
         request_approval=request_approval,
         goal_state=goal_state,
+        goal_wake_due=goal_wake_due,
         variables=variable_store,
         agent_registry=agent_registry,
         team_registry=team_registry,

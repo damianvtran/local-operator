@@ -1,0 +1,25 @@
+AUTHOR MECHANICAL VALIDATION; not independent audit or app/native proof
+executable: /Users/damian/local-operator/.venv/bin/python
+HOME: /Users/damian/.local-operator/sessions/5644d4838456/scratchpad/vi-author-home
+CONFIG: /Users/damian/.local-operator/sessions/5644d4838456/scratchpad/vi-author-home/config
+CMUX variables: []
+MODULE: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/catalogues.py
+MODULE: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/local_operator/i18n/runtime.py
+MODULE: /Users/damian/local-operator/.worktrees/i18n-provider-state-labels/scripts/i18n/check.py
+PASS exact pinned English/context hashes; 5 keys in exact order
+OFFICIAL scripts.i18n.check.check_catalogues scoped en/vi namespace: []
+NEGATIVE missing key: ["vi/tui.provider_state: missing key 'tui.provider_state.logged_in'"]
+NEGATIVE added argument: ["vi/tui.provider_state: tui.provider_state.logged_in: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"]
+RESTORED CONTROL: []
+WIDTH DIAGNOSTIC (not a max cap): {"key": "tui.provider_state.logged_in", "en_cells": 9, "vi_cells": 12, "pseudo_cells": 23, "illustrative_openrouter_allowance": 17, "vi_exceeds_illustrative_allowance": false}
+en: logged in | vi: đã đăng nhập | pseudo: [!! logged in ~~~~~ !!]
+WIDTH DIAGNOSTIC (not a max cap): {"key": "tui.provider_state.env_key", "en_cells": 7, "vi_cells": 23, "pseudo_cells": 21, "illustrative_openrouter_allowance": 17, "vi_exceeds_illustrative_allowance": true}
+en: env key | vi: khóa từ biến môi trường | pseudo: [!! env key ~~~~~ !!]
+WIDTH DIAGNOSTIC (not a max cap): {"key": "tui.provider_state.needs_login", "en_cells": 11, "vi_cells": 13, "pseudo_cells": 25, "illustrative_openrouter_allowance": 17, "vi_exceeds_illustrative_allowance": false}
+en: needs login | vi: cần đăng nhập | pseudo: [!! needs login ~~~~~ !!]
+WIDTH DIAGNOSTIC (not a max cap): {"key": "tui.provider_state.local_ready", "en_cells": 17, "vi_cells": 19, "pseudo_cells": 31, "illustrative_openrouter_allowance": 17, "vi_exceeds_illustrative_allowance": true}
+en: configured server | vi: máy chủ đã cấu hình | pseudo: [!! configured server ~~~~~ !!]
+WIDTH DIAGNOSTIC (not a max cap): {"key": "tui.provider_state.local_unconfigured", "en_cells": 16, "vi_cells": 16, "pseudo_cells": 30, "illustrative_openrouter_allowance": 17, "vi_exceeds_illustrative_allowance": false}
+en: configure server | vi: cấu hình máy chủ | pseudo: [!! configure server ~~~~~ !!]
+PASS: 5/5 zero args, no plural/select, NFC, no bidi controls, protected-token parity, ICU renders, plain Rich labels
+LIMIT: no real settings/app render, native geometry/fonts, server-health probe, ledger, eligibility, or global/full checker executed
