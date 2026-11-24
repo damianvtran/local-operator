@@ -29,7 +29,8 @@ not a link, and its line numbers and spacing are evidence.
   dropped -- unless such items are most of the text's non-blank lines, in
   which case they are the content (a docs index) and stay as text. A one-link
   item with an absolute target (a search result, a reading list) is never
-  dropped; it follows the link rules below like any other line.
+  dropped; it follows the link rules below like any other line, which keep
+  its URL in ``prose-links`` mode.
 * Wikipedia ``[[24]](#cite_note-24)`` markers are dropped. A bare ``[24]`` is
   never touched: it collides with code (``list[0]``) and footnote syntax.
 * Link hover titles (``[a](url "title")``) are dropped.
@@ -38,11 +39,13 @@ not a link, and its line numbers and spacing are evidence.
   protocol-relative targets (leading ``/``, ``#``, ``?``, ``./``, ``../``, or a
   scheme-less string containing ``/``) and ``javascript:`` pseudo-links become
   their anchor text.
-* Absolute ``http(s)`` targets survive only on *prose* lines (>= 80 visible
-  characters) with non-empty anchor text, in ``prose-links`` mode; in
-  ``strip-links`` mode every such target becomes its anchor text. Prose links
-  are how a navigation-style long task finds its next page, so the default
-  keeps them (the replay measured one link-only discovered fetch in 52).
+* Absolute ``http(s)`` targets with non-empty anchor text survive, in
+  ``prose-links`` mode, on *prose* lines (>= 80 visible characters) and on any
+  line whose only link is that absolute one (a search result, a README
+  reference); in ``strip-links`` mode every such target becomes its anchor
+  text. These links are how a navigation-style long task finds its next page
+  and what a citation-bound task cites, so the default keeps them (the replay
+  measured one link-only discovered fetch in 52).
 * Other schemes (``mailto:``, ``tel:``) and non-URL targets are left exactly
   as written: the target may be the datum itself (a contact address).
 * A line no rule changed is copied byte for byte (spacing inside a line is
@@ -343,14 +346,25 @@ def _normalize_line(original: str, line: str, keep_prose_links: bool, drop_nav: 
     if drop_nav and _nav_item(line):
         return None
 
+    targets: list[str] = []
+
     def as_text(match: re.Match[str]) -> str:
         target = match.group(2)
         if _ABSOLUTE.match(target) or _is_site_target(target):
+            targets.append(target)
             return match.group(1)
         return match.group(0)
 
     visible = _outside_inline_code(line, lambda seg: _LINK.sub(as_text, seg))
-    prose = keep_prose_links and len(" ".join(visible.split())) >= PROSE_LINE_MIN_CHARS
+    # A short line whose ONLY link is absolute -- a search result, a reading
+    # list entry, a README reference -- is often the one place the model learns
+    # which URL to fetch or cite, so ``prose-links`` keeps it like prose. A nav
+    # bar or breadcrumb carries several links per line (or on-site targets,
+    # handled above), so it still loses its targets.
+    single_absolute = len(targets) == 1 and _ABSOLUTE.match(targets[0]) is not None
+    prose = keep_prose_links and (
+        single_absolute or len(" ".join(visible.split())) >= PROSE_LINE_MIN_CHARS
+    )
 
     def relink(match: re.Match[str]) -> str:
         anchor, target = match.group(1), match.group(2)

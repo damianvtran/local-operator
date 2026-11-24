@@ -60,11 +60,14 @@ def test_images_become_alt_text_and_empty_alt_is_dropped() -> None:
     assert "px.example" not in out
 
 
-def test_on_site_nav_bullets_are_dropped_and_absolute_bullets_become_text() -> None:
+def test_on_site_nav_bullets_are_dropped_and_absolute_bullets_keep_their_link() -> None:
     out = normalize_markdown(PAGE)
     assert "Home" not in out  # ``* [Home](/)``: on-site navigation chrome
-    assert "* News" in out  # an absolute one-link bullet keeps its text (R3)
-    assert "example.com/news" not in out  # short line: the URL goes
+    # An absolute one-link bullet is kept whole in prose-links (the default) and
+    # reduced to its text in strip-links (R3 + round-1 addendum).
+    assert "* [News](https://example.com/news)" in out
+    assert "* News\n" in normalize_markdown(PAGE, keep_prose_links=False)
+    assert "example.com/news" not in normalize_markdown(PAGE, keep_prose_links=False)
     assert "facebook.com" not in out  # an icon-only bullet has no text left
 
 
@@ -277,16 +280,34 @@ README = (
 )
 
 
-@pytest.mark.parametrize("mode", ("prose-links", "strip-links"))
-def test_link_lists_keep_their_titles(mode: str) -> None:
-    out = normalize_tool_text(SEARCH_RESULTS, mode)
+def test_link_lists_keep_their_urls_in_prose_links_mode() -> None:
+    # A search-result list is often the only place the model learns which URL
+    # to fetch or cite: the default keeps every ``[title](url)`` verbatim.
+    assert normalize_tool_text(SEARCH_RESULTS, "prose-links") == SEARCH_RESULTS
+    assert normalize_tool_text(BOARD_DECKS, "prose-links") == BOARD_DECKS
+
+
+def test_link_lists_keep_their_titles_in_strip_links_mode() -> None:
+    out = normalize_tool_text(SEARCH_RESULTS, "strip-links")
     assert out == (
         "Search results:\n\n"
         "1. Mark Sutcliffe - Wikipedia\n"
         "2. Mayor of Ottawa | City of Ottawa\n"
         "3. Mark Sutcliffe (@marksutcliffe) / X\n"
     )
-    assert normalize_tool_text(BOARD_DECKS, mode) == "- Q3 board deck\n- Q4 board deck"
+    assert "https://" not in out
+    assert normalize_tool_text(BOARD_DECKS, "strip-links") == "- Q3 board deck\n- Q4 board deck"
+
+
+def test_single_absolute_link_on_a_short_line_is_kept_but_nav_bars_are_not() -> None:
+    text = (
+        "![](https://px.example/a.gif)\n"
+        "Source: [CBC News](https://www.cbc.ca/news/x)\n"
+        "[Home](https://e.example/) | [About](https://e.example/about)\n"
+        "Icon [](https://e.example/icon)\n"
+    )
+    out = normalize_tool_text(text, "prose-links")
+    assert out == "Source: [CBC News](https://www.cbc.ca/news/x)\nHome | About\nIcon\n"
 
 
 def test_nav_bullets_that_are_most_of_the_result_are_kept_as_text() -> None:
