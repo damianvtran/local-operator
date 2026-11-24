@@ -41,6 +41,7 @@ import { contentDir } from "../lib/content-direction";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getAsks } from "../api";
 import { AskCard, askStateOf, askToneClass } from "./ask-card";
+import { AskIdFoot } from "./ask-id";
 import { Chevron } from "./ui/disclosure";
 import { Sheet } from "./ui/sheet";
 import {
@@ -52,7 +53,7 @@ import {
 	orderedForDisplay,
 	questionTally,
 } from "../lib/asks";
-import { messageRuntime, useAsksRevision, useProjection, useSessions } from "../store";
+import { messageRuntime, rememberAskChipSettled, useAsksRevision, useProjection, useSessions } from "../store";
 import type { PendingAsk } from "../types";
 
 /** How often the open sheet re-reads the aggregate as a deadline backstop. */
@@ -124,6 +125,7 @@ export function AsksSheet({
 	open,
 	onClose,
 	currentSessionId,
+	jumpAsk = null,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -131,6 +133,12 @@ export function AsksSheet({
 	    cross-conversation view the navigation drawer's Questions destination
 	    opens (UX review round 1, U1). */
 	currentSessionId: string;
+	/** The ask a chip in the transcript named: the sheet opens with THAT ask's
+	    card expanded (a settled row expands in place), scrolled to it, and with
+	    focus moved onto it — the reader pressed a control that promised this
+	    question, so landing anywhere else would make the tap a lie. `null` is
+	    every other door (the dock, the policy, the drawer). */
+	jumpAsk?: string | null;
 }) {
 	/* EMPTY MEANS ALL CONVERSATIONS, and that is a real mode rather than a
 	   missing argument: the drawer's destination is machine-wide. Passing "" into
@@ -185,6 +193,9 @@ export function AsksSheet({
 			const answer = await getAsks(signal);
 			setRows(Array.isArray(answer.asks) ? answer.asks : []);
 			setError("");
+			/* The transcript's chips read the same list for the one state no live
+			   frame and no receipt can name (a withdrawn ask). */
+			rememberAskChipSettled(answer.asks);
 		} catch (failure) {
 			if (failure instanceof DOMException && failure.name === "TimeoutError") {
 				setError(messageRuntime.t("relay.asks.error.read_timeout"));
@@ -297,6 +308,35 @@ export function AsksSheet({
 		if (choice !== undefined && !choiceLive) setChoice(undefined);
 		else if (choice === undefined && defaultOpen) setChoice(defaultOpen.ask_id);
 	}, [open, loaded, choice, choiceLive, defaultOpen]);
+	/* A CHIP'S JUMP IS A ONE-SHOT INTENT, applied the first time its row is
+	   present. The sheet reads the aggregate asynchronously, so the id exists in
+	   `listed` a frame or two after the open; the effect waits for it rather than
+	   dropping the tap. AFTER IT LANDS IT IS SPENT: `listed` gets a new identity on
+	   every read (the 20 s backstop, `revision`, `rowsSignature`), so keying only
+	   on it re-applied the jump and pulled the reader back to the chip's ask —
+	   reproduced by jumping, tapping another row, and waiting one backstop tick.
+	   `jumpRowHere` is a BOOLEAN so the identity of the read cannot retrigger it;
+	   `jumped` holds the last consumed target, and a close resets both so
+	   reopening the same chip jumps again. */
+	const jumpTarget = typeof jumpAsk === "string" && jumpAsk !== "" ? jumpAsk : null;
+	const jumpRowHere =
+		jumpTarget !== null && listed.some((row) => row.ask_id === jumpTarget);
+	const jumped = useRef<string | null>(null);
+	/** The open card that still owes its jump one focus move; cleared by the
+	 *  scroll effect below, so a later re-render or read cannot move focus again. */
+	const jumpFocus = useRef<string | null>(null);
+	useEffect(() => {
+		if (!open) {
+			jumped.current = null;
+			jumpFocus.current = null;
+			return;
+		}
+		if (jumpTarget === null || jumped.current === jumpTarget || !jumpRowHere) return;
+		jumped.current = jumpTarget;
+		jumpFocus.current = jumpTarget;
+		setChoice(jumpTarget);
+		setFocusAsk(jumpTarget);
+	}, [open, jumpTarget, jumpRowHere]);
 	/* THE PINNED BAR'S ELEMENT. The open card portals its answering controls into
 	   it (`AskCard`'s `footerSlot`); a state rather than a ref so the card is
 	   re-rendered with the element once the bar mounts. */
@@ -316,6 +356,16 @@ export function AsksSheet({
 		if (!region || !card) return;
 		region.scrollTop +=
 			card.getBoundingClientRect().top - region.getBoundingClientRect().top - BODY_PAD_PX;
+		/* FOCUS FOLLOWS A CHIP'S JUMP, and only a jump: moving the reader's place
+		   on every open would steal focus from the control they pressed (U2's
+		   rule for the close control is the same). The question text is the first
+		   thing the card says; a settled receipt has no question element of its
+		   own, so the card itself takes focus there (`tabIndex={-1}`). */
+		if (jumpFocus.current !== null && jumpFocus.current === openId) {
+			jumpFocus.current = null;
+			const target = card.querySelector<HTMLElement>('[data-testid="ask-question-text"]') ?? card;
+			target.focus({ preventScroll: true });
+		}
 	}, [open, openId]);
 	const sessionOf = (row: PendingAsk) =>
 		crossConversation ? String(row.session_id) : currentSessionId;
@@ -448,13 +498,18 @@ export function AsksSheet({
 		const asked = questionStart(row);
 		return (
 			<div key={`${sessionOf(row)}:${row.ask_id}`} className="flex flex-col gap-1">
+				{/* THE ID SITS BESIDE THE ROW, not inside it (spec §2, §4): the row is
+				    one button, and a copy control nested in a button is invalid HTML and
+				    unreachable as its own target. The foot keeps the click-to-copy door
+				    at the 44 px floor while the row keeps its whole-line press. */}
+				<div className="flex flex-wrap items-start gap-1">
 				<button
 					type="button"
 					aria-expanded={expanded}
 					data-testid="ask-row"
 					data-ask-id={row.ask_id}
 					onClick={() => setChoice(expanded ? undefined : row.ask_id)}
-					className="flex min-h-11 w-full items-start gap-2 rounded-sm py-1 text-start active:bg-surface"
+					className="flex min-h-11 min-w-0 flex-1 items-start gap-2 rounded-sm py-1 text-start active:bg-surface"
 				>
 					{/* THE QUESTION LEADS, the state sentence follows on its own line and is
 					    never cut: a waiting row is read for WHAT it asks first, and the state
@@ -483,14 +538,17 @@ export function AsksSheet({
 							) : null}
 						</span>
 					</span>
-					<Chevron open={expanded} className="mt-0.5" />
+					<Chevron open={expanded} />
 				</button>
+					<AskIdFoot askId={row.ask_id} className="shrink-0" align="title" />
+				</div>
 				{expanded ? (
 					<AskCard
 						row={row}
 						sessionId={sessionOf(row)}
 						nowMs={nowMs}
 						hideState
+						hideId
 						onSettled={(kind) => settled(row, kind)}
 						onDismissed={dismissed}
 					/>

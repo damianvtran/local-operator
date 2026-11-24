@@ -12,6 +12,7 @@ import { useScrollCues } from "../lib/use-scroll-cues";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "./markdown"
 import { AskRow } from "./ask-row";
+import { useAskChipHost } from "./ask-id";
 import { BridgeCardBodyPanel, isBridgeCardNotice } from "./bridge-card-body";
 import { AttachmentImage } from "./attachment-image";
 import { ImageGenCard } from "./image-gen-card";
@@ -157,6 +158,12 @@ function NoticeRow({ entry }: { entry: TranscriptEntry }) {
 function Entry({ entry, pid, condensed = false, liveText = false }: {
 	entry: TranscriptEntry; pid: string; condensed?: boolean; liveText?: boolean;
 }) {
+	/* A CHIP NEEDS A SCREEN THAT OWNS ITS ASKS. The context is that screen's
+	   opt-in: the session route wraps its transcript in `AskChipHostProvider`, so
+	   an id here resolves against THIS conversation; a subagent transcript or any
+	   other caller has no provider, and the assistant row there stays plain text.
+	   The hook is unconditional — a branch would change the hook count. */
+	const askChips = useAskChipHost() !== null;
 	switch (entry.kind) {
 		case "user": {
 			/* The user's own words. Right-aligned like the desktop app's bubble,
@@ -269,7 +276,7 @@ function Entry({ entry, pid, condensed = false, liveText = false }: {
 			   report). */
 			return (
 				<div className="min-w-0 text-body leading-normal break-words">
-					<Markdown text={entry.text} live={liveText} />
+					<Markdown text={entry.text} live={liveText} askChips={askChips} />
 				</div>
 			);
 		case "tool":

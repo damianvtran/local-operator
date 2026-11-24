@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "relay.asks",
-  "history_sha256": "71ead85ba61d9cbfc2cf35b980360e20877934305bfb65f3a6e159be60f63fb3",
+  "history_sha256": "41d44625a306cc080a6ac6d1e2dcd62c3b3e4b26cbd1bff17da556065a4ceb48",
   "entries": [
     {
       "locale": "hi",
@@ -53,6 +53,31 @@
       },
       "status": "passed",
       "note": "PR #4495 relay ask-panel parity delta, independent audit 2026-11-23 by reviewer b7ef3c226fc6 (anthropic/claude-opus-5-5, no fallback): 38 changed/new key(s) passed; 49 unchanged key(s) carried by byte proof from the passed ebd750dd row. Source e19bac73afbfde9abac76d79c60bf7d1e2d8b2b621b49f2770a41d56749bc0ef and target 716b6f9de98eefa88d32c2a0667578d307ef1d0aeeaae5a2a4c151daaa41c485 recomputed from the files. Evidence: i18n/audits/evidence/hi/relay.asks/askparity-r1-b7ef3c226fc6/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.asks",
+      "source_sha256": "d417c862f4b4af8f52dec92942b50c2d6e9f872d332d8d0b6b0ea89402b8ba5b",
+      "translator": {
+        "agent": "radient/auto (translator of record for the PR commit 8077e80c9, ask-id foot and chip delta); not independently verified",
+        "model": "radient/auto",
+        "fallback": "none",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev i18n-auditor task, session 35f05771f20c; not the translator, did not write or edit the English)",
+        "session": "35f05771f20c",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "minor": 2,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "Relay ask-id foot and chip delta, independent audit 2026-11-23 by i18n-auditor 35f05771f20c (anthropic/claude-sonnet-5-5, no fallback): 14 new relay.asks.id.* / relay.asks.chip.* keys audited, 3 edited by the audit (3 findings: 2 minor, 1 nit, 0 unresolved blocker/major); 87 unchanged keys carried by byte proof from the passed e19bac73 row. Source d417c862f4b4af8f52dec92942b50c2d6e9f872d332d8d0b6b0ea89402b8ba5b and target 182661e0bb51b17f4f00bb5dfcf49f28abda6df958e06db3981a70c6660eb2a0 recomputed from the files. Evidence: i18n/audits/evidence/hi/relay.asks/relayid-r1-35f05771f20c/record.json"
     }
   ]
 }
