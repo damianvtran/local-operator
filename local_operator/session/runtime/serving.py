@@ -1663,6 +1663,8 @@ class ServingSessionHandle(SessionHandle):
         # ``_mcp_reload_tasks`` exists: a read warning is emitted as a notice
         # through the same fire-and-forget seam every other notice uses.
         self._adopt_persisted_approval_override()
+        # State the adopted mode before any switch: the desktop chip reads it.
+        self._publish_approval_mode()
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
@@ -8960,6 +8962,27 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a card is never worth failing a gate
             logger.debug("could not publish the pending gate", exc_info=True)
 
+    def _publish_approval_mode(self) -> None:
+        """Mirror the live gate onto ``FrontendSessionState.approval_mode``.
+
+        The desktop's ``/approvals`` picker and composer chip cannot read the
+        gate (it lives in this process), so without this the route answered
+        ``current: null`` forever (PR #4558 review X1). Called from ``_notify``
+        — the seam every gate assignment already follows — and once at
+        construction, so a resumed ``auto`` conversation states its mode before
+        the first switch. ``store.mutate`` drops an unchanged value, so the
+        per-notify call costs no frame. Never raises: a projection hiccup must
+        not fail the gate mutation that triggered it.
+        """
+        try:
+            store = getattr(self._session, "_frontend_state_store", None)
+            live = getattr(self, "_auto_approve", None)
+            if store is None or live is None:
+                return
+            store.mutate(approval_mode="auto" if live else "ask")
+        except Exception:  # noqa: BLE001 — advisory mirror; the gate stands
+            logger.debug("could not publish the approval mode", exc_info=True)
+
     def _publish_settings_result(
         self, request_id: str, *, kind: str, ok: bool, code: str, message: str
     ) -> None:
@@ -12723,6 +12746,7 @@ class ServingSessionHandle(SessionHandle):
 
     def _notify(self) -> None:
         self._publish_busy()
+        self._publish_approval_mode()
         # Published HERE rather than beside each push/pop: `_notify` already
         # follows every gate mutation, so one seam keeps the phone's fold and
         # the full TUI's `pending_gate` in step and a future gate cannot
