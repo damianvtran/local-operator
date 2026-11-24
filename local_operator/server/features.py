@@ -61,6 +61,10 @@ DESKTOP_ONLY_FEATURES = frozenset(
         # The relay answers asks on its own route, which carries no
         # `consent_bearing` receipt (a phone answer is stamped `remote` anyway).
         "ask_consent_bearing",
+        # Same class: the relay serves no
+        # `/v1/desktop/sessions/{id}/notification-avatar`; it is the desktop main
+        # process's OS-banner image, and a phone told it may ask would 404.
+        "desktop_session_notification_avatar",
     }
 )
 
@@ -1279,6 +1283,12 @@ def static_feature_flags() -> dict[str, Any]:
         # ignores an unknown query and would silently serve the original, which is
         # harmless, but a client must know to expect the sized ETag/body.
         "agent_avatar_sizes": 1,
+        # `GET /v1/desktop/sessions/{id}/notification-avatar?size=64|256&theme=light|dark`:
+        # the OS-banner image for a session bound to an agent with its own stored
+        # picture (picture + LO corner badge, no agent marker). Own key so a
+        # desktop facing an older core posts today's banner instead of 404-probing
+        # every notification; a 404 from a newer core means "no picture" only.
+        "desktop_session_notification_avatar": 1,
         # THE PER-SESSION FILE INDEX: `GET /v1/desktop/sessions/{id}/files` (the files this
         # conversation and its subagents produced: written, edited, command outputs,
         # screenshots, downloads, generated images/videos and Highlights callouts, derived
