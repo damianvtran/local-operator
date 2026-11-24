@@ -344,7 +344,7 @@ class TestInProcessTools:
 
     def test_web_fetch_ssrf_guard_is_forced_on_whatever_the_owner_set(self) -> None:
         from local_operator.web_fetch.models import WebFetchSettings
-        from local_operator.web_fetch.service import validate_public_url
+        from local_operator.web_fetch.service import PolicyRefusal, validate_public_url
 
         owner = WebFetchSettings(allow_private=True, max_bytes=1234)
         forced = responder_web_fetch_settings(owner)
@@ -352,7 +352,10 @@ class TestInProcessTools:
         assert forced.max_bytes == 1234  # only the guard is overridden
         assert owner.allow_private is True  # the owner's object is untouched
         url = "http://127.0.0.1:4097/"
-        assert validate_public_url(url, allow_private=forced.allow_private) is not None
+        # The guard refuses by raising (it returns the pinned IP when it admits).
+        with pytest.raises(PolicyRefusal) as refused:
+            validate_public_url(url, allow_private=forced.allow_private)
+        assert refused.value.reason == "private"
         # Control: the owner's own setting would have let it through.
         assert validate_public_url(url, allow_private=owner.allow_private) is None
 
