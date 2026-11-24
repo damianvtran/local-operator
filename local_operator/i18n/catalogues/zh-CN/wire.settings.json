@@ -772,7 +772,7 @@
   "wire.settings.team_bridge_hold_release.help": "部分新工作请求会暂扣，由你决定送达或丢弃。除非你送达，否则任何内容都不会到达你的智能体。关闭后，这类请求会被拒绝。",
   "wire.settings.tool_approval_mode.choice.ask.description": "写入/执行工具前先询问",
   "wire.settings.tool_approval_mode.choice.ask.label": "询问",
-  "wire.settings.tool_approval_mode.choice.auto.description": "不经询问直接运行",
+  "wire.settings.tool_approval_mode.choice.auto.description": "不经询问直接运行，但保存账户资料和发布社区帖子除外",
   "wire.settings.tool_approval_mode.choice.auto.label": "自动",
   "wire.settings.tool_approval_mode.help": "放宽需要在本会话内写入——/approvals auto。",
   "wire.settings.tool_approval_mode.label": "工具审批模式",

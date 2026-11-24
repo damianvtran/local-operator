@@ -1797,12 +1797,13 @@ class SettingsView(Vertical):
                     # synthesised rather than registered (see `_choices_for`).
                     for choice in _choices_for(setting):
                         rows.append(_Row(kind="choice", setting=setting, choice=choice))
-                        if setting.key == "language" and getattr(choice, "description", ""):
-                            # The Urdu capability note is longer than the
-                            # narrowest list, and single-line fitting turned
-                            # it into "Terminal: best ef…" — dropping the
-                            # caveat. Unselectable rows keep one line per
-                            # index while showing the whole sentence.
+                        if _description_needs_its_own_rows(setting, choice):
+                            # The language row's Urdu capability note and the
+                            # auto mode's exemption are longer than their slot,
+                            # and single-line fitting turned the first into
+                            # "Terminal: best ef…" — dropping the caveat.
+                            # Unselectable rows keep one line per index while
+                            # showing the whole sentence.
                             rows.extend(_note_rows(choice.description, self._list_width()))
         return rows
 
@@ -4506,11 +4507,14 @@ class SettingsView(Vertical):
                 # see the difference between "I chose this" and "this is what
                 # it came with" before touching anything.
                 line.append(_t(_x.settings_view_default_marker()), style=dim)
-            if row.choice.description and row.setting.key != "language":
+            if row.choice.description and not _description_needs_its_own_rows(
+                row.setting, row.choice
+            ):
                 line.append(f"  {_paint(row.choice.description, source_locale='en')}", style=faint)
-            # The language row's note is painted by `_note_rows` above it,
-            # wrapped whole; repeating it here is the truncated copy the
-            # expansion exists to stop showing.
+            # A description painted by `_note_rows` above it is shown whole,
+            # wrapped; repeating it here is the truncated copy the expansion
+            # exists to stop showing (the language row's rule, now shared with
+            # the auto mode's exemption).
             return line
 
         if row.kind == "chain" and row.chain is not None:
@@ -7199,6 +7203,24 @@ def _note_rows(text: str, width: int) -> list["_Row"]:
     without ellipsising the caveat away.
     """
     return [_Row(kind="note", text=line) for line in wrap_cells(text, max(1, width - _NOTE_INDENT))]
+
+
+def _description_needs_its_own_rows(
+    setting: settings_io.Setting, choice: settings_io.Choice
+) -> bool:
+    """Whether a choice's description is painted as note rows rather than inline.
+
+    A description that does not fit its row is ellipsised, which is exactly how
+    the language row dropped "Terminal: best ef…" — the caveat, painted as the
+    cut. Both callers here need the whole sentence: the tool-approval mode's
+    auto gloss is 73 cells against a 55-cell slot at 80 columns, and the part
+    that would be cut is the EXEMPTION (which gates still ask a person).
+    """
+    if not getattr(choice, "description", ""):
+        return False
+    if setting.key == "language":
+        return True
+    return setting.key == "tool_approval_mode" and choice.value == "auto"
 
 
 _BOOL_CHOICES: tuple[settings_io.Choice, ...] = _bool_choices()

@@ -97,6 +97,7 @@ from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 # cannot drift on which writes may loosen a live gate (issue #1282). Pure and
 # import-cheap: `harness.approval` pulls in `inspect` and nothing else.
 from local_operator.harness.approval import (
+    AUTO_MODE_EFFECT,
     LOOSENING_KEPT_BY_ASK_NOTICE,
     LOOSENING_REFUSED_NOTICE,
     REARM_KEPT_BY_AUTO_NOTICE,
@@ -32204,7 +32205,7 @@ class OperatorApp(App[None]):
                 else " — /approvals default auto saves it for new sessions"
             )
             notice(
-                "tool approvals: auto — every tool runs without asking (this session)" + save_hint,
+                f"tool approvals: auto — {AUTO_MODE_EFFECT} (this session)" + save_hint,
                 "warning",
             )
         else:
@@ -32274,7 +32275,7 @@ class OperatorApp(App[None]):
         on_disk = self._configured_approvals_mode()
         saved = on_disk if on_disk is not None else mode_word(self._approvals_default_auto)
         effect = (
-            "every tool runs without asking"
+            AUTO_MODE_EFFECT
             if self._approve_all
             else "write and command tools prompt before running"
         )
@@ -44683,7 +44684,7 @@ class OperatorApp(App[None]):
         if not announce or self._gate_is_owned_elsewhere():
             return _ApprovalsFollow("", False)
         return (
-            _ApprovalsFollow("tool approvals now auto — every tool runs without asking", False)
+            _ApprovalsFollow(f"tool approvals now auto — {AUTO_MODE_EFFECT}", False)
             if wanted_auto
             else _ApprovalsFollow("tool approvals now ask — tools prompt before running", False)
         )
@@ -61586,7 +61587,7 @@ class OperatorApp(App[None]):
             on_disk = self._configured_approvals_mode()
             saved = on_disk if on_disk is not None else mode_word(self._approvals_default_auto)
             effect = (
-                "every tool runs without asking"
+                AUTO_MODE_EFFECT
                 if self._approve_all
                 else "write and command tools prompt before running"
             )
@@ -61649,7 +61650,7 @@ class OperatorApp(App[None]):
             )
             return SlashResult(
                 kind="notice",
-                text="tool approvals: auto — every tool runs without asking (this session)"
+                text=f"tool approvals: auto — {AUTO_MODE_EFFECT} (this session)"
                 + save_hint
                 + not_saved,
                 style="warning",
