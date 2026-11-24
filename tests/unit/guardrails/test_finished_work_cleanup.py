@@ -354,6 +354,13 @@ async def test_plain_own_checkout_holds_unverified_payload(
     report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
     judge = _Judge("ALLOW: synthetic judge")
     result = await _check(home, command, judge)
+    if payload == "ignored":
+        # Operator directive 2026-11-23 (PR #4493): the owner sheds its own
+        # ignored ``.env``; no hold, no judge. Foreign trees still hold it.
+        assert ranked.risk is Risk.LOW and not ranked.targets[0].cleanup_hold, ranked.reasons
+        assert result is None or not result.blocked, result and result.text
+        assert not judge.prompts
+        return
     assert ranked.risk is Risk.HIGH and ranked.targets[0].cleanup_hold, ranked.reasons
     assert report.builtin_effect != BUILTIN_PASS, report.render()
     assert result.blocked and not judge.prompts, result
@@ -373,9 +380,9 @@ async def test_plain_own_checkout_holds_unverified_payload(
         assert "commit or stash" not in text and "push commits" not in text
         assert ".env" not in text  # counted, never listed
     elif payload == "ignored-and-edit":
-        assert "1 ignored entry" in text and "1 tracked or untracked change" in text
-        assert "ignored files (build output" in text and "commit or stash edits" in text
-        assert "not an open PR or unpushed work" not in text
+        # The own ``.env`` is shed (PR #4493); the uncommitted edit still holds.
+        assert "1 tracked or untracked change" in text and "commit or stash edits" in text
+        assert "ignored entry" not in text
     elif payload == "tracked-deletion":
         assert "tracked deletions remain" in text
         assert (home / "preserved-a.txt").read_text() == "a\n"
@@ -540,7 +547,9 @@ async def test_exact_cleanup_preserves_unverified_work(
             (wt / kept / "notes.txt").write_text("keep this local note\n")
     elif obstacle == "missing-force":
         (wt / "a.txt").unlink()
-    if obstacle not in ("foreign-ignored", "stale-link"):
+    # Operator directive 2026-11-23 (PR #4493): an OWN tree sheds every ignored
+    # entry, so the ignored obstacles are exercised on trees another session made.
+    if obstacle not in ("ignored", "foreign-ignored", "stale-link"):
         _record(home, wt, creator=ME)
     target = repo if obstacle == "primary" else wt
     if obstacle == "residue":

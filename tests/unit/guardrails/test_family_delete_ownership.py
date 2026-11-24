@@ -481,15 +481,18 @@ def test_regenerable_ignored_output_is_shed_only_by_the_owning_family(
         assert verdict.risk is Risk.LOW, verdict.reasons
 
 
-def test_child_cannot_remove_parents_tree_with_unverified_ignored_files(
-    home: Path, infra: Path
-) -> None:
+def test_child_removes_parents_tree_with_unverified_ignored_files(home: Path, infra: Path) -> None:
+    """Operator directive 2026-11-23 (PR #4493): the creator FAMILY cleans up
+    after itself with no approval, ignored files included. A sibling or an
+    unrelated session still holds: see
+    ``test_regenerable_ignored_output_is_shed_only_by_the_owning_family``.
+    """
     wt = _add_tree(home, infra / "services", P)
     _ignore_only(wt)
     assert prov.worktree_state(str(wt), own=True) == "clean"
     verdict = _rank(home, _remove(wt), C)
-    assert verdict.risk is Risk.HIGH and verdict.targets[0].cleanup_hold, verdict.reasons
-    assert "ignored entries the guard cannot prove regenerable" in verdict.targets[0].reason
+    assert not verdict.targets[0].cleanup_hold, verdict.reasons
+    assert verdict.risk is Risk.LOW, verdict.reasons
 
 
 def test_child_removes_parents_tree_with_tracked_change_is_high(home: Path, infra: Path) -> None:

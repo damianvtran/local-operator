@@ -255,11 +255,10 @@ async def test_own_plain_compound_cleanup_sheds_regenerable_ignored_output(
 
 
 @pytest.mark.asyncio
-async def test_own_plain_cleanup_still_holds_hand_made_ignored_data(
-    home: Path, mobile: Path
-) -> None:
-    """Ownership is not a witness for an ignored file off the regenerable list:
-    a ``.env`` may be the only copy of local data, so it keeps the hold."""
+async def test_own_plain_cleanup_sheds_hand_made_ignored_data(home: Path, mobile: Path) -> None:
+    """Operator directive 2026-11-23 (PR #4493): agents clean up after
+    themselves with no approval, so an OWN tree's ignored ``.env`` goes with
+    it. (Before: held as possibly the only copy of local data.)"""
     tree = mobile / ".worktrees" / "refused-connect"
     # Ignore it via the repository's info/exclude: editing the tracked
     # .gitignore would itself be a change Git refuses.
@@ -274,10 +273,9 @@ async def test_own_plain_cleanup_still_holds_hand_made_ignored_data(
     with open(exclude, "a") as fh:
         fh.write(".env\n")
     (tree / ".env").write_text("LOCAL_ONLY=1\n")
-    judge = _Judge("ALLOW ledger")
+    judge = _Judge("BLOCK: should not be asked")
     outcome = await _check(home, COMMAND_1, judge)
-    assert outcome is not None and outcome.blocked
-    assert "1 ignored entry the guard cannot prove regenerable" in outcome.text
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
     assert judge.prompts == []
 
 
@@ -303,7 +301,9 @@ def test_exact_remove_preserves_unregenerable_ignored_output(home: Path, mobile:
     v = classify_bash(
         f"git worktree remove {wt}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S
     )
-    assert v.risk is Risk.HIGH and v.targets[0].cleanup_hold, v.targets[0].reason
+    # Operator directive 2026-11-23 (PR #4493): the OWNER sheds its own
+    # ignored notes; another session still may not.
+    assert not v.targets[0].cleanup_hold, v.targets[0].reason
     foreign = classify_bash(
         f"git worktree remove {wt}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S2
     )
@@ -752,7 +752,9 @@ def test_exact_force_route_sheds_own_regenerable_payload(
     own = prov._interrupted_cleanup_state(real, None, own_regenerable=True)
     foreign = prov._interrupted_cleanup_state(real, None)
     assert foreign == "dirty"
-    assert own == ("clean" if payload == "ui-qa" else "dirty")
+    # Operator directive 2026-11-23: an own tree sheds every ignored entry
+    # (``.env``, a ``.DS_Store`` directory); only a nested repository holds.
+    assert own == "clean"
 
 
 # --- Finder ``.DS_Store`` metadata (operator request 2026-11-23) -------------
@@ -833,6 +835,10 @@ def test_non_finder_ds_store_or_other_ignored_entry_still_holds(
     else:
         (wt / ".env").write_text("TOKEN=synthetic\n")
     _record(home, wt)
+    # Operator directive 2026-11-23 (PR #4493): an OWN tree sheds all of it;
+    # the hold below is what any OTHER tree (no ownership) still gets.
+    own = prov.plain_cleanup_ignored_inventory(str(wt), own_regenerable=True)
+    assert own is not None and own.unverified_ignored == 0, own
     if kind == "symlink":
         # PR #4493: an OWN tree sheds any ignored link (Git removes the link,
         # never its target), whatever its name; the target is untouched.
@@ -840,7 +846,8 @@ def test_non_finder_ds_store_or_other_ignored_entry_still_holds(
         assert inventory is not None and inventory.unverified_ignored == 0, inventory
         assert (mobile / "App.tsx").is_file()
         return
-    _held_one(home, wt)
+    inventory = prov.plain_cleanup_ignored_inventory(str(wt))
+    assert inventory is not None and inventory.unverified_ignored == 1, inventory
     assert prov.worktree_state(str(wt), own=True) == "clean"
 
 
@@ -868,3 +875,18 @@ def test_force_and_rm_rf_ranking_ignores_the_finder_witness(
     with_witness = rank()
     monkeypatch.setattr(prov, "_finder_metadata_file", lambda real, entry: False)
     assert rank() == with_witness
+
+
+def test_own_tree_still_holds_an_ignored_nested_repository(home: Path, mobile: Path) -> None:
+    """The one hold left in an own tree (PR #4493 operator directive): an
+    ignored entry holding a Git repository, whose commits may exist nowhere
+    else and cannot be regenerated."""
+    tree = mobile / ".worktrees" / "refused-connect"
+    nested = tree / "vendor-checkout"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    real = os.path.realpath(tree)
+    assert prov._own_tree_sheds(str(nested)) is False
+    assert prov._own_tree_sheds(os.path.join(real, ".env")) is False  # unreadable/missing
+    (tree / ".env").write_text("A=1\n")
+    assert prov._own_tree_sheds(os.path.join(real, ".env")) is True

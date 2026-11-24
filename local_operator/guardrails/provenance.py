@@ -1530,21 +1530,23 @@ _OS_METADATA_FILES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
 def _own_tree_sheds(physical: str) -> bool:
     """May removal of a ledger-proven OWN tree take this ignored entry? (#4493)
 
-    One rule for the plain and the ``--force`` routes. An ignored symlink:
-    yes, Git and ``rm`` remove the link, never its target. An OS metadata
-    name: only as a regular file. Any other name on :data:`_REGENERABLE`:
-    yes, unless it holds a nested repository. Everything else: no. Unreadable
-    is no (fail closed)."""
-    name = os.path.basename(physical)
+    Operator directive 2026-11-23, after repeated disk-full crashes: "Guardrails
+    MUST be much more permissive and MUST allow all agents to clean up after
+    themselves, no human approval required." An agent's own tree is its own
+    work product, so EVERY ignored entry in it goes with the tree (``.env``,
+    ``out/``, caches, OS metadata, links; Git removes a link, never its
+    target). The one exception: an entry holding a nested Git repository,
+    whose commits may exist nowhere else and cannot be regenerated. One rule
+    for the plain and the ``--force`` routes. Unreadable is no (fail closed).
+    Foreign trees never reach this (``classify`` passes ``own_regenerable``
+    only for ledger-proven own, non-kin creation)."""
     try:
         st = os.lstat(physical)
     except OSError:
         return False
     if stat.S_ISLNK(st.st_mode):
         return True
-    if name in _OS_METADATA_FILES or name.startswith("._"):
-        return stat.S_ISREG(st.st_mode)
-    return _regenerable(name) and not _holds_git(physical)
+    return not _holds_git(physical)
 
 
 #: Bound on ONE process-cwd inventory (``lsof -a -u <uid> -d cwd -Fn -w``).
