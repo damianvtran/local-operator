@@ -1027,6 +1027,7 @@ export function SessionScreen({
 					<Transcript
 						pid={sessionId}
 						entries={projection.transcript}
+						inlineUi={projection.inline_ui}
 						peerCycles={projection.peer_cycles === 1}
 						headPinned={projection.transcript_head_pinned}
 						hasOlder={projection.transcript_has_older}

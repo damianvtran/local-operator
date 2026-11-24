@@ -135,25 +135,27 @@ class DesktopReceipts:
             )
         return db
 
-    def _claim(self, key: str, fingerprint: str, retry_safe: bool) -> dict[str, Any] | None:
+    def _claim(
+        self, key: str, fingerprint: str, retry_safe: bool, equivalent: tuple[str, ...]
+    ) -> tuple[str, dict[str, Any] | None]:
         with closing(self._db()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT fingerprint, result FROM receipts WHERE id = ?", (key,)
             ).fetchone()
             if row is not None:
-                if row[0] != fingerprint:
+                if row[0] != fingerprint and row[0] not in equivalent:
                     raise ReceiptConflict("Request ID was already used with different input")
                 if row[1] is not None:
-                    return json.loads(row[1])
+                    return row[0], json.loads(row[1])
                 if not retry_safe:
                     raise ReceiptConflict(
                         "Request outcome is indeterminate. Reconcile session state "
                         "before issuing a new request"
                     )
-            else:
-                db.execute("INSERT INTO receipts VALUES (?, ?, NULL)", (key, fingerprint))
-        return None
+                return row[0], None
+            db.execute("INSERT INTO receipts VALUES (?, ?, NULL)", (key, fingerprint))
+        return fingerprint, None
 
     @staticmethod
     def fingerprint(body: dict[str, Any]) -> str:
@@ -305,7 +307,62 @@ class DesktopReceipts:
         fingerprint check, so a same-id retry still coalesces and a different
         body still raises :class:`ReceiptConflict`.
         """
-        fingerprint = self.fingerprint(body)
+        return await self._run(
+            key,
+            self.fingerprint(body),
+            lambda _: operation(),
+            retry_safe=retry_safe,
+            replay_guard=replay_guard,
+        )
+
+    @classmethod
+    def prompt_fingerprints(cls, body: dict[str, Any]) -> tuple[str, str, str]:
+        """Return the absent, false and true digests for the same prompt.
+
+        Voice mode recovery must use the same aliases as the eventual claim:
+        only presentation support may differ; mode and words stay fingerprinted.
+        """
+        base = {field: value for field, value in body.items() if field != "inline_ui"}
+        return (
+            cls.fingerprint(base),
+            cls.fingerprint({**base, "inline_ui": False}),
+            cls.fingerprint({**base, "inline_ui": True}),
+        )
+
+    async def run_prompt(
+        self,
+        key: str,
+        body: dict[str, Any],
+        operation: Callable[[bool], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Retry the same send even if the viewer's rendering support changed.
+
+        Accept both historical digests and the pre-feature digest, but keep the
+        original claim. Even if the first attempt left an unfinished receipt
+        (including a timeout followed by a spool), the retry cannot upgrade or
+        downgrade the original send's negotiated authoring flag. Storing a
+        matching digest rather than rewriting it also keeps older receipt rows
+        readable without a schema migration.
+        """
+        legacy, false, true = self.prompt_fingerprints(body)
+        return await self._run(
+            key,
+            true if body.get("inline_ui") is True else legacy,
+            lambda claimed: operation(claimed == true),
+            equivalent=(legacy, false, true),
+            retry_safe=True,
+        )
+
+    async def _run(
+        self,
+        key: str,
+        fingerprint: str,
+        operation: Callable[[str], Awaitable[dict[str, Any]]],
+        *,
+        equivalent: tuple[str, ...] = (),
+        retry_safe: bool = False,
+        replay_guard: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> dict[str, Any]:
         # Coalesce retries of THIS request, not unrelated sessions: a runtime
         # compaction can wait on a provider, and must not block another session's
         # prompt admission. Cross-process races still use the SQLite transaction.
@@ -313,7 +370,9 @@ class DesktopReceipts:
         self.locks[key] = (lock, users + 1)
         try:
             async with lock:
-                cached = await asyncio.to_thread(self._claim, key, fingerprint, retry_safe)
+                claimed, cached = await asyncio.to_thread(
+                    self._claim, key, fingerprint, retry_safe, equivalent
+                )
                 superseding = False
                 if cached is not None:
                     # The guard runs HERE, under the per-key lock, so two
@@ -325,7 +384,7 @@ class DesktopReceipts:
                         return {**cached, "replayed": True}
                     superseding = True
                 try:
-                    result = await operation()
+                    result = await operation(claimed)
                 except Unclaimed as unclaimed:
                     # The operation refused this request in a way that leaves
                     # nothing behind, so its id must stay usable: withdraw the

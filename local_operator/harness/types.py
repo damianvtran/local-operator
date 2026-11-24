@@ -1201,6 +1201,12 @@ class Message(BaseModel):
     # Stable id for transcript entries and cache memoization.
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
 
+    # Admitted input intent only; replay must not reauthorize a future run.
+    _inline_ui_viewer_capable: bool = PrivateAttr(default=False)
+    # Journal-envelope presentation provenance; never serialized as a Message field.
+    _inline_ui_source_version: int | None = PrivateAttr(default=None)
+    _inline_ui_overlay: dict[str, Any] | None = PrivateAttr(default=None)
+
     # Set only on the ephemeral raw copies returned by ChatRequest.wire_messages.
     # Explicit provider encoders may read the content; generic serialization may
     # not silently turn this raw-bearing row into apparently safe public JSON.
@@ -3390,17 +3396,16 @@ class ProviderTurnStartEvent(AgentEvent[Literal["provider_turn_start"]]):
     limit could still reject — silently losing the work while the supervisor
     believed it was accepted.
 
-    ``response_id`` is the provider's native turn identity, or ``None`` when
-    the provider exposes none (Google). A consumer that requires no-replay
-    proof must treat ``None`` as indeterminate and fail closed rather than
-    substituting an id of its own. It is always emitted, even with a null id:
-    a MISSING boundary cannot be distinguished from "the request never went
-    out", so a consumer would wait forever instead of failing closed.
+    ``response_id`` is the provider's native turn identity, or ``None`` for
+    a wire with no stable ID (Google) or a withheld ID. A consumer that
+    requires no-replay proof must treat missing proof as indeterminate rather
+    than inventing an ID. A native stream that omits its opener supplies no
+    boundary; absence alone is not proof the request never went out.
 
     **One turn may emit SEVERAL of these, and the LATEST supersedes.** A
     credential rotation or a provider fallback retries the request, and each
-    attempt that reaches a provider announces its own boundary with its own
-    id. This is not a duplicate to be deduplicated: the earlier attempt failed
+    reported boundary names its own attempt. This is not a duplicate to be
+    deduplicated: the earlier attempt failed
     before rendering anything, so its id names a turn that produced no output,
     while the last one names the turn actually being served. A consumer
     committing no-replay proof must therefore key on the most recent id rather
@@ -4257,6 +4262,9 @@ class LoopConfig(BaseModel):
     # Required: render transcript messages (incl. custom entries) into the
     # LLM-visible list sent to the provider.
     convert_to_llm: Callable[[list[AgentMessage]], list[Message]] = Field(exclude=True)
+    # Model-facing widget discovery is an input capability, not a new user
+    # message. The host reads its current grant at each real request boundary.
+    get_inline_ui_hint: Callable[[], str | None] | None = Field(default=None, exclude=True)
 
     # Required in practice: stream one assistant response. Providers implement
     # this; the loop only knows the signature.
@@ -5018,6 +5026,11 @@ class ChatRequest(BaseModel):
     system_blocks: list[str] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
     tools: list[AgentTool] = Field(default_factory=list)
+    # Not a conversation row: history/Saver, cache breakpoints and last-user
+    # accounting must never treat it as one. Compatible wire builders append
+    # it only after encoding the durable prefix. As a declared field it is
+    # still covered by the armed one-turn retry/copy integrity check.
+    inline_ui_hint: str | None = Field(default=None, exclude=True, repr=False)
     # The generation bound for THIS call. Left ``None`` it is filled from
     # :func:`turn_output_budget` by the validator at the end of this class, so a
     # request built anywhere in the harness is bounded without the caller having
@@ -5585,10 +5598,11 @@ class ChatRequest(BaseModel):
 class StreamStartEvent(BaseModel):
     """The provider began responding to THIS request, on the wire.
 
-    Emitted by a wire client the moment the provider reveals its own identity
-    for the turn — the first chunk of an OpenAI-compatible stream, the
-    ``response.created`` event on the Responses API, Anthropic's
-    ``message_start``. It exists to give supervisors a boundary that means
+    Emitted at the wire client's acceptance boundary: the first chunk of an
+    OpenAI-compatible stream, ``response.created`` on Responses, or Anthropic's
+    ``message_start``. On the native streams a missing or nameless opener is
+    not grounds to synthesize acceptance from output. This gives supervisors
+    a boundary that means
     "the request crossed the wire and the provider started generating", which
     is NOT what ``MessageStartEvent`` means: the loop emits that one from a
     bare placeholder message before the ``ChatRequest`` is even constructed
@@ -5596,14 +5610,16 @@ class StreamStartEvent(BaseModel):
     prompt un-retryable that DNS, auth, or a rate limit could still reject.
 
     ``response_id`` is the provider's native turn identity, and is the token an
-    external runtime commits as no-replay proof. It is ``None`` when the
-    provider exposes no stable per-response id on its streaming surface
-    (Google), and a consumer must then treat acceptance as indeterminate
-    rather than inventing one.
+    external runtime commits as no-replay proof. It is ``None`` when a stable
+    per-response id isn't available at that boundary, and a consumer must then
+    treat acceptance as indeterminate for replay rather than inventing one.
     """
 
     type: Literal["start"] = "start"
     response_id: str | None = None
+    # A native id belongs to the adapter's route, not the loop's display
+    # model (ordinary API-key fallback need not emit StreamModelEvent).
+    _native_selector: tuple[str, str] | None = PrivateAttr(default=None)
     #: Anthropic cache diagnostics for THIS request, when it was opted in (see
     #: ``ChatRequest.cache_diagnostics``). ``None`` = not diagnosed (another
     #: provider, the conversation's first request, or the feature latched off).
@@ -5764,8 +5780,20 @@ class StreamModelEvent(BaseModel):
     model: ModelSpec
 
 
+class StreamAttemptReceipt(BaseModel, frozen=True):
+    """Provider-to-loop metadata; never an AgentEvent or evidence of acceptance.
+
+    None explicitly clears a previous route's opt-in before this attempt's
+    output. Only the encoder of the posted body can supply version 1.
+    """
+
+    type: Literal["attempt_receipt"] = "attempt_receipt"
+    inline_ui_source_version: Literal[1] | None = Field(exclude=True)
+
+
 StreamEvent = (
     StreamStartEvent
+    | StreamAttemptReceipt
     | StreamTextDelta
     # Beside the text delta it is the sibling of: one channel carries the
     # answer, the other carries the work behind it, and a consumer that

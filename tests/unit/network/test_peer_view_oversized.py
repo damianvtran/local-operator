@@ -27,6 +27,7 @@ import pytest
 
 from local_operator.harness.types import CustomMessage, Message
 from local_operator.network import relay
+from local_operator.session.frontend_state import FrontendSessionState, FrontendSync
 from local_operator.session.history_window import display_window
 from local_operator.session.peer_rows import clear_cache
 from local_operator.session.runtime.types import ClientLocality
@@ -310,8 +311,6 @@ async def test_only_a_non_local_viewer_gets_the_bounded_page(
     ``history_page`` answer stay ``full_required`` byte-for-byte; a REMOTE one
     cannot, so both routes hand it the bounded, marked page instead.
     """
-    from types import SimpleNamespace
-
     from local_operator.session.runtime.server import (
         RuntimeServer,
         _serve_peer_bounded_history,
@@ -327,13 +326,21 @@ async def test_only_a_non_local_viewer_gets_the_bounded_page(
     expected = "full_required" if locality == "local" else "ok"
 
     # Route 1: the sync frame (pushed frame and ``frontend_sync`` RPC).
-    exact_json = exact.model_dump(mode="json")
-    payload: dict[str, Any] = {"display_history": exact_json}
-    sync = SimpleNamespace(_peer_display_history=bounded)
-    _serve_peer_bounded_history(payload, sync, locality)
+    sync = FrontendSync(
+        epoch="test",
+        sequence=0,
+        snapshot=FrontendSessionState(session_id="test", epoch="test"),
+        display_history=exact,
+    )
+    sync._peer_display_history = bounded
+    payload = sync.model_dump(mode="json")
+    expected_window = exact if locality == "local" else bounded
+    expected_page = json.dumps(expected_window.model_dump(mode="json"))
+    # The caller uses the returned window for sidecars, so it must match the page on the wire.
+    served = _serve_peer_bounded_history(payload, sync, locality)
+    assert served is expected_window
     assert payload["display_history"]["status"] == expected
-    if locality == "local":
-        assert payload["display_history"] == exact_json
+    assert json.dumps(payload["display_history"]) == expected_page
 
     # Route 2: the ``history_page`` op, through the real dispatcher.
     class PagingHandle(FakeHandle):

@@ -579,6 +579,29 @@ def test_prompt_without_delivery_dumps_byte_identically_to_before() -> None:
     assert json.dumps(pinned.model_dump()) != json.dumps(dump)
 
 
+def test_inline_ui_default_leaves_the_receipt_dump_as_before() -> None:
+    """``inline_ui`` is retry identity only when a viewer actually claims it.
+
+    The receipt journal hashes ``model_dump()``. A same-id retry recorded
+    before the inline UI capability flag existed must replay after an upgrade,
+    so the default ``False`` is omitted, exactly like an absent ``delivery``.
+    A ``True`` claim DOES ride: a capable and an incapable send under one id
+    are different requests. Removing the omission fails the pinned-bytes test
+    above; this one guards the other half, that ``True`` is not dropped too.
+    """
+    import json
+
+    base = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi")
+    assert "inline_ui" not in base.model_dump()
+    explicit_false = Prompt.model_validate(
+        {"request_id": "12345678-1234-4678-9234-567812345678", "text": "hi", "inline_ui": False}
+    )
+    assert json.dumps(explicit_false.model_dump()) == json.dumps(base.model_dump())
+    capable = base.model_copy(update={"inline_ui": True})
+    assert capable.model_dump()["inline_ui"] is True
+    assert json.dumps(capable.model_dump()) != json.dumps(base.model_dump())
+
+
 @pytest.mark.asyncio
 async def test_a_pinned_delivery_is_part_of_receipt_identity(tmp_path):
     """Same-id replay: the pinned delivery hashes; a changed delivery conflicts."""
@@ -621,6 +644,39 @@ async def test_receipts_survive_adapter_restart_and_reject_changed_body(tmp_path
         await replacement.run("s:id", {"argument": "two"}, op)
     assert len(calls) == 1
     assert first.path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original", [None, False, True])
+async def test_prompt_receipt_retry_keeps_first_presentation_authority(tmp_path, original):
+    body = {"text": "the user's send", "delivery": "queue"}
+    previous = body if original is None else {**body, "inline_ui": original}
+
+    async def lost_ack():
+        raise ConnectionError("ack lost after claim")
+
+    journal = DesktopReceipts(tmp_path)
+    with pytest.raises(ConnectionError):
+        await journal.run("s:id", previous, lost_ack, retry_safe=True)
+
+    behaviors = []
+
+    async def deliver(inline_ui: bool):
+        behaviors.append(inline_ui)
+        return {"status": "queued"}
+
+    restarted = DesktopReceipts(tmp_path)
+    retry = {**body, "inline_ui": original is not True}
+    assert await restarted.run_prompt("s:id", retry, deliver) == {"status": "queued"}
+    assert await journal.run_prompt("s:id", previous, deliver) == {
+        "status": "queued",
+        "replayed": True,
+    }
+    assert behaviors == [original is True]
+    with pytest.raises(ReceiptConflict):
+        await journal.run_prompt("s:id", {**retry, "text": "different send"}, deliver)
+    with pytest.raises(ReceiptConflict):
+        await journal.run_prompt("s:id", {**retry, "delivery": "both"}, deliver)
 
 
 @pytest.mark.asyncio
@@ -11633,3 +11689,82 @@ def test_validate_target_names_the_unresolved_member(tmp_path) -> None:
         "slot": "team",
         "member": "nope",
     }
+
+
+@pytest.mark.asyncio
+async def test_inline_widget_history_and_stream_negotiate_on_desktop_http(move_api, monkeypatch):
+    """The same journal prose serves both viewers; only the opting reader gets placements."""
+    from local_operator.harness.types import Message
+
+    client, app, root = move_api
+    work = root / "inline-work"
+    work.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(work))
+    journal = Transcript(root / "sessions" / sid)
+    await journal.append_message(Message.user("Summarize January."))
+    answer = Message.assistant(
+        'Revenue 📈\n\n```lop-ui\n{"type":"bar","title":"Revenue","data":[["Jan",6]]}\n```\n\nEnd.'
+    )
+    answer._inline_ui_source_version = 1
+    await journal.append_message(answer)
+
+    url = f"/v1/desktop/sessions/{sid}"
+    capability = await client.get("/v1/capabilities")
+    assert capability.json()["result"]["features"]["inline_ui"] == 1
+    old = await client.get(f"{url}/history")
+    modern = await client.get(f"{url}/history", params={"inline_ui": 1})
+    assert old.status_code == modern.status_code == 200
+    plain = old.json()["result"]
+    rich = modern.json()["result"]
+    sidecar = rich.pop("inline_ui")
+    assert rich == plain and "lop-ui" not in old.text
+    row = sidecar["messages"][answer.id]
+    assert row == {
+        "version": 1,
+        "text": "Revenue 📈\n\n\n\nEnd.",
+        "widgets": [
+            {
+                "offset": len("Revenue 📈\n\n".encode("utf-16-le")) // 2,
+                "payload": {"type": "bar", "title": "Revenue", "data": [["Jan", 6]]},
+            }
+        ],
+    }
+    snapshot = await client.get(url, params={"open_frame": 1, "inline_ui": 1})
+    assert snapshot.status_code == 200
+    assert snapshot.json()["result"]["payload"]["history"]["inline_ui"] == sidecar
+    invalid = await client.get(f"{url}/history", params={"inline_ui": 2})
+    invalid_send = await client.post(
+        f"{url}/messages",
+        json={
+            "text": "invalid",
+            "request_id": str(uuid.uuid4()),
+            "inline_ui": "true",
+        },
+    )
+    assert invalid.status_code == invalid_send.status_code == 422
+
+    # ASGITransport buffers until the generator ends; terminate after real
+    # SSE serialization of one already-fanned-out event and replacement seed.
+    live = {"type": "message_update", "delta": "", "inline_ui": sidecar}
+    replace = {
+        "type": "frontend.replace",
+        "payload": {"frontend": {"snapshot": {"live_events": [live]}}},
+    }
+
+    async def finite_frames(self, sub, **options):
+        yield {"type": "event", "payload": live}
+        yield replace
+
+    monkeypatch.setattr(DesktopSessionBridge, "events", finite_frames)
+    old_stream = await client.get(f"{url}/events")
+    rich_stream = await client.get(f"{url}/events", params={"inline_ui": 1})
+    assert old_stream.status_code == rich_stream.status_code == 200
+    assert "inline_ui" not in old_stream.text
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in rich_stream.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert frames[0]["payload"] == live
+    assert frames[1] == replace

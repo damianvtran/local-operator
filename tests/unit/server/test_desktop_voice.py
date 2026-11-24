@@ -39,6 +39,7 @@ from httpx import ASGITransport, AsyncClient
 from local_operator.config import ConfigManager
 from local_operator.server.routes import desktop_sessions, desktop_voice
 from local_operator.server.utils.desktop_feed import DesktopFeed
+from local_operator.server.utils.desktop_receipts import DesktopReceipts
 from local_operator.voice import slot as voice_slot
 
 TOKEN = "desktop-voice-token"
@@ -339,10 +340,7 @@ async def _utter_with_id(rig: Any, request_id: str, text: str) -> Any:
 
 @pytest.mark.asyncio
 async def test_a_retry_after_the_turn_started_replays_instead_of_conflicting(rig: Any) -> None:
-    """The mode is the SERVER's pick (steer while streaming), so it must not be
-    part of what the receipt journal compares: a timed-out client retrying the
-    same ``request_id`` after its own prompt started the turn is a replay, not
-    "Request ID was already used with different input"."""
+    """Recover the admitted mode even when the turn now calls for a steer."""
     await _enable(rig, SESSION_A)
     request_id = str(uuid.uuid4())
     first = await _utter_with_id(rig, request_id, "list files")
@@ -375,8 +373,50 @@ async def test_a_retry_after_the_steered_turn_ended_replays_instead_of_conflicti
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recorded_mode", ["prompt", "steer"])
+@pytest.mark.parametrize("inline_ui", [False, True])
+async def test_voice_recovers_mode_from_explicit_presentation_receipt(
+    rig: Any, recorded_mode, inline_ui: bool
+) -> None:
+    await _enable(rig, SESSION_A)
+    request_id = str(uuid.uuid4())
+    words = "Check the latest report"
+    body = desktop_sessions.Prompt(
+        request_id=request_id,
+        text=words,
+        mode=recorded_mode,
+        input_mode="dictated",
+        inline_ui=inline_ui,
+    )
+
+    async def lost_ack() -> dict[str, Any]:
+        raise ConnectionError("lost after recording the original receipt")
+
+    # The old body-hash claimant stored both explicit booleans. Leave the
+    # receipt pending so the real retry also has to use the original authoring
+    # flag when it enters the owner, not merely return a cached result.
+    journal = DesktopReceipts(rig.root)
+    with pytest.raises(ConnectionError):
+        await journal.run(f"{SESSION_A}:{request_id}", body.model_dump(), lost_ack, retry_safe=True)
+
+    rig.pool.remote.is_streaming = recorded_mode == "prompt"
+    resumed = await _utter_with_id(rig, request_id, words)
+    assert resumed.status_code == 200, resumed.text
+    (admitted,) = rig.pool.remote.admissions
+    assert admitted["steer"] is (recorded_mode == "steer")
+    assert admitted.get("inline_ui", False) is inline_ui
+
+    repeated = await _utter_with_id(rig, request_id, words)
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["result"]["admission"]["replayed"] is True
+    changed = await _utter_with_id(rig, request_id, "Different words")
+    assert changed.status_code == 409, changed.text
+    assert len(rig.pool.remote.admissions) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_reused_request_id_with_other_words_is_still_a_conflict(rig: Any) -> None:
-    """The mode-blind replay must not weaken the journal's real protection."""
+    """Recovering a mode must not make changed words match a receipt."""
     await _enable(rig, SESSION_A)
     request_id = str(uuid.uuid4())
     assert (await _utter_with_id(rig, request_id, "list files")).status_code == 200

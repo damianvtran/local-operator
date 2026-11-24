@@ -231,6 +231,18 @@ class WireHintCapture:
     """One attempt's wire facts; never the last ambient nested request's hint."""
 
     hint: CacheAffinityHint | None = None
+    inline_ui_source_version: Literal[1] | None = None
+
+
+def record_inline_ui_wire_receipt(version: Literal[1] | None) -> None:
+    """Record the discovery suffix on the wire, never infer it from a model selector.
+
+    Use the same scoped capture as the cache wire facts. Without a failover
+    owner there is no ambient receipt for another stream to inherit.
+    """
+    capture = _wire_attempt.get()
+    if capture is not None:
+        capture.inline_ui_source_version = version
 
 
 @contextmanager

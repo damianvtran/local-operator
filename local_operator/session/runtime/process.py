@@ -5584,6 +5584,10 @@ async def _run_owner_prompt(
         from local_operator.session.session import spooled_input_surface
 
         fields["input_surface"] = spooled_input_surface(line)
+    if "inline_ui" in parameters:
+        from local_operator.session.session import spooled_inline_ui
+
+        fields["inline_ui"] = spooled_inline_ui(line)
     try:
         if live and getattr(line, "mode", "") == "steer":
             # A LIVE-QUEUED STEER: the user's mid-turn message that the busy
@@ -5647,6 +5651,10 @@ async def _run_owner_prompt(
             from local_operator.session.session import spooled_input_surface
 
             steer_fields["input_surface"] = spooled_input_surface(line)
+        if "inline_ui" in inspect.signature(steer).parameters:
+            from local_operator.session.session import spooled_inline_ui
+
+            steer_fields["inline_ui"] = spooled_inline_ui(line)
         logger.info(
             "spooled prompt %s arrived mid-turn; joining the turn in flight",
             command_id or "<no id>",

@@ -77,7 +77,10 @@ from local_operator.model.speed import (
     FastModeSupport,
     fast_mode_support,
 )
-from local_operator.providers.account_affinity import set_wire_hint
+from local_operator.providers.account_affinity import (
+    record_inline_ui_wire_receipt,
+    set_wire_hint,
+)
 from local_operator.providers.context import bind_native_context
 from local_operator.providers.documents import (
     DocumentBudget,
@@ -276,6 +279,24 @@ def _stream_id(value: Any) -> str | None:
         return None
     trimmed = value.strip()
     return trimmed or None
+
+
+def _native_stream_start(
+    request: ChatRequest,
+    response_id: str,
+    *,
+    cache_miss_type: str | None = None,
+    cache_missed_tokens: int = 0,
+) -> StreamStartEvent:
+    event = StreamStartEvent(
+        response_id=response_id,
+        cache_miss_type=cache_miss_type,
+        cache_missed_tokens=cache_missed_tokens,
+    )
+    # Failover may change the wire selector without changing the display
+    # model. Do not put a native response ID in that display model's namespace.
+    event._native_selector = (request.model.provider, request.model.model_id)
+    return event
 
 
 #: Longest provider display name we will carry back as a cache pin.
@@ -1924,6 +1945,13 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
     return int(visible * _estimate_slope(request.model)) + native, visible + native
 
 
+def _inline_ui_suffix_tokens(request: ChatRequest) -> int:
+    # Only serializers that send the suffix count it. It contributes to this
+    # request's admission, but is not part of the stored conversation measure.
+    hint = request.inline_ui_hint
+    return (len(hint) + 3) // 4 if hint is not None else 0
+
+
 def _reasoning_effort(request: ChatRequest) -> str | None:
     """The effort level to send, or ``None`` when the key must not appear.
 
@@ -3109,6 +3137,29 @@ class OpenAICompatClient:
     # (Radient, OpenRouter) enforce Anthropic's 4-breakpoint limit per request.
     MAX_CACHE_BREAKPOINTS = 4
 
+    #: Whether this wire's request bodies must grow APPEND-ONLY: each body the
+    #: Session sends has to extend the previous one byte for byte. That is the
+    #: Session's own persisted-prefix protocol (``append_only_state``, opted into
+    #: by every production system-block provider in ``session_factory``), and a
+    #: wire that honours it — Muse, whose shipped stability tests assert the
+    #: byte prefix — cannot carry a per-turn suffix. The suffix is fine where an
+    #: uncached tail is tolerated: it costs those tokens once per request. On a
+    #: prefix-stable wire it is worse than that: on the next request the suffix
+    #: sits MID-conversation (transcript, then suffix, then the new turn), so the
+    #: earlier body is no longer a prefix and every request pays to re-send from
+    #: the divergence. Wires that declare this therefore pin the inline discovery
+    #: hint at the HEAD of ``input``, where it is byte-identical on every request
+    #: and rides the cached prefix.
+    #:
+    #: Trade-off (review round 13, m1): the hint is present or absent per input
+    #: surface and re-resolved on every request, so a surface switch costs ONE
+    #: cold request whose prefix shares nothing with the previous one. That is
+    #: still strictly better than the tail placement, which costs a divergence on
+    #: every turn for as long as the hint is on. Ordering caveat (n2): a future
+    #: subclass that also takes the developer-instructions path inserts the hint
+    #: ahead of the standing instructions, since both are developer messages.
+    inline_ui_hint_rides_head = False
+
     def __init__(
         self,
         base_url: str,
@@ -3405,9 +3456,8 @@ class OpenAICompatClient:
             "openai-chat",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=(
-                echo_turns * reasoning_echo_placeholder_tokens() + google_boundary_tokens
-            ),
+            extra_native_tokens=echo_turns * reasoning_echo_placeholder_tokens()
+            + google_boundary_tokens,
         )
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
@@ -3424,6 +3474,10 @@ class OpenAICompatClient:
                 frozen_entry=epoch_entry,
                 ephemeral_indices=ephemeral_indices,
             )
+        # Chat Completions is a wire format, not a downstream template
+        # contract. A suffix row can violate strict role alternation; changing
+        # an existing row can rewrite the cached prefix or a tool pair. Keep
+        # this entire route transparent and leave discovery to native inputs.
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
@@ -3814,6 +3868,7 @@ class OpenAICompatClient:
             "openai-responses",
             scope,
             _estimate_slope(request.model),
+            extra_native_tokens=_inline_ui_suffix_tokens(request),
         )
         wire_messages = request.wire_messages()
         body: dict[str, Any] = {
@@ -3843,6 +3898,21 @@ class OpenAICompatClient:
                 )
             else:
                 body["instructions"] = instructions
+        if request.inline_ui_hint is not None:
+            # A real user item would move the Responses turn boundary, discard
+            # encrypted tool-round reasoning and reposition top-level instructions.
+            hint_item = {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": request.inline_ui_hint}],
+            }
+            if self.inline_ui_hint_rides_head:
+                # Prefix-stable wire: a tail item would break the append-only body
+                # contract this wire declares (see the class attribute), so pin it
+                # before the transcript where it stays byte-identical.
+                body["input"].insert(0, hint_item)
+            else:
+                body["input"].append(hint_item)
         if request.tools:
             body["tools"] = _tools_to_openai_responses(request.tools)
             body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
@@ -4422,6 +4492,7 @@ class OpenAICompatClient:
         tool_call_count = 0
         terminal_stop: str | None = None
         terminal_error: str | None = None
+        announced_id: str | None = None
         #: The model the upstream says actually answered (``response.model``), read
         #: off frames this loop already parses. Same contract as the chat wire's
         #: capture: the last carrier wins and a refused value leaves the previous
@@ -4547,6 +4618,7 @@ class OpenAICompatClient:
             if turn_state is not None and turn_generation is not None:
                 turn_state.receive(turn_generation, response.headers.get("x-codex-turn-state"))
             self._observe_responses_headers(response.headers)
+            record_inline_ui_wire_receipt(1 if request.inline_ui_hint is not None else None)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
                     break
@@ -4565,15 +4637,14 @@ class OpenAICompatClient:
                         raise _openai_response_error(payload)
                     continue
                 if event_type == "response.created":
-                    # The Responses API names the turn as soon as it opens it.
-                    # Capture the boundary HERE, not at ``response.completed``:
-                    # a supervisor keying no-replay proof on completion would
-                    # learn the turn was accepted only after it had already
-                    # produced its whole answer, which defeats the purpose.
-                    yield StreamStartEvent(
-                        response_id=_stream_id((payload.get("response") or {}).get("id"))
-                    )
-                    created_model = _served_model_slug((payload.get("response") or {}).get("model"))
+                    created = payload.get("response") or {}
+                    # Output and terminal IDs are not acceptance proof. If a
+                    # gateway delays the native opener, keep it in wire order.
+                    if announced_id is None:
+                        announced_id = _stream_id(created.get("id"))
+                        if announced_id is not None:
+                            yield _native_stream_start(request, announced_id)
+                    created_model = _served_model_slug(created.get("model"))
                     if created_model:
                         served_model = created_model
                 # Reasoning remains invisible here, but plaintext deltas still
@@ -5905,6 +5976,7 @@ class AnthropicClient:
             _ANTHROPIC_NATIVE_PROTOCOL,
             scope,
             _estimate_slope(request.model),
+            extra_native_tokens=_inline_ui_suffix_tokens(request),
         )
         body: dict[str, Any] = {
             "model": request.model.model_id,
@@ -5964,6 +6036,12 @@ class AnthropicClient:
                 frozen_block=epoch_block,
                 static_prefix_block=static_prefix_block,
                 ephemeral_indices=ephemeral_indices,
+            )
+        # An ephemeral frame belongs beyond all original cache points. Keep a
+        # preceding user/tool-result row byte-identical, including block order.
+        if request.inline_ui_hint is not None:
+            messages.append(
+                {"role": "user", "content": [{"type": "text", "text": request.inline_ui_hint}]}
             )
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
@@ -6225,6 +6303,7 @@ class AnthropicClient:
         native_blocks: dict[int, dict[str, Any]] = {}
         tool_json: dict[int, list[str]] = {}
         visible_text: list[str] = []
+        announced_id: str | None = None
         #: The model the API says served this turn (``message.model`` on
         #: ``message_start``). Captured for the per-call ledger record because the
         #: request names the ROUTE the harness asked for, never the checkpoint
@@ -6267,6 +6346,7 @@ class AnthropicClient:
             if response.status_code >= 400:
                 await response.aread()
                 self._raise_for_status(response)
+            record_inline_ui_wire_receipt(1 if request.inline_ui_hint is not None else None)
             async for event in self._iter_events(response):
                 event_type = event.get("type")
                 if event_type == USAGE_FILL_EVENT:
@@ -6291,31 +6371,26 @@ class AnthropicClient:
                         usage.output_tokens = int(fill["output_tokens"])
                     continue
                 if event_type == "message_start":
-                    # Anthropic names the turn on its own ``message_start``,
-                    # which is the moment it began generating for this request.
-                    # The id was previously read past for usage alone, leaving
-                    # an Anthropic-pinned run with NO native turn identity on
-                    # any event — and therefore no way for an external runtime
-                    # to commit no-replay proof.
-                    # ``diagnostics`` rides the same frame (streaming puts it
-                    # on ``message_start``, nowhere else). Read only when THIS
-                    # request opted in — the retry below may have dropped the
-                    # key — so an undiagnosed call reports ``None``, never a
-                    # fabricated "baseline".
-                    miss_type, missed_tokens = (
-                        _anthropic_cache_diagnosis(
-                            event.get("message") or {},
-                            previous_id=request.cache_diagnostics_previous_id,
-                        )
-                        if "diagnostics" in body
-                        else (None, 0)
-                    )
-                    yield StreamStartEvent(
-                        response_id=_stream_id((event.get("message") or {}).get("id")),
-                        cache_miss_type=miss_type,
-                        cache_missed_tokens=missed_tokens,
-                    )
-                    start_model = _served_model_slug((event.get("message") or {}).get("model"))
+                    message = event.get("message") or {}
+                    if announced_id is None:
+                        announced_id = _stream_id(message.get("id"))
+                        if announced_id is not None:
+                            # Only this opener can name the turn and carry cache
+                            # diagnostics for a request that opted in.
+                            miss_type, missed_tokens = (
+                                _anthropic_cache_diagnosis(
+                                    message, previous_id=request.cache_diagnostics_previous_id
+                                )
+                                if "diagnostics" in body
+                                else (None, 0)
+                            )
+                            yield _native_stream_start(
+                                request,
+                                announced_id,
+                                cache_miss_type=miss_type,
+                                cache_missed_tokens=missed_tokens,
+                            )
+                    start_model = _served_model_slug(message.get("model"))
                     if start_model:
                         served_model = start_model
                     raw_usage = (event.get("message") or {}).get("usage") or {}
@@ -6565,8 +6640,15 @@ def _google_digest(value: Any) -> bytes:
     return hashlib.sha256(encoded).digest()
 
 
-def _google_prefix_snapshot(body: Mapping[str, Any]) -> _GooglePrefixSnapshot:
+def _google_prefix_snapshot(
+    body: Mapping[str, Any], *, has_inline_ui_suffix: bool = False
+) -> _GooglePrefixSnapshot:
     contents = body.get("contents") or []
+    # This classifier attributes changes to the durable history. The builder's
+    # own final discovery row moves after new messages, without rewriting any
+    # of them. Do not alter the actual POST or the provider's token receipts.
+    if has_inline_ui_suffix:
+        contents = contents[:-1]
     return _GooglePrefixSnapshot(
         system_hash=_google_digest(body.get("systemInstruction")),
         tools_hash=_google_digest(body.get("tools")),
@@ -6603,7 +6685,8 @@ def _google_cache_diagnosis(
         a != b for a, b in zip(current.contents_hashes, prev_contents)
     ):
         return "messages_changed", shortfall
-    # The whole previous prompt is a byte-identical prefix of this one.
+    # The durable prompt is a matching prefix. Shortfall still comes from
+    # the provider's exact wire token counts, including any transient tail.
     if cached_tokens <= 0:
         if previous.prompt_tokens >= _GOOGLE_IMPLICIT_CACHE_MIN_TOKENS:
             return "evicted_or_rerouted", previous.prompt_tokens
@@ -6821,8 +6904,10 @@ class GoogleClient:
             "google-content",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=boundary_tokens,
+            extra_native_tokens=boundary_tokens + _inline_ui_suffix_tokens(request),
         )
+        if request.inline_ui_hint is not None:
+            contents.append({"role": "user", "parts": [{"text": request.inline_ui_hint}]})
         body: dict[str, Any] = {"contents": contents}
         if request.system_blocks:
             # Gemini's dedicated system slot (not folded into a user turn).
@@ -7140,11 +7225,14 @@ class GoogleClient:
             # Silent telemetry must never fail a turn: a hashing bug only
             # loses this call's diagnosis (no snapshot, so nothing recorded).
             try:
-                prefix = _google_prefix_snapshot(body)
+                prefix = _google_prefix_snapshot(
+                    body, has_inline_ui_suffix=request.inline_ui_hint is not None
+                )
             except Exception:  # noqa: BLE001 — telemetry is best-effort
                 logger.debug("google cache snapshot failed", exc_info=True)
         prompt_tokens = 0
         async with self._open_content_stream(request, url, body, headers) as response:
+            record_inline_ui_wire_receipt(1 if request.inline_ui_hint is not None else None)
             started = False
             async for data in _iter_sse_lines(response):
                 try:

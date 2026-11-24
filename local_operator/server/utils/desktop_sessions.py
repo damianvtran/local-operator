@@ -49,7 +49,11 @@ from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 # every existing caller and test stays put; there is ONE definition, in the
 # host-free module (see its docstring).
 from local_operator.harness.rows import visible_transcript_rows  # noqa: F401
-from local_operator.harness.types import ModelSpec, SupplementProgressEvent
+from local_operator.harness.types import (
+    HistoryDeltaEvent,
+    ModelSpec,
+    SupplementProgressEvent,
+)
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.resume import (
     ORIGIN_AGENT_CONFIG,
@@ -128,6 +132,7 @@ from local_operator.session.frontend_state import (
     job_trajectory_wire_value,
     sync_wire_payload,
 )
+from local_operator.session.inline_ui import inline_ui_opt_in
 from local_operator.session.last_user import last_user_at
 from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.session.open_frame import (
@@ -165,6 +170,11 @@ from local_operator.session.row_clip import (
     row_range,
 )
 from local_operator.session.runtime import registry
+from local_operator.session.runtime.inline_ui_egress import (
+    InlineUiEvents,
+    attach_journal_inline_ui,
+    without_desktop_inline_ui,
+)
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
 from local_operator.session.temporary import RowProjector as _TemporaryRows
@@ -3314,7 +3324,13 @@ class DesktopSessionBridge:
         return True
 
     def _event(self, event: Any) -> None:
-        self.publish("event", event.model_dump(mode="json"))
+        if isinstance(event, HistoryDeltaEvent):
+            # The facade can synthesize a catch-up delta from the journal in
+            # this process, bypassing the owner's already projected event relay.
+            payload = InlineUiEvents(sidecars=True).dump(event)
+        else:
+            payload = event.model_dump(mode="json")
+        self.publish("event", payload)
 
     @property
     def watched_trajectory_jobs(self) -> frozenset[str]:
@@ -4247,6 +4263,7 @@ class DesktopSessionBridge:
         supplements: bool = False,
         diff_bindings: bool = False,
         on_capture: Callable[[int], None] | None = None,
+        inline_ui: bool = False,
     ) -> dict[str, Any]:
         """The authoritative snapshot frame.
 
@@ -4380,6 +4397,7 @@ class DesktopSessionBridge:
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
                 # why the renderer's own paint time is the reason for it.
                 deadline=started + OPEN_FRAME_SNAPSHOT_BUDGET_S,
+                **inline_ui_opt_in(inline_ui),
             )
             if open_trace.enabled():
                 open_trace.mark(
@@ -4474,7 +4492,7 @@ class DesktopSessionBridge:
             open_trace.mark(
                 "a.snap.total", (time.monotonic() - started) * 1000, session=self.session_id
             )
-        return {
+        frame = {
             "session_id": self.session_id,
             "epoch": epoch,
             "seq": seq,
@@ -4485,6 +4503,7 @@ class DesktopSessionBridge:
                 **cold_fields,
             },
         }
+        return frame if inline_ui else without_desktop_inline_ui(frame)
 
     def _can_paint_supplements(self, declared: bool) -> bool:
         """Cold history has no attach socket; negotiate its reader, not another viewer.
@@ -4519,6 +4538,7 @@ class DesktopSessionBridge:
         supplements: bool = False,
         diff_bindings: bool = False,
         deadline: float | None = None,
+        inline_ui: bool = False,
     ) -> dict[str, Any]:
         """One page of the durable journal.
 
@@ -4666,6 +4686,7 @@ class DesktopSessionBridge:
                     limit=limit,
                     entry_times=entry_times,
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                    **inline_ui_opt_in(inline_ui),
                 )
                 return {**page, "runs": [], "runs_state": "unsupported", "head_cut": False}
             return await self._open_frame_history(
@@ -4683,6 +4704,7 @@ class DesktopSessionBridge:
                 # the strip re-validates against THIS session; the viewer's
                 # declaration is the only input.
                 diff_bindings=diff_bindings,
+                inline_ui=inline_ui,
                 # ONLY A CALLER-SUPPLIED DEADLINE bounds the display-only proof
                 # join: that is the snapshot's first frame. A standalone
                 # ``/history`` page keeps waiting for the join, because it is
@@ -4770,6 +4792,8 @@ class DesktopSessionBridge:
             "cursor_missing": page.reconciled,
             "has_newer": True if capped_newer else page.has_newer,
         }
+        if inline_ui:
+            attach_journal_inline_ui(answer, page.entries)
         answer = await self._with_peer_cycle_records(answer, [page])
         return (
             await self._journal_order_page(answer, [page], order_ids or [])
@@ -4831,6 +4855,7 @@ class DesktopSessionBridge:
         supplements: bool = False,
         diff_bindings: bool = False,
         paint_deadline: float | None = None,
+        inline_ui: bool = False,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
 
@@ -4930,6 +4955,8 @@ class DesktopSessionBridge:
                 ),
             )
             answer = self._frame_answer(result)
+            if inline_ui:
+                attach_journal_inline_ui(answer, page.entries)
             # ONLY the older side (review round 3, F15): a cut on the newer side
             # leaves older rows untouched, so folding it here made ``has_more``
             # true on a page whose oldest row is the journal's first.
@@ -5167,6 +5194,10 @@ class DesktopSessionBridge:
             ),
         )
         answer = self._frame_answer(result)
+        if inline_ui:
+            attach_journal_inline_ui(
+                answer, (entry for page in order_pages for entry in page.entries)
+            )
         # A cut that DROPPED rows the read had already fetched still owes the
         # client a "there is more above this page": ``has_more`` describes the
         # page served, never the reads behind it, and a reader that trimmed rows
@@ -7496,6 +7527,7 @@ class DesktopSessionBridge:
         journal_order: bool = False,
         order_ids: list[str] | None = None,
         peer_journal_source: bool = False,
+        inline_ui: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         gen_at = time.monotonic()
         try:
@@ -7589,6 +7621,7 @@ class DesktopSessionBridge:
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                     peer_journal_source=peer_journal_source,
                     **supplement_read_options(sub.supplements),
+                    **inline_ui_opt_in(inline_ui),
                     **cast(
                         "DiffBindingReadOptions",
                         {"diff_bindings": True} if sub.diff_bindings else {},

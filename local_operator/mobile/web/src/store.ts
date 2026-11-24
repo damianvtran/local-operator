@@ -8,6 +8,7 @@
  */
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { handleUnauthorized } from "./api";
+import { readInlineUiMessages } from "./inline-ui-parts";
 import { SESSION_TEMPORARY_DELETED_CODE, temporaryChatsEnabled } from "./lib/temporary";
 import { supplementsFromWire } from "./lib/supplement";
 import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./i18n/runtime";
@@ -49,9 +50,12 @@ function normalizeSubagent(row: SubagentRow): SubagentRow {
 	};
 }
 
-export function normalizeProjection(incoming: SessionProjection): SessionProjection {
+type WireProjection = Omit<SessionProjection, "inline_ui"> & { inline_ui?: unknown };
+
+export function normalizeProjection(incoming: WireProjection): SessionProjection {
+	const { inline_ui, ...rest } = incoming;
 	const projection: SessionProjection = {
-		...incoming,
+		...rest,
 		transcript: list(incoming.transcript),
 		todos: list(incoming.todos).map(normalizeTodoPhase),
 		subagents: list(incoming.subagents).map(normalizeSubagent),
@@ -64,6 +68,12 @@ export function normalizeProjection(incoming: SessionProjection): SessionProject
 	   the same way (the distinction is deliberately not laundered here). */
 	if (incoming.supplements !== undefined) {
 		projection.supplements = supplementsFromWire(incoming.supplements);
+	}
+	// Each accepted projection is complete. Never retain a sidecar from an
+	// earlier snapshot when this frame omits it or supplies no valid messages.
+	if (inline_ui !== undefined) {
+		const messages = readInlineUiMessages(inline_ui, projection.transcript);
+		if (messages) projection.inline_ui = messages;
 	}
 	return projection;
 }
@@ -1075,12 +1085,12 @@ export function retainProjectionStream(sessionId: string): () => void {
 			   transcript's held list upserts by `rowKey` (the id), so a held row
 			   keeps the slot it already has, and a fresh mount takes the frame's
 			   (journal) order (`transcript.steer-journal-order.test.tsx`). */
-			`/api/sessions/${encodeURIComponent(sessionId)}/events?steer_journal_order=1`,
+			`/api/sessions/${encodeURIComponent(sessionId)}/events?steer_journal_order=1&inline_ui=1`,
 			"projection",
 			(data, connected) => {
 				let incoming: SessionProjection;
 				try {
-					incoming = normalizeProjection(JSON.parse(data) as SessionProjection);
+					incoming = normalizeProjection(JSON.parse(data) as WireProjection);
 				} catch {
 					return false;
 				}

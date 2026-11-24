@@ -21,6 +21,10 @@ from textual.message import Message
 from local_operator.harness.types import ImageContent
 from local_operator.i18n.keys import tui_small as copy
 from local_operator.i18n.text import tr
+from local_operator.session.inline_ui_text import (
+    terminal_inline_ui,
+    terminal_inline_ui_overlay,
+)
 from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui.bridge_card_body import card_body_loader, card_conversation
 from local_operator.tui.session_interaction import SessionDraft
@@ -2139,6 +2143,10 @@ def project_settled_rows(
             # thing both surfaces must read from one place. Leaving it as a
             # bare truthiness test here is what let the phone's own bare test
             # drift — the helper is only load-bearing if both hosts call it.
+            if getattr(message, "_inline_ui_source_version", None) == 1:
+                text = terminal_inline_ui(text, streaming=False)
+            elif overlay := getattr(message, "_inline_ui_overlay", None):
+                text = terminal_inline_ui_overlay(text, message.id, overlay)
             # HOISTED above the block gate: the same two fields the live path
             # classifies on have to be in hand BEFORE the block is created,
             # because the decision is whether to create it at all.

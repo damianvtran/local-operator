@@ -22,6 +22,7 @@ def exercise(
     unknown_child=False,
     peer_custom_type="",
     interrupt_custom_type=None,
+    before_tools=(),
 ):
     fold = DisplayCycleAccumulator("display-test", "epoch-test")
     fold.observe(
@@ -38,6 +39,8 @@ def exercise(
                 custom_type=interrupt_custom_type,
             )
         )
+    for event in before_tools:
+        fold.observe(event)
     parent = Message(
         id="parent-test",
         role="assistant",

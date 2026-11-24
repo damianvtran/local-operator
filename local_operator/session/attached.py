@@ -44,6 +44,7 @@ from local_operator.harness.types import (
     EFFORT_CHOICE_UNSET,
     AgentEndEvent,
     AgentEvent,
+    AgentMessage,
     AgentStartEvent,
     AskOption,
     AskQuestion,
@@ -857,6 +858,18 @@ def resolve_frame_attachments(data: dict[str, Any], store: AttachmentStore) -> d
     return resolved if moved else data
 
 
+def _keep_inline_ui_overlay(messages: Sequence[AgentMessage], envelope: object) -> None:
+    if not isinstance(envelope, dict) or envelope.get("version") != 1:
+        return
+    overlays = envelope.get("messages")
+    if not isinstance(overlays, dict):
+        return
+    for message in messages:
+        if isinstance(message, Message) and isinstance(row := overlays.get(message.id), dict):
+            # Do not repeat the whole page in each Message's private snapshot.
+            message._inline_ui_overlay = {"version": 1, "messages": {message.id: row}}
+
+
 def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     """Rehydrate one relayed event into its concrete pydantic subclass.
 
@@ -865,7 +878,13 @@ def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     owner can relay through an older follower without killing its stream.
     """
     cls = _EVENT_TYPES.get(str(data.get("type", "")), AgentEvent)
-    return cls.model_validate(data)
+    event = cls.model_validate(data)
+    if overlay := data.get("inline_ui"):
+        if isinstance(event, (AgentEndEvent, HistoryDeltaEvent)):
+            _keep_inline_ui_overlay(event.messages, overlay)
+        elif isinstance(event, MessageEndEvent):
+            _keep_inline_ui_overlay([event.message], overlay)
+    return event
 
 
 def _ask_question_from_pending(pending: PendingRequest) -> AskQuestion:
@@ -3844,6 +3863,7 @@ class AttachedSession:
         audio: list[dict[str, str]] | None = None,
         files: list[dict[str, Any]] | None = None,
         delivery: str | None = None,
+        inline_ui: bool = False,
     ) -> tuple[str, bool]:
         """Return the owner's admission receipt, not a fictitious completed turn.
 
@@ -3931,6 +3951,8 @@ class AttachedSession:
             fields["files"] = files
         if delivery and delivery != "steer":
             fields["delivery"] = delivery
+        if inline_ui is True:
+            fields["inline_ui"] = True
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
     async def bind_runtime(
@@ -6118,6 +6140,7 @@ class AttachedSession:
             lambda _projection: None,
             on_disconnected,
             events=True,
+            inline_ui=True,
             on_event=once_adopted(self._on_wire_event),
             frontend_state=True,
             display_window=self._display_window_requested,
@@ -6588,6 +6611,7 @@ class AttachedSession:
             return
         self._validate_display_window(window, frontend.epoch, frontend.live_cursor)
         rows = list(window.messages)
+        _keep_inline_ui_overlay(rows, window.inline_ui)
         # THE OWNER'S ENTRY TIMES FOR THE ROWS IT JUST SHIPPED. Tracked beside
         # ``rows`` as the window and any older pages are prepended, so the map
         # covers exactly the loaded interval: a row the owner could not stamp is
@@ -6677,6 +6701,7 @@ class AttachedSession:
         if client is None:
             raise ConnectionError("history owner is disconnected")
         page = DisplayHistoryWindow.model_validate(await client.history_page(before, anchor))
+        _keep_inline_ui_overlay(page.messages, page.inline_ui)
         if page.status != "reset":
             self._validate_display_window(page, epoch, cursor)
         return page
@@ -11603,9 +11628,9 @@ class AttachedSession:
             raise ConnectionError("owner connection lost")
         images_wire = [_image_to_wire(image) for image in (images or [])]
         command = (
-            ContinuationCommand(message_id, self._session_id, text, images_wire)
+            ContinuationCommand(message_id, self._session_id, text, images_wire, inline_ui=True)
             if message_id
-            else ContinuationCommand.create(self._session_id, text, images_wire)
+            else ContinuationCommand.create(self._session_id, text, images_wire, inline_ui=True)
         )
         # `self.epoch` is the copy-free read of the same field; this is the
         # captured baseline the observer below compares each event against.
@@ -11783,9 +11808,10 @@ class AttachedSession:
                 session_id=self._session_id,
                 text=text,
                 images=images_wire,
+                inline_ui=True,
             )
             if message_id
-            else ContinuationCommand.create(self._session_id, text, images_wire)
+            else ContinuationCommand.create(self._session_id, text, images_wire, inline_ui=True)
         )
         return await client.send_command(command, streaming=self._streaming)
 
@@ -11869,6 +11895,7 @@ class AttachedSession:
             session_id=self._session_id,
             text=message.text,
             delivery=delivery or "",
+            inline_ui=True,
             images=[
                 _image_to_wire(block)
                 for block in message.content

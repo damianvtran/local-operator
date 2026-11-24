@@ -452,6 +452,7 @@ from local_operator.tui.widgets.editor import (
     EditorCopied,
     EditorCopyStale,
     EditorDraftStarted,
+    EditorPageRequested,
     EditorPasteAttached,
     EditorPasteEmpty,
     EditorQuit,
@@ -5237,7 +5238,8 @@ class OperatorApp(App[None]):
         # `down`, `pageup`, `pagedown` and `home`/`end` are TextArea cursor
         # bindings, `tab` never leaves the composer, `shift+tab` is effort
         # cycling (priority), and `ctrl+up`/`ctrl+down` page the todo overflow.
-        # So without a chord of its own, "scroll up to load" was mouse-only.
+        # Plain page keys now fall through from the editor at its draft
+        # boundaries; these chords still jump straight to either endpoint.
         #
         # `ctrl+home`/`ctrl+end` because TextArea binds NEITHER (audited
         # against textual 8.2.8: it binds `home,ctrl+a` and `end,ctrl+e` for
@@ -36257,6 +36259,8 @@ class OperatorApp(App[None]):
             # contents by identity to know which transcript blocks the user
             # took back (`_recall_queued_steers`), so the app and the queue
             # must share one Message rather than each building their own.
+            from local_operator.session.session import stamp_tui_composer_steer
+
             steer_message = Message.user(sent, images)
             # The delivery mode: only `queue`/`both` ride the keyword, and only
             # when this session's handle takes it. `steer` keeps the legacy call
@@ -36301,6 +36305,7 @@ class OperatorApp(App[None]):
                     can_send_again=False,
                 )
                 return
+            stamp_tui_composer_steer(steer_message)
             if mode != "steer":
                 OperatorApp._steer_message_with_delivery(session, steer_message, mode)
             else:
@@ -50138,6 +50143,19 @@ class OperatorApp(App[None]):
         performs. The visible page is the target, as in :meth:`action_transcript_home`.
         """
         self._reader_transcript_view().action_scroll_end()
+
+    def on_editor_page_requested(self, message: EditorPageRequested) -> None:
+        # Reuse the focused transcript's page path so scroll provenance
+        # releases tail-follow before a later stream update can move the reader.
+        if self.screen.focused is not message.editor:
+            return
+        view = self._reader_transcript_view()
+        if not view.allow_vertical_scroll:
+            return
+        if message.upward:
+            view.action_page_up()
+        else:
+            view.action_page_down()
 
     def _scroll_todos(self, *, down: bool) -> None:
         """Drive the todo panel's keyboard scroll, the one path both keys share.
@@ -64196,6 +64214,12 @@ class OperatorApp(App[None]):
         # path that retires a reasoning phase for a turn that reasoned and then
         # called a tool. Idempotent: a `reasoning_end` already retired it.
         self._retire_reasoning_block()
+        if message.retract_inline_ui and not message.text.strip():
+            block, self._streaming_block = self._streaming_block, None
+            if block is not None:
+                self._transcript_view().remove_block(block)
+            self._refresh_working_activity()
+            return
         # An empty authoritative text is not an instruction to erase what
         # streamed. Adopting it unconditionally destroyed the prose the deltas
         # had already painted and left an empty block mounted in its place; the

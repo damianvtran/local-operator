@@ -1,3 +1,4 @@
+import type { InlineUiMessages } from "./inline-ui-parts";
 import type { SettingsResultWire } from "./lib/settings-defer";
 import type { SupplementBeat } from "./lib/supplement";
 
@@ -634,6 +635,8 @@ export interface SessionProjection {
 	    sparse: absent on an older daemon and on a complete transcript. */
 	transcript_has_older?: boolean;
 	transcript: TranscriptEntry[];
+	/** Decoded from the negotiated sidecar, only for this snapshot's assistant rows. */
+	inline_ui?: InlineUiMessages;
 	/** Todos grouped into phases. One implicit `"Todos"` phase carries a flat
 	    list and renders without a header. */
 	todos: TodoPhase[];

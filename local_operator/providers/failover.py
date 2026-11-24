@@ -46,6 +46,7 @@ from local_operator.harness.types import (
     ModelSpec,
     OneTurnSecretScopeError,
     RenderedStreamError,
+    StreamAttemptReceipt,
     StreamEndEvent,
     StreamEvent,
     StreamModelEvent,
@@ -4931,6 +4932,7 @@ async def _stream_with_failover_events(
             )
 
             attempt_hint = WireHintCapture()
+            receipt_pending = request.inline_ui_hint is not None
             sent_at_ms = int(time.time() * 1000)
             sent_monotonic = time.monotonic()
             successful_terminal = False
@@ -4952,6 +4954,20 @@ async def _stream_with_failover_events(
                 async for event in capture_wire_stream(
                     client.stream(current_request, key, oauth_access=access), attempt_hint
                 ):
+                    if receipt_pending:
+                        # The encoder has run, even when its wire has no native
+                        # opener. For an unsupported adapter this fresh capture
+                        # stays None, clearing any failed primary before output.
+                        # Do not count the receipt as forwarded output or flush
+                        # it from a replayable attempt we will discard.
+                        receipt_pending = False
+                        receipt = StreamAttemptReceipt(
+                            inline_ui_source_version=attempt_hint.inline_ui_source_version
+                        )
+                        if buffered is None:
+                            yield receipt
+                        else:
+                            buffered.append(receipt)
                     if isinstance(event, StreamEndEvent):
                         successful_terminal = (
                             event.stop_reason in ("stop", "length", "toolUse") and not event.error
