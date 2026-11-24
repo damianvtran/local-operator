@@ -6698,11 +6698,17 @@ class ReadParams(BaseModel):
     )
 
 
-_LINE_RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)?$")
+# The dash group is optional so a bare start line (``"76"``) parses: models
+# send it often enough that rejecting it cost a whole retry call each time.
+_LINE_RANGE_RE = re.compile(r"^(\d+)(?:\s*-\s*(\d+)?)?$")
 
 
 def _parse_line_range(spec: str) -> tuple[int, int | None]:
-    """Parse a ``'start-end'`` / ``'start-'`` range spec.
+    """Parse a ``'start-end'`` / ``'start-'`` / bare ``'start'`` range spec.
+
+    A bare start means ``'start-'``: it is a superset of any plausible reading
+    (one line, or "from here"), and the clamp footer already names the
+    continuation if the rest does not fit, so nothing is lost by reading on.
 
     Raises :class:`InvalidToolArgumentsError` (a ``ValueError`` subclass, so
     existing ``except ValueError`` callers are unaffected) because every
@@ -6721,7 +6727,7 @@ def _parse_line_range(spec: str) -> tuple[int, int | None]:
     match = _LINE_RANGE_RE.match(spec.strip())
     if not match:
         raise InvalidToolArgumentsError(
-            f"invalid line range '{spec}' (expected 'start-end' or 'start-')"
+            f"invalid line range '{spec}' (expected 'start-end', 'start-' or 'start')"
         )
     start = int(match.group(1))
     if start < 1:

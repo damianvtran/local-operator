@@ -834,6 +834,30 @@ async def test_read_line_range(tools, context) -> None:
     assert "a\n" not in result.text
 
 
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [("76", (76, None)), (" 76 ", (76, None)), ("76-", (76, None)), ("2-3", (2, 3))],
+)
+def test_parse_line_range_accepts_a_bare_start(spec, expected) -> None:
+    # A bare start is "start-": the superset reading, so it never costs the
+    # model a retry call the way the old rejection did.
+    assert builtin._parse_line_range(spec) == expected
+
+
+@pytest.mark.parametrize("spec", ["0", "0-5", '"270-330"', "abc", "5-3", "-5", ""])
+def test_parse_line_range_still_rejects_malformed_specs(spec) -> None:
+    with pytest.raises(builtin.InvalidToolArgumentsError):
+        builtin._parse_line_range(spec)
+
+
+@pytest.mark.asyncio
+async def test_read_bare_start_line_reads_to_the_end(tools, context) -> None:
+    await _call(tools, "write", {"path": "r.txt", "content": "a\nb\nc\n"}, context)
+    result = await _call(tools, "read", {"path": "r.txt", "range": "2"}, context)
+    assert result.is_error is False
+    assert result.text.splitlines() == ["2| b", "3| c"]
+
+
 @pytest.mark.asyncio
 async def test_read_range_beyond_eof_is_useless(tools, context) -> None:
     # RT-32: a range past the last line is useless, not an error.
