@@ -74,6 +74,26 @@ MAX_ARM_MS = 60_000  # never arm further out than this; re-check on a tick
 MIN_ARM_MS = 25  # no zero-delay re-entry loop
 LOAD_GRACE_MS = 2_000  # an overdue wake adopted at resume fires shortly AFTER load
 
+#: How long the wake supervisor may HOLD a due one-shot wake so that a later
+#: wake of the same session, due within this window, shares its cold boot
+#: (``wakes.supervisor._coalesced_release_ms``). Chosen from the 2026-11-21..24
+#: fire timelines (3.57 days, 2,878 cold boots): coalescing within 5 min would
+#: have removed 1.7% of boots, 15 min 12.3%, 30 min 27.7%; 15 min is the
+#: approved bound on how late a held wake may be delivered. INVARIANT: a held
+#: wake is delivered at most this long after its own due time (plus the
+#: engage latency every cold-boot fire already has), and never dropped.
+WAKE_COALESCE_WINDOW_MS = 15 * 60 * 1000
+
+#: How overdue a wake can be at load and still be a cold-boot DELIVERY rather
+#: than a fire MISSED while the session was down: the coalescing hold above,
+#: plus the supervisor's engage deadline (``WAKE_DEADLINE_S`` = 180 s) and one
+#: re-read slice (``SLICE_S`` = 10 s). A supervisor-raised runtime always loads
+#: its wake overdue, and labelling that "missed while the session was down"
+#: told the model a punctual fire had been missed (session 316765a40496: 85
+#: such notices in 3.57 days, every one a distinct on-time wake). A test pins
+#: this sum against the supervisor's constants.
+COLD_BOOT_DELIVERY_MS = WAKE_COALESCE_WINDOW_MS + 180_000 + 10_000
+
 WAKE_SCHEDULES_CUSTOM_TYPE = "wake_schedules"
 WAKE_PROMPT_MESSAGE_TYPE = "wake_prompt"
 

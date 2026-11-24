@@ -446,6 +446,77 @@ def _fireable_due_ms(entry: dict[str, Any], now_ms: int) -> int | None:
     return min(candidates) if candidates else None
 
 
+def _delayable_wake_row(raw: Mapping[str, Any]) -> bool:
+    """Whether coalescing may hold this row past its own due time.
+
+    ONE-SHOTS ONLY, and only the model's own: everything else keeps exactly
+    the timing it has without coalescing.
+
+    - Recurring (``every_ms``): a runtime that fires a recurring wake late
+      re-phases it to the fire time (``advance_wake_schedule`` advances from the
+      load-time re-armed due), so holding one would shift its cadence and, held
+      repeatedly behind a slower sibling, make it fire FEWER times than it
+      would uncoalesced. Never holding it keeps its ``fired_count`` and
+      ``next_due_at`` byte-identical to separate firings. It may still be the
+      LATEST member a cluster waits for.
+    - Operator-authored (``origin`` cli/desktop/tui) or ``notify``: a reminder
+      a person set, or one that pings the desktop, is promised at its time.
+    - Internal/hidden timers (patience waits, ask deadlines): mechanisms whose
+      timing other code depends on.
+    """
+    from local_operator.harness.wake_types import OPERATOR_WAKE_ORIGINS
+    from local_operator.wakes.store import is_internal_wake_row
+
+    if raw.get("every_ms") is not None:
+        return False
+    if raw.get("origin") in OPERATOR_WAKE_ORIGINS or raw.get("notify"):
+        return False
+    return not (is_internal_wake_row(raw) or raw.get("hidden"))
+
+
+def _coalesced_release_ms(entry: Mapping[str, Any], anchor_ms: int) -> int:
+    """When the engagement for ``anchor_ms`` (the entry's earliest fireable due)
+    should happen so it also carries the session's other wakes due soon after.
+
+    WHY (wake boot economy, 2026-11-24). The supervisor engages a session when
+    its earliest wake is due; a sibling due a few minutes later finds the
+    runtime idle-exited (residency median ~147 s) and pays a second cold boot
+    (median 11.4 s). Holding the earlier wake until the latest sibling due
+    within :data:`~local_operator.harness.wake.WAKE_COALESCE_WINDOW_MS` makes
+    ONE boot; the runtime's load then folds every overdue schedule into one
+    turn listing each schedule id, its original due time and its message, in
+    due order (``Session._format_missed_wake_catchup``), and fires each
+    schedule exactly as it would have fired alone (one-shots retire with
+    ``fired_count`` 1; recurring rows are never held, see
+    :func:`_delayable_wake_row`).
+
+    INVARIANTS. The cluster is anchored on ``anchor_ms`` and never extends past
+    ``anchor_ms + window``, so no wake is held more than the window past its
+    own due time, and chaining cannot postpone forever. Any member that would
+    be held but is not delayable disables the hold (engage now, as before).
+    Returns ``anchor_ms`` when there is nothing to wait for.
+    """
+    from local_operator.harness.wake import WAKE_COALESCE_WINDOW_MS
+
+    horizon = anchor_ms + WAKE_COALESCE_WINDOW_MS
+    cluster: list[tuple[int, Mapping[str, Any]]] = []
+    for raw in entry.get("schedules") or ():
+        if not isinstance(raw, Mapping):
+            continue
+        due = raw.get("next_due_at")
+        if isinstance(due, bool) or not isinstance(due, int):
+            continue
+        if anchor_ms <= due <= horizon:
+            cluster.append((due, raw))
+    if not cluster:
+        return anchor_ms
+    release = max(due for due, _raw in cluster)
+    for due, raw in cluster:
+        if due < release and not _delayable_wake_row(raw):
+            return anchor_ms
+    return release
+
+
 def _has_fireable_schedule(entry: dict[str, Any], now_ms: int) -> bool:
     """Whether ANY schedule in this entry is still worth supervising.
 
@@ -824,6 +895,22 @@ def _due_sessions(
                         record.get("last_error") or "unknown",
                     )
                 continue
+        if record is None:
+            # COALESCE (see `_coalesced_release_ms`). Only a FRESH fire is held:
+            # one with a ledger record is already owed and late, and holding it
+            # further would stack the hold on top of its retry backoff.
+            release = _coalesced_release_ms(entry, fireable)
+            if release > now_ms:
+                if _skip_log.should_log(session_id, "coalescing"):
+                    logger.info(
+                        "coalescing: holding %s — its wake due %d waits %.0fs for the "
+                        "wake(s) due by %d, so one boot delivers them all",
+                        session_id,
+                        fireable,
+                        (release - now_ms) / 1000.0,
+                        release,
+                    )
+                continue
         # A missing index cwd is no opinion, not an explicit HOME override.
         # Only the common spawn boundary may default it after reading a move.
         cwd = entry.get("cwd")
@@ -1110,6 +1197,16 @@ PARKED_PROBE_TIMEOUT_S = 180.0
 PARKED_PROBE_START_MARGIN_S = 15.0
 
 
+def _monitor_entry_is_parked(config_dir: Path, session_id: str) -> bool:
+    """Whether the on-disk monitor entry is parked — for the probe's log label only."""
+    from local_operator.monitors import store as monitor_store
+
+    try:
+        return _is_parked_monitor_entry(monitor_store.read_entry(config_dir, session_id))
+    except Exception:  # noqa: BLE001 — a label must never fail the probe
+        return False
+
+
 def _is_parked_monitor_entry(entry: Any) -> bool:
     """A monitor entry stamped ``parked_at`` by a park (and not held)."""
     return (
@@ -1174,7 +1271,18 @@ def _sweep_probe_group(pid: int) -> None:
 
 
 async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "") -> bool:
-    """Run a parked session's due monitor checks WITHOUT reopening it.
+    """Run a runtime-less session's due monitor checks WITHOUT booting it.
+
+    Named for its first use (parked sessions); since the wake boot economy
+    change it runs for EVERY due monitor row whose session has no live runtime.
+    Its log lines say ``parked monitors`` for a parked session and ``cold
+    monitors`` for an idle-exited one, so the two populations stay countable.
+
+    COST, measured from the supervisor log (8,657 probe samples before this
+    widening): maxrss median ~106 MB, p90 ~116 MB, max ~171 MB, for the life of
+    one short subprocess; it shares the ``_MAX_CONCURRENT_ENGAGES`` slots with
+    engagements and is bounded by ``PARKED_PROBE_TIMEOUT_S``. A cold boot it
+    avoids costs a median 11.4 s of boot and ~147 s of residency.
 
     True only when the probe ran every due check and each was unchanged (it
     advanced their counters itself); then the session stays parked. Every other
@@ -1193,6 +1301,11 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
 
     if await _has_live_runtime(config_dir, session_id):
         return False
+    label = (
+        "parked monitors"
+        if await asyncio.to_thread(_monitor_entry_is_parked, config_dir, session_id)
+        else "cold monitors"
+    )
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -1213,13 +1326,13 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
             env=_parked_probe_env(config_dir),
         )
     except OSError as exc:
-        logger.warning("parked monitors %s: probe could not start (%s); engaging", session_id, exc)
+        logger.warning("%s %s: probe could not start (%s); engaging", label, session_id, exc)
         return False
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=PARKED_PROBE_TIMEOUT_S)
     except asyncio.TimeoutError:
         await _reap_probe(proc)
-        logger.warning("parked monitors %s: probe timed out; engaging", session_id)
+        logger.warning("%s %s: probe timed out; engaging", label, session_id)
         return False
     except asyncio.CancelledError:
         # SHUTDOWN, NOT A VERDICT (review round 1, R1-5). Swallowing the
@@ -1249,9 +1362,14 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
     # that matters — real servers such as Slack's — cannot be measured in
     # isolation. A cap, if one is wanted, is derived from these log lines.
     logger.info(
-        "parked monitors %s: %s (%s, %s checked, maxrss self=%s KiB children=%s KiB)",
+        "%s %s: %s (%s, %s checked, maxrss self=%s KiB children=%s KiB)",
+        label,
         session_id,
-        "quiet — left parked" if quiet else "engaging",
+        (
+            ("quiet — left parked" if label == "parked monitors" else "quiet — not booted")
+            if quiet
+            else "engaging"
+        ),
         verdict.get("why", f"no verdict, probe exit {proc.returncode}"),
         verdict.get("checked", 0),
         maxrss.get("self", "?"),
@@ -1466,7 +1584,10 @@ async def _engage_one(
         # live-stalled, the live skip's escalated form). Whether the engage
         # SUCCEEDS is decided below, and its own throttle key must survive this
         # pass — see `_SkipLog.forget`.
-        _skip_log.forget(session_id, "live", "live-stalled", "ghost", "wedged", "stale")
+        # "coalescing" too: each held cluster announces its own hold once.
+        _skip_log.forget(
+            session_id, "live", "live-stalled", "ghost", "wedged", "stale", "coalescing"
+        )
         logger.info(
             "engaging %s: %s due %d, %.1fs overdue (deadline %.0fs)",
             session_id,
@@ -2303,9 +2424,10 @@ class _Sweeper:
     ) -> bool:
         """Start one engagement in the background. False when already running.
 
-        ``parked`` (monitor rows only): the session was PARKED, so its due
-        checks are first run by :func:`_parked_monitors_quiet` outside the
-        session, and the engagement happens only when one is not quiet. Shares
+        ``parked`` (monitor rows only; the name predates the widening): the
+        session's due checks are first run by :func:`_parked_monitors_quiet`
+        outside the session — for any session with no live runtime, parked or
+        not — and the engagement happens only when one is not quiet. Shares
         the engagement semaphore, so probes and engagements together stay
         within ``_MAX_CONCURRENT_ENGAGES``.
 
@@ -2504,12 +2626,17 @@ class _Sweeper:
             origins=origins,
         ):
             origin = origins.get(session_id)
-            parked = bool(
-                origin and monitors and _is_parked_monitor_entry(monitors.get(session_id))
-            )
+            # EVERY monitors-pass row is probed first, parked or not (wake boot
+            # economy, 2026-11-24). Parking was a proxy for "no runtime"; the
+            # probe itself re-checks liveness (``_parked_monitors_quiet`` asks
+            # ``_has_live_runtime`` before spawning, the probe re-asks at commit),
+            # so a session a runtime hosts still reaches ``_engage_one``'s live
+            # skip. Before this, 1,039 of 2,878 cold boots in 3.57 days (36.1%)
+            # booted an idle-exited session only to find its check unchanged.
+            probe = bool(origin and monitors)
             engaged = (
                 self.engage(
-                    config_dir, session_id, cwd, due_ms, moment, schedule_id=origin, parked=parked
+                    config_dir, session_id, cwd, due_ms, moment, schedule_id=origin, parked=probe
                 )
                 if origin
                 else self.engage(config_dir, session_id, cwd, due_ms, moment)

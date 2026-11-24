@@ -36478,12 +36478,33 @@ class Session:
                 schedule.next_due_at, now=datetime.fromtimestamp(now_ms / 1000, tz=UTC)
             )
 
+        from local_operator.harness.wake import COLD_BOOT_DELIVERY_MS
+
         lines = []
-        for entry in missed:
+        cold_boot_only = True
+        # DUE ORDER, not creation order: the wake supervisor coalesces a
+        # session's wakes due within a window into one cold boot, and the turn
+        # it delivers must read as the sequence the wakes came due in.
+        for entry in sorted(missed, key=lambda item: item["schedule"].next_due_at):
             schedule = entry["schedule"]
             # The DUE-while-down count is what the agent should read (M2).
             occurrences = entry["due"]
-            if occurrences > 1:
+            # A COLD-BOOT DELIVERY IS NOT A MISS. The supervisor starts a runtime
+            # for a wake only once it is due, so its runtime always loads that
+            # wake overdue — by the boot latency, plus any coalescing hold. Within
+            # ``COLD_BOOT_DELIVERY_MS`` a single occurrence is a punctual delivery
+            # by the supervisor, and calling it "missed while the session was
+            # down" told the model to treat on-time fires as missed ones
+            # (316765a40496: 85 such notices in 3.57 days, each a distinct
+            # on-time wake — they read as repeated missed-notice boots).
+            cold_boot = occurrences <= 1 and now_ms - schedule.next_due_at <= COLD_BOOT_DELIVERY_MS
+            cold_boot_only = cold_boot_only and cold_boot
+            if cold_boot:
+                header = (
+                    f"- {schedule.id} (due {_due_label(schedule)}): came due while no "
+                    "runtime was running; delivered by the wake supervisor's start."
+                )
+            elif occurrences > 1:
                 # occurrences > 1 implies a repeating schedule, so every_ms is
                 # set; the assert turns that reasoning into a type narrowing.
                 assert schedule.every_ms is not None
@@ -36500,6 +36521,13 @@ class Session:
             lines.append(
                 f"{header}\n  Message: {schedule.message}"
             )  # i18n: ignore model-facing wake prompt
+        if cold_boot_only:
+            # i18n: ignore model-facing wake prompt
+            return (
+                "(alarm) The wake supervisor started this session for the following "
+                "scheduled wake(s), listed in the order they came due, each with its own "
+                "id and due time. Handle each one now.\n\n" + "\n".join(lines)
+            )
         return (
             "(alarm) The session resumed after being closed; the following scheduled wake(s) "
             "came due while it was down. Each fires once now — handle them as missed wakes, "

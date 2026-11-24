@@ -147,10 +147,52 @@ async def test_a_call_the_readonly_gate_refuses_is_never_run(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_an_entry_that_is_not_parked_is_left_to_the_session(tmp_path: Path) -> None:
+async def test_an_entry_a_live_runtime_hosts_is_left_to_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live runtime owns its checks: the probe never runs them beside it."""
     row = _row("read", {"path": str(tmp_path)}, str(tmp_path))
     _arm(tmp_path, row, parked_at=False)
-    assert (await parked.probe_session(tmp_path, SID, now_ms=NOW))["verdict"] == "engage"
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _sid: ({"pid": 1}, "owner"),
+    )
+    outcome = await parked.probe_session(tmp_path, SID, now_ms=NOW)
+    assert outcome["verdict"] == "engage" and outcome["checked"] == 0
+
+
+@pytest.mark.asyncio
+async def test_an_idle_exited_unparked_session_is_probed_like_a_parked_one(
+    tmp_path: Path,
+) -> None:
+    """Wake boot economy: no runtime record is enough; parking is not required."""
+    watched = tmp_path / "watched.txt"
+    watched.write_text("unchanged\n", encoding="utf-8")
+    row = _row("read", {"path": str(watched)}, str(tmp_path))
+    _arm(tmp_path, row, parked_at=False)
+    monitor_state.write_counters(
+        tmp_path,
+        SID,
+        "m1",
+        {
+            "schema": 1,
+            "monitor_id": "m1",
+            "next_due_at": NOW - 1,
+            "content_hash": await _baseline(tmp_path, row),
+            "checks": 1,
+            "last_check_at": NOW - 60_000,
+        },
+    )
+    assert await parked.probe_session(tmp_path, SID, now_ms=NOW) == {
+        "verdict": "quiet",
+        "why": "unchanged",
+        "checked": 1,
+    }
+    # Negative control: a STOPPED (held) entry is never probed.
+    monitor_store.write_entry(
+        tmp_path, SID, cwd=row["cwd"], monitors=[row], preserve={"stopped_at": NOW}
+    )
+    assert (await parked.probe_session(tmp_path, SID, now_ms=NOW + 120_000))["checked"] == 0
 
 
 @pytest.mark.asyncio
@@ -228,8 +270,9 @@ async def test_a_session_committing_during_the_check_wins_the_quiet_tick(
     # The session's commit survives byte-for-byte: nothing was written over it.
     assert monitor_state.read_counters(tmp_path, SID, "m1") == session_commit
 
-    # Same race, but the entry stopped being parked (the session reopened)
-    # while its counters happened to be untouched: also no write.
+    # Same race, but a runtime came up (the session reopened) while its
+    # counters happened to be untouched: also no write. The runtime record is
+    # the signal now that unparked runtime-less sessions are probed too.
     monitor_state.write_counters(
         tmp_path,
         SID,
@@ -245,6 +288,10 @@ async def test_a_session_committing_during_the_check_wins_the_quiet_tick(
         async def _execute(*args: Any, **kwargs: Any) -> Any:
             result = await real_execute(*args, **kwargs)
             monitor_store.write_entry(tmp_path, SID, cwd=row["cwd"], monitors=[row])
+            monkeypatch.setattr(
+                "local_operator.mobile.attach_client.find_runtime_record",
+                lambda _root, _sid: ({"pid": 1}, "owner"),
+            )
             return result
 
         monkeypatch.setattr(tool, "execute", _execute)
