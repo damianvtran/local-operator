@@ -3801,6 +3801,93 @@ def test_hourly_cron_is_the_one_the_helper_gates() -> None:
     assert '--schedule "$SCHEDULE"' in step["run"] and '--run-id "$GITHUB_RUN_ID"' in step["run"]
 
 
+def _base_helper_source() -> str | None:
+    """The trusted base's fast_gate_check.py: origin/main locally; HEAD^1 in CI.
+
+    CI checks out the PR merge ref with fetch-depth 2 and no origin/main, and
+    a merge ref's first parent IS the base tip the precondition fetches from.
+    """
+    for rev in ("origin/main", "HEAD^1"):
+        proc = subprocess.run(
+            ["git", "show", f"{rev}:scripts/fast_gate_check.py"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return proc.stdout
+    return None
+
+
+def _precondition_argv(tmp_path: Path, event: str) -> list[str]:
+    """Execute the precondition step's real `run:` script with python3 stubbed."""
+    full = yaml.safe_load(FULL_SUITE_YML.read_text())
+    step = next(st for st in full["jobs"]["precondition"]["steps"] if st.get("id") == "gate")
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir(exist_ok=True)
+    argv_file = tmp_path / f"argv-{event}"
+    stub = stub_dir / "python3"
+    stub.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        f"open({str(argv_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+    )
+    stub.chmod(0o755)
+    env = {
+        "PATH": f"{stub_dir}:/usr/bin:/bin",
+        "EVENT": event,
+        "PR_NUMBER": "4527" if event == "pull_request" else "",
+        "PR_HEAD_SHA": "a" * 40 if event == "pull_request" else "",
+        "PR_HEAD_REPO": "damianvtran/local-operator" if event == "pull_request" else "",
+        "SCHEDULE": "41 * * * *" if event == "schedule" else "",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_REPOSITORY": "damianvtran/local-operator",
+        "GITHUB_REF": "refs/pull/4527/merge" if event == "pull_request" else "refs/heads/main",
+        "GITHUB_REF_NAME": "4527/merge" if event == "pull_request" else "main",
+        "GITHUB_SHA": "b" * 40,
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_OUTPUT": str(tmp_path / "out"),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "sum"),
+    }
+    # Actions' default `run` shell on ubuntu-latest: bash -e.
+    subprocess.run(["bash", "-e", "-c", step["run"]], env=env, check=True, timeout=30)
+    argv = json.loads(argv_file.read_text())
+    assert argv[0] == f"{tmp_path}/fast_gate_check.py"
+    return argv[1:]
+
+
+def test_pr_path_argv_parses_under_the_base_helper(tmp_path: Path) -> None:
+    """PR #4527 QA Q1: the PR-path precondition argv must parse under main's helper.
+
+    On `pull_request` the precondition runs the TRUSTED BASE helper while the
+    workflow comes from the PR, so a new flag on the PR path makes the old
+    argparse exit 2 and turns the required `Merge gate (full suite)` red. New
+    flags belong on the non-PR path only (where the helper is the run's own).
+    """
+    import importlib.util
+
+    pr_argv = _precondition_argv(tmp_path, "pull_request")
+    assert "--schedule" not in pr_argv and "--run-id" not in pr_argv, pr_argv
+    source = _base_helper_source()
+    if source is None:
+        pytest.skip("no base revision (origin/main or HEAD^1) to read the helper from")
+    base = tmp_path / "base_fast_gate_check.py"
+    base.write_text(source)
+    spec = importlib.util.spec_from_file_location("base_fast_gate_check", base)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    parsed = module._parse(pr_argv)  # argparse raises SystemExit(2) on an unknown flag
+    assert parsed.event == "pull_request" and parsed.pr == 4527
+
+    # Off pull_request the run's own helper gets the batching inputs.
+    from scripts.fast_gate_check import _parse
+
+    sched = _parse(_precondition_argv(tmp_path, "schedule"))
+    assert sched.schedule == "41 * * * *" and sched.run_id == 123
+
+
 def test_release_check_axes_match_the_non_pr_matrix() -> None:
     """`make release-check` requires these axes; they must be what main runs."""
     from scripts.fast_gate_check import RELEASE_OSES, RELEASE_PYTHONS
@@ -3815,9 +3902,14 @@ def test_release_check_axes_match_the_non_pr_matrix() -> None:
     makefile = (REPO / "Makefile").read_text()
     assert "release-check:" in makefile and "--release-check" in makefile
     agents = (REPO / "AGENTS.md").read_text()
-    assert agents.index("release-check SHA=<the SHA you just checked>") < agents.index(
-        "gh release create vX.Y.Z --target"
+    # QA Q4: the runbook runs origin/main's helper, never the shared
+    # checkout's (whatever branch or dirty state it is in), right before the cut.
+    check = (
+        "git -C ~/local-operator show origin/main:scripts/fast_gate_check.py | python3 - --local"
     )
+    assert check in agents and "--release-check" in agents[agents.index(check) :][:200]
+    assert "make -C ~/local-operator release-check" not in agents
+    assert agents.index(check) < agents.index("gh release create vX.Y.Z --target")
 
 
 def test_pr_merge_gate_path_still_runs_every_shard() -> None:

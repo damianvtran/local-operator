@@ -292,8 +292,11 @@ PR it is skipped (the gate names its own head).
 `--release-check` mode) exits 0 only when a full-suite run on EXACTLY that SHA
 on main concluded `success` with the full matrix: both Python legs of `test`
 and `coverage-report`, linux and macOS `tui-e2e`, a green aggregate. The
-release owner runs it before `gh release create` (AGENTS.md runbook step 4). It
-is deliberately not a step in `publish.yml`: that workflow starts after the tag
+release owner runs it before `gh release create` (AGENTS.md runbook step 4); the
+runbook pipes `origin/main`'s copy of the helper into `python3 -` rather than
+running `make` in the shared checkout, whose branch or dirty state could
+otherwise supply an older helper. A malformed SHA prints the usage line (exit
+2). It is deliberately not a step in `publish.yml`: that workflow starts after the tag
 and GitHub Release exist, so a refusal there would strand a half-made release.
 
 **Limits.** A main commit between two hourly ticks gets no verdict of its own;

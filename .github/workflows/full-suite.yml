@@ -225,12 +225,24 @@ jobs:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           # Empty except on `schedule`; tells the hourly batch from the nightly.
           SCHEDULE: ${{ github.event.schedule }}
+        # VERSION SKEW (PR #4527 QA Q1): on `pull_request` the helper above is
+        # the TRUSTED BASE copy (gate_base = main tip), which can be OLDER than
+        # this workflow — an old argparse rejects unknown flags with exit 2 and
+        # turns the required merge gate red. So the PR-path argv must stay
+        # byte-compatible with the base helper: flags added for push/schedule
+        # (`--schedule`, `--run-id`) are passed ONLY off pull_request, where the
+        # helper is fetched at this run's own SHA. Any future flag follows the
+        # same rule; test_pr_path_argv_parses_under_the_base_helper pins it.
         run: |
+          non_pr_flags=()
+          if [ "$EVENT" != "pull_request" ]; then
+            non_pr_flags=(--schedule "$SCHEDULE" --run-id "$GITHUB_RUN_ID")
+          fi
           python3 "$RUNNER_TEMP/fast_gate_check.py" \
             --event "$EVENT" --repo "$GITHUB_REPOSITORY" \
             --pr "${PR_NUMBER:-0}" --head-sha "$PR_HEAD_SHA" --head-repo "$PR_HEAD_REPO" \
             --ref "$GITHUB_REF" --ref-name "$GITHUB_REF_NAME" --sha "$GITHUB_SHA" \
-            --schedule "$SCHEDULE" --run-id "$GITHUB_RUN_ID" \
+            "${non_pr_flags[@]}" \
             --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
   # Same classifier job as ci.yml (kept identical; a hygiene test compares the

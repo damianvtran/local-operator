@@ -15,6 +15,7 @@ import json
 import subprocess
 import sys
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -560,8 +561,11 @@ def test_release_check_refuses_anything_short_of_a_full_green_run(
 
 
 def test_release_check_needs_a_full_sha_and_fails_closed_on_api_errors(serve, tmp_path):
-    code, out, _ = cli(serve({}), tmp_path, "--event", "x", "--release-check", "--sha", "abc123")
-    assert code == 1 and "40-hex" in out
+    # QA Q3: a malformed SHA is a usage error (exit 2), not "wait for its run".
+    for bad in ("abc123", "NOTASHA", "A" * 40, ""):
+        code, out, _ = cli(serve({}), tmp_path, "--event", "x", "--release-check", "--sha", bad)
+        assert code == 2 and "usage: make release-check SHA=<40-hex" in out, (bad, out)
+        assert "gh run list" not in out
     code, out, _ = cli(serve({}), tmp_path, *RELEASE)
     assert code == 3 and "UNKNOWN" in out
 
@@ -621,6 +625,61 @@ def test_red_run_names_the_range_and_its_merged_prs(serve, tmp_path):
     assert "#4502 feat(tui): batched" in out and "#4501 fix(cli): squash merged" in out
     assert "side-branch" not in out  # first-parent only: PRs, not their inner commits
     assert f"git log --first-parent --oneline {GREEN}..{SHA}" in summary
+
+
+def _stamped(run, created, seconds):
+    """A run created at ``created`` that took ``seconds`` (the API's timing fields)."""
+    run.update(created_at=created, run_started_at=created)
+    ts = datetime.fromisoformat(created.replace("Z", "+00:00")) + timedelta(seconds=seconds)
+    run["updated_at"] = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return run
+
+
+def _history(n_batched, green_age_hours, *, unstamped=()):
+    """Newest-first main success history: ``n_batched`` no-op runs, then GREEN.
+
+    Batched pushes and hourly skips finish in about a minute (PR #4527 R1/Q2:
+    ~70/day once batching ships); ``unstamped`` ids lack timing fields, so the
+    scan must read their jobs to learn they ran nothing.
+    """
+    now = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+    runs = []
+    for i in range(n_batched):
+        rid = 10_000 - i
+        created = (now - timedelta(minutes=10 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        run = full_run(rid, event="push" if i % 3 else "schedule", sha=OTHER)
+        runs.append(run if rid in unstamped else _stamped(run, created, 60))
+    green_at = (now - timedelta(hours=green_age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    runs.append(_stamped(full_run(2, sha=GREEN), green_at, 2400))
+    routes = red_routes()
+    for page in range(0, len(runs), 100):
+        routes[f"{FULL}?&page={page // 100 + 1}"] = {"workflow_runs": runs[page : page + 100]}
+    del routes[FULL]
+    for rid in unstamped:
+        routes[attempt(rid)] = BATCHED
+    return routes
+
+
+def test_red_range_walks_past_hundreds_of_batched_successes(serve, tmp_path):
+    """R1/Q2/R3: >300 no-op successes ahead of the real green, across 4 pages."""
+    api = serve(_history(330, green_age_hours=60, unstamped=(10_000, 9_999, 9_998)))
+    code, out, _ = cli(api, tmp_path, *RED_ARGS)
+    assert code == 0 and f"RED BATCH RANGE: {GREEN}..{SHA}" in out, out
+    assert "unavailable" not in out
+    pages = [p for p in api.seen if p.startswith(FULL)]
+    assert len(pages) == 4 and pages[-1].endswith("&page=4"), pages
+    # Quick runs are skipped without a jobs call; only unstamped ones + GREEN are read.
+    job_calls = sorted(p.split("?")[0] for p in api.seen if "/attempts/" in p)
+    assert job_calls == sorted([attempt(2), *(attempt(r) for r in (10_000, 9_999, 9_998))])
+
+
+def test_red_range_stops_at_the_age_bound_instead_of_crawling(serve, tmp_path):
+    """No green within RED_RANGE_MAX_AGE_DAYS: a clear fail-soft line, bounded reads."""
+    api = serve(_history(150, green_age_hours=15 * 24))
+    code, out, _ = cli(api, tmp_path, *RED_ARGS)
+    assert code == 0 and "RED BATCH RANGE unavailable" in out and "14 days" in out, out
+    assert "--status success" not in out and "release-check SHA=" in out  # R2 guidance
+    assert attempt(2) not in api.seen  # the too-old green is never inspected
 
 
 @pytest.mark.parametrize(

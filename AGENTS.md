@@ -1843,7 +1843,11 @@ git -C ~/local-operator rev-parse origin/main          # copy this SHA after che
 # on exactly this SHA is green with the full matrix (both Python legs, linux +
 # macOS tui-e2e, coverage). Non-zero: do NOT cut — wait for that run
 # (gh run list --workflow full-suite.yml --commit <SHA>); red: fix forward.
-make -C ~/local-operator release-check SHA=<the SHA you just checked>
+# Runs origin/main's helper (what `make release-check SHA=` runs in a clean
+# checkout), so the shared checkout's branch or dirty state cannot change it.
+git -C ~/local-operator show origin/main:scripts/fast_gate_check.py | python3 - --local \
+  --event release-check --release-check --repo damianvtran/local-operator \
+  --sha <the SHA you just checked>
 gh release create vX.Y.Z --target <the SHA you just checked> \
   --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 

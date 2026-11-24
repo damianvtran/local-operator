@@ -43,7 +43,8 @@ TWO CLIENT MODES that gate nothing in CI themselves:
   linux and macOS ``tui-e2e``, a green ``Merge gate (full suite)``). The
   release owner runs it before ``gh release create``. A batched/superseded
   run is ``success`` at the run level with every heavy job skipped, which is
-  why the jobs are read rather than the run conclusion.
+  why the jobs are read rather than the run conclusion. A SHA that is not 40
+  lowercase hex is a usage error (exit 2), not "no run yet".
 * ``--red-range``: run by the aggregate of a RED main/hourly run. Names
   ``<last green full main SHA>..<this SHA>`` and the merged PRs in it, so an
   owner can fix forward from a batch that mixed many merges. Fail-soft: it
@@ -89,7 +90,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta
 from typing import Any
 
 CI_WORKFLOW = "ci.yml"
@@ -115,8 +117,21 @@ RELEASE_OSES = ("ubuntu-latest", "macos-latest")
 #: Events whose run tests the raw main SHA (a pull_request run tests a merge ref).
 _MAIN_EVENTS = frozenset({"push", "schedule", "workflow_dispatch"})
 _LIVE_STATUSES = frozenset({"queued", "in_progress", "waiting", "pending", "requested"})
-#: Red-range bounds: candidate runs inspected for the last green full main run.
-MAX_GREEN_CANDIDATES = 25
+#: Red-range bounds (PR #4527 R1/Q2). Under batching most main ``success``
+#: runs are BATCHED pushes or HOURLY SKIPs that ran nothing (~70/day), so the
+#: success list outgrows any "read it all" cap within days and a run-count
+#: window covers only hours. The scan therefore walks the list newest-first a
+#: page at a time and stops at the first ancestor run whose full matrix ran
+#: green, bounded by PAGES and by AGE (both API-resource bounds that fit the
+#: step's 3 min budget), never by how many no-op successes sit in between.
+RED_RANGE_MAX_PAGES = 15
+RED_RANGE_MAX_AGE_DAYS = 14
+#: Job lookups (one API call each) for runs that survive the cheap filters.
+MAX_GREEN_CANDIDATES = 60
+#: A run that finished faster than this cannot have run the full matrix (its
+#: test shards alone take far longer), so its jobs are not fetched. Only a
+#: shortcut: a run without both timestamps is still inspected.
+MIN_FULL_RUN_SECONDS = 240
 #: Tag resolution bounds. ``matching-refs`` returns every tag in one JSON body
 #: (~900 today, no ``Link``), so the page cap exists only for the day GitHub
 #: starts paginating it; hitting any cap means UNKNOWN -> run in full, never a
@@ -130,6 +145,8 @@ TAG_BUDGET_SECONDS = 120
 RELEASE_SUBJECT_PREFIX = "chore(release)"
 #: See the module docstring: 1 = decided not green, 3 = could not decide.
 EXIT_NOT_GREEN = 1
+#: Bad invocation (argparse's own code), e.g. a malformed release SHA.
+EXIT_USAGE = 2
 EXIT_UNKNOWN = 3
 
 #: ``fetch(path, headers_out=None)``; ``headers_out`` receives the ``link`` header.
@@ -585,30 +602,64 @@ def _pr_line(commit: dict[str, Any]) -> str:
     return f"{subject} ({sha7}, no PR number)"
 
 
+def _ts(value: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _too_quick_for_full_run(run: dict[str, Any]) -> bool:
+    started, ended = _ts(run.get("run_started_at")), _ts(run.get("updated_at"))
+    return bool(started and ended and (ended - started).total_seconds() < MIN_FULL_RUN_SECONDS)
+
+
+def _success_runs_newest_first(fetch: Fetch, repo: str) -> Iterator[dict[str, Any]]:
+    """Main ``success`` runs, newest first, lazily, within the page and age bounds.
+
+    Unlike ``_paged`` an overflow is NOT an error: this caller wants the
+    newest qualifying run, not the whole list, and stopping early is the point.
+    """
+    path = f"/repos/{repo}/actions/workflows/{FULL_WORKFLOW}/runs?branch=main&status=success"
+    newest: datetime | None = None
+    for page in range(1, RED_RANGE_MAX_PAGES + 1):
+        payload = fetch(f"{path}&per_page={PER_PAGE}&page={page}")
+        batch = payload.get("workflow_runs") if isinstance(payload, dict) else None
+        if not isinstance(batch, list):
+            raise ApiError(f"unexpected payload for {path}")
+        for run in batch:
+            if not isinstance(run, dict):
+                continue
+            created = _ts(run.get("created_at"))
+            if created is not None:
+                newest = newest or created
+                if newest - created > timedelta(days=RED_RANGE_MAX_AGE_DAYS):
+                    return
+            yield run
+        if len(batch) < PER_PAGE:
+            return
+
+
 def red_range(fetch: Fetch, repo: str, sha: str, run_id: int) -> str:
     """The text naming ``<last green full main SHA>..<sha>`` and its merged PRs.
 
-    Raises on any API doubt; ``main`` turns that into a fail-soft message.
+    Raises on any API doubt or when no green full run lies within the bounds;
+    ``main`` turns that into a fail-soft message.
     """
-    runs = _paged(
-        fetch,
-        f"/repos/{repo}/actions/workflows/{FULL_WORKFLOW}/runs?branch=main&status=success",
-        "workflow_runs",
-    )
-    candidates = sorted(
-        (
-            r
-            for r in runs
-            if r.get("head_branch") == "main"
-            and r.get("event") in _MAIN_EVENTS
-            and r.get("conclusion") == "success"
-            and r.get("head_sha") != sha
-            and r.get("id") != run_id
-            and _full_name(r, "repository") == repo
-        ),
-        key=lambda r: -int(r.get("id") or 0),
-    )[:MAX_GREEN_CANDIDATES]
-    for run in candidates:
+    inspected = 0
+    for run in _success_runs_newest_first(fetch, repo):
+        if not (
+            run.get("head_branch") == "main"
+            and run.get("event") in _MAIN_EVENTS
+            and run.get("conclusion") == "success"
+            and run.get("head_sha") != sha
+            and run.get("id") != run_id
+            and _full_name(run, "repository") == repo
+        ) or _too_quick_for_full_run(run):
+            continue
+        if inspected >= MAX_GREEN_CANDIDATES:
+            break
+        inspected += 1
         # Run-level success includes BATCHED runs whose heavy jobs all skipped;
         # only a run whose suite actually ran green is a "last green".
         jobs = _attempt_jobs(fetch, repo, run)
@@ -641,7 +692,10 @@ def red_range(fetch: Fetch, repo: str, sha: str, run_id: int) -> str:
             + partial
             + f"\nreproduce: git log --first-parent --oneline {green}..{sha}"
         )
-    raise ApiError(f"no green full-matrix main run among the newest {len(candidates)} candidates")
+    raise ApiError(
+        f"no green full-matrix main ancestor within {RED_RANGE_MAX_PAGES} pages / "
+        f"{RED_RANGE_MAX_AGE_DAYS} days ({inspected} runs' jobs inspected)"
+    )
 
 
 def _write(path: str | None, text: str) -> None:
@@ -698,6 +752,15 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
 
 def _release_main(fetch: Fetch, args: argparse.Namespace) -> int:
     """``make release-check``: fail closed; exit 0 only on a verified full green run."""
+    # A malformed SHA is an operator typo, not a missing run: answer with the
+    # usage line (exit 2, like a missing SHA) instead of "wait for its run".
+    if not re.fullmatch(r"[0-9a-f]{40}", args.sha or ""):
+        print(
+            f"usage: make release-check SHA=<40-hex main SHA> (got {args.sha!r}; "
+            "use the full lowercase SHA from `git rev-parse origin/main`)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     try:
         ok, why = check_release(fetch, args.repo, args.sha)
     except (ApiError, KeyError, IndexError, TypeError, ValueError) as exc:
@@ -723,9 +786,13 @@ def _red_range_main(fetch: Fetch, args: argparse.Namespace) -> int:
             text = red_range(fetch, args.repo, args.sha, args.run_id)
         except Exception as exc:  # noqa: BLE001 -- fail-soft is the contract
             text = (
+                # Not `gh run list --status success`: under batching most of
+                # those are BATCHED/HOURLY-SKIP runs that tested nothing (R2).
                 f"RED BATCH RANGE unavailable ({type(exc).__name__}: {exc}). Find the last "
-                "green full main run with: gh run list --workflow full-suite.yml --branch main "
-                f"--status success, then git log --first-parent --oneline <green>..{args.sha}"
+                "green full main run: a full-suite main run whose test jobs RAN green "
+                "(confirm a candidate SHA with `make release-check SHA=<sha>`, exit 0 "
+                "= full matrix green on it), then git log --first-parent --oneline "
+                f"<green>..{args.sha}"
             )
     print(text)
     try:
