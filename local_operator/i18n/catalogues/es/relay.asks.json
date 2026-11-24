@@ -89,7 +89,7 @@
   "relay.asks.id.copy_label": "Copiar el id de la pregunta {id}",
   "relay.asks.id.copied": "Copiado",
   "relay.asks.id.copied_named": "Copiado {id}",
-  "relay.asks.id.copy_failed": "No se pudo copiar: el id está seleccionado; cópialo desde ahí",
+  "relay.asks.id.copy_failed": "No se pudo copiar — el id está seleccionado; cópialo desde ahí",
   "relay.asks.chip.open": "abierta",
   "relay.asks.chip.answered": "respondida",
   "relay.asks.chip.declined": "rechazada",

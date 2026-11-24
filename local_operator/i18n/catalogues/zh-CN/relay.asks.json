@@ -94,7 +94,7 @@
   "relay.asks.chip.answered": "已回答",
   "relay.asks.chip.declined": "已拒绝",
   "relay.asks.chip.timed_out": "已超时",
-  "relay.asks.chip.late": "迟答",
+  "relay.asks.chip.late": "延迟回答",
   "relay.asks.chip.dismissed": "已忽略",
   "relay.asks.chip.withdrawn": "已撤回",
   "relay.asks.chip.expired": "已过期",

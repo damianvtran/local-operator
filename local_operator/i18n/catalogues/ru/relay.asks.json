@@ -95,9 +95,9 @@
   "relay.asks.chip.declined": "отклонён",
   "relay.asks.chip.timed_out": "время истекло",
   "relay.asks.chip.late": "с опозданием",
-  "relay.asks.chip.dismissed": "снят",
+  "relay.asks.chip.dismissed": "скрыт",
   "relay.asks.chip.withdrawn": "отозван",
-  "relay.asks.chip.expired": "истёк срок",
+  "relay.asks.chip.expired": "устарел",
   "relay.asks.chip.label": "Вопрос {id}, {state}: {question}. Активируйте, чтобы показать.",
   "relay.asks.chip.label_bare": "Вопрос {id}, {state}. Активируйте, чтобы показать."
 }

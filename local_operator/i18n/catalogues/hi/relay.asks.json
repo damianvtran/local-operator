@@ -86,7 +86,7 @@
   "relay.asks.card.progress_pick_or_type": "भेजने के लिए कोई विकल्प चुनें या अपना जवाब लिखें।",
   "relay.asks.card.progress_type": "भेजने के लिए जवाब लिखें या सवाल छोड़ दें।",
   "relay.asks.card.other_kept": "आपका टेक्स्ट सहेजा गया है, भेजा नहीं गया",
-  "relay.asks.id.copy_label": "प्रश्न आईडी {id} कॉपी करें",
+  "relay.asks.id.copy_label": "सवाल आईडी {id} कॉपी करें",
   "relay.asks.id.copied": "कॉपी किया गया",
   "relay.asks.id.copied_named": "कॉपी किया गया {id}",
   "relay.asks.id.copy_failed": "कॉपी नहीं हो सका — आईडी चयनित है; वहीं से कॉपी करें",
@@ -98,6 +98,6 @@
   "relay.asks.chip.dismissed": "खारिज",
   "relay.asks.chip.withdrawn": "वापस लिया गया",
   "relay.asks.chip.expired": "समय सीमा समाप्त",
-  "relay.asks.chip.label": "प्रश्न {id}, {state}: {question}. दिखाने के लिए सक्रिय करें।",
-  "relay.asks.chip.label_bare": "प्रश्न {id}, {state}. दिखाने के लिए सक्रिय करें।"
+  "relay.asks.chip.label": "सवाल {id}, {state}: {question}। दिखाने के लिए सक्रिय करें।",
+  "relay.asks.chip.label_bare": "सवाल {id}, {state}। दिखाने के लिए सक्रिय करें।"
 }
