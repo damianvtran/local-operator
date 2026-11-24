@@ -734,8 +734,10 @@ class TestFormatMcpResultNormalization:
         raw = _FORGE_WIKI_FETCH.read_text(encoding="utf-8")
         result = _text_result(raw)
         formatted = format_mcp_result(result, "c1", "mcp__forge_tools_fetch")
-        # Measured on this payload: 12,389 -> 6,748 chars under prose-links.
-        assert len(formatted.text) <= 0.6 * len(raw)
+        # Measured on this payload: 12,389 -> 7,826 chars (0.632) under
+        # prose-links, which keeps a short line's only absolute link (the
+        # page's reference/external-link entries are what a task cites).
+        assert len(formatted.text) <= 0.65 * len(raw)
         parsed = json.loads(formatted.text)
         assert parsed["url"] == json.loads(raw)["url"]  # the citation key, byte-equal
         for fact in ("59th", "mayor of Ottawa", "July 14, 1968"):
