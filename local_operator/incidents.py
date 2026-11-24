@@ -742,6 +742,9 @@ INVOLUNTARY_MECHANISM_LABELS: dict[str, str] = {
     "generation-prune": "its install generation was pruned",
     "in-place-install": "its install was being replaced in place",
     "reclaim": "it was reclaimed as an unreachable runtime",
+    # ``session.runtime.runtime_memory.MECHANISM``: its own footprint stayed over
+    # ``session.runtime_memory.limit_mb`` for several consecutive checks.
+    "runtime-memory-guard": "it stayed over its memory ceiling and was ended",
     "wake-sweep": "wake delivery for its store was going away",
 }
 

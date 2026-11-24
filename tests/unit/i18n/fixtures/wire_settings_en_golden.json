@@ -1199,5 +1199,15 @@
  "wire.settings.keymap_send_queue.label": "Send as queue",
  "wire.settings.keymap_send_queue.help": "Wait for the step; never interrupt tools. Overrides Delivery when busy.",
  "wire.settings.keymap_send_both.label": "Send as queue, then steer",
- "wire.settings.keymap_send_both.help": "Wait, then steer if slow. Overrides Delivery when busy."
+ "wire.settings.keymap_send_both.help": "Wait, then steer if slow. Overrides Delivery when busy.",
+ "wire.settings.runtime_memory_guard.description": "A ceiling on each session runtime's own memory, so one runaway session is ended instead of pushing the whole device into swap.",
+ "wire.settings.runtime_memory_guard.title": "Session memory limit",
+ "wire.settings.session_runtime_memory_enabled.choice.false.description": "no ceiling",
+ "wire.settings.session_runtime_memory_enabled.choice.false.label": "off",
+ "wire.settings.session_runtime_memory_enabled.choice.true.description": "end runaway sessions",
+ "wire.settings.session_runtime_memory_enabled.choice.true.label": "on",
+ "wire.settings.session_runtime_memory_enabled.help": "End a session runtime whose own memory stays over the ceiling below for several consecutive checks (about three minutes). Its wakes and monitors are made dormant, not deleted, and the session is told why when it next opens. The TUI window you are working in is never ended.",
+ "wire.settings.session_runtime_memory_enabled.label": "End runaway sessions",
+ "wire.settings.session_runtime_memory_limit_mb.help": "How much memory, in MiB, one session runtime may hold before the guard ends it. The default sits well above the largest session measured in normal use; a value below 1024, or 0, is ignored and the default applies.",
+ "wire.settings.session_runtime_memory_limit_mb.label": "Session ceiling (MiB)"
 }

@@ -636,7 +636,18 @@ def _paint_team_facts_lines(
 #: trades the band's blank top row for a second line of help and may GROW the
 #: band to :data:`_DETAIL_WRAP_MAX_ROWS` rows (taken from the list), so a
 #: sentence needing more than that still falls to the marked cut.
-_WRAPPED_HELP_KEYS: frozenset[str] = frozenset({"update.keep_generations"})
+#: ``session.runtime_memory.*`` (UX round 1 on #4519, U4): the limit's
+#: guarantee is its LAST clause ("a value below 1024, or 0, is ignored and the
+#: default applies" — what keeps a units typo from becoming a fleet kill), and
+#: the switch's is too ("the TUI window you are working in is never ended");
+#: the one-row band cut both at 100 and 150 columns.
+_WRAPPED_HELP_KEYS: frozenset[str] = frozenset(
+    {
+        "update.keep_generations",
+        "session.runtime_memory.enabled",
+        "session.runtime_memory.limit_mb",
+    }
+)
 
 #: Most rows the detail band may grow to for a :data:`_WRAPPED_HELP_KEYS` row.
 #: QA round 2, Q1 (PR #4135): two rows were not enough — the fr keep help (196

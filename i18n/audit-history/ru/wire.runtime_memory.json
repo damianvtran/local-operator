@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "wire.runtime_memory",
+  "history_sha256": "0b12f2dc6fd759f7e7b293017443ca54eef9a2e3366dc037571519217fb0279e",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "wire.runtime_memory",
+      "source_sha256": "ae637b4fb10258f5a0b0b6b4a2161ca6169ef761319198763e3a5a37d1a65cea",
+      "context_sha256": "44e1c7971132ab0386afd7222323429d924ba37a35cbfe9c7d38ae52ed00112a",
+      "target_sha256": "565b39292b8dd297530d2b2f2e968f42155d53004e16ec7b3c5a0457138ab089",
+      "translator": {
+        "agent": "coder (lopdev team): original translation in ee515de6c772, round-1 remediation (MiB, TUI clause, U6 label, I1-I5) in 16298d789d9e",
+        "session": "167d9ab10ebc; 5477158bc8e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none (both sessions)"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team member, task 4519-i18n-audit-r2-first), FIRST independent i18n audit (auditor A, round 2) at the post-remediation bytes; distinct from the coder that translated",
+        "session": "27daf6bc2db4",
+        "model": "anthropic/claude-opus-5-5",
+        "underlying_model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none: served as anthropic/claude-opus-5-5 per this session's own environment header; no route log inspected",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "full semantic audit of all 10 rows of the namespace at PR #4519 head 16298d789d9e (delta f55a826dee96..16298d789d9e; round-1 audit at f55a826dee96 carried as context)"
+      },
+      "status": "passed",
+      "note": "FIRST independent audit (auditor A, round 2) of ru wire.runtime_memory at 16298d789d9e, superseding the void round-1 receipts (target bytes changed in every locale). PASS, 0 BLOCKER/0 MAJOR (damianvtran/local-operator#4519, `### i18n audit — round 2 (auditor A)`). Placeholder {address}, digits 1024/0, force=true, stop, SIGTERM/SIGKILL, TUI and the MiB unit preserved; check.py catalogue parity/ICU/context checks run at that head. Safety rows (approval_stop_local_force, stop_force_hint) still need the SECOND independent safety audit (I7) per docs/I18N.md (Add or extend a locale, step 3), appended as its own receipt by a different auditor. Agent-independent only; no native human review, no rendered frame."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.runtime_memory",
+      "source_sha256": "ae637b4fb10258f5a0b0b6b4a2161ca6169ef761319198763e3a5a37d1a65cea",
+      "context_sha256": "44e1c7971132ab0386afd7222323429d924ba37a35cbfe9c7d38ae52ed00112a",
+      "target_sha256": "565b39292b8dd297530d2b2f2e968f42155d53004e16ec7b3c5a0457138ab089",
+      "translator": {
+        "agent": "coder (lopdev team): translation session 167d9ab10ebc (ee515de6c772), revised by session 5477158bc8e1 (round-1 remediation 16298d789d9e)",
+        "session": "167d9ab10ebc; 5477158bc8e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none (both sessions), per the manager's brief to auditor B"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team), SECOND independent safety-copy i18n audit (auditor B, round 2, finding I7); not the translator (167d9ab10ebc, 5477158bc8e1), not auditor A (27daf6bc2db4), not the round-1 auditor (33aa1fbf755d)",
+        "session": "a1d2ef5f25ec",
+        "model": "anthropic/claude-opus-5-5",
+        "underlying_model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none: served as anthropic/claude-opus-5-5 per this session's own environment header",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 1 nit — I15 (nit): ru stop_force_hint 'дождётся её … завершения': nearest feminine antecedent is 'идентичности'; name 'сессии' explicitly; non-gating, deferred to the PR thread",
+        "independent_from_translator": true,
+        "scope": "safety rows wire.runtime_memory.approval_stop_local_force and wire.runtime_memory.stop_force_hint at PR #4519 head 16298d789d9e, judged for the destructive consequence (signals while working, SIGTERM→bounded drain→SIGKILL, work in flight cut), the exact-process target, the operator-request/memory-runaway precondition, and verbatim stop/force=true/SIGTERM/SIGKILL/{address}"
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit (auditor B, I7) of ru wire.runtime_memory safety rows at 16298d789d9e, appended AFTER auditor A's first-audit receipt (comment 7124637345). PASS, 0 BLOCKER/0 MAJOR: both rows state that the force stop signals even while the session works, the SIGTERM→bounded drain→SIGKILL ladder, that work in flight is cut, and (hint) the identity check, the exact process and the operator-request/runaway-only precondition. 1 non-gating finding (I15, nit) deferred in-thread (damianvtran/local-operator#4519, `### i18n audit — round 2 (auditor B, safety copy)`). Agent-independent only: auditor shares anthropic/claude-opus-5-5 with the translators and auditor A. No native human review, no rendered frame."
+    }
+  ]
+}

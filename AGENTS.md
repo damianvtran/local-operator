@@ -2824,6 +2824,22 @@ taken from `ps` alone is blind to that class; neither guard decides on it alone.
   answers, otherwise **queued** in its inbox and read the next time that session
   opens a runtime (the log says which). One `machine memory kill:` line carries
   who/what/how big in the supervisor log.
+- **Per runtime** (`session.runtime.runtime_memory`, the same supervisor pass, run
+  first). The one guard that ends a session runtime itself: when a runtime's OWN
+  footprint (its pid only — its commands are the two guards above) stays over
+  `session.runtime_memory.limit_mb` (MiB; default 8192, above the largest live runtime
+  measured, 5,028 MiB; below 1024 is invalid and the default applies) for 3
+  consecutive passes spanning at least 120 s, it proves
+  the pid's birth and config root, stages an involuntary stop marker (which the
+  runtime's signal gate honours), makes the session's wakes and monitors dormant
+  (kept, not re-armed — the incident was a wake cold-booting a runaway), SIGTERMs,
+  and SIGKILLs the exact pid after 30 s. One `runtime memory guard:` line in the
+  supervisor log; a notice spooled to the session's inbox. Never ends a `kind=tui`
+  record (the operator's own window; one warning line instead). While it is enabled
+  and a guardable runtime is live the supervisor does not retire. Off switch:
+  `session.runtime_memory.enabled`. An operator stop of a busy runaway is `lop stop
+  --force`, or `sessions(op='stop', force=true)` from an agent — never a bare
+  `kill`, which the runtime refuses because no marker sanctions it.
 
 **What this is not.** It is not a throttle: nothing is slowed, a process is ended.
 It does not make allocation safe — a fast allocator can outrun a 250 ms tick, and

@@ -1,0 +1,12 @@
+{
+  "wire.runtime_memory.approval_stop_local_force": "buộc dừng {address}: gửi tín hiệu ngay cả khi phiên đang làm việc (SIGTERM, chờ kết thúc trong thời gian giới hạn, rồi SIGKILL), nên công việc đang chạy sẽ bị cắt",
+  "wire.runtime_memory.enabled.choice.false.description": "không đặt trần",
+  "wire.runtime_memory.enabled.choice.true.description": "kết thúc phiên mất kiểm soát",
+  "wire.runtime_memory.enabled.help": "Kết thúc runtime phiên có bộ nhớ riêng vẫn vượt trần bên dưới qua nhiều lần kiểm tra liên tiếp (khoảng ba phút). Các lần thức dậy và giám sát của nó được cho ngủ đông, không bị xóa, và phiên sẽ biết lý do khi được mở lại. Cửa sổ TUI bạn đang làm việc sẽ không bao giờ bị kết thúc.",
+  "wire.runtime_memory.enabled.label": "Kết thúc phiên mất kiểm soát",
+  "wire.runtime_memory.limit_mb.help": "Lượng bộ nhớ, tính bằng MiB, một runtime phiên được giữ trước khi cơ chế bảo vệ kết thúc nó. Mặc định cao hơn nhiều so với phiên lớn nhất đo được khi dùng bình thường; giá trị dưới 1024, hoặc 0, sẽ bị bỏ qua và mặc định được áp dụng.",
+  "wire.runtime_memory.limit_mb.label": "Trần mỗi phiên (MiB)",
+  "wire.runtime_memory.section.description": "Trần cho bộ nhớ riêng của mỗi runtime phiên, để một phiên mất kiểm soát bị kết thúc thay vì đẩy cả thiết bị vào swap.",
+  "wire.runtime_memory.section.title": "Giới hạn bộ nhớ phiên",
+  "wire.runtime_memory.stop_force_hint": "Nếu người vận hành đã yêu cầu kết thúc phiên này, hoặc bộ nhớ của nó đang tăng mất kiểm soát, hãy gọi lại stop với force=true: lệnh này gửi SIGTERM sau khi xác minh danh tính, chờ phiên kết thúc trong thời gian giới hạn, rồi gửi SIGKILL tới đúng tiến trình đó, và công việc đang chạy sẽ bị cắt. Nếu không, lời từ chối này chính là câu trả lời."
+}

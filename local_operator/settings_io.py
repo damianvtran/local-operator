@@ -72,6 +72,7 @@ from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_notification_sound as _ns
 from local_operator.i18n.keys import wire_phone_access as _pa
 from local_operator.i18n.keys import wire_radient_saver as _rsv
+from local_operator.i18n.keys import wire_runtime_memory as _rm
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
@@ -146,6 +147,9 @@ _CHILD_SETTINGS_NAMESPACES = (
     # now fails for any child namespace left out of this tuple.
     "wire.phone_access",
     "wire.voice",
+    # The per-runtime memory guard (``session.runtime_memory.*``): its own child
+    # namespace so its rows never move the audited ``wire.settings`` hash.
+    "wire.runtime_memory",
 )
 
 
@@ -938,6 +942,17 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.heavy_jobs_title()),
         Scope.LIVE,
         _t(_ws.heavy_jobs_description()),
+    ),
+    # The PER-RUNTIME ceiling (``session/runtime/runtime_memory.py``), run by the
+    # wake supervisor every minute. Its own section, not ``memory_guard``: that
+    # one bounds a COMMAND and kills only its group; this one ends a whole
+    # session runtime. LIVE: the supervisor reads a fresh ``ConfigManager`` on
+    # every pass.
+    Section(
+        "runtime_memory_guard",
+        _t(_rm.section_title()),
+        Scope.LIVE,
+        _t(_rm.section_description()),
     ),
     # Its own section for the reason ``memory_guard`` has one, and LIVE for the
     # same reason: the reader is a fresh ``ConfigManager`` per ``bash`` call. It is
@@ -5322,6 +5337,32 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.FLOAT,
         default=0.8,
         help=(_t(_ws.bash_memory_soft_fraction_help())),
+    ),
+    # -- runtime_memory_guard -------------------------------------------------
+    # ``path`` mirrors ``runtime_memory.RUNTIME_MEMORY_*_PATH``; the defaults are
+    # pinned against that module by ``tests/unit/test_settings_io.py`` rather than
+    # imported, for the cheap-CLI reason the ``memory_guard`` rows give.
+    Setting(
+        key="session.runtime_memory.enabled",
+        path=("session", "runtime_memory", "enabled"),
+        section="runtime_memory_guard",
+        label=_t(_rm.enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_rm.enabled_help()),
+        choices=_bool_choices(
+            _t(_rm.enabled_choice_true_description()),
+            _t(_rm.enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="session.runtime_memory.limit_mb",
+        path=("session", "runtime_memory", "limit_mb"),
+        section="runtime_memory_guard",
+        label=_t(_rm.limit_mb_label()),
+        kind=Kind.INT,
+        default=8192,
+        help=_t(_rm.limit_mb_help()),
     ),
     # -- heavy_jobs ---------------------------------------------------------
     # ``path`` mirrors ``heavy_lease.HEAVY_JOBS_ENABLED_PATH``; pinned by

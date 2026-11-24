@@ -1175,7 +1175,7 @@ def test_validation_refusals_are_legible_and_per_op() -> None:
     refusal = _sessions_validation_error(SessionsParams(op="stop", prompt="p"))
     assert refusal is not None
     assert refusal.startswith("`prompt` applies to spawn/resume only. ")
-    assert "`stop` takes: session|target|pid, peer." in refusal
+    assert "`stop` takes: session|target|pid, peer, force." in refusal
     assert refusal.endswith("Call op='help' for the full per-op reference.")
     refusal = _sessions_validation_error(SessionsParams(op="list", session="a"))
     assert refusal is not None
@@ -1254,7 +1254,13 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     # that tells it apart from `stop` ("keeps wakes/monitors armed") — 1326
     # measured with this test's own ruler, pinned at 1327 (one-token headroom).
     # The rest of park's contract lives in op='help', not the schema.
-    assert count_text_tokens(params) <= 1327
+    # RE-MEASURED for `stop`'s `force` (runtime memory-runaway incident,
+    # 2026-11-24): one boolean whose description was trimmed to its safety
+    # clause ("operator-safety escalation (signals; cuts work)") — 1364 measured
+    # with this test's own ruler, pinned at 1365 (one-token headroom). When it
+    # is legitimate, and what the ladder does, live in op='help' and in every
+    # refusal that names it.
+    assert count_text_tokens(params) <= 1365
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 
@@ -3728,6 +3734,62 @@ async def test_stop_puts_the_outcome_above_the_wait_lines(
     assert "waiting up to" in lines[1]
 
 
+@pytest.mark.asyncio
+async def test_a_forced_stop_receipt_does_not_reprint_the_pre_signal_wait(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 1 on #4519, U7: the tool result is rendered once, AFTER the
+    outcome, so the SIGTERM rung's "waiting up to … before SIGKILL" announcement
+    under "killed" read as still pending. A forced receipt drops it and keeps the
+    ladder's other explanation lines.
+
+    Negative control: ``test_stop_puts_the_outcome_above_the_wait_lines`` — the
+    plain stop keeps its announcement lines unchanged.
+    """
+
+    class _Outcome:
+        pid = 4243
+        session_id = "aaaa00000002"
+        name = "runaway"
+        method = "sigkill"
+        reason = ""
+        wakes_dormant = 0
+        monitors_dormant = 0
+        line = 'killed "runaway"'
+
+    class _Record:
+        pid = 4243
+        session_id = "aaaa00000002"
+        conversation_name = "runaway"
+
+    seen: dict[str, Any] = {}
+
+    async def _stop(target: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        kwargs["on_wait"]('"runaway" (pid 4243) is leaving, but stalled; trying the ordinary stop')
+        kwargs["on_wait"]('waiting up to 2.5 min for "runaway" (pid 4243) to drain before SIGKILL')
+        return _Outcome()
+
+    monkeypatch.setattr(
+        builtin,
+        "_sessions_target",
+        AsyncMock(
+            return_value=builtin._SessionsTarget(
+                record=_Record(), session_id="", candidates=[], candidates_stored=False, error=""
+            )
+        ),
+    )
+    monkeypatch.setattr(control, "stop_session", _stop)
+    result = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000002", "force": True}, None, None, _context(root)
+    )
+    assert seen["force"] is True and seen["graceful_only"] is False
+    lines = result.text.splitlines()
+    assert lines[0] == 'killed "runaway"'
+    assert not any(line.startswith("waiting up to") for line in lines), lines
+    assert any("trying the ordinary stop" in line for line in lines), lines
+
+
 # ---------------------------------------------------------------------------
 # park — free a session's memory, keep its wakes and monitors armed
 # ---------------------------------------------------------------------------
@@ -4722,3 +4784,124 @@ async def test_the_hint_agrees_in_number_when_both_fields_name_the_team(
     )
     assert not result.is_error, result.text
     assert "the name and prompt name the team lopdev" in result.text, result.text
+
+
+def _stop_fixture(monkeypatch: pytest.MonkeyPatch, method: str, reason: str = "") -> AsyncMock:
+    """A stop whose ladder answers ``method``/``reason``; returns the ladder mock."""
+
+    class _Outcome:
+        pid = 4242
+        session_id = "aaaa00000001"
+        name = "stoppable"
+        wakes_dormant = 0
+        monitors_dormant = 0
+        line = "the ladder's own English line"
+
+        def __init__(self) -> None:
+            self.method = method
+            self.reason = reason
+
+    class _Record:
+        pid = 4242
+        session_id = "aaaa00000001"
+        conversation_name = "stoppable"
+
+    monkeypatch.setattr(
+        builtin,
+        "_sessions_target",
+        AsyncMock(
+            return_value=builtin._SessionsTarget(
+                record=_Record(), session_id="", candidates=[], candidates_stored=False, error=""
+            )
+        ),
+    )
+    ladder = AsyncMock(return_value=_Outcome())
+    monkeypatch.setattr(control, "stop_session", ladder)
+    return ladder
+
+
+@pytest.mark.asyncio
+async def test_stop_force_runs_the_cli_escalation_ladder(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``force=true`` is ``lop stop --force``: signals allowed, not idle-only.
+
+    2026-11-24: the idle-only stop refused a runaway runtime ("working right
+    now") with no way forward. Negative control: the same call without ``force``
+    keeps the graceful-only promise.
+    """
+    ladder = _stop_fixture(monkeypatch, "sigkill")
+    result = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001", "force": True}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert ladder.await_args is not None
+    kwargs = ladder.await_args.kwargs
+    assert (kwargs["force"], kwargs["graceful_only"]) == (True, False)
+    assert kwargs["_command"] == "sessions tool --force"
+    assert (result.details or {})["force"] is True
+
+    ladder = _stop_fixture(monkeypatch, "socket")
+    await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001"}, None, None, _context(root)
+    )
+    assert ladder.await_args is not None
+    kwargs = ladder.await_args.kwargs
+    assert (kwargs["force"], kwargs["graceful_only"]) == (False, True)
+    assert kwargs["_command"] == "sessions tool"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "reason"),
+    [("refused", "busy"), ("refused", "unanswered"), ("busy", ""), ("draining", "")],
+)
+async def test_a_stop_refusal_names_the_escalation(
+    root: Path, monkeypatch: pytest.MonkeyPatch, method: str, reason: str
+) -> None:
+    """A refusal is never a dead end: it names ``force=true`` and when it is legitimate.
+
+    Negative control: a SUCCESSFUL stop carries no such line, and a forced call that
+    is still refused (identity unproven) does not offer the flag it already used.
+    """
+    _stop_fixture(monkeypatch, method, reason)
+    result = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert "force=true" in result.text
+    assert "memory runaway" in result.text
+
+    _stop_fixture(monkeypatch, "socket")
+    ok = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001"}, None, None, _context(root)
+    )
+    assert "force=true" not in ok.text
+
+    _stop_fixture(monkeypatch, "refused", "")
+    forced = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001", "force": True}, None, None, _context(root)
+    )
+    assert forced.is_error
+    assert "force=true" not in forced.text
+
+
+def test_force_is_a_stop_only_input_and_is_documented() -> None:
+    """The schema and the ``help`` reference expose ``force`` on ``stop`` only."""
+    assert "force" in builtin._SESSIONS_OP_FIELDS["stop"]
+    assert all(
+        "force" not in fields for op, fields in builtin._SESSIONS_OP_FIELDS.items() if op != "stop"
+    )
+    reference = builtin.render_sessions_reference()
+    stop_block = reference.split("`stop` —", 1)[1].split("\n`", 1)[0]
+    assert "force (" in stop_block and "force=true" in stop_block
+
+
+def test_the_forced_stop_approval_does_not_promise_idle_only() -> None:
+    plain = _describe_sessions_approval({"op": "stop", "session": "aaaa00000001"}, "~/x")
+    forced = _describe_sessions_approval(
+        {"op": "stop", "session": "aaaa00000001", "force": True}, "~/x"
+    )
+    assert "never signals" in plain
+    assert "never signals" not in forced
+    assert "SIGKILL" in forced and "aaaa00000001" in forced
