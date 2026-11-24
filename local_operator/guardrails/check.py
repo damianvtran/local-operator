@@ -606,9 +606,10 @@ _HOLD_GENERAL = (
 _HOLD_IGNORED = (
     "The worktree holds ignored files (build output, caches, environments) that the "
     "guard cannot prove are regenerable, so it will not let Git delete them. "
-    "In a worktree you created (this session or its family) the only ignored entry "
-    "that holds is a nested Git repository: push or move it out, then remove the tree "
-    "yourself, no operator question. In a tree you did not create, copy or move what "
+    "In a worktree you created (this session, its subagents, or the ancestor that "
+    "delegated to it; never a sibling subagent) the only ignored entry that holds is a "
+    "nested Git repository: push or move it out, then remove the tree yourself, no "
+    "operator question. In a tree you did not create, copy or move what "
     "you still need out of the checkout; ask the operator only about paths you did not "
     "create. "
 )
@@ -626,7 +627,7 @@ _HOLD_TAIL = (
     "The standing two refusal exceptions still apply. "
     "If this refusal's `(guard x.y.z)` is older than the installed guard, "
     "`preview_tool_call` the identical call before asking: ALLOW or WARN means "
-    "re-issue it once, not ask."
+    "re-issue it once, not ask; REVIEW or a refusal keeps this final."
 )
 
 
