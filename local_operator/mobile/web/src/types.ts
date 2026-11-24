@@ -1064,6 +1064,11 @@ export type CommandOp =
 			    exists. Part of the retry envelope's bytes: a replay asks for the
 			    same expansion the first attempt asked for. */
 			expand_skills?: boolean;
+			/** The prompt-wake opt-in (capability `prompt_wake.request_flag`):
+			    "answer a cold prompt `waking` once a runtime is booting; I keep
+			    my retry envelope until the stream carries this id or `ended`".
+			    A transport flag the relay pops, NOT part of the envelope. */
+			accept_waking?: boolean;
 		}
 	| { op: "abort" }
 	/* `defer_ok` + `request_id` (both optional): a busy session answers

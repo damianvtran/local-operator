@@ -583,6 +583,10 @@ export type CommandReceipt = {
 	    reply cannot say which channel the first attempt landed on), and on an
 	    older relay. */
 	delivered_as?: "prompt" | "steer";
+	/** Present (true) only on a cold prompt sent with `accept_waking`: a
+	    runtime is booting and the prompt is NOT admitted yet; the reply streams.
+	    See `continuation-command.ts` for what the retry envelope does then. */
+	waking?: boolean;
 };
 
 export function sendCommand(sessionId: string, op: CommandOp): Promise<CommandReceipt> {

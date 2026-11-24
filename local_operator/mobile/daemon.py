@@ -48,7 +48,8 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -1989,7 +1990,7 @@ class SessionTable:
 
 
 class _OutcomeReader:
-    """The three reads ``bootstrap_transcript`` makes, without opening a ``Transcript``.
+    """``bootstrap_transcript``'s reads, without a writer-locked ``Transcript``.
 
     WHY. Both relay callers of ``bootstrap_transcript`` (the restart sweep and
     the discovered-death classification) used to construct a full
@@ -2008,6 +2009,16 @@ class _OutcomeReader:
     never restores an archive in place): an archive this build cannot read
     raises here, at construction, exactly where ``Transcript(...)`` raised, so
     the sweep's per-session skip-and-log contract is unchanged.
+
+    THE LEGACY-BASELINE BRANCH needs the whole history. A conversation with no
+    eligible marker and no ``completion_token`` makes ``bootstrap_transcript``
+    call ``build_llm_history()`` and ``entries()`` to find its final assistant
+    turn (``attention._import_transcript_outcome``). Those cannot be answered
+    by a one-row backward walk, so ONLY that branch opens a full transcript --
+    ``read_only``, so still no writer lock and no archive restore -- once, on
+    first use. Without them the branch raised ``AttributeError``, which the
+    bootstrap's broad guard logged as a traceback warning and the ``complete``
+    baseline was never published (agent review round 1, R1-2).
     """
 
     def __init__(self, directory: Path) -> None:
@@ -2015,6 +2026,20 @@ class _OutcomeReader:
 
         self.directory = directory
         transcript_for_read(directory, read_only=True)
+        self._full: Any = None
+
+    def _transcript(self) -> Any:
+        if self._full is None:
+            from local_operator.session.transcript import Transcript
+
+            self._full = Transcript(self.directory, read_only=True)
+        return self._full
+
+    def build_llm_history(self) -> Any:
+        return self._transcript().build_llm_history()
+
+    def entries(self) -> Any:
+        return self._transcript().entries()
 
     def latest_custom_entry(self, custom_type: str) -> Any:
         from local_operator.session.transcript import read_latest_custom_entry
@@ -3984,14 +4009,17 @@ class _PromptWake:
     """One in-flight phone prompt wake, keyed by ``(session_id, command_id)``."""
 
     constructing: asyncio.Event
-    #: Assigned right after construction, so ``run`` can name its own record
-    #: even under an eager task factory that starts the coroutine inside
-    #: ``create_task``.
-    task: "asyncio.Task[str]" = field(init=False)
-    #: Set once ``/command`` answered "waking" for this wake, i.e. once the
-    #: phone was told the outcome will arrive later. Only then does a failure
-    #: owe the stream a terminal frame (a synchronous failure is answered on
-    #: the request itself, as before).
+    #: Assigned by ``create_task`` AFTER the record is registered in
+    #: ``_prompt_wakes``, so a ``run`` that finishes inside ``create_task``
+    #: (an eager task factory) still finds and pops its own entry rather than
+    #: leaving a finished one behind for a later retry to join.
+    # ``dataclass_field``: this module uses ``field`` as a loop variable.
+    task: "asyncio.Task[str]" = dataclass_field(init=False)
+    #: Set once a request returned WITHOUT this wake's outcome -- a "waking"
+    #: answer, a legacy 504 at the ack window, or a phone that hung up. From
+    #: then on nobody is awaiting the outcome, so a failure owes the stream its
+    #: terminal frame (a failure inside the window is answered on the request
+    #: itself, as before).
     acknowledged: bool = False
 
 
@@ -4000,6 +4028,8 @@ async def _prompt_wake(
     session_id: str,
     command_id: str,
     deliver: "Callable[[Callable[[], None]], Awaitable[str]]",
+    *,
+    accept_waking: bool = False,
 ) -> tuple[str, bool]:
     """Run (or join) a cold prompt wake; answer ``(detail, waking)``.
 
@@ -4009,8 +4039,25 @@ async def _prompt_wake(
     answer" while the runtime kept booting, the provisional active mark was
     dropped, and the prompt only landed if the phone retried. Now the delivery
     runs as a daemon-owned task, and the request returns as soon as EITHER the
-    delivery finished (same answer as before, error or detail) OR a runtime is
-    known to be constructing (``waking=True``, a 2xx).
+    delivery finished (same answer as before, error or detail) OR -- for a
+    client that opted in -- a runtime is known to be constructing
+    (``waking=True``, a 2xx).
+
+    "WAKING" IS OPT-IN (``accept_waking``, the body flag ``accept_waking:
+    true``). Until the runtime admits it, the prompt exists only in this
+    task's memory: a relay restart or a boot failure after the answer loses
+    it. A 2xx is only safe to a client that keeps its own retry copy until the
+    session's stream shows the message (or ``ended``), so only a client that
+    SAYS it does gets one (agent review round 1, R1-1; the repo's rule in
+    ``command_reservation.py``: an "admitted" answer for a message in no
+    transcript and no queue is a silent drop). Every other client gets exactly
+    the old answer: the outcome if it lands inside ``PROMPT_WAKE_ACK_WINDOW_S``,
+    else ``TimeoutError`` (the route's 504 "session did not answer", which
+    those clients already treat as ambiguous and retry under the same id). The
+    one difference for them is the better one: the wake keeps running instead
+    of dying with the request, and their retry joins it. An opted-in client
+    whose window passes with nothing constructing gets that same 504 too: a
+    2xx promises a boot that is underway, and none is (R1-4).
 
     EXACTLY ONCE. A retry carrying the same ``command_id`` while the wake is in
     flight JOINS this task instead of starting a second engage, so a phone that
@@ -4058,16 +4105,19 @@ async def _prompt_wake(
             return detail
 
         this = _PromptWake(constructing=constructing)
-        this.task = asyncio.create_task(run())
-        # A failure nobody awaits (the request already answered "waking") must
-        # not surface as "Task exception was never retrieved"; it was logged.
-        this.task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        # Registered BEFORE the task exists (R1-6): see ``_PromptWake.task``.
         daemon._prompt_wakes[key] = this
+        this.task = asyncio.create_task(run())
+        # A failure nobody awaits (the request already answered) must not
+        # surface as "Task exception was never retrieved"; it was logged.
+        this.task.add_done_callback(lambda t: t.cancelled() or t.exception())
         wake = this
-    waiter = asyncio.create_task(wake.constructing.wait())
+    # A legacy request waits for the outcome only; ``constructing`` is not a
+    # reason to answer it early, because its only early answer is the 504.
+    waiter = asyncio.create_task(wake.constructing.wait()) if accept_waking else None
     try:
         await asyncio.wait(
-            {wake.task, waiter},
+            {wake.task} if waiter is None else {wake.task, waiter},
             timeout=PROMPT_WAKE_ACK_WINDOW_S,
             return_when=asyncio.FIRST_COMPLETED,
         )
@@ -4077,12 +4127,17 @@ async def _prompt_wake(
         wake.acknowledged = True
         raise
     finally:
-        waiter.cancel()
+        if waiter is not None:
+            waiter.cancel()
     if wake.task.done():
         # The engage's own answer, success or error, exactly as before.
         return wake.task.result(), False
     wake.acknowledged = True
-    return PROMPT_WAKE_DETAIL, True
+    if accept_waking and wake.constructing.is_set():
+        return PROMPT_WAKE_DETAIL, True
+    # The pre-change answer at the pre-change moment; the wake runs on and a
+    # same-``command_id`` retry joins it above.
+    raise TimeoutError(f"phone wake {session_id}: no outcome within the ack window")
 
 
 async def _publish_failed_wake(daemon: "MobileDaemon", session_id: str) -> None:
@@ -4092,9 +4147,7 @@ async def _publish_failed_wake(daemon: "MobileDaemon", session_id: str) -> None:
         # frames are the truth, and an ended frame would contradict them.
         return
     try:
-        projection = await daemon._capture_durable_projection(
-            session_id, terminal=True, ended=True
-        )
+        projection = await daemon._capture_durable_projection(session_id, terminal=True, ended=True)
     except Exception:  # noqa: BLE001 - best effort; the list retraction already landed
         logger.debug("phone wake %s: failure frame unavailable", session_id, exc_info=True)
         return
@@ -5578,7 +5631,10 @@ class MobileDaemon:
             # Its writes land in the attention store, whose revision check
             # below repaints the list and watched streams on a later pass.
             self._attention_bootstrapped = True
-            self._detach_scan_work(asyncio.to_thread(_bootstrap_mobile_attention))
+            self._detach_scan_work(
+                asyncio.to_thread(_bootstrap_mobile_attention),
+                on_failure=self._attention_bootstrap_failed,
+            )
         from local_operator.session.attention import AttentionStore
 
         await self._refresh_pins_if_changed()
@@ -6115,11 +6171,40 @@ class MobileDaemon:
         # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
         table.notify_list_changed()
 
-    def _detach_scan_work(self, work: "Awaitable[None]") -> None:
-        """Run ``work`` beside the scan loop, holding a reference until it ends."""
+    def _detach_scan_work(
+        self,
+        work: "Awaitable[None]",
+        *,
+        on_failure: "Callable[[], None] | None" = None,
+    ) -> None:
+        """Run ``work`` beside the scan loop, holding a reference until it ends.
+
+        A detached failure has no awaiter, so it is RETRIEVED and logged here
+        (otherwise asyncio reports "Task exception was never retrieved" at
+        garbage collection, with no context) and ``on_failure`` runs so the
+        caller can re-arm work that used to be retried by the scan loop's own
+        ``except`` when it was awaited inline (agent review round 1, R1-3).
+        """
         task = asyncio.ensure_future(work)
         self._scan_side_tasks.add(task)
-        task.add_done_callback(self._scan_side_tasks.discard)
+
+        def settled(done: "asyncio.Future[None]") -> None:
+            self._scan_side_tasks.discard(done)
+            if done.cancelled() or done.exception() is None:
+                return
+            logger.warning("mobile daemon detached scan work failed", exc_info=done.exception())
+            if on_failure is not None:
+                on_failure()
+
+        task.add_done_callback(settled)
+
+    def _attention_bootstrap_failed(self) -> None:
+        # Re-arm: the NEXT scan pass runs the sweep again, which is what the
+        # inline ``await`` did before the sweep was detached (the flag was set
+        # only after it returned). Per-session failures never reach here --
+        # ``_bootstrap_mobile_attention`` skips and logs those itself -- so this
+        # only retries a sweep-wide failure (the sessions root, the registry).
+        self._attention_bootstrapped = False
 
     def retain_provisional_active(self, session_id: str) -> None:
         """Hold a wake transition until discovery or one scan interval wins."""
@@ -7801,15 +7886,25 @@ def build_app(daemon: MobileDaemon):
                 # RELAY capability like ``session_tags``: an older daemon lacks
                 # the key, and the phone then stays on its bundled built-ins.
                 "notification_sounds": {"available": True},
-                # BACKGROUND PROMPT WAKE. A cold ``prompt`` may answer 2xx with
-                # ``waking: true`` once a runtime is booting, instead of holding
-                # the request for the boot (or 504ing at 15 s). The reply then
-                # streams; a wake that fails later retracts the active claim and
-                # sends the stream its ``ended`` frame; a resend with the same
-                # ``command_id`` joins the in-flight wake rather than delivering
-                # twice. An older app ignores both this key and ``waking`` and
-                # reads an ordinary ``ok`` ack, which is what it gets anyway.
-                "prompt_wake": {"available": True, "background": True, "version": 1},
+                # BACKGROUND PROMPT WAKE. A cold ``prompt`` keeps booting past
+                # the 15 s ack window instead of dying with the request, and a
+                # resend with the same ``command_id`` joins the in-flight wake
+                # rather than delivering twice -- for EVERY client. A client
+                # that sends ``"accept_waking": true`` in the command body
+                # (``request_flag``) may additionally get 2xx ``waking: true``
+                # as soon as a runtime is constructing; it MUST then keep its
+                # retry copy until the session stream carries the message id
+                # (= ``command_id``), and treat ``ended`` without it as a failed
+                # send. A failure after that answer retracts the active claim
+                # and sends the stream its ``ended`` frame. A client that does
+                # not opt in gets the old answers: the outcome within 15 s, else
+                # 504 "session did not answer" (retry under the same id).
+                "prompt_wake": {
+                    "available": True,
+                    "background": True,
+                    "request_flag": "accept_waking",
+                    "version": 1,
+                },
                 # Authenticated build support, not a claim that receipt storage
                 # is writable right now. Typed refusals preserve the same key.
                 "session_start": dict(START_CAPABILITY),
@@ -10115,6 +10210,13 @@ def build_app(daemon: MobileDaemon):
         # additive-input treatment (ignore what you do not understand), which is
         # the same behaviour an older relay gives the whole flag.
         expand_skills = body.pop("expand_skills", False) is True
+        # THE PROMPT-WAKE OPT-IN IS THE RELAY'S OWN TOO (capability
+        # ``prompt_wake``), popped here for the same reason. A literal ``true``
+        # says "I keep my retry copy until the stream shows this message or
+        # ``ended``", which is the only condition under which a cold prompt may
+        # be answered ``waking`` before the runtime admits it (see
+        # ``_prompt_wake``). Anything else is the legacy client.
+        accept_waking = body.pop("accept_waking", False) is True
         denied = _device_refusal(body.get("operator_cert"))
         if denied is not None:
             return denied
@@ -10239,14 +10341,19 @@ def build_app(daemon: MobileDaemon):
                 # a 50 ms worker is observable in list SSE and a failed engage
                 # retracts the claim.
                 detail, waking = await _prompt_wake(
-                    daemon, session_id, command.command_id, _deliver_prompt
+                    daemon,
+                    session_id,
+                    command.command_id,
+                    _deliver_prompt,
+                    accept_waking=accept_waking,
                 )
                 answer = receipt(detail)
                 if waking:
-                    # ADDITIVE (capability ``prompt_wake``): a 2xx that means
-                    # "accepted, a runtime is booting, the reply streams". An
-                    # app that ignores the key reads an ordinary ``ok`` ack,
-                    # which is what it already does once a wake succeeds.
+                    # Only ever reached by a request that sent
+                    # ``accept_waking: true`` (capability ``prompt_wake``): a
+                    # 2xx meaning "a runtime is booting, the prompt is NOT yet
+                    # admitted; the reply streams". A client that did not opt
+                    # in never sees it -- it gets the old 504 instead.
                     answer["waking"] = True
                 return JSONResponse(answer)
             if op in _ASK_ANSWER_OPS and not _session_is_live(daemon, session_id):
@@ -11422,9 +11529,7 @@ def build_app(daemon: MobileDaemon):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("mobile resume spawn failed", exc_info=True)
-            return JSONResponse(
-                {"error": (str(exc) or type(exc).__name__)[:300]}, status_code=500
-            )
+            return JSONResponse({"error": (str(exc) or type(exc).__name__)[:300]}, status_code=500)
         answer: dict[str, Any] = {"ok": True, "pid": pid, "session_id": session_id}
         if starting:
             # ADDITIVE: the runtime was spawned and is still booting; the

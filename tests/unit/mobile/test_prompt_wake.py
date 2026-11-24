@@ -58,17 +58,24 @@ class _SlowBoot:
     instead of hanging the suite.
     """
 
-    def __init__(self, *, fail: bool = False, release_after_s: float = 10.0) -> None:
+    def __init__(
+        self, *, fail: bool = False, release_after_s: float = 10.0, construct: bool = True
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
         self.release = threading.Event()
         self.fail = fail
         self.release_after_s = release_after_s
+        #: False models an engage that never reaches a construction (a stale
+        #: record whose dial hangs): ``on_constructing`` is never called.
+        self.construct = construct
         self.finished = threading.Event()
 
-    async def __call__(self, config_root, command, *, origin="", **engage):  # noqa: ANN001, ANN003, ANN204
+    async def __call__(  # noqa: ANN204
+        self, config_root, command, *, origin="", **engage  # noqa: ANN001, ANN003
+    ):
         self.calls.append({"command_id": command.command_id, "origin": origin, **engage})
         on_constructing = engage.get("on_constructing")
-        if on_constructing is not None:
+        if on_constructing is not None and self.construct:
             on_constructing()
         deadline = time.monotonic() + self.release_after_s
         try:
@@ -81,11 +88,12 @@ class _SlowBoot:
             self.finished.set()
 
 
-def _post(client: TestClient) -> Any:
-    return client.post(
-        f"/api/sessions/{SESSION}/command",
-        json={"op": "prompt", "command_id": COMMAND_ID, "text": "wake up"},
-    )
+def _post(client: TestClient, *, accept_waking: bool = True, command_id: str = COMMAND_ID) -> Any:
+    """POST a cold prompt; ``accept_waking`` is the client's opt-in (R1-1)."""
+    body: dict[str, Any] = {"op": "prompt", "command_id": command_id, "text": "wake up"}
+    if accept_waking:
+        body["accept_waking"] = True
+    return client.post(f"/api/sessions/{SESSION}/command", json=body)
 
 
 def _wait_until(predicate, timeout_s: float = 30.0) -> None:  # noqa: ANN001
@@ -200,8 +208,149 @@ def test_capabilities_advertise_the_background_prompt_wake(
     assert response.json()["capabilities"]["prompt_wake"] == {
         "available": True,
         "background": True,
+        "request_flag": "accept_waking",
         "version": 1,
     }
+
+
+def test_a_client_that_did_not_opt_in_never_gets_waking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1: no ``accept_waking`` -> the old 504 at the ack window, never a 2xx.
+
+    A 2xx would make a client that does not know ``waking`` drop its retry copy
+    of a prompt that, until the runtime admits it, lives only in this relay's
+    memory. The one change such a client sees is the better one: the wake keeps
+    running past the 504 and its same-id retry JOINS it (delivered once).
+    """
+    from local_operator.mobile import attach_client, daemon as daemon_module
+
+    _durable_session(tmp_path, monkeypatch)
+    # The window is the pre-change 15 s ack; shortened so the suite does not
+    # spend it. The boot DOES report constructing, which is exactly the moment
+    # an opted-in client would have been told "waking".
+    monkeypatch.setattr(daemon_module, "PROMPT_WAKE_ACK_WINDOW_S", 0.3)
+    boot = _SlowBoot()
+    monkeypatch.setattr(attach_client, "continue_command", boot)
+    daemon = MobileDaemon(port=0, password=PASSWORD)
+    with TestClient(build_app(daemon)) as client:
+        client.post("/login", data={"password": PASSWORD})
+
+        response = _post(client, accept_waking=False)
+        assert response.status_code == 504, response.text
+        assert response.json() == {"error": "session did not answer"}
+        assert not boot.finished.is_set(), "the 504 must not have waited the boot out"
+
+        retry = _post(client, accept_waking=False)
+        assert retry.status_code == 504, retry.text
+        assert len(boot.calls) == 1, "a same-id retry must join the running wake"
+
+        boot.release.set()
+        _wait_until(lambda: not daemon._prompt_wakes)
+        assert len(boot.calls) == 1
+        assert SESSION in daemon.table.provisional_active
+
+
+def test_a_client_that_did_not_opt_in_gets_the_outcome_inside_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fast wake answers a legacy client exactly as before: the engage's detail."""
+    from local_operator.mobile import attach_client
+
+    _durable_session(tmp_path, monkeypatch)
+    boot = _SlowBoot(release_after_s=0.0)
+    monkeypatch.setattr(attach_client, "continue_command", boot)
+    daemon = MobileDaemon(port=0, password=PASSWORD)
+    with TestClient(build_app(daemon)) as client:
+        client.post("/login", data={"password": PASSWORD})
+        response = _post(client, accept_waking=False)
+        assert response.status_code == 200, response.text
+        assert response.json() == {"ok": True, "detail": "prompt admitted"}
+        assert len(boot.calls) == 1
+
+
+def test_an_opted_in_client_gets_504_when_nothing_is_constructing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-4: ``waking`` promises a boot underway; with none, the old 504 stands."""
+    from local_operator.mobile import attach_client, daemon as daemon_module
+
+    _durable_session(tmp_path, monkeypatch)
+    monkeypatch.setattr(daemon_module, "PROMPT_WAKE_ACK_WINDOW_S", 0.3)
+    boot = _SlowBoot(construct=False)
+    monkeypatch.setattr(attach_client, "continue_command", boot)
+    daemon = MobileDaemon(port=0, password=PASSWORD)
+    with TestClient(build_app(daemon)) as client:
+        client.post("/login", data={"password": PASSWORD})
+        response = _post(client, accept_waking=True)
+        assert response.status_code == 504, response.text
+        assert "waking" not in response.json()
+        boot.release.set()
+        _wait_until(lambda: not daemon._prompt_wakes)
+        assert len(boot.calls) == 1
+
+
+def test_two_command_ids_waking_one_cold_session_each_deliver_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-5: concurrent wakes for different prompts neither merge nor duplicate."""
+    from local_operator.mobile import attach_client
+
+    _durable_session(tmp_path, monkeypatch)
+    boot = _SlowBoot()
+    monkeypatch.setattr(attach_client, "continue_command", boot)
+    daemon = MobileDaemon(port=0, password=PASSWORD)
+    other = "87654321-4321-4876-9432-876543218765"
+    with TestClient(build_app(daemon)) as client:
+        client.post("/login", data={"password": PASSWORD})
+        first = _post(client)
+        second = _post(client, command_id=other)
+        assert first.json()["waking"] is True
+        assert second.json()["waking"] is True
+        # Both wakes are in flight at once, one per command id.
+        assert set(daemon._prompt_wakes) == {(SESSION, COMMAND_ID), (SESSION, other)}
+        # Each id's retry joins its OWN wake.
+        assert _post(client, command_id=other).json()["waking"] is True
+        assert _post(client).json()["waking"] is True
+        assert sorted(call["command_id"] for call in boot.calls) == sorted([COMMAND_ID, other])
+
+        boot.release.set()
+        _wait_until(lambda: not daemon._prompt_wakes)
+        assert sorted(call["command_id"] for call in boot.calls) == sorted([COMMAND_ID, other])
+        # Both succeeded, so the claim is retained for discovery to settle; the
+        # first wake to finish must not have retracted it under the second.
+        assert SESSION in daemon.table.provisional_active
+
+
+@pytest.mark.asyncio
+async def test_a_wake_finishing_inside_create_task_leaves_no_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-6: registered before ``create_task``, so an eager run pops its own entry."""
+    from local_operator.mobile import daemon as daemon_module
+
+    loop = asyncio.get_running_loop()
+    # Only the TUI's loop installs one today (``harness/comms.py``); the point
+    # is that the registry stays correct if the relay's loop ever does.
+    loop.set_task_factory(asyncio.eager_task_factory)
+    try:
+
+        async def instant(daemon, session_id, engage):  # noqa: ANN001, ANN202
+            return "prompt admitted"
+
+        monkeypatch.setattr(daemon_module, "_engage_and_publish", instant)
+
+        async def deliver(on_constructing):  # noqa: ANN001, ANN202
+            return "unused"
+
+        daemon = MobileDaemon(port=0, password=PASSWORD)
+        detail, waking = await daemon_module._prompt_wake(
+            daemon, SESSION, COMMAND_ID, deliver, accept_waking=True
+        )
+    finally:
+        loop.set_task_factory(None)
+    assert (detail, waking) == ("prompt admitted", False)
+    assert not daemon._prompt_wakes
 
 
 # -- resume (fix 2) -----------------------------------------------------------
@@ -221,7 +370,9 @@ class _SlowStart:
         self.spawn = spawn
         self.finished = False
 
-    async def __call__(self, cwd, provider, model_id, session_id, effort=None, **start):  # noqa: ANN001, ANN003, ANN204
+    async def __call__(  # noqa: ANN204
+        self, cwd, provider, model_id, session_id, effort=None, **start  # noqa: ANN001, ANN003
+    ):
         self.calls.append({"session_id": session_id, **start})
         on_spawned = start.get("on_spawned")
         if self.spawn and on_spawned is not None:
@@ -237,7 +388,9 @@ class _SlowStart:
             self.finished = True
 
 
-async def _resume_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start: _SlowStart):  # noqa: ANN202
+async def _resume_rig(  # noqa: ANN202
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start: _SlowStart
+):
     import httpx
 
     from local_operator.harness.types import Message

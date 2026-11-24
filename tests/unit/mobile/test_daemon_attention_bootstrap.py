@@ -229,3 +229,100 @@ async def test_the_first_scan_after_a_restart_does_not_wait_for_the_sweep(
     release.set()
     await asyncio.gather(*daemon._scan_side_tasks)
     assert swept == [True], "the sweep must still run, beside the scan"
+
+
+# -- the lock-free reader still answers the legacy-baseline branch (R1-2) -----
+#
+# A conversation with no marker and no ``completion_token`` makes the REAL
+# ``bootstrap_transcript`` read the whole history (``build_llm_history`` and
+# ``entries``) to publish its ``complete`` baseline. The tests above stub
+# ``bootstrap_transcript`` away, which is how a reader missing those two methods
+# shipped: the branch raised ``AttributeError``, the bootstrap's guard logged a
+# traceback warning, and no baseline was published.
+
+
+def _marker_less_conversation(sessions: Path, sid: str) -> Path:
+    import asyncio
+
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    directory = sessions / sid
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    asyncio.run(transcript.append_message(Message.user("hello", id=f"{sid}-u")))
+    asyncio.run(transcript.append_message(Message.assistant("hi there", id=f"{sid}-a")))
+    return directory
+
+
+def _published(directory: Path) -> dict[str, Any]:
+    store = attention.AttentionStore()
+    return store.state(attention.conversation_identity(directory))
+
+
+@pytest.mark.parametrize("caller", ["discovered_death", "restart_sweep"])
+def test_the_real_bootstrap_publishes_a_marker_less_baseline(
+    caller: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _marker_less_conversation(tmp_path / "sessions", "legacy-one")
+    lock_calls: list[Path] = []
+    monkeypatch.setattr(compression, "acquire_writer", _held_lock(lock_calls))
+    assert not _published(directory)["completion_token"]
+
+    with caplog.at_level(logging.DEBUG):
+        if caller == "discovered_death":
+            daemon_module._classify_discovered_death("legacy-one", reaped_owner=None)
+        else:
+            daemon_module._bootstrap_mobile_attention()
+
+    assert _published(directory)["completion_token"], "the complete baseline was not published"
+    # Nothing swallowed: no traceback from the bootstrap's guard, no skip line,
+    # no debug "classifying a discovered death failed".
+    assert not [r for r in caplog.records if r.exc_info], [r.getMessage() for r in caplog.records]
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # The full read the branch needs is still a READ: no writer lock taken.
+    assert lock_calls == []
+
+
+# -- the detached restart sweep is retried and its failure is read (R1-3) -----
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restart_sweep_is_logged_and_runs_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import asyncio
+
+    from local_operator.session.runtime import registry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir()
+    runs: list[int] = []
+
+    def flaky_sweep() -> None:
+        runs.append(1)
+        if len(runs) == 1:
+            raise OSError("sessions root unreadable")
+
+    monkeypatch.setattr(daemon_module, "_bootstrap_mobile_attention", flaky_sweep)
+    monkeypatch.setattr(registry, "scan", lambda *a, **k: [])
+    daemon = daemon_module.MobileDaemon(port=0, password="pw", dial_registrants=False)
+
+    with caplog.at_level(logging.WARNING, logger=daemon_module.logger.name):
+        await daemon._scan_once()
+        await asyncio.gather(*daemon._scan_side_tasks, return_exceptions=True)
+        # The done-callback runs on the loop's next turn.
+        await asyncio.sleep(0)
+    failures = [r for r in caplog.records if "detached scan work failed" in r.getMessage()]
+    assert len(failures) == 1 and isinstance(failures[0].exc_info[1], OSError)
+    assert daemon._attention_bootstrapped is False, "a failed sweep must be re-armed"
+
+    await daemon._scan_once()
+    await asyncio.gather(*daemon._scan_side_tasks)
+    await asyncio.sleep(0)
+    assert runs == [1, 1]
+    assert daemon._attention_bootstrapped is True

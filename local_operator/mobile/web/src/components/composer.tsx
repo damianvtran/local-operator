@@ -32,6 +32,7 @@ import {
 } from "../lib/settings-defer";
 import {
 	getPendingContinuation,
+	settleWakingContinuation,
 	submitContinuation,
 } from "../continuation-command";
 import {
@@ -986,6 +987,9 @@ export function Composer({
 	const slashOpen = slashTokenOnly(text) && !slashDismissed;
 	const [sending, setSending] = useState(false);
 	const [retryEnvelope, setRetryEnvelope] = useState(() => getPendingContinuation(pid));
+	/* The cold prompt answered `waking` and not yet settled by the stream. A ref,
+	   not state: nothing renders from it; the settle effect reads it. */
+	const wakingCommand = useRef<{ pid: string; commandId: string; text: string; sawLive: boolean } | null>(null);
 	const retryPending = retryEnvelope !== null;
 	/* Presentation is deliberately separate from the immutable retry envelope.
 	   Each occurrence is an object, even for identical copy: a queued close from
@@ -1388,6 +1392,39 @@ export function Composer({
 		setRetryEnvelope(pending);
 		setError(pending ? RETAINED_RETRY_ERROR : "");
 	}, [pid]);
+
+	/* SETTLE A RETAINED ENVELOPE FROM THE STREAM (prompt wake, R1-1). Two
+	   outcomes only the stream can report:
+	   - the projection carries a row under the envelope's id: the session wrote
+	     the message, so the envelope is cleared;
+	   - a `waking` send's session reports `ended` without that row: the boot
+	     failed, so this becomes the failed send it is — the row comes down, the
+	     text returns to an empty composer, and the retry replays the SAME id. */
+	useEffect(() => {
+		const waking = wakingCommand.current?.pid === pid ? wakingCommand.current : null;
+		if (waking && !ended) waking.sawLive = true;
+		const outcome = settleWakingContinuation(
+			pid,
+			(commandId) => projectionCarriesCommand(projection.transcript, commandId),
+			ended && (waking?.sawLive ?? false),
+			waking?.commandId ?? null,
+		);
+		if (outcome === "delivered") {
+			wakingCommand.current = null;
+		} else if (outcome === "failed" && waking) {
+			wakingCommand.current = null;
+			withdrawPendingEcho(pid, waking.commandId);
+			if (textRef.current.trim() === "") {
+				provenanceRef.current = emptyProvenance();
+				setText(waking.text);
+				setCaret(null);
+			}
+			setRetryEnvelope(getPendingContinuation(pid));
+			setError(messageRuntime.t("relay.health.ended_send_failed"));
+		} else if (outcome === null) {
+			wakingCommand.current = null;
+		}
+	}, [pid, projection.transcript, ended]);
 
 	const addFiles = async (files: Iterable<File>) => {
 		/* Nothing silent: a file that cannot be attached (not an image, or one
@@ -1909,6 +1946,22 @@ export function Composer({
 					skillCapability && trimmed.includes("$"),
 				);
 				setRetryEnvelope(null);
+				if (receipt.waking) {
+					/* A COLD PROMPT THE RELAY IS STILL WAKING A RUNTIME FOR: not admitted
+					   yet, so the row keeps saying it is going out and the envelope stays
+					   retained until the stream settles it (the effect on
+					   `wakingCommand` below). The draft already moved into the row. */
+					/* `sawLive` guards a STALE `ended`: a conversation opened ended is
+					   un-ended by the wake itself, so only an `ended` seen AFTER the
+					   stream showed it not ended is this boot's failure. */
+					wakingCommand.current = {
+						pid,
+						commandId: receipt.envelope.command_id,
+						text: receipt.envelope.text,
+						sawLive: !ended,
+					};
+					return;
+				}
 				/* The session admitted this command — the receipt IS that fact, and it is
 				   what lets the row stop saying it is still going out. A no-op when the
 				   projection already answered the echo, or when none was painted. */
