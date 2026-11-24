@@ -31,6 +31,10 @@ from local_operator.harness.types import (
     ToolExecuteFn,
     ToolResult,
 )
+from local_operator.tools.result_normalize import (
+    RESULT_NORMALIZATION_DEFAULT,
+    normalize_tool_text,
+)
 
 if TYPE_CHECKING:
     # Annotation-only: the SDK is an optional extra, and this module must
@@ -506,6 +510,7 @@ def format_mcp_result(
     context: ToolContext | None = None,
     *,
     producer_scope: str | None = None,
+    normalization: str = RESULT_NORMALIZATION_DEFAULT,
 ) -> ToolResult:
     """Flatten an MCP ``tools/call`` result into a harness ``ToolResult``.
 
@@ -518,6 +523,10 @@ def format_mcp_result(
 
     ``result`` is the SDK model on every live call path; the raw-dict branch
     covers servers whose payload never went through SDK validation.
+
+    ``normalization`` is the ``mcp.result_normalization`` mode applied to a
+    non-error result's text (see :mod:`local_operator.tools.result_normalize`).
+    The caller reads the setting; this module stays pure.
 
     ``producer_scope`` is the harness-stamped identity of the ACTUAL producer
     (server+tool origin plus owning session -- see
@@ -558,6 +567,18 @@ def format_mcp_result(
     text = "\n\n".join(parts)
     if is_error:
         text = f"Error: {text}" if text else "Error"
+    else:
+        # Normalize HERE, once, at creation: the persisted ToolResult carries
+        # the normalized bytes, so resume/replay re-send them unchanged and no
+        # cached prefix moves. It runs before the spill cut so an oversized
+        # result's inline head carries more content per byte. Errors stay
+        # verbatim (diagnostics, not payload). ``server_result`` below keeps
+        # the raw text -- except when the result spills: then the spill holds
+        # the normalized text and the raw copy is dropped as before, because
+        # keeping it would persist every large result twice in the transcript
+        # (the de-duplication below exists to stop exactly that). Rationale
+        # and the measurement: ``local_operator.tools.result_normalize``.
+        text = normalize_tool_text(text, normalization)
 
     details: dict[str, Any] = {"server_result": server_result}
     if context is not None:

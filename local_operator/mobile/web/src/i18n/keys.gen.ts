@@ -1703,6 +1703,14 @@ export type MessageParams = {
   "wire.settings.local_providers.title": undefined;
   "wire.settings.max_learnings_history.help": undefined;
   "wire.settings.max_learnings_history.label": undefined;
+  "wire.settings.mcp_result_normalization.choice.off.description": undefined;
+  "wire.settings.mcp_result_normalization.choice.off.label": undefined;
+  "wire.settings.mcp_result_normalization.choice.prose_links.description": undefined;
+  "wire.settings.mcp_result_normalization.choice.prose_links.label": undefined;
+  "wire.settings.mcp_result_normalization.choice.strip_links.description": undefined;
+  "wire.settings.mcp_result_normalization.choice.strip_links.label": undefined;
+  "wire.settings.mcp_result_normalization.help": undefined;
+  "wire.settings.mcp_result_normalization.label": undefined;
   "wire.settings.memory_guard.description": undefined;
   "wire.settings.memory_guard.title": undefined;
   "wire.settings.mesh_move_working_set_max_bytes.help": undefined;

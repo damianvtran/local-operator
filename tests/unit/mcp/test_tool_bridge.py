@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -539,9 +540,15 @@ class TestFormatMcpResult:
 
         One JSON line, the shape every MCP JSON result has (no line structure).
         """
-        frame = json.dumps({"url": "https://example.test/judges", "text": ""})
+        # Compact separators: the shape an MCP server emits and a fixed point
+        # of ``mcp.result_normalization`` (no long whitespace-bearing leaf), so
+        # these spill-bound assertions keep measuring the spill path alone.
+        frame = json.dumps(
+            {"url": "https://example.test/judges", "text": ""}, separators=(",", ":")
+        )
         page = json.dumps(
-            {"url": "https://example.test/judges", "text": "J" * (12_000 - len(frame))}
+            {"url": "https://example.test/judges", "text": "J" * (12_000 - len(frame))},
+            separators=(",", ":"),
         )
         assert len(page) == 12_000
         return {"content": [{"type": "text", "text": page}], "isError": False}, page
@@ -685,3 +692,172 @@ def test_auth_challenges_are_retriable_once() -> None:
     assert is_retriable_connection_error(RuntimeError("HTTP 401 Unauthorized"))
     assert is_retriable_connection_error(RuntimeError("WWW-Authenticate: Bearer scope=x"))
     assert is_retriable_connection_error(RuntimeError("mcp/www_authenticate challenge"))
+
+
+_FORGE_WIKI_FETCH = (
+    Path(__file__).resolve().parents[2]
+    / "fixtures"
+    / "mcp_results"
+    / "forge_fetch_wikipedia_mark_sutcliffe.json"
+)
+
+# A Postmedia-shaped page head: tracking pixel, share icons and nav bullets,
+# the markup that dominated the measured run's fetched news pages.
+_POSTMEDIA_HEAD = "\n".join(
+    ["![](https://sb.scorecardresearch.com/p?c1=2&c2=10276888)"]
+    + [
+        f"![{alt}](https://dcs-static.gprod.postmedia.digital/22.2.2/websites/images/"
+        f"share-icons/icon-{i}.svg)"
+        for i, alt in enumerate(["", "Close", "", "Reddit", "X", "", "Share via email"] * 3)
+    ]
+    + [
+        "* [News](https://ottawacitizen.com/category/news/)",
+        "* [Local News](/category/news/local-news/)",
+    ]
+    + [
+        "",
+        "Mark Sutcliffe was sworn in as the 59th mayor of Ottawa on Nov. 15, 2022, after a "
+        "campaign built on [affordability](https://ottawacitizen.com/tag/affordability) "
+        "and transit.",
+    ]
+)
+
+
+def _text_result(text: str, *, is_error: bool = False) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": text}], "isError": is_error}
+
+
+class TestFormatMcpResultNormalization:
+    """``format_mcp_result`` applies ``mcp.result_normalization`` once, at creation."""
+
+    def test_recorded_forge_fetch_shrinks_and_keeps_cited_facts(self) -> None:
+        raw = _FORGE_WIKI_FETCH.read_text(encoding="utf-8")
+        result = _text_result(raw)
+        formatted = format_mcp_result(result, "c1", "mcp__forge_tools_fetch")
+        # Measured on this payload: 12,389 -> 6,748 chars under prose-links.
+        assert len(formatted.text) <= 0.6 * len(raw)
+        parsed = json.loads(formatted.text)
+        assert parsed["url"] == json.loads(raw)["url"]  # the citation key, byte-equal
+        for fact in ("59th", "mayor of Ottawa", "July 14, 1968"):
+            assert fact in parsed["content"]
+        assert "#cite_note" not in parsed["content"]
+        assert formatted.details is not None
+        assert formatted.details["server_result"]["content"][0]["text"] == raw
+
+    def test_icon_images_and_nav_bullets_are_removed(self) -> None:
+        formatted = format_mcp_result(_text_result(_POSTMEDIA_HEAD))
+        assert "postmedia.digital" not in formatted.text
+        assert "scorecardresearch" not in formatted.text
+        assert "Local News" not in formatted.text
+        assert "59th mayor of Ottawa" in formatted.text
+        assert "Reddit" in formatted.text  # alt text is content, kept
+
+    def test_strip_links_mode_drops_prose_link_targets(self) -> None:
+        prose = format_mcp_result(_text_result(_POSTMEDIA_HEAD), normalization="prose-links").text
+        stripped = format_mcp_result(
+            _text_result(_POSTMEDIA_HEAD), normalization="strip-links"
+        ).text
+        assert "(https://ottawacitizen.com/tag/affordability)" in prose
+        assert "ottawacitizen.com" not in stripped
+        assert "affordability and transit" in stripped
+
+    def test_off_is_byte_identical_to_unnormalized_flattening(self) -> None:
+        raw = _FORGE_WIKI_FETCH.read_text(encoding="utf-8")
+        result = {
+            "content": [{"type": "text", "text": raw}, {"type": "text", "text": _POSTMEDIA_HEAD}]
+        }
+        assert format_mcp_result(result, normalization="off").text == f"{raw}\n\n{_POSTMEDIA_HEAD}"
+
+    def test_error_results_are_never_normalized(self) -> None:
+        formatted = format_mcp_result(_text_result(_POSTMEDIA_HEAD, is_error=True))
+        assert formatted.text == f"Error: {_POSTMEDIA_HEAD}"
+
+    def test_spill_stores_the_normalized_text(self, tmp_path, monkeypatch) -> None:
+        """Normalized BEFORE the cut, so the inline head and the spill carry no
+        markup; the duplicate raw text is still dropped from ``server_result``
+        (one durable copy per large result, as before this change)."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        raw = (_POSTMEDIA_HEAD + "\n\n") * 60
+        formatted = format_mcp_result(
+            _text_result(raw), "call", "mcp__demo_page", ToolContext(session_id="norm-spill")
+        )
+        details = formatted.details
+        assert details is not None
+        assert "postmedia.digital" not in formatted.text  # inline head is normalized
+        read = spill.get_store().read_lines(details["spill"]["handle"])
+        assert read is not None
+        stored = "\n".join(read[0])
+        assert "59th mayor of Ottawa" in stored and "postmedia.digital" not in stored
+        assert details["server_result"]["content"] == []
+
+    def test_spill_of_an_unchanged_text_still_drops_the_duplicate(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """No normalization delta: the existing de-duplication is unchanged."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        body = "MCP evidence line\n" * 1_000
+        formatted = format_mcp_result(
+            _text_result(body.rstrip("\n")),
+            "call",
+            "mcp__demo_plain",
+            ToolContext(session_id="plain"),
+        )
+        assert formatted.details is not None
+        assert "spill" in formatted.details
+        assert formatted.details["server_result"]["content"] == []  # text-only: dropped
+
+
+class TestResultNormalizationSetting:
+    """``read_result_normalization_mode`` reads the key per call and never raises."""
+
+    @staticmethod
+    def _write_config(tmp_path, monkeypatch, body: str | None) -> None:
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        if body is not None:
+            (cfg / "config.yml").write_text(body, encoding="utf-8")
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+
+    def test_absent_key_is_the_default(self, tmp_path, monkeypatch) -> None:
+        from local_operator.mcp.manager import read_result_normalization_mode
+
+        self._write_config(tmp_path, monkeypatch, None)
+        assert read_result_normalization_mode() == "prose-links"
+
+    @pytest.mark.parametrize("mode", ["off", "strip-links", "prose-links"])
+    def test_configured_mode_is_read(self, tmp_path, monkeypatch, mode: str) -> None:
+        from local_operator.mcp.manager import read_result_normalization_mode
+
+        self._write_config(
+            tmp_path, monkeypatch, f'values:\n  mcp:\n    result_normalization: "{mode}"\n'
+        )
+        assert read_result_normalization_mode() == mode
+
+    def test_unknown_value_falls_back_to_the_default(self, tmp_path, monkeypatch) -> None:
+        from local_operator.mcp.manager import read_result_normalization_mode
+
+        self._write_config(
+            tmp_path, monkeypatch, "values:\n  mcp:\n    result_normalization: everything\n"
+        )
+        assert read_result_normalization_mode() == "prose-links"
+
+    def test_bare_yaml_off_means_off(self, tmp_path, monkeypatch) -> None:
+        """YAML 1.1 parses an unquoted ``off`` as False; it still means off."""
+        from local_operator.mcp.manager import read_result_normalization_mode
+
+        self._write_config(
+            tmp_path, monkeypatch, "values:\n  mcp:\n    result_normalization: off\n"
+        )
+        assert read_result_normalization_mode() == "off"
+
+    def test_settings_registry_write_is_what_the_reader_sees(self, tmp_path, monkeypatch) -> None:
+        """The /settings writer and this reader agree on the path."""
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.mcp.manager import read_result_normalization_mode
+
+        self._write_config(tmp_path, monkeypatch, None)
+        settings_io.write_setting(
+            ConfigManager(tmp_path / "cfg"), settings_io.BY_KEY["mcp.result_normalization"], "off"
+        )
+        assert read_result_normalization_mode() == "off"
