@@ -2382,6 +2382,97 @@ class AttachedSession:
             return ""
         return str(getattr(team, "manager", "") or "")
 
+    def _cold_attachment_slots(
+        self, active_agent: str, team_name: str
+    ) -> tuple[str, str, dict[str, str]]:
+        """``(active_agent, active_team, effective_identity)`` for a COLD frame.
+
+        NO NAME-ONLY RECOVERY, on the cold side too. The checkpoint's
+        ``active_team`` is a NAME the last owner wrote (possibly another device,
+        possibly before a move or fork completed its binding). The warm restore
+        (``Session._restore_attachment``) refuses exactly that: with no
+        completed local binding (``move_team.needs_reauthorization``) the stored
+        team is kept only as an unresolved hint, ``active_team_name`` and
+        ``active_agent`` stay empty, and the warm frame publishes
+        ``active_team=""`` with the explicit empty identity
+        (``FrontendStateStore.refresh_from_session`` reads ``active_team_name``,
+        never the hint). The cold frame must say the same thing in all three cells:
+        painting the checkpoint's team would show an authority the runtime is
+        about to refuse, and the pane would flip when it engaged (the #2014
+        flip, inverted). ``effective_identity_for``'s own contract says the
+        same: ``team`` is the team in force, never merely a name on disk.
+
+        SAME SOURCE AS WARM, not just the same gate. The warm restore attaches
+        the team named by the session's attachment sidecar, and only when the
+        completed binding names that same team (``_verify_name``,
+        case-insensitive). So the team cells come from exactly there
+        (:meth:`_cold_bound_team`), never from the checkpoint's name: a
+        checkpoint that lags or was written elsewhere (naming ``admins`` beside a
+        ``lopdev`` binding) would otherwise paint ``admins`` while the runtime
+        attaches ``lopdev``. The checkpoint's ``active_agent`` is kept only where
+        it describes the same state — the same team (its manager slot), or no
+        team at all (a plain profile); beside a different or refused team it is
+        that team's manager slot, so it is replaced or dropped with it.
+
+        WHY THE BINDING CHECK IS ENOUGH HERE, without the warm attach's full
+        definition comparison. The binding is written only on this machine: by
+        an explicit local attach (which IS the authorization), by a fork
+        inheriting its parent's binding, or by a verified arrival after its
+        comparison succeeded (``check_arrival``); it is never admitted from a
+        peer's copy set, and the gate also requires it to name THIS team
+        (case-insensitive, as the warm ``_verify_name`` does) — so "bound" means
+        "locally authorized for this team when recorded". This frame is ownerless
+        display: it starts no runtime, publishes no tools and executes nothing.
+
+        The only place the authority is EXERCISED is the warm attach, which
+        re-runs the full comparison (``restoring=True``) before any team is in
+        force and, on a mismatch, refuses with a notice or raises — never runs
+        under a drifted definition. Definition drift since binding can therefore change what the
+        pane names for one frame, never what the runtime is allowed to do.
+
+        Any failure reading the binding is treated as unbound: fail-closed
+        display matches what the runtime will do.
+        """
+        bound = self._cold_bound_team()
+        if not bound:
+            if team_name:
+                # A team on the checkpoint with nothing bound: a name-only hint,
+                # and its manager slot falls with it.
+                return "", "", effective_identity_for(active_agent="", team="")
+            return active_agent, "", effective_identity_for(active_agent=active_agent, team="")
+        manager = self._cold_team_manager(bound)
+        if bound.casefold() != team_name.casefold():
+            active_agent = manager
+        return (
+            active_agent,
+            bound,
+            effective_identity_for(
+                active_agent=active_agent, team=bound, manager=manager, team_in_force=True
+            ),
+        )
+
+    def _cold_bound_team(self) -> str:
+        """The team the warm restore would attach, or ``""`` (best-effort).
+
+        The attachment sidecar's team, but only when the session's completed
+        local binding names that same team — the two checks the warm restore
+        makes before any team is in force. Any failure reading either is
+        treated as unbound: this is display, and fail-closed display matches
+        what the runtime will do.
+        """
+        from local_operator.network.move_team import (
+            has_local_authority,
+            read_local_attachment,
+        )
+
+        directory = self._config_dir / "sessions" / self._session_id
+        try:
+            stored = read_local_attachment(directory)
+            team = stored.team if stored is not None else ""
+            return team if team and has_local_authority(directory, team) else ""
+        except Exception:  # noqa: BLE001 — unreadable evidence is no authority
+            return ""
+
     async def _restore_cold_details(self, state: FrontendSessionState) -> FrontendSessionState:
         """Fold the durable turn-end checkpoint over synthesised cold state.
 
@@ -2456,6 +2547,13 @@ class AttachedSession:
         # (``frontend_state._inherited_identity_fixups``), so the cold frame
         # and the attached frame agree on what the fork has.
         inherited = durable.session_id != self._session_id
+        # Threaded: it reads the session's local binding and the machine's team
+        # registry (directory + brief files), and every other read this open
+        # makes is off the loop for the same reason (agent review round 1,
+        # MINOR-3). Best-effort either way.
+        cold_agent, cold_team, cold_identity = await asyncio.to_thread(
+            self._cold_attachment_slots, durable.active_agent, durable.active_team
+        )
         restored = state.model_copy(
             update={
                 # Everything the last runtime knew and this process cannot
@@ -2495,8 +2593,10 @@ class AttachedSession:
                 # bound rather than empty: restoring the list without it would
                 # re-create the lie it exists to prevent.
                 "goal_history_truncated": durable.goal_history_truncated,
-                "active_agent": durable.active_agent,
-                "active_team": durable.active_team,
+                # Gated with the identity below, and for the same reason: see
+                # ``_cold_attachment_slots``.
+                "active_agent": cold_agent,
+                "active_team": cold_team,
                 # Issue #2014: the identity triple is DERIVED here, never copied
                 # from the checkpoint. Every checkpoint written before this field
                 # existed has no key for it, so a copy would hand the frame the
@@ -2509,19 +2609,9 @@ class AttachedSession:
                 # The manager's name is not on the checkpoint either, so it is
                 # resolved best-effort from THIS machine's registry (the same one
                 # the warm session reads) and falls back to the team name exactly
-                # as the shared rule does. Carried unconditionally, like the two
-                # slots above: identity survives a fork, so ``inherited`` does not
-                # gate it.
-                "effective_identity": effective_identity_for(
-                    active_agent=durable.active_agent,
-                    team=durable.active_team,
-                    # Threaded: it reads the machine's team registry (directory
-                    # + brief files), and every other read this open makes is
-                    # off the loop for the same reason (agent review round 1,
-                    # MINOR-3). Best-effort either way.
-                    manager=await asyncio.to_thread(self._cold_team_manager, durable.active_team),
-                    team_in_force=bool(durable.active_team),
-                ),
+                # as the shared rule does. Carried like the two slots above:
+                # identity survives a fork, so ``inherited`` does not gate it.
+                "effective_identity": cold_identity,
                 # Spend and occupancy are the conversation's history, not this
                 # process's: a resumed session that already cost money must not
                 # open reading zero (the same argument as

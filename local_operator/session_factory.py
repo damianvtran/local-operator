@@ -194,6 +194,10 @@ _WARM_IMPORTS: tuple[str, ...] = (
     "local_operator.monitors.store",
     "local_operator.network.credentials.placement",
     "local_operator.network.identity",
+    # The cold open reads the session's local team binding before it may paint
+    # a team in force (``AttachedSession._cold_bound_team``); light module, no
+    # module-scope side effect.
+    "local_operator.network.move_team",
     "local_operator.providers.auth_store",
     "local_operator.session.session",
     "local_operator.session.tail_anchor",

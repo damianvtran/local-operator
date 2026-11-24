@@ -52,6 +52,7 @@ from local_operator.tui.glyphs import (
 from local_operator.tui.widgets import tool_card as card_mod
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import (
+    _HARNESS_ADVISORY_LEADS,
     COLLAPSE_HINT,
     DURATION_COL,
     EXPAND_HINT,
@@ -2473,6 +2474,62 @@ def test_a_programs_scratch_prefixed_stdout_line_stays_captured_bytes() -> None:
     assert matches[0].rstrip().endswith("…"), matches
     assert _style_at(content, "[scratch]") == bindings.style("tool.output.dim"), matches
     assert _style_at(content, "[scratch]") != bindings.style("tool.live.advisory")
+
+
+#: A held-back tier edit's reason exactly as the bound-team path words it
+#: (``tests/unit/session/test_member_tier_overrides.py``, the provider-ceiling
+#: refusal) -- the 200+-cell sentence design review D1 measured being cropped.
+HELD_BACK_REASON = (
+    "team 'org' slot 'pod': kept the attached tier 'lo' (provider test); the "
+    "edited tier 'hi' routes to provider elsewhere, which this binding did not "
+    "authorize; re-attach via /team to use it"
+)
+
+
+def test_the_selection_note_lead_is_a_wrapped_harness_advisory() -> None:
+    """D1: the receipt's own builder and the card's carve-out agree on the
+    lead, so the held-back reason is recognised as the harness's advisory."""
+    from local_operator.tools import builtin as builtin_mod
+
+    assert builtin_mod.SELECTION_NOTE_LEAD in _HARNESS_ADVISORY_LEADS
+    note = builtin_mod._selection_note_line("team", HELD_BACK_REASON)
+    assert note == "\n" + builtin_mod.SELECTION_NOTE_LEAD + HELD_BACK_REASON
+
+
+@pytest.mark.parametrize("width", [100, 150])
+def test_a_held_back_selection_reason_wraps_whole_on_the_receipt_card(width: int) -> None:
+    """D1, measured: as the tail of the ``[selection: …]`` line the reason
+    showed 27 cells at 100 columns and 77 at 150, remedy never visible. From
+    the REAL builders, the tag stays on the launch line and the reason is its
+    own line that wraps at the measure -- every cell painted, none cropped,
+    in the advisory ink rather than the captured-output dim."""
+    from local_operator.tools import builtin as builtin_mod
+
+    launch = "- pod (team:pod) on lo-model: job job-1" + builtin_mod._selection_tag("team")
+    note = builtin_mod._selection_note_line("team", HELD_BACK_REASON)
+    card = ToolCard("t", "task", {"agent": "team:pod"})
+    card.mark_done(
+        "launched 1 subagent(s) as concurrent background jobs:\n"
+        + launch
+        + note
+        + "\nuse 'wait' (job_id=...) to await one, or 'jobs' to list running work."
+    )
+    card.toggle_expanded()
+
+    content = card._build_content(width)
+    body = content.plain.splitlines()
+    assert any(line.rstrip().endswith("[selection: team]") for line in body), body
+    start = next(i for i, line in enumerate(body) if "selection not applied:" in line)
+    full_wrap = wrap_cells(note.lstrip("\n"), width - 2 - OUTPUT_INDENT)
+    rows = [line[OUTPUT_INDENT:] for line in body[start : start + len(full_wrap)]]
+    assert rows == full_wrap, (rows, full_wrap)
+    assert len(rows) > 1, rows
+    assert all(not row.rstrip().endswith("…") for row in rows), rows
+    # The reason carries no word wider than the measure, so the rows re-join
+    # to the whole sentence: nothing between the lead and the remedy is lost.
+    assert " ".join(row.rstrip() for row in rows) == note.strip(), rows
+    ink = _style_at(content, "selection not applied:")
+    assert ink == bindings.style("tool.live.advisory")
 
 
 def test_a_result_whose_head_line_is_not_the_reason_keeps_the_plain_crop() -> None:

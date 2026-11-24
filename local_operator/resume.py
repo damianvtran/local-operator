@@ -953,6 +953,36 @@ def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
     return SessionAttachment(team=_text("team"), agent=_text("agent"), goal=_text("goal"))
 
 
+class SessionAttachmentUnreadable(ValueError):
+    """Attachment evidence exists but does not establish either slot's state."""
+
+
+def read_session_attachment_evidence(session_dir: Path) -> SessionAttachment | None:
+    """Strict authority read: missing, explicitly empty, and invalid are distinct.
+
+    Presentation callers can still use the tolerant reader. A transfer or
+    restore must not interpret a partial document, bad encoding or I/O error
+    as a deliberate detach.
+    """
+    try:
+        raw = (session_dir / ATTACHMENT_SIDECAR_NAME).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as error:
+        raise SessionAttachmentUnreadable from error
+    try:
+        payload = json.loads(raw)
+    except ValueError as error:
+        raise SessionAttachmentUnreadable from error
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("team"), str)
+        or any(not isinstance(payload.get(key, ""), str) for key in ("agent", "goal"))
+    ):
+        raise SessionAttachmentUnreadable
+    return SessionAttachment(*(payload.get(key, "").strip() for key in ("team", "agent", "goal")))
+
+
 def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: str) -> None:
     """Journal the session's attached identity so a resume can rebuild it.
 
@@ -1009,7 +1039,9 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
         return
 
 
-def bind_session_attachment(session_dir: Path, *, agent: str, team: str) -> bool:
+def bind_session_attachment(
+    session_dir: Path, *, agent: str, team: str, root: Path | None = None
+) -> bool:
     """Bind a NEW session to a profile or team before anything runs in it.
 
     ``write_session_attachment`` is best-effort by contract (an attach mid-session
@@ -1026,6 +1058,22 @@ def bind_session_attachment(session_dir: Path, *, agent: str, team: str) -> bool
     unconditionally, which is what binds the manager role, the briefs and the
     roster on the first turn rather than after it.
     """
+    if team:
+        from local_operator.network.move_team import (
+            TeamIdentityRefused,
+            authorize_named_team,
+        )
+        from local_operator.paths import config_dir
+
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            # This is an explicit CREATE, not a file-copy or restore. Publish
+            # its authorization first so a warm runtime can safely adopt it.
+            team = authorize_named_team(
+                root if root is not None else config_dir(), session_dir, team
+            )
+        except (OSError, TeamIdentityRefused):
+            return False
     write_session_attachment(session_dir, agent=agent, team=team, goal="")
     stored = read_session_attachment(session_dir)
     return stored is not None and stored.agent == agent and stored.team == team

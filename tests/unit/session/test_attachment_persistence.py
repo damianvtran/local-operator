@@ -94,7 +94,9 @@ def registries(tmp_path: Path) -> tuple[AgentRegistry, TeamRegistry]:
     return agents, teams
 
 
-def _session(tmp_path: Path, registries: tuple[AgentRegistry, TeamRegistry]) -> Session:
+def _session(
+    tmp_path: Path, registries: tuple[AgentRegistry, TeamRegistry], *, directory: Path | None = None
+) -> Session:
     """A session over ``tmp_path/sess`` — reopening one RESUMES it, which is
     exactly the shape both ``--resume <id>`` and the ``/resume`` picker build."""
     agents, teams = registries
@@ -102,7 +104,7 @@ def _session(tmp_path: Path, registries: tuple[AgentRegistry, TeamRegistry]) -> 
         model=MODEL,
         stream_fn=ScriptedStream([[]]),
         tools=[],
-        transcript=Transcript(tmp_path / "sess"),
+        transcript=Transcript(directory or tmp_path / "sess"),
         system_blocks_provider=lambda: [],
         agent_registry=agents,
         team_registry=teams,
@@ -320,13 +322,7 @@ class TestTheStaleName:
         assert resumed.attachment_restore_notice == ""
 
     def test_the_cause_is_only_claimed_when_it_has_been_established(self, tmp_path, registries):
-        """Three failures, one of which is renamed-or-deleted.
-
-        A registry that is absent or that RAISED has established nothing about
-        whether the team still exists, and both are transient. Telling the user
-        it was renamed or deleted sends them off to re-create something that is
-        still there, which is worse than saying nothing about the cause.
-        """
+        """A missing or unloaded definition must not be reported as deleted."""
         _, teams = registries
         agents, _ = registries
         first = _session(tmp_path, registries)
@@ -344,26 +340,20 @@ class TestTheStaleName:
             )
 
         class Raises:
-            def get_team_by_name(self, name: str) -> Any:
+            def get_team_by_name(self, name: str, *, require_loaded=False) -> Any:
                 raise RuntimeError("registry down")
 
-        # Established: the lookup ran and answered "no such team".
-        deleted = resumed_with(TeamRegistry(tmp_path / "elsewhere"))
-        assert "renamed or deleted" in deleted.attachment_restore_notice
-        # Not established: no registry at all, and a registry that blew up.
-        assert "renamed or deleted" not in resumed_with(None).attachment_restore_notice
-        assert "renamed or deleted" not in resumed_with(Raises()).attachment_restore_notice
-        # All three still say what to do about it.
-        for session in (deleted, resumed_with(None), resumed_with(Raises())):
-            assert "Run /team to re-attach." in session.attachment_restore_notice
+        for registry in (TeamRegistry(tmp_path / "elsewhere"), None, Raises()):
+            session = resumed_with(registry)
+            assert session.active_team is None
+            assert session.attachment_restore_notice == (
+                "lopdev: team definition is unavailable; re-attach via /team"
+            )
 
     def test_the_notice_fits_one_line_on_a_standard_terminal(self, tmp_path, registries):
         """It wrapped to two lines at 100 columns, which is where it is read."""
         agents, _ = registries
-        # The stored PAIR, written the way a pre-#2014 build left it: both
-        # slots failing is the longest form this notice can take, and the team
-        # rule does not shorten it — with the team unresolvable there is no team
-        # in force, so the agent half is still attempted and still missed.
+        # The legacy pair is not an authority record for either of its slots.
         _store_sidecar(tmp_path, team="lopdev", agent="auditor")
 
         resumed = Session(
@@ -375,10 +365,9 @@ class TestTheStaleName:
             agent_registry=AgentRegistry(tmp_path / "elsewhere"),
             team_registry=TeamRegistry(tmp_path / "elsewhere"),
         )
-        # Both slots missing is the longest form this can take.
-        assert "team 'lopdev' and agent 'auditor'" in resumed.attachment_restore_notice
-        # Deduped commands: never "/team or /team".
-        assert "Run /team or /agent to re-attach." in resumed.attachment_restore_notice
+        assert "lopdev" in resumed.attachment_restore_notice
+        assert "re-attach via /team" in resumed.attachment_restore_notice
+        assert resumed.active_agent == ""
         assert len(resumed.attachment_restore_notice) <= 96, resumed.attachment_restore_notice
 
     def test_a_partial_restore_does_not_erase_the_name_it_could_not_resolve(
@@ -392,6 +381,7 @@ class TestTheStaleName:
         # A stored pair whose TEAM is the half that cannot resolve. The agent
         # half resolves, and that is the point: a restore that wrote back
         # through ``attach_agent_profile`` would journal the empty team slot.
+        _session(tmp_path, registries).attach_team(registries[1].get_team_by_name("lopdev"))
         _store_sidecar(tmp_path, team="lopdev", agent="auditor")
         Session(
             model=MODEL,
@@ -424,6 +414,7 @@ class TestTheStaleName:
         agents, _ = registries
         # The stored pair, because the R1 scenario is a session that was carrying
         # one when the team registry went away mid-life.
+        _session(tmp_path, registries).attach_team(registries[1].get_team_by_name("lopdev"))
         _store_sidecar(tmp_path, team="lopdev", agent="auditor")
 
         # Transient miss: the team registry is not wired on this host yet.
@@ -599,7 +590,9 @@ class TestLateAdoptionBeforeTheFirstTurn:
         # The warm: constructed while NOTHING was on disk...
         assert not (tmp_path / "sess" / ATTACHMENT_SIDECAR_NAME).exists()
         # ...and the sidecar lands only now, the way ``create`` writes it.
-        write_session_attachment(tmp_path / "sess", team="lopdev", agent="", goal="")
+        from local_operator.resume import bind_session_attachment
+
+        assert bind_session_attachment(tmp_path / "sess", team="lopdev", agent="", root=tmp_path)
 
         await session.prompt("open the team")
         try:
@@ -713,3 +706,122 @@ class TestLateAdoptionBeforeTheFirstTurn:
             assert session.attachment_restore_notice == ""
         finally:
             await session.dispose()
+
+
+@pytest.mark.parametrize("damage", ["missing", "unreadable", "manager-pins"])
+def test_moved_team_reopen_refuses_unverified_authority(tmp_path, registries, damage):
+    from shutil import copyfile
+
+    from local_operator.network.move_team import (
+        KEY,
+        TeamIdentityRefused,
+        check_arrival,
+        source_offer,
+    )
+    from local_operator.session.placement import MeshStamp, write_stamp_into
+
+    source = _session(tmp_path, registries)
+    source.attach_team(registries[1].get_team_by_name("lopdev"))
+    directory = tmp_path / "arrived"
+    directory.mkdir()
+    copyfile(tmp_path / "sess" / ATTACHMENT_SIDECAR_NAME, directory / ATTACHMENT_SIDECAR_NAME)
+    offer = source_offer(tmp_path, tmp_path / "sess", supported=True)
+    binding = check_arrival(tmp_path, directory, offer)
+    assert binding is not None
+    write_stamp_into(directory, MeshStamp(session_id="000000000000", origin={KEY: binding}))
+
+    if damage == "missing":
+        (directory / ATTACHMENT_SIDECAR_NAME).unlink()
+        reason = "lopdev: attachment evidence is unavailable"
+    elif damage == "unreadable":
+        (directory / ATTACHMENT_SIDECAR_NAME).write_text("{", encoding="utf-8")
+        reason = "lopdev: attachment evidence is unreadable"
+    else:
+        agents, _ = registries
+        agents.create_agent(_role_fields(name="manager", tags=["role", "tools:edit"]))
+        reason = "lopdev: would grant tool pins: edit"
+
+    with pytest.raises(TeamIdentityRefused, match=reason):
+        _session(tmp_path, registries, directory=directory)
+
+
+def test_local_restore_does_not_reauthorize_manager_pins(tmp_path, registries):
+    agents, teams = registries
+    manager = agents.create_agent(_role_fields(name="lead", tags=["role", "tools:read"]))
+    teams.save_team(_team("ceiling").model_copy(update={"manager": "lead"}))
+    _session(tmp_path, registries).attach_team(teams.get_team_by_name("ceiling"))
+    agents.update_agent(manager.id, _role_fields(tags=["role", "tools:read,edit"]))
+
+    resumed = _session(tmp_path, registries)
+    assert resumed.active_team is None
+    assert "edit" not in resumed._deferral_pins
+    assert "would grant tool pins: edit" in resumed.attachment_restore_notice
+
+
+@pytest.mark.parametrize(
+    "forked", [False, True], ids=["partial-copy", "fork-without-parent-binding"]
+)
+def test_present_attachment_without_completed_binding_is_not_authority(
+    tmp_path, registries, forked
+):
+    from local_operator.fork import fork_session
+    from local_operator.resume import TRANSCRIPT_NAME
+
+    directory = tmp_path / "sessions" / "000000000001"
+    directory.mkdir(parents=True)
+    (directory / TRANSCRIPT_NAME).write_text('{"id":"m1","role":"user","content":"hi"}\n')
+    write_session_attachment(directory, team="lopdev", agent="", goal="keep")
+    if forked:
+        directory = directory.parent / fork_session(tmp_path, directory.name)
+    reopened = _session(tmp_path, registries, directory=directory)
+    assert reopened.active_team is None
+    assert "recorded authority is unavailable" in reopened.attachment_restore_notice
+    assert reopened.goal == "keep"
+    reopened.attach_team(registries[1].get_team_by_name("lopdev"))
+    assert _session(tmp_path, registries, directory=directory).active_team_name == "lopdev"
+
+
+@pytest.mark.asyncio
+async def test_generic_child_of_moved_team_cannot_gain_tools_or_pins(tmp_path, registries):
+    from local_operator.harness.subagent import (
+        TeamLaunchError,
+        _build_child_session,
+        resolve_launch_target,
+    )
+    from local_operator.harness.types import AgentTool
+    from local_operator.network.move_team import KEY, check_arrival, source_offer
+    from local_operator.session.placement import MeshStamp, write_stamp_into
+
+    agents, teams = registries
+    agents.create_agent(_role_fields(name="lead", tags=["role", "tools:read"]))
+    teams.save_team(_team("ceiling").model_copy(update={"manager": "lead"}))
+    _session(tmp_path, registries).attach_team(teams.get_team_by_name("ceiling"))
+    directory = tmp_path / "arrived"
+    write_session_attachment(directory, team="ceiling", agent="", goal="")
+    offer = source_offer(tmp_path, tmp_path / "sess", supported=True)
+    binding = check_arrival(tmp_path, directory, offer)
+    write_stamp_into(directory, MeshStamp(session_id="000000000000", origin={KEY: binding}))
+    moved = _session(tmp_path, registries, directory=directory)
+
+    async def not_called(*args, **kwargs):
+        raise AssertionError("no tools are executed")
+
+    moved.refresh_tools([AgentTool(name="read", execute=not_called)])
+    child = await _build_child_session(
+        label="bound",
+        prompt="inspect",
+        parent_session=moved,
+        model_spec=None,
+        job_id="job-generic",
+        target=resolve_launch_target("task", moved),
+    )
+    try:
+        assert {tool.name for tool in child._tools} == {"read"}
+        child.set_tool_deferral(pins={"edit"})
+        assert child._deferral_pins <= moved._deferral_pins == {"read"}
+        with pytest.raises(TeamLaunchError, match="must inherit its parent's model"):
+            moved._launch_subagent("bound", "inspect", effort="hi")
+        assert not moved.jobs.list()
+    finally:
+        await child.dispose()
+        await moved.dispose()

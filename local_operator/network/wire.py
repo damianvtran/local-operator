@@ -158,9 +158,14 @@ CREDENTIAL_RENEW_PUSH_V1 = "credential-renew-push-v1"
 #: §11.1): the ``workset_preflight``/``workset_probe`` phases of ``net_session_move`` and
 #: the ``dry_run``/``working_set`` fields of a local move request.
 SESSION_MOVE_WORKSET_V1 = "session-move-workset-v1"
+#: An offload destination can echo its invite's attempt token (``mobility``).
+#: Additive: older links omit this string, older readers ignore it, and no op
+#: or member grant changes shape.
+SESSION_MOVE_ATTEMPT_V1 = "session-move-attempt-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
+    SESSION_MOVE_ATTEMPT_V1,
     "credential-broker-v1",
     # The refresh delegation's advertisement (manager ruling on review R1-4: this
     # is an INTERPRETATION of the signed design's §3.9 "no wire.py change" line,

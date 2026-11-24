@@ -157,6 +157,8 @@ from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.request_admission import RequestAdmission
 from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
+    TeamLaunchError,
+    inherits_bound_team_authority,
     is_inherit_tier_sentinel,
     resolve_launch_target,
     run_subagent,
@@ -427,6 +429,24 @@ BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
 #: owner typing at this machine, so it never authorizes a card-free account
 #: profile save (operator: "a peer ... request never authorizes an edit").
 REMOTE_PROMPT_KEY = "lop_remote_prompt"
+
+
+#: The remedy a refused team restore names in ``attachment_restore_notice``.
+_TEAM_REMEDY = "re-attach via /team"
+
+
+def _with_team_remedy(refusal: BaseException) -> str:
+    """The restore notice for a refused team: the refusal, then the remedy ONCE.
+
+    Some refusals already carry it (``role definition ... differs from the
+    recorded one; re-attach via /team``, ``recorded delegation does not match;
+    re-attach via /team``) because the same text crosses the relay protocol on a
+    move, where the remedy has to travel with it. Appending unconditionally read
+    ``...; re-attach via /team; re-attach via /team`` -- in text quoted as gate
+    evidence -- so the remedy is added only when the refusal does not end with it.
+    """
+    text = str(refusal)
+    return text if text.endswith(_TEAM_REMEDY) else f"{text}; {_TEAM_REMEDY}"
 
 
 def _stamp_remote_prompt(message: Any) -> None:
@@ -4894,6 +4914,14 @@ class Session:
         #: ``cache_read``/``cache_write`` on activation turns shows the resumed
         #: case paying more than that single turn.
         self._deferral_pins: frozenset[str] = frozenset()
+        #: Generic tool ceiling a team-bound subagent inherits from its parent
+        #: (set by ``harness/subagent.py`` at child build). ``None`` = unbounded.
+        #: Declared here, not only assigned there, so the type checker knows
+        #: the attribute and its value type at every reader below; the readers
+        #: keep their ``getattr`` default for reduced hosts that skip __init__.
+        self._team_generic_tool_ceiling: frozenset[str] | None = None
+        #: The pins (schema-published names) that same ceiling allows.
+        self._team_generic_pin_ceiling: frozenset[str] | None = None
         self._activated_tools: set[str] = set()
         self._tool_deferral = tool_deferral_enabled()
         #: True while a mid-session model selection has not reached the
@@ -9106,7 +9134,7 @@ class Session:
             return ""
         return str(getattr(team, "name", "") or "")
 
-    def attach_team(self, team: Any) -> str | None:
+    def attach_team(self, team: Any, *, _verified_bound: bool = False) -> str | None:
         """Bind this session as the manager of ``team``.
 
         The team's collaboration and project briefs ride the volatile tail
@@ -9136,6 +9164,35 @@ class Session:
         actually IN FORCE, or a bare ``/team clear`` would quietly drop an
         attached profile the user never asked to lose.
         """
+        manager_name = getattr(team, "manager", "") or ""
+        from local_operator.network.move_team import bind_runtime_authority
+        from local_operator.teams import Team
+
+        kind, profile, specialist_prompt = None, None, ""
+        authority = None
+        if isinstance(team, Team) or _verified_bound:
+            # Journal before exposing the attachment and use exactly the
+            # checked profiles and rosters, not another live registry lookup.
+            authority = bind_runtime_authority(
+                getattr(self._transcript, "directory", None),
+                team,
+                self.team_registry,
+                self.agent_registry,
+                restoring=_verified_bound,
+                readonly_shell=self._readonly_shell,
+            )
+            team = authority.team
+            manager, profile, specialist_prompt = authority.manager
+            kind = manager["kind"]
+            if kind == "role" and profile is not None:
+                from local_operator.agent_profiles import with_delivery_pointer
+
+                profile = with_delivery_pointer(profile)
+        elif manager_name and self.agent_registry is not None:
+            # Reduced, non-Team hosts have no durable attachment authority.
+            kind, profile, specialist_prompt, _ = self._resolve_profile_or_specialist(manager_name)
+        manager_pins = tuple(profile.tools or ()) if profile is not None else ()
+        self._team_authority = authority
         # Read BEFORE the assignment below: the detach branch needs to know
         # whether a team was in force, and this is the only place that is still
         # true. Review round 1 caught a bare ``/team clear`` (no team attached)
@@ -9164,37 +9221,20 @@ class Session:
             self.refresh_frontend_state()
             return None
         preamble = getattr(team, "manager_preamble", lambda: "")()
-        # The manager's own profile instructions (the reusable BASE) sit in
-        # front of the team brief so a custom manager keeps its voice when
-        # this session was not launched with --agent. A packaged starter
-        # resolved by name is enough; a missing profile costs nothing.
-        manager_name = getattr(team, "manager", "") or ""
-        if manager_name and self.agent_registry is not None:
-            # Same resolution ORDER as ``/agent`` attach, via the ONE shared
-            # resolver: own role, then own specialist (BEFORE a same-named
-            # packaged seed), then the seed. This closes the twin of A1 — a
-            # team whose manager is the operator's own specialist named after a
-            # seed word (reviewer/coder/…) previously layered the SEED here,
-            # because ``resolve_profile`` was consulted before the specialist
-            # path. Both call sites share ``_resolve_profile_or_specialist`` so
-            # the order cannot drift between them again.
-            kind, profile, specialist_prompt, _ = self._resolve_profile_or_specialist(manager_name)
-            if kind in ("role", "seed") and profile is not None:
-                # The manager's ``tools:`` list pins those schemas published,
-                # exactly as an ``/agent`` attach of the same role would.
-                self.set_tool_deferral(pins=tuple(profile.tools or ()))
-            if kind in ("role", "seed") and profile is not None and profile.preamble:
+        if kind in ("role", "seed") and profile is not None:
+            # The profile's tools pin published schemas, just as /agent does.
+            self.set_tool_deferral(pins=manager_pins)
+            if profile.preamble:
                 preamble = profile.preamble + (preamble or "")
-            elif kind == "specialist" and specialist_prompt:
-                # A specialist has no role preamble header; wrap it so the model
-                # can tell the manager's own base voice apart from the team brief
-                # layered after it.
-                preamble = (
-                    "<manager-profile>\n"
-                    + specialist_prompt
-                    + "\n</manager-profile>\n\n"
-                    + (preamble or "")
-                )
+        elif kind == "specialist" and specialist_prompt:
+            # Specialists have no role header: keep their voice distinct from
+            # the team collaboration brief layered after it.
+            preamble = (
+                "<manager-profile>\n"
+                + specialist_prompt
+                + "\n</manager-profile>\n\n"
+                + (preamble or "")
+            )
         self._goal_state.team_brief = preamble or ""
         # Read BEFORE the claim, because the claim blanks it: this is the
         # profile the team is about to replace, and the caller's notice names it.
@@ -9204,7 +9244,10 @@ class Session:
         self._claim_agent_slot_for_team()
         # A team whose MANAGER is a read-only shell role makes this session
         # that role: the same confinement ``attach_agent_profile`` applies.
-        self._apply_readonly_shell_role(self._team_manager_name())
+        self._apply_readonly_shell_role(
+            self._team_manager_name(),
+            force=authority is not None and authority.manager[0]["readonly_shell"],
+        )
         # Journal the NAME so a resume can rebuild this tail. On change only:
         # the roster moves a handful of times per session, and the brief itself
         # is deliberately not stored (see ``SessionAttachment``).
@@ -9503,11 +9546,23 @@ class Session:
         (:attr:`attachment_restore_notice`) rather than raised: a team the user
         renamed or deleted must not make a conversation unopenable.
         """
-        from local_operator.resume import read_session_attachment
+        from local_operator.network.move_team import (
+            TeamIdentityRefused,
+            UnboundAttachmentUnreadable,
+            needs_reauthorization,
+            read_local_attachment,
+        )
 
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None:
+            return
+        # Known bindings with lost evidence must fail before any authority can
+        # enter the runtime. For a never-bound conversation, keep the history
+        # open but report that attachment restoration was refused.
         try:
-            stored = read_session_attachment(self._transcript.directory)
-        except Exception:  # noqa: BLE001 — a resume must always open
+            stored = read_local_attachment(directory)
+        except UnboundAttachmentUnreadable as error:
+            self.attachment_restore_notice = str(error)
             return
         if stored is None:
             return
@@ -9528,6 +9583,22 @@ class Session:
         live_goal = self._goal_state.text
         if stored.goal and (not live_goal or live_goal == stored.goal):
             self._goal_state.set(stored.goal)
+        if (
+            stored.team
+            and not self.active_agent
+            and not self.active_team_name
+            and needs_reauthorization(directory)
+        ):
+            # Recovery preserves the attachment bytes as a hint, not a grant.
+            # Leave the journal intact so merely setting a goal cannot certify it.
+            self._unresolved_team = stored.team
+            self._unresolved_agent = stored.agent
+            self.attachment_restore_notice = str(
+                TeamIdentityRefused(
+                    stored.team, "recorded authority is unavailable; re-attach via /team"
+                )
+            )
+            return
         if stored.agent or stored.team:
             from local_operator.session.errors import ProfileRegistryUnavailable
 
@@ -9597,25 +9668,38 @@ class Session:
         # the revert F1 forbids. "The live state wins" is per SESSION here, not
         # per slot, wherever the two slots are mutually exclusive.
         if stored.team and not live_agent and (not live_team or live_team == stored.team):
-            team = None
-            registry = self.team_registry
-            if registry is None:
-                looked_up_and_absent = False
-            else:
-                try:
-                    team = registry.get_team_by_name(stored.team)
-                except Exception:  # noqa: BLE001 — a bad registry row is not fatal
-                    team = None
-                    looked_up_and_absent = False
-            if team is None:
-                missing.append((f"team {stored.team!r}", "/team"))
-                # Carried so the next mutation cannot erase it (R1).
+            from local_operator.network.move_team import (
+                TeamIdentityRefused,
+                is_pending_definition,
+                restore_bound,
+                was_authorized_locally,
+            )
+
+            # No name-only recovery: an interrupted copy, old local journal
+            # or fork without a completed binding cannot grant authority.
+            directory = self._transcript.directory
+            try:
+                team = restore_bound(directory, stored.team, self.team_registry)
+                self.attach_team(team, _verified_bound=True)
+            except TeamIdentityRefused as refusal:
+                if is_pending_definition(refusal):
+                    # THE RECORD IS INTACT; ONLY THE DEFINITION IS IN FLIGHT
+                    # (Q-R5-1). Definitions reconciliation runs independently of a
+                    # move, so a missing row is a WAIT: keep the recorded name (the
+                    # next turn re-resolves it and attaches once the row lands) and
+                    # report it — but never raise, which lost the recorded team and,
+                    # on the moved shape, made the conversation unopenable. The
+                    # recorded team is what the retry attaches UNDER, so waiting
+                    # grants nothing; a RECORD that does not match still raises
+                    # below, exactly as before.
+                    self._unresolved_team = stored.team
+                    self.attachment_restore_notice = _with_team_remedy(refusal)
+                    return
+                if not was_authorized_locally(directory):
+                    raise
                 self._unresolved_team = stored.team
-            else:
-                # Through ``attach_team`` rather than by setting the brief, so
-                # ``active_team`` (what subagents inherit) is restored too, not
-                # just the prompt text.
-                self.attach_team(team)
+                self.attachment_restore_notice = _with_team_remedy(refusal)
+                return
         # A stored agent name is SUPERSEDED, not missing, when the same sidecar
         # named a team (issue #2014): the team owns the agent slot, so the
         # manager ``attach_team`` just claimed IS this session's speaker.
@@ -9977,7 +10061,7 @@ class Session:
             return self._stamp_agent_brief(body, display_name)
         return None
 
-    def _apply_readonly_shell_role(self, role: str) -> None:
+    def _apply_readonly_shell_role(self, role: str, *, force: bool = False) -> None:
         """Confine this session's shell when ``role`` is a read-only shell role.
 
         WHY HERE. ``harness.subagent`` confines a DELEGATED scout, but a scout
@@ -10015,7 +10099,7 @@ class Session:
             readonly_shell_write_root,
         )
 
-        if not is_readonly_shell_role(role):
+        if not force and not is_readonly_shell_role(role):
             return
         self._readonly_shell = True
         if self._shell_write_root is None:
@@ -16555,10 +16639,14 @@ class Session:
         Takes effect at the next publish, like any inventory change.
         """
         if pins is not None:
+            requested = frozenset(pins)
+            inherited: frozenset[str] | None = getattr(self, "_team_generic_pin_ceiling", None)
+            if inherited is not None:
+                requested &= inherited
             # ADDITIVE, for the reason activations are sticky: dropping a pin
             # (an ``/agent clear``, a role switch) would re-defer a schema the
             # cached prefix already carries and pay a second rewrite for it.
-            self._deferral_pins = self._deferral_pins | frozenset(pins)
+            self._deferral_pins = self._deferral_pins | requested
 
     def activate_deferred_tool(self, name: str) -> bool | None:
         """Publish a deferred tool's schema from the next publish on (sticky).
@@ -16634,6 +16722,9 @@ class Session:
         :meth:`_scope_declared_ops`; this method is where every inventory writer
         passes, so this is where the two cannot be applied apart.
         """
+        inherited = getattr(self, "_team_generic_tool_ceiling", None)
+        if inherited is not None:
+            tools = [tool for tool in tools if tool.name in inherited]
         if self._readonly_shell and self._shell_write_root is None:
             # A read-only shell role with no enforceable sandbox gets NO shell
             # (see :meth:`_apply_readonly_shell_role`). Here, not at the attach,
@@ -25870,6 +25961,11 @@ class Session:
         # team, cycle, depth cap) raises here before any model is priced or
         # job registered (BEN-7-D1/D2/D3).
         target = resolve_launch_target(agent, self)
+        if inherits_bound_team_authority(agent, target):
+            # Generic task is not a fresh persona or model authorization.
+            if effort is not None or model not in (None, "inherit"):
+                raise TeamLaunchError("a generic team task must inherit its parent's model")
+            model = "inherit"
         # MEMORY ADMISSION (memory_guard.admission_check): a child session is
         # resident work in THIS process — its transcript, its tool commands, its
         # browser — and a small node OOM-killed its own mesh relay by adding such
@@ -25886,11 +25982,14 @@ class Session:
 
             if not model_may_choose_tier():
                 raise ValueError("specific task models require subagents.model_choice=model")
+        held_back: list[str] = []
         model_spec, selection_source = self._resolve_subagent_selection(
             target.role,
             effort,
             strict=True,
             model=model,
+            authority=target.authority,
+            notes=held_back,
             roster=target.roster,
             slot_kind="team" if target.is_team_launch else "agent",
             # For a ``team:pod`` launch the resolved ROLE is pod's manager while
@@ -25909,6 +26008,9 @@ class Session:
             # delegating model reads back. Derived here, where the roster is in
             # hand, because ``run_subagent`` cannot see one from the arguments.
             selection_source=selection_source,
+            # A live tier edit the provider ceiling held back is shown on the
+            # receipt, not only logged (the operator's requirement).
+            selection_notes=held_back,
             target=target,
             agent=agent,
             # Recorded on the job for the title/band to name the tier. The spec
@@ -26669,8 +26771,17 @@ class Session:
         roster: Any = None,
         slot_kind: str = "agent",
         slot_role: str | None = None,
+        authority: Any = None,
+        notes: list[str] | None = None,
     ) -> tuple[ModelSpec | None, str]:
         """``(spec, model_selection_source)`` for one delegated role.
+
+        ``authority`` is the LAUNCHING session's ``/team`` snapshot
+        (``LaunchTarget.authority``; a resume's launch parent need not be this
+        session), defaulting to this session's own. When bound, the role's own
+        ``effort:`` tag is read from that snapshot and a live edit only passes
+        the provider ceiling (``resolve_member_model``). ``notes`` collects why
+        an edit was held back, for the receipt the operator reads.
 
         The SPEC half is what :meth:`_resolve_subagent_model` hands its naming and
         resume callers. The SOURCE half names WHICH layer decided it, and is the
@@ -26696,19 +26807,27 @@ class Session:
         """
         from local_operator.harness.subagent import (
             SubagentModelUnavailable,
+            _bound_team_authority,
             local_missing_tier_remedy,
             resolve_member_model,
         )
+        from local_operator.network.move_team import TeamAuthority
+
+        bound = authority if isinstance(authority, TeamAuthority) else _bound_team_authority(self)
 
         def _resolved(registry: Any) -> Any:
-            return resolve_member_model(
+            resolution = resolve_member_model(
                 agent,
                 roster=roster,
                 slot_kind=slot_kind,
                 slot_role=slot_role,
                 launch_tier=effort,
                 agent_registry=registry,
+                bound_authority=bound,
             )
+            if notes is not None:
+                notes.extend(resolution.held_back)
+            return resolution
 
         def _role_resolution() -> Any:
             """The launch resolution WITH the registry, or the lenient fallback.

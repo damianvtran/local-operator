@@ -1201,3 +1201,27 @@ def test_the_served_bytes_are_the_ones_the_plan_described(tmp_path: Path) -> Non
         ), "a fetch served bytes its own plan does not describe"
     # And the two really are different, or this test proves nothing.
     assert replica_plan["transcript"]["digest"] != raw_plan["transcript"]["digest"]
+
+
+def test_replica_recovery_requires_local_authorization_of_retained_team(tmp_path: Path) -> None:
+    from local_operator.network.move_team import TeamIdentityRefused, source_offer
+    from local_operator.resume import read_session_attachment, write_session_attachment
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    root = tmp_path / "owner"
+    root.mkdir()
+    original = seed(root, "abc123", rows=4)
+    team = TeamRegistry(root).create_team(TeamEditFields(name="recovery-team"))
+    write_session_attachment(original, team=team.name, agent="manager", goal="keep")
+    sync.sync_from(
+        root,
+        "abc123",
+        ask=_ask(root),
+        owner_device="d_owner",
+        into=sync.replica_dir(root, "abc123"),
+    )
+    result = sync.promote_replica(root, "abc123")
+    target = root / "sessions" / result["session_id"]
+    assert read_session_attachment(target) == read_session_attachment(original)
+    with pytest.raises(TeamIdentityRefused, match=team.name):
+        source_offer(root, target, supported=True)

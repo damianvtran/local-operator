@@ -327,10 +327,17 @@ class TestTeamResolution:
     def test_no_attachment_reports_nothing(self, tmp_path: Path) -> None:
         assert carry.attachment_resolution(tmp_path, tmp_path) == {}
 
-    def test_the_queued_copy_pushes_definitions_before_the_invite(
+    def test_the_queued_copy_applies_nothing_before_its_invite(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from local_operator.network import mobility
+        """R4-2: nothing is applied on the destination before the invite.
+
+        The queued path used to call the general push with empty agent/team
+        selectors. Those selectors filter DECLARATION rows, and the receiver still
+        dispatches the bundle to ``definitions.apply_bundle`` — the mechanism the
+        condition is about — so the assertion is that no push happens at all.
+        """
+        from local_operator.network import definitions, mobility
 
         mq.enqueue(
             tmp_path,
@@ -345,9 +352,7 @@ class TestTeamResolution:
         monkeypatch.setattr(mobility, "_resolve_typed_peer", lambda server, name: ("d_b", "node-2"))
         monkeypatch.setattr(mobility, "_link_for_move", lambda server, dev, name: object())
         monkeypatch.setattr(
-            mobility,
-            "_push_move_definitions",
-            lambda server, sid, dev, label: order.append(f"push:{sid}:{dev}") or "",
+            definitions, "push_to_peer", lambda *a, **k: order.append("push") or {"ok": True}
         )
 
         class _Transport:
@@ -365,7 +370,7 @@ class TestTeamResolution:
 
         # Only ``root`` is read before the stubbed transport stops the drive.
         mq._drive_copy(cast(Any, _Server()), SID)  # noqa: SLF001
-        assert order[:2] == [f"push:{SID}:d_b", "invite:invite"]
+        assert order == ["invite:invite"], order
 
 
 # -- (d) the queued move of an idle session ----------------------------------
@@ -593,6 +598,7 @@ class TestMovedSessionReappliesItsTeamBrief:
                     project="local-operator",
                 )
             )
+            _moved_here(session_dir, source, "lopdev")
             applied = definitions.apply_bundle(
                 dest, definitions.local_bundle(source), origin_device="dev-source"
             )
@@ -609,6 +615,121 @@ class TestMovedSessionReappliesItsTeamBrief:
             assert "[team: lopdev]" not in stream.requests[0].model_dump_json()
         finally:
             await session.dispose()
+
+
+def _moved_here(session_dir: Path, source_root: Path, team: str) -> dict[str, Any]:
+    """Give ``session_dir`` the destination-authored record a verified move writes.
+
+    WHY (review r5 R5-2): a moved session carries its team as a RECORD this device
+    compared at arrival (the stamp's ``origin`` block, ``sessions/<id>/mesh.json``),
+    never as a bare name — the runtime re-resolves only against that record, so a
+    fixture holding an attachment sidecar alone models a directory no move
+    produces, and cannot exercise the late-mirror contract this class is about.
+
+    Built through the production snapshotter against the SOURCE's definitions, so
+    the digest, delegation and ceiling are exactly what a promote would have
+    compared, and no local-attach flag (``explicit_local``) is invented: this is
+    the moved shape, not a session someone attached by hand here.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.network import move_team
+    from local_operator.session.placement import MeshStamp, write_stamp_into
+    from local_operator.teams import TeamRegistry
+
+    teams = TeamRegistry(source_root)
+    loaded = teams.get_team_by_name(team, require_loaded=True)
+    assert loaded is not None
+    authority = move_team.bind_runtime_authority(
+        None,
+        loaded,
+        teams,
+        AgentRegistry(source_root),
+        restoring=False,
+    )
+    record = authority.record()
+    write_stamp_into(
+        session_dir,
+        MeshStamp(
+            session_id=session_dir.name,
+            home_device="dev-destination",
+            origin={
+                "kind": "moved",
+                "source_device": "dev-source",
+                move_team.KEY: record,
+            },
+        ),
+    )
+    return record
+
+
+class TestANameIsNotAuthority:
+    """R5-3: an unresolvable team must not refuse the MOVE, and must not bind.
+
+    The invariant this class pins: **a name is not authority.** A source that
+    cannot attest the sidecar's team offers nothing (so a missing definition or a
+    legacy sidecar never blocks moving the conversation), and a destination that
+    receives no record installs no team binding at all — the name survives only as
+    a hint, which the move's receipt reports and which can never attach.
+    """
+
+    def test_an_unattested_offer_travels_as_nothing_and_binds_nothing(self, tmp_path: Path) -> None:
+        from local_operator.network import move_team
+        from local_operator.resume import write_session_attachment
+
+        team = "team-nowhere"
+        source, dest = tmp_path / "src", tmp_path / "dst"
+        # A legacy sidecar: the session names a team, and no record attests to it.
+        for root in (source, dest):
+            directory = root / "sessions" / SID
+            directory.mkdir(parents=True)
+            write_session_attachment(directory, team=team, agent="", goal="")
+
+        # The source offers NOTHING (it cannot attest) instead of refusing, so the
+        # move still runs and the receipt is left to name the unresolved team.
+        assert move_team.source_offer(source, source / "sessions" / SID, supported=True) is None
+
+        # The destination installs nothing and records no binding for the hint.
+        assert move_team.check_arrival(dest, dest / "sessions" / SID, None) is None
+        assert move_team._local_binding(dest / "sessions" / SID) is None
+        # ... which is what keeps the runtime from ever attaching it by name.
+        assert move_team.needs_reauthorization(dest / "sessions" / SID) is True
+
+    def test_an_attested_offer_still_carries_its_record(self, tmp_path: Path) -> None:
+        """The negative control: the tolerance above must not blanket-disable offers."""
+        from datetime import datetime, timezone
+
+        from local_operator.agents import AgentRegistry
+        from local_operator.network import move_team
+        from local_operator.resume import write_session_attachment
+        from local_operator.teams import Team, TeamRegistry
+
+        source = tmp_path / "src"
+        directory = source / "sessions" / SID
+        directory.mkdir(parents=True)
+        write_session_attachment(directory, team="lopdev", agent="", goal="")
+        TeamRegistry(source).save_team(
+            Team(
+                id="t-lopdev",
+                name="lopdev",
+                created_date=datetime.now(timezone.utc),
+                manager="manager",
+                instructions="Ship reviewed work.",
+                project="local-operator",
+            )
+        )
+        lopdev = TeamRegistry(source).get_team_by_name("lopdev", require_loaded=True)
+        assert lopdev is not None
+        move_team.bind_runtime_authority(
+            directory,
+            lopdev,
+            TeamRegistry(source),
+            AgentRegistry(source),
+            restoring=False,
+        )
+
+        offer = move_team.source_offer(source, directory, supported=True)
+        assert offer is not None, "an attested team must still be offered"
+        assert offer["name"] == "lopdev" and "delegation" in offer, offer
 
 
 def _role(registry: Any, name: str, prompt: str) -> None:
@@ -656,7 +777,10 @@ async def _answered_session(dest: Path, *, team: str = "", agent: str = "") -> t
     from tests.unit.session.test_session import MODEL, ScriptedStream
 
     session_dir = dest / "sessions" / SID
-    session_dir.mkdir(parents=True)
+    # exist_ok: a caller may stage the destination's own record (the moved
+    # shape) into the directory before the runtime opens, exactly as a promote
+    # writes it before the session is opened here.
+    session_dir.mkdir(parents=True, exist_ok=True)
     write_session_attachment(session_dir, team=team, agent=agent, goal="")
     goal_state = GoalState()
 
@@ -718,6 +842,7 @@ class TestReresolveRefreshesBothRegistries:
                     project="local-operator",
                 )
             )
+            _moved_here(dest / "sessions" / SID, source, "lopdev")
             definitions.apply_bundle(
                 dest, definitions.local_bundle(source), origin_device="dev-source"
             )
@@ -728,6 +853,58 @@ class TestReresolveRefreshesBothRegistries:
             assert "MGR-VOICE-MARKER" in session._goal_state.team_brief
             sent = stream.requests[1].model_dump_json()
             assert "[team: lopdev]" in sent and "MGR-VOICE-MARKER" in sent
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_moved_record_waits_for_its_definition_and_then_attaches(
+        self, tmp_path: Path
+    ) -> None:
+        """Q-R5-1: the RECORD survives a definition that has not landed yet.
+
+        The failing behaviour this pins: with the moved session's stamp in place and
+        the definition still in flight, the restore raised out of the attach and the
+        conversation could not open, so the recorded team was lost. A definition sync
+        is independent of a move, so its absence is a WAIT: the name stays held and
+        the team attaches under the recorded ceiling once the mirror lands.
+        """
+        from datetime import datetime, timezone
+
+        from local_operator.network import definitions
+        from local_operator.teams import Team, TeamRegistry
+
+        source, dest = tmp_path / "src", tmp_path / "dst"
+        session_dir = dest / "sessions" / SID
+        session_dir.mkdir(parents=True)
+        TeamRegistry(source).save_team(
+            Team(
+                id="t-lopdev",
+                name="lopdev",
+                created_date=datetime.now(timezone.utc),
+                manager="manager",
+                instructions="Ship reviewed work.",
+                project="local-operator",
+            )
+        )
+        # The destination's own record, before the definition reaches this device.
+        _moved_here(session_dir, source, "lopdev")
+
+        session, stream = await _answered_session(dest, team="lopdev")
+        try:
+            # PENDING: nothing attached, the record is held, and the conversation
+            # opened (this is the row that used to raise and lose the team).
+            assert session.active_team_name == ""
+            assert session._unresolved_team == "lopdev"
+            assert "[team: lopdev]" not in stream.requests[0].model_dump_json()
+
+            definitions.apply_bundle(
+                dest, definitions.local_bundle(source), origin_device="dev-source"
+            )
+            await session.prompt("the definition has landed")
+
+            assert session.active_team_name == "lopdev"
+            assert session._unresolved_team == ""
+            assert "[team: lopdev]" in stream.requests[-1].model_dump_json()
         finally:
             await session.dispose()
 

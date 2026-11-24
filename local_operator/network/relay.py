@@ -10957,11 +10957,14 @@ class RelayServer:
         # requirement rules out.
         attachment_agent = identity.agent_name if identity.instructions_attachable else ""
         if attachment_agent or identity.team_name:
-            from local_operator.resume import write_session_attachment
+            from local_operator.resume import bind_session_attachment
 
-            write_session_attachment(
-                session_dir, team=identity.team_name, agent=attachment_agent, goal=""
-            )
+            if not bind_session_attachment(
+                session_dir, team=identity.team_name, agent=attachment_agent, root=self.root
+            ):
+                raise MeshRefusal(
+                    "session_create_failed", "the selected session attachment could not be saved"
+                )
         if name:
             # THROUGH ``resume.write_session_title``, never a hand-rolled
             # ``title.json`` of our own. This write used to build the payload

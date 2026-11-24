@@ -109,6 +109,11 @@ class TestTheCloneItself:
         directory copy — which would bring across every file added to a session
         directory from now on, not just the ones known today.
         """
+        from local_operator.network.move_team import (
+            LOCAL_BINDING_NAME,
+            needs_reauthorization,
+        )
+
         parent = _seed_parent(tmp_path)
         (parent / ATTACHMENT_SIDECAR_NAME).write_text('{"team": "lopdev"}', encoding="utf-8")
         (parent / TITLE_SIDECAR_NAME).write_text('{"title": "Refactor"}', encoding="utf-8")
@@ -126,7 +131,10 @@ class TestTheCloneItself:
             FORK_BOUNDARY_NAME,  # written by the fork, not inherited
             "created_at.json",  # own birth, never the parent's inherited journal date
             "origin.json",  # written by the fork itself, not copied
+            LOCAL_BINDING_NAME,  # parent stamp was unreadable; child must not inherit authority
         }
+
+        assert needs_reauthorization(fork_dir)
 
     def test_a_parents_approval_choice_does_not_reach_the_fork(self, tmp_path: Path) -> None:
         """A FORK STARTS WITH NO APPROVAL CHOICE OF ITS OWN (2026-10-23).
@@ -1590,3 +1598,45 @@ def test_a_fork_of_a_temporary_chat_is_retained(tmp_path: Path) -> None:
     fork_id = fork_session(tmp_path, PARENT_ID)
     assert not temporary.is_marked(tmp_path, fork_id)
     assert temporary.is_marked(tmp_path, PARENT_ID)
+
+
+def test_fork_carries_team_identity_without_carrying_mesh_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator import fork
+    from local_operator.network.move_team import KEY, LOCAL_BINDING_NAME, source_offer
+    from local_operator.resume import read_session_attachment, write_session_attachment
+    from local_operator.session.placement import (
+        MESH_STAMP_NAME,
+        MeshStamp,
+        write_stamp_into,
+    )
+    from local_operator.teams import TeamEditFields, TeamRegistry
+    from tests.unit.network.test_mobility import _authorize_source, _open_team_session
+
+    parent = _seed_parent(tmp_path)
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="bound-team", instructions="original"))
+    _authorize_source(tmp_path, parent, team.name)
+    write_session_attachment(parent, team=team.name, agent="", goal="Keep this goal")
+    binding = source_offer(tmp_path, parent, supported=True)
+    assert binding is not None
+    write_stamp_into(parent, MeshStamp(session_id=PARENT_ID, origin={KEY: binding}))
+    (parent / LOCAL_BINDING_NAME).unlink()
+
+    real_copy = fork._copy_roles_tree
+
+    def check_before_commit(source: Path, target: Path) -> None:
+        assert read_session_attachment(target) is not None
+        assert not (target / LOCAL_BINDING_NAME).exists()
+        real_copy(source, target)
+
+    monkeypatch.setattr(fork, "_copy_roles_tree", check_before_commit)
+    child = parent.parent / fork_session(tmp_path, PARENT_ID)
+    assert (child / LOCAL_BINDING_NAME).is_file()
+    assert not (child / MESH_STAMP_NAME).exists()
+    assert read_session_attachment(child) == read_session_attachment(parent)
+    registry.update_team(team.id, TeamEditFields(instructions="other revision"))
+    reopened = _open_team_session(tmp_path, child)
+    assert reopened.active_team_name == team.name
+    assert "other revision" in reopened._goal_state.team_brief

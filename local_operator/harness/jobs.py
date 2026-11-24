@@ -664,6 +664,12 @@ class AsyncJob(BaseModel):
     # relationship, whereas a direct pick stays pinned across parent switches.
     model_selector: str | None = None
     model_selection_source: str = ""
+    # Why a live tier/effort edit was NOT applied to this child on a bound
+    # session (provider ceiling, mesh replica), shown inside the receipt's
+    # ``[selection: ...]``. "Refused, with the reason surfaced" is the
+    # requirement: a reason only in the log reads, on the receipt, as though
+    # the edit took effect.
+    model_selection_note: str = ""
     # The label the launch's PIN resolved to (a tier or role pin), stamped at
     # REGISTRATION beside ``owns_model`` and NEVER overwritten — the mirror of
     # the attribution stamp for the MODEL. ``model_label`` above is deliberately
