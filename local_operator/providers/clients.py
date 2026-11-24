@@ -991,7 +991,100 @@ def _openrouter_no_route(status: int | None, message: str) -> bool:
     return any(marker in lowered for marker in _OPENROUTER_NO_ROUTE_MARKERS)
 
 
-def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
+# A code-less error from the upstream HTTP/2 body reader, not the generic
+# “Stream error” heading (which can also carry a provider's refusal).
+_H2_BODY_READ_STREAM_ERROR = "Stream error: h2 protocol error: error reading a body from connection"
+
+
+def _has_explicit_error_disposition(fields: Mapping[str, Any]) -> bool:
+    # OpenRouter's Chat Completions SSE schema also carries the normalized
+    # error type and original provider code in metadata. A status-less
+    # classification must not override either, wherever the gateway put it.
+    metadata = fields.get("metadata")
+    return any(key in fields for key in ("code", "status", "type", "error_type")) or (
+        isinstance(metadata, Mapping)
+        and any(key in metadata for key in ("error_type", "provider_code"))
+    )
+
+
+def _is_simple_h2_body_read_frame(chunk: Mapping[str, Any], data: str) -> bool:
+    # Only the synthetic simple frame qualifies without an authoritative code.
+    # An extra field may carry a disposition hidden by message rendering (for
+    # example metadata.raw). Leave unknown shapes on the ordinary error path;
+    # coded relay failures have their own classifier in failover.
+    if chunk.keys() != {"error", "id", "object", "created", "model", "choices"}:
+        return False
+    error, choices = chunk["error"], chunk["choices"]
+    if not isinstance(error, Mapping) or error != {"message": _H2_BODY_READ_STREAM_ERROR}:
+        return False
+    response_id, model, created = chunk["id"], chunk["model"], chunk["created"]
+    if not (
+        chunk["object"] == "chat.completion.chunk"
+        and isinstance(response_id, str)
+        and response_id.strip()
+        and isinstance(model, str)
+        and model.strip()
+        and type(created) is int
+        and created >= 0
+        and isinstance(choices, list)
+        and len(choices) == 1
+    ):
+        return False
+    choice = choices[0]
+    # JSON booleans and floats compare equal to Python integers. They aren't
+    # valid index framing and must not qualify by equality alone.
+    if not (
+        isinstance(choice, Mapping)
+        and type(choice.get("index")) is int
+        and choice == {"index": 0, "delta": {}, "finish_reason": "error"}
+    ):
+        return False
+
+    # The normal JSON decoder is last-wins. Recheck only a recovery candidate
+    # so a duplicate key cannot erase a verdict, without changing other SSE
+    # handling (including coded relays).
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        fields = dict(pairs)
+        if len(fields) != len(pairs):
+            raise ValueError("duplicate SSE object key")
+        return fields
+
+    try:
+        json.loads(data, object_pairs_hook=unique_object)
+    except ValueError:
+        return False
+    return True
+
+
+def _has_competing_stream_choice(chunk: Mapping[str, Any]) -> bool:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            continue
+        # `error` only marks the SSE terminator. Any other explicit finish
+        # (e.g. content_filter), or dedicated refusal payload, is independent
+        # evidence. Check all choices before the error short-circuits parsing.
+        if (
+            _has_explicit_error_disposition(choice)
+            or isinstance(choice.get("error"), (Mapping, str))
+            or any(
+                choice.get(key) not in (None, "", "error")
+                for key in ("finish_reason", "native_finish_reason")
+            )
+        ):
+            return True
+        for key in ("delta", "message"):
+            content = choice.get(key)
+            if isinstance(content, Mapping) and content.get("refusal"):
+                return True
+    return False
+
+
+def _compat_stream_error(
+    chunk: Mapping[str, Any], *, prior_disposition: bool = False, wire_data: str | None = None
+) -> ProviderError:
     """An in-band mid-stream failure on an OpenAI-compatible stream.
 
     Once a gateway has committed HTTP 200 it can no longer signal an upstream
@@ -1048,12 +1141,18 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
         message = error_type or "provider ended the stream with an error"
     elif error_type and error_type not in message:
         message = f"{error_type}: {message}"
-    return ProviderError(
+    failure = ProviderError(
         status,
         _capped(message),
         retryable=(relayed_upstream or status is None or status == 429 or status >= 500),
         auth_error=status in (401, 403),
     )
+    failure.in_band_h2_body_read_failure = (
+        not prior_disposition
+        and wire_data is not None
+        and _is_simple_h2_body_read_frame(chunk, wire_data)
+    )
+    return failure
 
 
 #: Ceiling on any advertised wait. A ``Retry-After`` is provider-supplied and
@@ -4038,6 +4137,7 @@ class OpenAICompatClient:
         replay_text: list[str] = []
         replay_calls: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
+        prior_disposition = False
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
         # Refusal prose arrives in its own delta slot (``delta.refusal``), not
@@ -4136,7 +4236,13 @@ class OpenAICompatClient:
                         # 200, so this chunk is the only channel the failure has.
                         # Raise it NAMED; swallowing it left turns dying as
                         # wordless interruptions (see _compat_stream_error).
-                        raise _compat_stream_error(chunk)
+                        raise _compat_stream_error(
+                            chunk, prior_disposition=prior_disposition, wire_data=data
+                        )
+                    if not prior_disposition:
+                        # A refusal/finish can arrive in a separate SSE frame.
+                        # Retain it for the narrow H2 recovery decision only.
+                        prior_disposition = _has_competing_stream_choice(chunk)
                     if not started:
                         # First decoded chunk: the request is on the wire and the
                         # provider is generating. Announce the boundary HERE rather

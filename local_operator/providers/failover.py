@@ -840,6 +840,10 @@ class ProviderError(RenderedStreamError):
     #: capped. Declared here so the stamp is a typed attribute, not a monkey-patch.
     content_verdict_seen: bool = False
 
+    #: Stamped only by the SSE parser for the code-less HTTP/2 body-read report.
+    #: This is evidence from the gateway, not a local socket error (`transport`).
+    in_band_h2_body_read_failure: bool = False
+
     def __init__(
         self,
         status: int | None,
@@ -1971,8 +1975,10 @@ def is_aggregator_upstream_stream_failure(error: BaseException, provider: str | 
     The status gate keeps every REFUSAL terminal. A 4xx is the gateway
     answering about OUR request — a bad model slug, a bad field, auth, quota,
     moderation — and it is deterministic in its bytes, so re-asking earns the
-    same answer while spending the turn's continuation budget. Only a 5xx is a
-    statement about the gateway's own side of the hop.
+    same answer while spending the turn's continuation budget. The only
+    status-less exception is Radient's relayed HTTP/2 body-read failure: the
+    SSE parser must positively identify it before non-HTTP codes and other
+    wire fields are lost.
 
     A 5xx qualifies on EITHER of two kinds of evidence, and the second exists
     because the first cannot cover the incident's whole class:
@@ -2007,7 +2013,9 @@ def is_aggregator_upstream_stream_failure(error: BaseException, provider: str | 
 
     if provider not in AGGREGATOR_PROVIDERS:
         return False
-    if error.status is None or error.status < 500:
+    if error.status is None:
+        return provider in {"radient", "radient-key"} and error.in_band_h2_body_read_failure
+    if error.status < 500:
         return False
     # Imported at call time for the same reason as `registry` above: `clients`
     # imports THIS module at module scope for `ProviderError`, so the reverse
@@ -2046,10 +2054,8 @@ def _mark_mid_stream_connectivity(error: ProviderError, *, provider: str | None 
       passed in by the driver because the predicate needs the identity and this
       helper cannot recover it from the error. Only the forwarded-any
       ``ProviderError`` arm passes it: that is the arm an aggregator's IN-BAND
-      report arrives on. The transport arm deliberately calls this bare —
-      ``wrap_transport_error``'s result is status-less by construction, so the
-      aggregator predicate cannot fire there and passing a provider would only
-      suggest it could.
+      report arrives on. The transport arm calls this bare: a local transport
+      exception is not an in-band gateway report.
 
     Never clears the flag — a pre-connect connectivity loss that somehow
     surfaces here is still one. Only ever an upgrade.
