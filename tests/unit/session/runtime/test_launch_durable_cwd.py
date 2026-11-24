@@ -109,9 +109,21 @@ def test_the_marker_is_the_sessions_own_directory(tmp_path: Path) -> None:
 
 
 def test_a_session_with_no_record_has_no_opinion(tmp_path: Path) -> None:
-    """FRESH SESSIONS still fall through to HOME, unchanged."""
+    """A SUBAGENT-shaped session (no marker, no ledger, no wake index) keeps HOME."""
     config, _own, _other = _tree(tmp_path)
     assert _durable_cwd_for_restart(config, OWN) == ""
+
+
+def test_the_wake_index_is_the_second_source(tmp_path: Path) -> None:
+    """No desktop marker (a terminal-created session): the ledger still answers."""
+    from local_operator.harness.wake_types import WakeSchedule
+    from local_operator.wakes.store import write_entry
+
+    config, own, _other = _tree(tmp_path)
+    row = WakeSchedule(id="w1", message="tick", next_due_at=4_000_000_000_000)
+    written = write_entry(config, OWN, cwd=str(own), schedules=[row])
+    assert written is not None
+    assert _durable_cwd_for_restart(config, OWN) == str(own)
 
 
 def test_a_recorded_directory_that_is_gone_is_skipped(tmp_path: Path) -> None:
@@ -173,6 +185,27 @@ def test_a_recorded_move_outranks_the_record(tmp_path: Path) -> None:
     assert seen == [str(other)]
 
 
+def test_a_caller_naming_the_move_source_follows_the_move(tmp_path: Path) -> None:
+    """PRE-EXISTING, UNCHANGED: naming the source IS the move's documented case.
+
+    ``cwd_move.spawn_cwd_for_session`` treats a request for the directory a move
+    left as a request for the session, so a wake or a peer note still standing in
+    the old tree lands in the destination. That rule is the fix for a move that
+    survived exactly one start, and it keeps priority over this PR's "an explicit
+    cwd wins" rule — the two collide only here, and this cell pins which one wins.
+    """
+    config, own, other = _tree(tmp_path)
+    _record_cwd(config, other)
+    intent = cwd_move.enqueue_self_move(
+        config, OWN, requested_cwd=str(other), effective_cwd=str(own), owner_pid=1
+    )
+    handoff = cwd_move.accept_handoff(config, OWN, intent)
+    assert handoff is not None and handoff.stage == cwd_move.STAGE_HANDOFF
+    with _captured_spawn() as seen:
+        _spawn_runtime(OWN, str(own), defer_materialise=False, config_dir=config)
+    assert seen == [str(other)]
+
+
 def test_no_record_and_no_move_falls_back_to_home(tmp_path: Path) -> None:
     config, _own, _other = _tree(tmp_path)
     with _captured_spawn() as seen:
@@ -186,21 +219,39 @@ def test_no_record_and_no_move_falls_back_to_home(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("errand_kind", ["wake", "peer"])
-async def test_a_cold_wake_and_a_cold_peer_note_start_in_the_sessions_directory(
+@pytest.mark.parametrize("errand_kind", ["wake", "peer", "warm"])
+async def test_a_cold_wake_a_cold_peer_note_and_a_warm_engage_start_in_the_sessions_directory(
     tmp_path: Path, spawn_seen: list[str], errand_kind: str
 ) -> None:
     config, own, _other = _tree(tmp_path)
     _record_cwd(config, own)
+    errand: Any
     if errand_kind == "wake":
-        errand: Any = launch.WakeErrand(schedule_id="", occurrence_ms=0, command_id="c1")
-    else:
+        errand = launch.WakeErrand(schedule_id="", occurrence_ms=0, command_id="c1")
+    elif errand_kind == "peer":
         errand = launch.PeerMessageErrand(
             text="hello", mode="mailbox", wake=True, sender={"pid": 0}
         )
+    else:
+        errand = launch.WarmErrand()
     with pytest.raises((RuntimeStartupError, TimeoutError)):
         await asyncio.wait_for(
             engage_runtime(OWN, "", errand, config_dir=config, deadline_s=5.0),
             timeout=30,
         )
     assert spawn_seen == [str(own)], "the respawn keeps the session in its own directory"
+
+
+def test_the_hosted_fork_route_is_handed_the_same_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host route forks the child, but the DIRECTORY is decided here."""
+    from local_operator.session.runtime import session_host
+
+    config, own, _other = _tree(tmp_path)
+    _record_cwd(config, own)
+    seen: list[str] = []
+    monkeypatch.setattr(session_host, "spawn_authority", lambda: session_host.AUTHORITY_HOST)
+    monkeypatch.setattr(launch, "_spawn_runtime_hosted", lambda _sid, cwd, **_k: seen.append(cwd))
+    _spawn_runtime(OWN, "", defer_materialise=False, config_dir=config)
+    assert seen == [str(own)]
