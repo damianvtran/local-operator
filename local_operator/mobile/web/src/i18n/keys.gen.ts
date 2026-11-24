@@ -106,6 +106,10 @@ export type MessageParams = {
   "relay.asks.gate.unpaired_before": undefined;
   "relay.asks.gate.unpaired_middle": undefined;
   "relay.asks.gate.unpaired_run_label": undefined;
+  "relay.asks.id.copied": undefined;
+  "relay.asks.id.copied_named": { "id": string };
+  "relay.asks.id.copy_failed": undefined;
+  "relay.asks.id.copy_label": { "id": string };
   "relay.asks.pending.approve": undefined;
   "relay.asks.pending.deny": undefined;
   "relay.asks.pending.kind_approval": undefined;

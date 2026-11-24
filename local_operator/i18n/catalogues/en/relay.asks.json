@@ -85,5 +85,9 @@
   "relay.asks.card.progress_tally": "{answered} of {total} questions answered or skipped",
   "relay.asks.card.progress_pick_or_type": "Pick an option or type your own answer to send.",
   "relay.asks.card.progress_type": "Type an answer or skip the question to send.",
-  "relay.asks.card.other_kept": "Your text is kept, not sent"
+  "relay.asks.card.other_kept": "Your text is kept, not sent",
+  "relay.asks.id.copy_label": "Copy ask id {id}",
+  "relay.asks.id.copied": "Copied",
+  "relay.asks.id.copied_named": "Copied {id}",
+  "relay.asks.id.copy_failed": "Couldn't copy — the id is selected; copy it from there"
 }

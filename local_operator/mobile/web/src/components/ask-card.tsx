@@ -43,6 +43,7 @@ import type { ReactNode } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
 import { ASK_QUESTION_FRACTION, columnCap } from "../lib/column";
+import { AskIdFoot } from "./ask-id";
 import {
 	type AskTone,
 	answeredPairs,
@@ -678,6 +679,7 @@ export function AskCard({
 	footerSlot,
 	lead,
 	hideState = false,
+	hideId = false,
 	focusQuestion = false,
 	onFocused,
 }: {
@@ -715,6 +717,10 @@ export function AskCard({
 	/** The state line is stated once by the collapsed row an expanded receipt
 	    sits under, so the card does not say it a second time. */
 	hideState?: boolean;
+	/** The id is already stated by the collapsed row an expanded receipt sits
+	    under (the row keeps its quiet id line while open), so the card does not
+	    show a second copy of the same six characters. */
+	hideId?: boolean;
 	/** Move focus to the first question's text once, on mount (after a send, the
 	    reader's place moves to the next ask), then say so through `onFocused`. */
 	focusQuestion?: boolean;
@@ -1171,6 +1177,11 @@ export function AskCard({
 					    all (§5) — the remedy is in the state line. */}
 				</>
 			)}
+			{/* THE ID AT THE FOOT, quiet and copyable (spec §2): it is how a reader
+			    matches the `a-e53b` an agent quoted without reading the card's prose.
+			    Muted ink on the card ground is pinned at 4.5:1 by the contrast
+			    contract; the tap target is the child's own 44 px box. */}
+			{hideId ? null : <AskIdFoot askId={row.ask_id} />}
 		</>
 	);
 

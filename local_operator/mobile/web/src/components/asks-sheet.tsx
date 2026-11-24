@@ -41,6 +41,7 @@ import { contentDir } from "../lib/content-direction";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getAsks } from "../api";
 import { AskCard, askStateOf, askToneClass } from "./ask-card";
+import { AskIdFoot } from "./ask-id";
 import { Chevron } from "./ui/disclosure";
 import { Sheet } from "./ui/sheet";
 import {
@@ -448,13 +449,18 @@ export function AsksSheet({
 		const asked = questionStart(row);
 		return (
 			<div key={`${sessionOf(row)}:${row.ask_id}`} className="flex flex-col gap-1">
+				{/* THE ID SITS BESIDE THE ROW, not inside it (spec §2, §4): the row is
+				    one button, and a copy control nested in a button is invalid HTML and
+				    unreachable as its own target. The foot keeps the click-to-copy door
+				    at the 44 px floor while the row keeps its whole-line press. */}
+				<div className="flex items-start gap-1">
 				<button
 					type="button"
 					aria-expanded={expanded}
 					data-testid="ask-row"
 					data-ask-id={row.ask_id}
 					onClick={() => setChoice(expanded ? undefined : row.ask_id)}
-					className="flex min-h-11 w-full items-start gap-2 rounded-sm py-1 text-start active:bg-surface"
+					className="flex min-h-11 min-w-0 flex-1 items-start gap-2 rounded-sm py-1 text-start active:bg-surface"
 				>
 					{/* THE QUESTION LEADS, the state sentence follows on its own line and is
 					    never cut: a waiting row is read for WHAT it asks first, and the state
@@ -485,12 +491,15 @@ export function AsksSheet({
 					</span>
 					<Chevron open={expanded} className="mt-0.5" />
 				</button>
+					<AskIdFoot askId={row.ask_id} className="shrink-0" />
+				</div>
 				{expanded ? (
 					<AskCard
 						row={row}
 						sessionId={sessionOf(row)}
 						nowMs={nowMs}
 						hideState
+						hideId
 						onSettled={(kind) => settled(row, kind)}
 						onDismissed={dismissed}
 					/>

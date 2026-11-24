@@ -126,6 +126,10 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.asks.gate.unpaired_before": "This phone is not paired with that machine, so",
       "relay.asks.gate.unpaired_middle": "will ask you to pair it first. Keeping approvals at",
       "relay.asks.gate.unpaired_run_label": "run without asking",
+      "relay.asks.id.copied": "Copied",
+      "relay.asks.id.copied_named": "Copied {id}",
+      "relay.asks.id.copy_failed": "Couldn't copy \u2014 the id is selected; copy it from there",
+      "relay.asks.id.copy_label": "Copy ask id {id}",
       "relay.asks.pending.approve": "approve",
       "relay.asks.pending.deny": "deny",
       "relay.asks.pending.kind_approval": "approval needed",
@@ -684,11 +688,4 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
  * rather than mixing two languages under one page tag. */
 export const BUNDLED_CHUNKS: Readonly<Record<string, () => Promise<
  { readonly BUNDLED_LOCALE: typeof BUNDLED_OWNED }>>> = {
-  "es": () => import("./bundled.es.gen"),
-  "fr": () => import("./bundled.fr.gen"),
-  "hi": () => import("./bundled.hi.gen"),
-  "ru": () => import("./bundled.ru.gen"),
-  "ur": () => import("./bundled.ur.gen"),
-  "vi": () => import("./bundled.vi.gen"),
-  "zh-CN": () => import("./bundled.zh-CN.gen"),
 };

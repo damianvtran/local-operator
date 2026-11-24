@@ -233,6 +233,22 @@ def gate_unpaired_run_label() -> Msg:
     return Msg("relay.asks.gate.unpaired_run_label", {})
 
 
+def id_copied() -> Msg:
+    return Msg("relay.asks.id.copied", {})
+
+
+def id_copied_named(*, id: str) -> Msg:
+    return Msg("relay.asks.id.copied_named", {"id": id})
+
+
+def id_copy_failed() -> Msg:
+    return Msg("relay.asks.id.copy_failed", {})
+
+
+def id_copy_label(*, id: str) -> Msg:
+    return Msg("relay.asks.id.copy_label", {"id": id})
+
+
 def pending_approve() -> Msg:
     return Msg("relay.asks.pending.approve", {})
 
