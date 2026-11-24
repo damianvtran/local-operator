@@ -698,7 +698,7 @@ def test_trailing_unterminated_link_is_cut_to_its_anchor(mode: str, terminator: 
     assert "](https://en.wikipedia.org/wiki/Rob_(polit" not in out
 
 
-@pytest.mark.parametrize("cut", ["h", "http", "https:", "https:/", "HTTP:/"])
+@pytest.mark.parametrize("cut", ["http", "https", "https:", "https:/", "HTTP:/"])
 def test_link_cut_inside_its_scheme_is_cut_to_its_anchor(cut: str) -> None:
     """Run 2, rec-006: ``... trailed [Pierre Poilievre](http`` ended a chunk."""
     text = (
@@ -707,11 +707,32 @@ def test_link_cut_inside_its_scheme_is_cut_to_its_anchor(cut: str) -> None:
     assert normalize_markdown(text, keep_prose_links=False) == "a and b\ntrailed Pierre Poilievre"
 
 
-def test_scheme_cut_tail_is_cut_even_with_no_other_link() -> None:
-    """Regression (replay): the text had no ``//`` link left to pass the gate."""
+def test_scheme_cut_tail_needs_the_web_markdown_gate() -> None:
+    """PR #4540 review m2: a text with no absolute link, image or cite marker
+    is not web content, so even a ``](http`` tail keeps its bytes there."""
     text = "By late 2024 the government trailed [Pierre Poilievre](http"
-    assert normalize_markdown(text) == "By late 2024 the government trailed Pierre Poilievre"
+    assert normalize_markdown(text) == text
+    assert normalize_tool_text(text, "strip-links", tool_name="fetch") == text
     assert normalize_markdown("plain text, no links\n") == "plain text, no links\n"
+
+
+@pytest.mark.parametrize(
+    "tail", ["handlers[key](h", "callbacks[key](h", "cfg[name](ht", "x = f[k](htt"]
+)
+@pytest.mark.parametrize("signal", [False, True], ids=["code-only", "with-web-link"])
+@pytest.mark.parametrize("mode", ["prose-links", "strip-links"])
+def test_code_tail_cut_before_http_keeps_its_bytes(tail: str, signal: bool, mode: str) -> None:
+    """PR #4540 review m2 / QA Q2 repros: a chunk cut at ``(h`` or ``(ht`` in
+    code is not a link; below ``http`` the scheme prefix is an identifier."""
+    head = "[doc](https://docs.python.org/3/) at top\n" if signal else "x = 1\n"
+    for text in (head + "result = " + tail, head + "result = " + tail + "\n"):
+        expected = normalize_markdown(head, keep_prose_links=mode == "prose-links")
+        out = normalize_tool_text(text, mode, tool_name="read_file")
+        assert out.endswith("result = " + tail + ("\n" if text.endswith("\n") else ""))
+        if not signal:
+            assert out == text
+        else:
+            assert out.startswith(expected.rstrip("\n"))
 
 
 def test_trailing_short_non_url_target_keeps_its_bytes() -> None:
@@ -998,6 +1019,12 @@ def test_top_level_hit_list_renders_without_a_header() -> None:
         (json.dumps({"url": "https://x.example", "content": "c", "bad key": 1}), "fetch"),
         (json.dumps({"url": "https://x.example", "content": "c\ud800"}), "fetch"),
         (json.dumps({"content": "no url"}), "fetch"),
+        # PR #4540 review m3: a repository file is not a fetched page.
+        (
+            json.dumps({"url": "src/app.py", "content": "def f():\n    pass\n", "sha": "abc"}),
+            "get_file_contents",
+        ),
+        (json.dumps({"url": "file:///etc/hosts", "content": "127.0.0.1 localhost"}), "fetch"),
     ],
     ids=[
         "non-search",
@@ -1007,6 +1034,8 @@ def test_top_level_hit_list_renders_without_a_header() -> None:
         "bad-key",
         "surrogate-content",
         "no-url",
+        "relative-url",
+        "file-url",
     ],
 )
 def test_other_shapes_are_never_rendered(payload: str, tool_name: str) -> None:
@@ -1069,98 +1098,73 @@ def test_rendering_is_idempotent(mode: str) -> None:
         assert _render(once, tool_name=tool, mode=mode) == once
 
 
-# --- result shaping v2: boilerplate section elision (structural-economy §5) --
+# --- no section elision: page content is never cut (PR #4540 M2/M3/Q1) -----
+#
+# A heading-based "drop References / See also / Notes" lever deleted lines from
+# fetched code, config and READMEs and swallowed the section after a setext
+# heading; it was removed. These are the review's and QA's repros: each comes
+# back exactly as PR #4525 left it (the JSON byte-identical under
+# ``prose-links`` -- #4525 returned it unchanged -- and the rendered page's
+# content equal to the server's content).
 
-_WIKI = "\n".join(
-    [
-        "# Olivia Chow",
-        "",
-        "Olivia Chow (born 24 March 1957) is the 66th mayor of Toronto.",
-        "",
-        "## Career",
-        "",
-        "She served on Toronto City Council from 1991 to 2005.",
-        "",
-        "### Notes",
-        "",
-        "1. A footnote that is not a cited fact.",
-        "",
-        "### Electoral record",
-        "",
-        "Won the 2023 by-election.",
-        "",
-        "## See also",
-        "",
-        "* Jack Layton",
-        "",
-        "## References",
-        "",
-        "1. Smith, J. (2023). *Chow wins*.",
-        "",
-        "```",
-        "## Not a heading inside code",
-        "```",
-        "",
-        "## External links",
-        "",
-        "* Official site",
-        "",
-        "## Personal life",
-        "",
-        "Chow married Jack Layton in 1988.",
-        "",
-        "## Further reading",
-        "",
-        "* A book",
-    ]
+_QA_PY = (
+    "#!/usr/bin/env python3\n"
+    "# Notes\n"
+    "# This module keeps handlers[name](arg) calls and [x](https://example.com/x) strings.\n"
+    "import os\n\n"
+    "# References\n"
+    'URL = "[doc](https://docs.python.org/3/)"\n'
+    "def tail():\n"
+    "    return '[cut](https://example.com/cu'\n"
+    "#\n"
+    "def main():\n"
+    "    return os.getcwd()\n"
 )
+_QA_README = (
+    "# tool\n\nA small tool. See [docs](https://example.com/docs).\n\n"
+    "## Notes\n\nRequires Python 3.12; set FOO=1 before running (AUTHOR-NOTE).\n"
+    "Do NOT run with --force on prod.\n\n"
+    "## Usage\n\n    tool --help\n"
+)
+_QA_CI = (
+    "name: ci\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+    "      - uses: actions/checkout@v4\n"
+    "# See also\n"
+    "      - run: make test\n"
+    "      - run: make deploy\n"
+    "# docs: [guide](https://example.com/ci)\n"
+)
+_REVIEW_SETEXT = (
+    "Title\n=====\n\n### References\n\n1. ref\n\nBiography\n---------\n\n"
+    "Born in 1957 in Hong Kong.\n\n### Early life\n\ntext\n"
+)
+_RAW = "https://raw.githubusercontent.com/o/r/main/"
+_NO_ELISION_CASES = {
+    "qa-py": {"url": _RAW + "x.py", "content": _QA_PY},
+    "qa-readme": {"url": _RAW + "README.md", "content": _QA_README},
+    "qa-ci-yml": {"url": _RAW + ".github/workflows/ci.yml", "content": _QA_CI},
+    "review-setext": {"url": "https://en.wikipedia.org/wiki/X", "content": _REVIEW_SETEXT},
+    "review-github-contents": {
+        "url": "https://api.github.com/repos/a/b/contents/README.md",
+        "content": "# b\n\n## Notes\n\nkeep me\n",
+        "sha": "abc",
+    },
+}
 
 
-def _page(content: str, url: str = "https://en.wikipedia.org/wiki/Olivia_Chow") -> str:
-    return json.dumps({"url": url, "content": content, "offset": 0, "total_chars": len(content)})
-
-
-@pytest.mark.parametrize("mode", ["prose-links", "strip-links"])
-def test_boilerplate_sections_are_dropped_from_page_content(mode: str) -> None:
-    content = json.loads(normalize_tool_text(_page(_WIKI), mode))["content"]
-    assert content == "\n".join(
-        [
-            "# Olivia Chow",
-            "",
-            "Olivia Chow (born 24 March 1957) is the 66th mayor of Toronto.",
-            "",
-            "## Career",
-            "",
-            "She served on Toronto City Council from 1991 to 2005.",
-            "",
-            "### Electoral record",
-            "",
-            "Won the 2023 by-election.",
-            "",
-            "## Personal life",
-            "",
-            "Chow married Jack Layton in 1988.",
-        ]
-    )
-
-
-def test_section_elision_is_only_for_page_payloads() -> None:
-    # Plain markdown text (a README read, a docs tool) keeps its Notes section.
-    plain = _WIKI + "\n[x](https://x.example)"
-    assert "### Notes" in normalize_tool_text(plain, "prose-links")
-    # A JSON leaf that is not a fetched page keeps it too.
-    issue = json.dumps({"title": "Bug", "body": _WIKI + "\n" + "detail " * 40})
-    assert "## References" in json.loads(normalize_tool_text(issue, "prose-links"))["body"]
-    # A relative/non-web ``url`` is not a fetched page.
-    relative = normalize_tool_text(_page(_WIKI, url="docs/a.md"), "prose-links")
-    assert "## References" in json.loads(relative)["content"]
-    # ``off`` is the identity.
-    assert normalize_tool_text(_page(_WIKI), "off") == _page(_WIKI)
-
-
-def test_section_elision_keeps_nav_chrome_lines_and_is_idempotent() -> None:
-    """Rejected lever (lost a cited fact): short chrome-looking lines stay."""
-    content = "Minister of Foreign Affairs\nShare\nEdit links\n\n## References\n\n* ref"
-    once = normalize_tool_text(_page(content), "prose-links")
-    assert json.loads(once)["content"] == "Minister of Foreign Affairs\nShare\nEdit links"
-    assert normalize_tool_text(once, "prose-links") == once
+@pytest.mark.parametrize("tool_name", ["fetch", "get_file_contents"])
+@pytest.mark.parametrize("case", sorted(_NO_ELISION_CASES))
+def test_page_content_is_never_section_elided(case: str, tool_name: str) -> None:
+    payload = _NO_ELISION_CASES[case]
+    raw = json.dumps(payload)
+    # PR #4525 behaviour (no rendering): the server's exact bytes.
+    assert normalize_tool_text(raw, "prose-links", tool_name=tool_name) == raw
+    # Rendered: header lines, a blank line, then the content verbatim.
+    rendered = normalize_tool_text(raw, "prose-links", tool_name=tool_name, text_rendering=True)
+    assert rendered.split("\n\n", 1)[1] == payload["content"]
+    # strip-links rewrites only links (#4525); every line, heading and step stays.
+    stripped = json.loads(normalize_tool_text(raw, "strip-links", tool_name=tool_name))
+    assert stripped["content"].count("\n") == payload["content"].count("\n")
+    for line in payload["content"].split("\n"):
+        if "](" not in line:
+            assert line in stripped["content"].split("\n")

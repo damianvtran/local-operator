@@ -2872,6 +2872,9 @@ class McpManager:
             continuation.cancel()
             gate_task.cancel()
         self._pending_continuations.clear()
+        # The ledgers describe what models of this manager's sessions were
+        # shown; a disposed manager serves none of them any more (review m5).
+        self._seen_urls.clear()
         for name, future in self._connect_futures.items():
             # Settle with an error (never cancel): a cancelled future would
             # surface as CancelledError in waiters; deferred executes need a
@@ -4892,17 +4895,36 @@ class McpManager:
             )
         )
 
-    def _seen_url_ledger(self, session_id: str) -> SeenUrlLedger:
-        """The session's ``SeenUrlLedger``, created on first use.
+    def _seen_url_ledger(self, session_id: str) -> SeenUrlLedger | None:
+        """The session's ``SeenUrlLedger``, created on first use; ``None`` with no id.
 
         Keyed by session id because one manager can serve several sessions (a
-        borrowing subagent, the server host). Never pruned: an entry is a set
-        of short URL strings (184 search hits plus 49 fetches over all 12
-        records of POC run 2), small next to the transcript the same session
-        keeps in memory. ``dict.setdefault`` is atomic under the GIL, and this
-        runs on the event loop, so two calls cannot create two ledgers.
+        borrowing subagent, the server host). A caller without a session id
+        (an SDK probe, a test host) gets no ledger at all and so no elision:
+        keyed on ``""`` every such caller would share one, and one of them
+        would lose snippets because another saw the URL (review m4; the same
+        rule as ``capture_producer_scope``). A ledger is dropped when its
+        session compacts or is disposed (``forget_seen_urls``) and is bounded
+        (``SeenUrlLedger.MAX_URLS_DEFAULT``). ``dict.setdefault`` is atomic
+        under the GIL, and this runs on the event loop, so two calls cannot
+        create two ledgers.
         """
+        if not session_id:
+            return None
         return self._seen_urls.setdefault(session_id, SeenUrlLedger())
+
+    def forget_seen_urls(self, session_id: str) -> None:
+        """Drop ``session_id``'s seen-URL ledger.
+
+        Called by the session when a compaction commits (the earlier results
+        and their snippets have left the model's context, so a repeat hit must
+        carry its snippet again: review M1) and when it is disposed (review
+        m5). A result formatting concurrently keeps recording into the ledger
+        it already holds, which is then unreachable: the next result starts
+        from an empty ledger, which can only show a snippet again, never hide
+        one. Idempotent; an unknown or empty id is a no-op.
+        """
+        self._seen_urls.pop(session_id, None)
 
     async def _race_abort(
         self, coro: Coroutine[Any, Any, _RaceT], signal: AbortSignal | None

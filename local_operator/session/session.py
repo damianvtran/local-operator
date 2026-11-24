@@ -31247,6 +31247,30 @@ class Session:
             self._published_tools = None
         return changed
 
+    def _forget_mcp_seen_urls(self) -> None:
+        """Drop this session's MCP seen-URL ledger (``McpManager.forget_seen_urls``).
+
+        The ledger lets an MCP search drop the snippet of a hit whose URL the
+        model was already shown. That is only true while the earlier result is
+        still in the model's context: a compaction commit replaces it with a
+        summary under the SAME session id, so without this the session would
+        keep eliding snippets the model no longer has (PR #4540 review M1).
+        Called at the compaction commit and on dispose (review m5: a long-lived
+        manager otherwise keeps one ledger per session it ever served). Read
+        off ``mcp_manager`` -- a subagent's is its parent's borrowed manager,
+        keyed by the child's own id -- with ``getattr`` because hosts install
+        other managers (``SnapshotMcpManager``, test fakes) that have no
+        ledger. Best-effort: bookkeeping must never fail a compaction or a
+        dispose.
+        """
+        forget = getattr(getattr(self, "mcp_manager", None), "forget_seen_urls", None)
+        if forget is None:
+            return
+        try:
+            forget(self._session_id)
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("MCP seen-URL ledger reset failed", exc_info=True)
+
     async def _plan_compaction(
         self, *, respect_threshold: bool, parked_hint: Any | None = None
     ) -> _CompactionPlan | CompactionOutcome:
@@ -32723,6 +32747,9 @@ class Session:
             # The commit has landed: the next request re-writes the history, so
             # idle published MCP schemas leave the tools array on THAT request.
             self._demote_cold_mcp_tools()
+            # ...and the MCP results before it left the model's context, so a
+            # repeat search hit must carry its snippet again.
+            self._forget_mcp_seen_urls()
             outcome = CompactionOutcome(
                 ran=True,
                 strategy=plan.strategy,
@@ -40290,6 +40317,9 @@ class Session:
                 # Own finally: a fault in the notice flush or console cleanup must
                 # not leak this session's servers (the reap never raises itself).
                 await self._reap_session_process_groups()
+                # The manager can outlive this session (a borrowed parent
+                # manager, the server host): drop its ledger. Never raises.
+                self._forget_mcp_seen_urls()
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:

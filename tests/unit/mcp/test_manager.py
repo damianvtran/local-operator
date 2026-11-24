@@ -864,6 +864,54 @@ class TestDroppedArgumentNote:
         assert "Mayor." in await call("watched")  # ... and it recorded nothing
         await manager.disconnect_all()
 
+    async def _ledger_tool(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[McpManager, Callable[[str], Any]]:
+        hit = {"title": "Olivia Chow", "url": "https://example.com/chow", "snippet": "Mayor."}
+        raw = json.dumps({"query": "q", "results": [hit]})
+        session = FakeSession(
+            call_result=CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False)
+        )
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        async def call(session_id: str) -> str:
+            ctx = ToolContext(session_id=session_id)
+            return (await tool.execute("c", {"command": "q"}, None, None, ctx)).text
+
+        return manager, call
+
+    @pytest.mark.asyncio
+    async def test_forget_seen_urls_lets_a_post_compaction_repeat_keep_its_snippet(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR #4540 review M1: after a compaction the model no longer has the
+        earlier snippet, so the session's ledger is dropped and a repeat hit
+        carries its snippet again; another session's ledger is untouched."""
+        manager, call = await self._ledger_tool(project, monkeypatch)
+        assert "Mayor." in await call("parent")
+        assert "Mayor." in await call("other")
+        assert "Mayor." not in await call("parent")  # control: elided before compaction
+        manager.forget_seen_urls("parent")  # what the compaction commit calls
+        assert "Mayor." in await call("parent")  # seen before compaction, shown again
+        assert "Mayor." not in await call("parent")  # ...and the new ledger works
+        assert "Mayor." not in await call("other")  # other session keeps its ledger
+        manager.forget_seen_urls("never-seen")  # unknown id: no-op
+        manager.forget_seen_urls("")
+        await manager.disconnect_all()
+        assert manager._seen_urls == {}  # review m5: teardown drops every ledger
+
+    @pytest.mark.asyncio
+    async def test_a_caller_without_a_session_id_gets_no_ledger(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR #4540 review m4: id-less callers never share one ``""`` ledger."""
+        manager, call = await self._ledger_tool(project, monkeypatch)
+        assert "Mayor." in await call("")
+        assert "Mayor." in await call("")  # no elision without a session id
+        assert "" not in manager._seen_urls
+        await manager.disconnect_all()
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "machine_read",

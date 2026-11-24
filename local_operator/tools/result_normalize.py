@@ -85,12 +85,14 @@ Constraints
   back to the exact input.
 * **No evidence removed.** Nothing here selects passages, deduplicates or
   truncates page text: those levers measurably dropped cited support. The
-  three narrow exceptions are each replayed against every cited fact (41/41
+  two narrow exceptions are each replayed against every cited fact (41/41
   kept on run 2): search-hit snippets are clipped (below) and dropped for a
   URL the session already showed (``elide_seen_snippets``) -- discovery text,
-  never a source -- and a fetched page loses its References / See also /
-  External links / Notes / Further reading sections
-  (``elide_boilerplate_sections``). The raw server payload is kept in
+  never a source. Page text itself is never cut: a heading-based "drop the
+  References / See also / Notes sections" lever was tried and removed (PR
+  #4540 review M2/M3, QA Q1) because a ``# Notes`` comment in fetched code, a
+  README's ``## Notes`` or a setext heading made it delete author content,
+  for a measured -0.0016x. The raw server payload is kept in
   ``details["server_result"]`` (never sent to a model).
 * **Errors are not normalized.** An error body is diagnostics, often small,
   and its exact text matters more than its size.
@@ -133,8 +135,8 @@ whole) sets the hit-snippet clip on its own. ``mcp.result_text_rendering``
 (default on) switches the lossless JSON -> text rendering of hit lists and
 fetched pages (``render_result_text``) on its own.
 
-Result shaping v2 (seen-URL elision, text rendering, section elision and the
-glued/cut link fix) re-priced POC run 2 from 0.658x to 0.626x Claude Code
+Result shaping v2 (seen-URL elision, text rendering and the glued/cut link
+fix) re-priced POC run 2 from 0.658x to 0.627x Claude Code
 (``strip-links``, the run's mode) with 41/41 cited facts, 233/233 ``url``
 fields byte-equal and 39/39 cited search discoveries still naming their
 subject (structural-economy replay, PR description).
@@ -283,12 +285,16 @@ _MARKER_ONLY = re.compile(r"^\s*(?:[*+-]|\d{1,9}[.)])\s*$")
 # unclosed ``(`` inside it is the ``Foo_(bar`` Wikipedia title being cut).
 # 5 of the 8 ``](http`` leaks on run 2 were these (structural-economy §6);
 # one of them was cut inside the scheme itself (``[Pierre Poilievre](http``),
-# so a bare prefix of ``https://`` counts too. Any other short target
-# (``handlers[name](arg``) is code or unknowable and keeps its bytes.
+# so a scheme cut at ``http`` or later (``https``, ``http:``, ``https:/``)
+# counts too -- but never a shorter one: ``handlers[key](h`` or
+# ``cfg[name](ht`` at a chunk cut is code (PR #4540 review m2, QA Q2), and
+# ``http`` is the shortest prefix that is a URL rather than an identifier.
+# Any other short target (``handlers[name](arg``) keeps its bytes. Only text
+# that already passed ``_MARKDOWN_SIGNAL`` reaches it (``normalize_markdown``).
 _TRUNCATED_LINK = re.compile(
     r"!?\[([^\[\]\n]{0,1000})\]\(\s*"
     r"(?:(?i:https?:)?//(?:[^()\s]|\([^()\s]*\))*(?:\([^()\s]*)?"
-    r"|(?i:h(?:t(?:t(?:ps?(?::/?)?)?)?)?))\Z"
+    r"|(?i:https?(?::/?)?))\Z"
 )
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _BACKTICKS = re.compile(r"`+")
@@ -606,15 +612,11 @@ def normalize_markdown(text: str, *, keep_prose_links: bool = True) -> str:
     unchanged. Pure and deterministic; ``normalize_tool_text`` adds the
     fixed-point loop that makes it idempotent. See the module docstring.
     """
-    if not text:
+    # The web-markdown gate (PR #4514) covers the cut-tail fix too: a text
+    # with no absolute link, image or cite marker is code, a log or a table,
+    # and its last line keeps its bytes even when it ends ``[x](http``.
+    if not text or not _MARKDOWN_SIGNAL.search(text):
         return text
-    if not _MARKDOWN_SIGNAL.search(text):
-        # A text whose only link is one cut inside its scheme at the very end
-        # (``[Pierre Poilievre](http``) carries no ``//`` signal, yet that
-        # tail is still a broken link; only the last line is scanned.
-        last = text.rstrip("\n").rsplit("\n", 1)[-1]
-        if _strip_truncated_tail(last) == last:
-            return text
     # A trailing newline is a terminator, not a blank line: keep it exactly.
     body, terminator = (text[:-1], "\n") if text.endswith("\n") else (text, "")
     runs = [
@@ -814,7 +816,7 @@ def elide_seen_snippets(value: Any, seen: frozenset[str], changed: list[bool]) -
     the cache, to be re-read on every later turn. The repeat keeps its title
     and URL -- so ranking, discovery and the citation key are unchanged --
     and loses only the discovery text the model already has (a snippet is a
-    lead, never a source). Replay: -0.016x Claude Code.
+    lead, never a source). Replay: -0.015x Claude Code.
 
     ``seen`` holds ``seen_url_key`` keys; the caller (the MCP bridge's
     per-session ``SeenUrlLedger``) passes a snapshot, so this stays pure and
@@ -897,71 +899,6 @@ def shown_urls(text: str, *, tool_name: str = "") -> list[str]:
     return urls
 
 
-# --- boilerplate section elision ------------------------------------------
-
-#: Section titles that hold a page's apparatus, not its facts. Exactly the
-#: structural-economy §5 list (plus the common combined Wikipedia heading).
-#: On run 2 no cited fact (0/41) sat in one of these sections. Broader lists
-#: ("Related", "Share", newsletter blocks) were not measured, so they are not
-#: here. Nav-chrome LINES are never dropped: that rule lost a cited fact
-#: ("Minister of Foreign Affairs", rec-005) and was rejected.
-BOILERPLATE_SECTION_TITLES: Final = frozenset(
-    {"references", "see also", "external links", "notes", "further reading", "notes and references"}
-)
-_ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
-
-
-def _heading(line: str) -> tuple[int, str] | None:
-    match = _ATX_HEADING.match(line)
-    if match is None:
-        return None
-    title = (match.group(2) or "").rstrip("#").strip().rstrip(":").strip()
-    return len(match.group(1)), " ".join(title.split()).lower()
-
-
-def elide_boilerplate_sections(text: str) -> str:
-    """Drop References / See also / External links / Notes / Further reading.
-
-    Each such ATX section is removed from its heading up to (not including)
-    the next heading of the same or a higher level, so a subsection's own
-    siblings and the following top-level section survive. Headings inside
-    code (fenced or indented, ``_split_code``) are not headings. Applied only
-    to the ``content`` of a fetched page payload (``_is_page_payload``): a
-    README, an issue body or a docs tool's "## Notes" is the author's text,
-    not a web page's apparatus. Measured worth: -0.002 to -0.004x Claude Code
-    on run 2 (the forge server's 12,000-char chunks rarely reach a page's
-    tail); kept because it is evidence-safe and free in the same pass.
-    """
-    if "#" not in text:
-        return text
-    body, terminator = (text[:-1], "\n") if text.endswith("\n") else (text, "")
-    lines = body.split("\n")
-    headings: list[tuple[int, str] | None] = []
-    for is_code, run in _split_code(lines):
-        headings.extend(None if is_code else _heading(line) for line in run)
-    kept: list[str] = []
-    i = 0
-    dropped_tail = False
-    while i < len(lines):
-        heading = headings[i]
-        if heading is not None and heading[1] in BOILERPLATE_SECTION_TITLES:
-            level = heading[0]
-            i += 1
-            while i < len(lines) and not ((h := headings[i]) is not None and h[0] <= level):
-                i += 1
-            dropped_tail = i == len(lines)
-            continue
-        kept.append(lines[i])
-        i += 1
-    if len(kept) == len(lines):
-        return text
-    if dropped_tail:
-        # A tail section leaves the blank lines that separated it.
-        while kept and _is_blank(kept[-1]):
-            kept.pop()
-    return "\n".join(kept) + terminator
-
-
 # --- JSON -> text rendering -------------------------------------------------
 #
 # Why: a JSON result spends tokens on keys, quotes and escapes -- the run-2
@@ -995,7 +932,8 @@ def elide_boilerplate_sections(text: str) -> str:
 #   Decode: a column-0 ``key: v`` is a field, a bare ``key:`` opens the hit
 #   list; ``N. `` opens a hit; its first indented line is the url, a second
 #   one that is not ``key: v`` is the snippet, the rest are fields.
-# * Fetched page (``{"url": str, "content": str, ...}``, any tool):
+# * Fetched page (``{"url": <absolute http(s)>, "content": str, ...}``, any
+#   tool; ``_is_page_payload``):
 #       <key>: enc(value)        every field except ``content``, in order
 #       (blank line)
 #       <content, raw>           to the end of the text
@@ -1102,12 +1040,10 @@ def _render_search(parsed: Any) -> str | None:
 
 
 def _render_page(parsed: Any) -> str | None:
-    if not (
-        isinstance(parsed, dict)
-        and isinstance(parsed.get("url"), str)
-        and isinstance(parsed.get("content"), str)
-        and all(_FIELD_KEY.match(k) for k in parsed)
-    ):
+    # ``_is_page_payload``: the ``url`` must be an absolute web URL. A
+    # repository file tool's ``{"url": "src/app.py", "content": ...}`` is
+    # not a fetched page and keeps its JSON (PR #4540 review m3).
+    if not (_is_page_payload(parsed) and all(_FIELD_KEY.match(k) for k in parsed)):
         return None
     content = parsed["content"]
     if _LONE_SURROGATE.search(content):
@@ -1157,14 +1093,6 @@ def _normalize_once(
             parsed = None
         if isinstance(parsed, (dict, list)):
             changed: list[bool] = []
-            if isinstance(parsed, dict) and _is_page_payload(parsed):
-                # Before the markup walk, so a dropped section's links are
-                # never worked on and the walk tidies the blank lines left.
-                page: dict[str, Any] = parsed
-                content = elide_boilerplate_sections(page["content"])
-                if content != page["content"]:
-                    parsed = {**page, "content": content}
-                    changed.append(True)
             walked = _walk(parsed, keep_prose_links, changed)
             if search_snippet_chars > 0:
                 # After the markup walk, as the replay measured it: links and
@@ -1205,10 +1133,9 @@ def normalize_tool_text(
 
     ``seen_urls`` (``seen_url_key`` keys, a snapshot of the session's
     ``SeenUrlLedger``) drops the snippets of a search's hits the model was
-    already shown (``elide_seen_snippets``). A fetched page payload loses its
-    boilerplate sections (``elide_boilerplate_sections``). ``text_rendering``
+    already shown (``elide_seen_snippets``). ``text_rendering``
     (``mcp.result_text_rendering``) renders a hit list or a fetched page as
-    text after the fixed point (``render_result_text``). All three are pure
+    text after the fixed point (``render_result_text``). Both are pure
     given their inputs, so the result is still deterministic and
     ``f(f(x)) == f(x)`` for the same ``seen_urls``. The defaults here are the
     PR #4525 behaviour; the MCP manager passes the live settings.

@@ -1145,6 +1145,24 @@ class TestSeenUrlLedger:
             and "https://a.example/1" in restored.text
         )
 
+    def test_the_ledger_is_bounded_and_evicts_the_least_recently_shown(self) -> None:
+        """PR #4540 review m5: a ledger never grows past ``max_urls``; the
+        evicted URL is the one shown longest ago, and its snippet comes back."""
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        assert SeenUrlLedger.MAX_URLS_DEFAULT == 5_000
+        ledger = SeenUrlLedger(max_urls=2)
+        self._fmt(self._search("https://a.example/1"), ledger)
+        self._fmt(self._search("https://a.example/2"), ledger)
+        self._fmt(self._search("https://a.example/1"), ledger)  # re-shown: now most recent
+        self._fmt(self._search("https://a.example/3"), ledger)  # evicts /2, not /1
+        assert len(ledger) == 2
+        assert ledger.snapshot() == frozenset({"https://a.example/1", "https://a.example/3"})
+        again = json.loads(
+            self._fmt(self._search("https://a.example/1", "https://a.example/2"), ledger).text
+        )
+        assert ["snippet" in h for h in again["results"]] == [False, True]
+
 
 class TestFormatMcpResultTextRendering:
     """``mcp.result_text_rendering`` through the real formatter."""

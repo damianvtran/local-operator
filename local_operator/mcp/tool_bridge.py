@@ -532,19 +532,42 @@ class SeenUrlLedger:
     * Only URLs that reached the model are recorded: machine-read results and
       ``off`` never touch it, and a URL a spill cut off the inline text is not
       recorded (``format_mcp_result``).
+    * **Only as long as the model still has the text.** A compaction drops
+      the earlier results from the model's context while the session id
+      stays the same, so the manager drops the ledger then
+      (``McpManager.forget_seen_urls``, called from the session's compaction
+      commit) and again when the session is disposed (PR #4540 review M1/m5).
+    * **Bounded** to ``max_urls`` keys, least recently shown evicted first.
+      Forgetting a URL can only show its snippet again; the bound exists so a
+      host serving one session for days cannot grow without limit. POC run 2
+      showed at most 233 URLs per session (184 hits + 49 fetches), so the
+      5,000 default is ~20x the measured maximum and never evicts in practice.
     """
 
-    def __init__(self) -> None:
+    #: See "Bounded" above.
+    MAX_URLS_DEFAULT = 5_000
+
+    def __init__(self, max_urls: int = MAX_URLS_DEFAULT) -> None:
         # A thread lock, not an asyncio one: MCP results are formatted in a
         # worker thread (``asyncio.to_thread``) by ``McpManager``.
         self.lock = threading.Lock()
-        self._keys: set[str] = set()
+        self._max_urls = max_urls
+        # Insertion-ordered dict as an LRU: a re-shown URL moves to the end.
+        self._keys: dict[str, None] = {}
 
     def snapshot(self) -> frozenset[str]:
         return frozenset(self._keys)
 
     def record(self, urls: Iterable[str]) -> None:
-        self._keys.update(seen_url_key(url) for url in urls)
+        for url in urls:
+            key = seen_url_key(url)
+            self._keys.pop(key, None)
+            self._keys[key] = None
+        while len(self._keys) > self._max_urls:
+            del self._keys[next(iter(self._keys))]
+
+    def __len__(self) -> int:
+        return len(self._keys)
 
 
 def format_mcp_result(
