@@ -26,7 +26,14 @@ from local_operator.guardrails.check import CallContext
 from local_operator.guardrails.classify import Risk, classify_bash
 from local_operator.guardrails.preview import BUILTIN_PASS, preview_tool_call
 from tests.unit.guardrails import test_own_worktree_removal as _base
-from tests.unit.guardrails.test_own_worktree_removal import S, S2, _check, _env, _Judge, _record
+from tests.unit.guardrails.test_own_worktree_removal import (
+    S2,
+    S,
+    _check,
+    _env,
+    _Judge,
+    _record,
+)
 
 # The synthetic tmp-HOME layout, shared rather than copied.
 home = _base.home
@@ -178,8 +185,15 @@ def test_sibling_kin_tree_still_holds_its_ignored_env(home: Path, mobile: Path) 
 def test_ignored_hold_text_sends_no_one_to_ask_about_their_own_tree() -> None:
     """Directive 2026-11-24: "whether the rest may be deleted is the operator's
     decision" read as a cue to ask, even for the agent's own trees."""
-    from local_operator.guardrails.check import SUPPORTED_DELETE_PATHS, cleanup_hold_text
-    from local_operator.guardrails.classify import HOLD_IGNORED_UNVERIFIED, RankedTarget, Verdict
+    from local_operator.guardrails.check import (
+        SUPPORTED_DELETE_PATHS,
+        cleanup_hold_text,
+    )
+    from local_operator.guardrails.classify import (
+        HOLD_IGNORED_UNVERIFIED,
+        RankedTarget,
+        Verdict,
+    )
     from local_operator.guardrails.resolve import Target
 
     target = RankedTarget(
