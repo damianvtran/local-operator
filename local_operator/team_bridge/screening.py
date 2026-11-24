@@ -2374,6 +2374,10 @@ def _screen_prepare_steps(
                         return resolved
                 code = _HOLD_FOR_ADOPT.get(failure.code, "policy_stale")
                 _persist_hold(store, owner, message_id, code)
+                if code == WRITE_ONCE_CONFLICT_HOLD:
+                    _record_conflict_review(
+                        store, owner, _review_target(envelope, snapshot, epoch, item)
+                    )
                 return ScreenResult("hold", hold_code=code)
             receipt = ScreeningReceipt(
                 verdict=cached["verdict"],
@@ -4139,6 +4143,8 @@ def _conclude_parsed(
                 return resolved
         code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
         _persist_hold(store, owner, message_id, code)
+        if code == WRITE_ONCE_CONFLICT_HOLD:
+            _record_conflict_review(store, owner, prepared)
         return ScreenResult("hold", hold_code=code)
     return ScreenResult(
         disposition,
@@ -4447,6 +4453,14 @@ def _replay_work_scope_decision(
     ):
         return None
     review_code = str(decision.get("hold_code") or "")
+    if review_code == WRITE_ONCE_CONFLICT_HOLD:
+        # NOT replayed: a conflict's decision row is not a cached answer, and
+        # its daily re-drive must still reach the commit, where a fully
+        # current preferred allow supersedes the stale one (#4533) or
+        # ``_resolve_write_once_conflict`` answers it. Replaying the hold here
+        # would make the person's Deliver the ONLY exit. The re-drive re-holds
+        # it under the same code, and the row (written once) stays put.
+        return None
     if review_code in hold_release.REVIEW_HOLD_CODES:
         # A REVIEW decision replays its own hold while it waits for the person.
         # With ``review_held`` off it is inert: the answer cache below replays
@@ -4681,6 +4695,55 @@ def _record_review_decision(
         )
     except StoreRefused:
         logger.info("bridge: review decision unrecorded code=store_refused")
+
+
+def _record_conflict_review(
+    store: Store, owner: OwnerSnapshot, target: "_Prepared | _ReviewTarget"
+) -> None:
+    """Give a ``write_once_conflict`` hold over a SCREENER ALLOW its owner exit.
+
+    WHY (security review S-4 on #4249, recorded follow-up; live 2026-11-24:
+    seq 3318/3319). Such a hold publishes ``awaiting_review`` and no retry
+    clears it, yet with no decision row it never reached the owner's holds
+    list. #4533 made a verified owner Deliver commit over a committed screener
+    allow; this writes the review decision row that list offers it from.
+
+    ONLY when ``hold_release.owner_reviewable`` says the committed receipt is
+    a readable screener allow for these exact body bytes: a reject-backed or
+    damaged conflict gets no row, so it is never listed (no Deliver could
+    commit there). The row names the COMMITTED receipt's screener and verdict,
+    which is what the person is agreeing with; the provider is not stored on a
+    receipt, so it is empty (the hub block then carries no provider and an
+    ``unknown`` stage rather than a guessed one). Best effort and written
+    once, like every review row; the daily re-drive calls this again, which is
+    how a conflict held before this build gets its row.
+    """
+
+    from local_operator.team_bridge import hold_release as hr
+
+    envelope = target.envelope
+    if not hr.owner_reviewable(
+        store,
+        owner,
+        envelope.message_id,
+        WRITE_ONCE_CONFLICT_HOLD,
+        body_sha256=envelope.body_sha256,
+    ):
+        return
+    committed = store.receipt_for_message(owner, envelope.message_id)
+    if committed is None:
+        return
+    _record_review_decision(
+        store,
+        owner,
+        target,
+        WRITE_ONCE_CONFLICT_HOLD,
+        actual_model=str(committed.get("model") or "") or None,
+        served_provider="",
+        served_hop=None,
+        screener_preferred=bool(committed.get("screener_preferred")),
+        screener_verdict="allow",
+    )
 
 
 def _hop_of(row: Mapping[str, Any]) -> int:

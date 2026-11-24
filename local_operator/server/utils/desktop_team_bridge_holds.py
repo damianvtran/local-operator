@@ -202,11 +202,17 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
             and str(decision.get("hold_code") or "") == code
             and decision.get("eligible")
             and hr.trusted_decision(decision)
+            # A write-once conflict is offered only while its committed receipt
+            # is still a screener allow a Deliver can commit over; re-read live
+            # here as well as when its row was written (see ``owner_reviewable``).
+            and hr.owner_reviewable(
+                store, owner, bare, code, body_sha256=str(decision.get("body_sha256") or "")
+            )
         )
         held_at = float(decision["created_at"]) if decision is not None else row["created_at"]
         deliver_until = held_at + hr.DELIVER_WINDOW_S if eligible else None
         release = store.owner_release(owner, bare)
-        can_discard = eligible
+        can_discard = eligible and code not in hr.DELIVER_ONLY_HOLD_CODES
         conversation_id = row["conversation_id"] or (
             str(decision.get("conversation_id") or "") if decision else ""
         )
@@ -371,6 +377,21 @@ def decide(
     if word == "deliver" and str(decision.get("hold_code") or "") in hr.DISCARD_ONLY_HOLD_CODES:
         # PR #4212 round 3 (S-13): every screener failed on THIS message while
         # others screened; nothing read it, so only Discard is offered.
+        raise HoldRefused(409, "hold_not_releasable")
+    if word == "discard" and str(decision.get("hold_code") or "") in hr.DELIVER_ONLY_HOLD_CODES:
+        # A write-once conflict: a Discard would need a reject over the
+        # committed screener allow, which write-once refuses, so it could only
+        # ever sit refused (``hold_release.DELIVER_ONLY_HOLD_CODES``).
+        raise HoldRefused(409, "hold_not_releasable")
+    if not hr.owner_reviewable(
+        store,
+        owner,
+        message_id,
+        str(decision.get("hold_code") or ""),
+        body_sha256=str(decision["body_sha256"]),
+    ):
+        # The committed receipt is no longer one a Deliver can commit over
+        # (a reject, an owner-release head, damage): nothing to sign.
         raise HoldRefused(409, "hold_not_releasable")
     message = hr.release_payload(
         owner_key=_owner_key(owner),

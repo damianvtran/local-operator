@@ -2000,8 +2000,17 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
 #: resolver keeps is one whose committed verdict the LIVE policy no longer
 #: supports, and no retry can clear it. Publishing it as ``delivery_pending``
 #: would tell readers the delay is transient. It falls to ``awaiting_review``,
-#: the conservative class for a terminal hold only the owner can move. An
-#: owner-review release for it is a recorded follow-up.
+#: the conservative class for a terminal hold only the owner can move.
+#:
+#: The owner CAN now move it (the S-4 follow-up): a conflict whose committed
+#: receipt is a screener allow gets a review decision row and is a Deliver
+#: item in the owner's holds list (``hold_release.owner_reviewable``,
+#: ``WRITE_ONCE_CONFLICT_HOLD``), which #4533's owner Deliver commits. A
+#: reject-backed or damaged conflict is NOT offered (no Deliver could commit)
+#: and still publishes ``awaiting_review``: the class is per CODE (a reader
+#: must not learn which verdict was committed), and such a row IS one of the
+#: terminal fail-closed holds below: the one class that promises no clearing
+#: time, so it tells no reader the delay is transient.
 #:
 #: Also here (holds trace 2026-11-18), each a delivery-side wait that clears
 #: without anyone reviewing the content:
@@ -11364,8 +11373,43 @@ class Store:
         if not (
             receipt.verdict == "allow"
             and receipt.template_sha256 == _owner_release_sha256()
-            and existing["verdict"] == "allow"
-            and existing["body_sha256"] == receipt.body_sha256
+            and self._owner_deliver_could_supersede(
+                conn, owner, key, existing, body_sha256=receipt.body_sha256
+            )
+        ):
+            return False
+        self._ensure_work_scope_tables(conn)
+        release = self._verified_release(conn, key, message_id)
+        if not (
+            release is not None
+            and release.get("verified") is True
+            and release.get("word") == "deliver"
+            and release.get("body_sha256") == receipt.body_sha256
+            and release.get("envelope_digest") == envelope_digest
+            and _receipt_int(release.get("creator_generation"), -1) == owner.enrollment_generation
+        ):
+            raise StoreRefused("proof_corrupt", "owner Deliver without a verified release")
+        return True
+
+    @staticmethod
+    def _owner_deliver_could_supersede(
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        key: str,
+        existing: Mapping[str, Any],
+        *,
+        body_sha256: str,
+    ) -> bool:
+        """The committed-row half of :meth:`_owner_deliver_supersedes` (no release read).
+
+        Shared with :meth:`write_once_conflict_deliverable`, which decides
+        whether a ``write_once_conflict`` hold is offered for owner review at
+        all, so "listed" and "a Deliver can commit" are ONE rule.
+        """
+
+        if not (
+            existing["verdict"] == "allow"
+            and existing["body_sha256"] == body_sha256
             and existing["template_sha256"] not in (_owner_release_sha256(), OWNER_PRINCIPAL_SHA256)
         ):
             return False
@@ -11387,20 +11431,37 @@ class Store:
         _decoded, damage, _note = receipt_authority(
             owner, dict(policy), dict(existing), epoch_bound=False
         )
-        if damage == RECEIPT_CORRUPT:
+        return damage != RECEIPT_CORRUPT
+
+    def write_once_conflict_deliverable(
+        self, owner: OwnerSnapshot, message_id: str, *, body_sha256: str
+    ) -> bool:
+        """May an owner Deliver commit over this message's committed receipt?
+
+        ``hold_release.owner_reviewable`` reads this to decide whether a
+        ``write_once_conflict`` hold becomes an owner-review item: only a
+        readable SCREENER allow for exactly ``body_sha256`` qualifies (the
+        case :meth:`_owner_deliver_supersedes` lets a verified Deliver move).
+        A reject, an owner-release or owner-principal head, a damaged row, a
+        different body or no row at all answers ``False``. Read-only; any
+        store error is ``False`` (fail closed: not offered).
+        """
+
+        key = _owner_key(owner)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                existing = conn.execute(
+                    "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    (key, str(message_id)),
+                ).fetchone()
+                if existing is None:
+                    return False
+                return self._owner_deliver_could_supersede(
+                    conn, owner, key, existing, body_sha256=str(body_sha256)
+                )
+        except (sqlite3.Error, StoreRefused):
             return False
-        self._ensure_work_scope_tables(conn)
-        release = self._verified_release(conn, key, message_id)
-        if not (
-            release is not None
-            and release.get("verified") is True
-            and release.get("word") == "deliver"
-            and release.get("body_sha256") == receipt.body_sha256
-            and release.get("envelope_digest") == envelope_digest
-            and _receipt_int(release.get("creator_generation"), -1) == owner.enrollment_generation
-        ):
-            raise StoreRefused("proof_corrupt", "owner Deliver without a verified release")
-        return True
 
     def commit_owner_release(
         self,
