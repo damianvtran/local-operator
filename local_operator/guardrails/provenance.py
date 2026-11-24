@@ -1611,7 +1611,21 @@ def _own_tree_sheds(physical: str) -> bool:
     whose commits may exist nowhere else and cannot be regenerated. One rule
     for the plain and the ``--force`` routes. Unreadable is no (fail closed).
     Foreign trees never reach this (``classify`` passes ``own_regenerable``
-    only for ledger-proven own, non-kin creation)."""
+    only for ledger-proven own, non-kin creation).
+
+    Re-affirmed by the operator directive of 2026-11-24 (Damian, via Aida:
+    "agents keep asking permission to clean up after themselves", feeding
+    disk crashes; 8 of 14 triaged asks followed an "ignored entries the guard
+    cannot prove regenerable" hold on the agent's OWN merged tree, most from
+    guards older than this rule). WHY it is safe: a ledger-recorded
+    ``git worktree add`` creates a tree with zero ignored files, so every
+    ignored byte in it was written later by the session's own work; the
+    creation ledger is harness-written (never agent-forgeable text); plain
+    Git still refuses tracked/untracked changes and the branch ref survives.
+    Constraints: kin/sibling and foreign trees keep ``_REGENERABLE``,
+    ``merged_regenerable`` and the finished-foreign proof unchanged, and the
+    nested-repository walk keeps :func:`_git_inside`'s bounds (exhausted →
+    held)."""
     try:
         st = os.lstat(physical)
     except OSError:
