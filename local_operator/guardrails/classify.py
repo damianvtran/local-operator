@@ -35,6 +35,7 @@ import os
 import re
 import sqlite3
 import stat
+import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -1132,7 +1133,11 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
         if os.path.dirname(path) == home and not os.path.isfile(path):
             return "a top-level directory of the home directory"
     try:
-        if os.path.isdir(path) and os.path.exists(os.path.join(path, ".git")):
+        if (
+            os.path.isdir(path)
+            and os.path.exists(os.path.join(path, ".git"))
+            and not _removed_worktree_remnant(path)
+        ):
             return "a git repository root"
         # The repository's history itself: deleting ``<repo>/.git`` loses every
         # unpushed commit, stash and linked-worktree record just as deleting
@@ -1143,6 +1148,77 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
     except OSError:
         return "an unreadable path"
     return None
+
+
+def _removed_worktree_remnant(path: str) -> bool:
+    """Is ``path`` what a FAILED ``git worktree remove`` left behind?
+
+    Field case 2026-11-24 (disk recovery, guard 0.112.8): a guard-allowed
+    ``git worktree remove`` of a clean, merged tree ended in "Directory not
+    empty". Finder wrote a fresh ``.DS_Store`` mid-delete, so Git had already
+    unregistered the tree and deleted its admin directory, but left tracked
+    files behind. When the leftover still held its ``.git`` pointer FILE, the
+    folder ranked as "a git repository root" and went to the judge, while the
+    same remnant without that file was an ordinary directory. The ranking
+    depended only on the order Git deleted entries in.
+
+    A remnant is recognised only when ALL of these hold, so a live repository
+    or a moved-but-pruned worktree carrying real work is not mistaken for one:
+
+    - ``.git`` is a regular one-line ``gitdir:`` FILE, never a directory;
+    - it points at ``<repo>/.git/worktrees/<name>`` where ``<name>`` equals
+      this folder's basename (``git worktree move`` keeps the old admin name,
+      so a moved tree fails this) and ``<repo>/.git`` is a real directory;
+    - that admin directory is GONE, which only ``git worktree remove`` or
+      ``prune`` does, and ``prune`` keeps an entry whose folder exists;
+    - ``git worktree list`` of that repository does not list ``path``.
+
+    Then the folder ranks as an ordinary path, the same as the remnant whose
+    pointer Git already deleted. Any doubt, including an unreadable file or a
+    failed ``git`` call, keeps the repository-root rank (fail closed).
+    """
+    marker = os.path.join(path, ".git")
+    try:
+        if not stat.S_ISREG(os.lstat(marker).st_mode):
+            return False
+        with open(marker, encoding="utf-8") as fh:
+            text = fh.read(4097)
+    except (OSError, UnicodeDecodeError):
+        return False
+    lines = text.splitlines()
+    if len(text) > 4096 or len(lines) != 1 or not lines[0].startswith("gitdir: "):
+        return False
+    admin = lines[0][len("gitdir: ") :].strip()
+    if not os.path.isabs(admin):
+        admin = os.path.normpath(os.path.join(path, admin))
+    worktrees = os.path.dirname(admin)
+    common = os.path.dirname(worktrees)
+    if (
+        os.path.basename(admin) != os.path.basename(os.path.normpath(path))
+        or os.path.basename(worktrees) != "worktrees"
+        or os.path.basename(common) != ".git"
+        or not os.path.isdir(common)
+        or os.path.islink(common)
+        or os.path.lexists(admin)
+    ):
+        return False
+    try:
+        listed = subprocess.run(
+            ["git", "-C", os.path.dirname(common), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if listed.returncode != 0:
+        return False
+    real = os.path.realpath(path)
+    for row in listed.stdout.splitlines():
+        if row.startswith("worktree ") and os.path.realpath(row[len("worktree ") :]) == real:
+            return False
+    return True
 
 
 #: Programs that remove a symlink operand's ENTRY without following it. Not
