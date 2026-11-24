@@ -845,6 +845,18 @@ jobs:
         run: |
           python -m tests.shard_stall_watchdog "${TMPDIR:-/tmp}/lo-shard-stall"
 
+      # FAILED-ONLY RERUNS (`make merge-gate` -> `gh run rerun --failed`, GH
+      # #4074): artifacts belong to the RUN, not the attempt, so a re-run shard
+      # uploads beside every earlier attempt's artifacts and coverage-report's
+      # `coverage-data-<py>-*` pattern must still find the carried (passing)
+      # shards' attempt-1 uploads; that is why this name has NO attempt suffix
+      # (measured: run 45325871121 attempt 2 combined attempt-1 data for shards
+      # 1 and 5). A failing step skips this upload, so a red shard normally
+      # leaves nothing behind; `overwrite: true` covers the race where a shard
+      # is cancelled or fails AFTER this upload: v4+ artifacts are immutable
+      # and a second upload under the same name is a 409 that would turn every
+      # rerun of that shard red. The rerun's data replaces the stale copy, so
+      # the combine still sees exactly one file per shard.
       - name: Upload shard coverage data
         if: env.LEG_IDLE != 'true'
         uses: actions/upload-artifact@v7
@@ -853,6 +865,7 @@ jobs:
           path: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
           retention-days: 1
           include-hidden-files: true
+          overwrite: true
 
   # `coverage-report` is deliberately left with `needs: test` and NO `if:`, and
   # that is the whole disposition — do not add `always()` for symmetry with the
@@ -920,6 +933,10 @@ jobs:
           name: coverage-report-${{ matrix.python-version }}
           path: htmlcov
           retention-days: 7
+          # `always()` upload under a run-scoped name: a failed-only rerun
+          # (`make merge-gate`, GH #4074) re-runs this job, and without
+          # overwrite a report left by the earlier attempt is a 409 red.
+          overwrite: true
 
   tui-e2e:
     # Moved from ci.yml with `needs: [changes, lint, type-check]`; lint and
@@ -1232,7 +1249,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: junit-timings-e2e-${{ matrix.os }}-${{ matrix.shard }}
+          # Attempt in the name, like the unit shards' junit: this upload is
+          # `always()`, so a FAILED e2e shard already uploaded under this name,
+          # and its failed-only rerun (GH #4074) would hit the run-scoped 409
+          # "artifact with this name already exists" and go red on the upload
+          # instead of on its tests.
+          name: junit-timings-e2e-${{ matrix.os }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           # Signal cases run in this job, not `test`: jobs have separate working
           # trees, so a unit-job allowlist cannot collect their shutdown witnesses.
           # Preserve only diagnostic JSON, bounded stderr and the owned child's
