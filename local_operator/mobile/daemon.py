@@ -1988,6 +1988,45 @@ class SessionTable:
         return bool(self._attention_states.get(f"session/{session_id}", {}).get("unseen", False))
 
 
+class _OutcomeReader:
+    """The three reads ``bootstrap_transcript`` makes, without opening a ``Transcript``.
+
+    WHY. Both relay callers of ``bootstrap_transcript`` (the restart sweep and
+    the discovered-death classification) used to construct a full
+    ``Transcript`` per session: that takes the session's WRITER lock (waiting up
+    to 5 s when it is held) and JSON-decodes the whole journal into memory --
+    to answer two one-row questions (``latest_custom`` and
+    ``latest_custom_entry``) plus ``.directory``. Under load that is the lock a
+    booting runtime waits on, and the operator's ``mobile.log`` carried 165
+    "stayed locked for 5.0s" lines from exactly these opens, clustered right
+    after relay restarts. ``read_latest_custom_entry`` answers the same
+    questions by a backward walk over complete lines, with no lock and no
+    resident journal, and its docstring pins row-for-row agreement with the
+    resident object for well-formed journals.
+
+    The readable path is resolved EAGERLY (``read_only``, so a pure reader
+    never restores an archive in place): an archive this build cannot read
+    raises here, at construction, exactly where ``Transcript(...)`` raised, so
+    the sweep's per-session skip-and-log contract is unchanged.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        from local_operator.session.compression import transcript_for_read
+
+        self.directory = directory
+        transcript_for_read(directory, read_only=True)
+
+    def latest_custom_entry(self, custom_type: str) -> Any:
+        from local_operator.session.transcript import read_latest_custom_entry
+
+        return read_latest_custom_entry(self.directory, custom_type, read_only=True)
+
+    def latest_custom(self, custom_type: str) -> dict[str, Any] | None:
+        # The same expression ``Transcript.latest_custom`` uses.
+        entry = self.latest_custom_entry(custom_type)
+        return dict(entry.payload.get("details", {})) if entry is not None else None
+
+
 def _classify_discovered_death(session_id: str, *, reaped_owner: Any | None = None) -> None:
     """Publish the durable outcome for a runtime the scan just found dead.
 
@@ -2021,15 +2060,12 @@ def _classify_discovered_death(session_id: str, *, reaped_owner: Any | None = No
     death it just discovered (review round 2, MINOR-1).
     """
     from local_operator.session.attention import bootstrap_transcript
-    from local_operator.session.transcript import Transcript
 
     directory = _durable_user_session_dir(session_id)
     if directory is None:
         return
     try:
-        bootstrap_transcript(
-            Transcript(directory, defer_materialise=True), reaped_owner=reaped_owner
-        )
+        bootstrap_transcript(_OutcomeReader(directory), reaped_owner=reaped_owner)
     except Exception:  # noqa: BLE001 — a listing must survive an unparsable transcript
         logger.debug("classifying a discovered death failed", exc_info=True)
 
@@ -2038,7 +2074,6 @@ def _bootstrap_mobile_attention() -> None:
     """Migrate the retained list once on daemon startup, not on passive reads."""
     from local_operator.paths import config_dir
     from local_operator.session.attention import bootstrap_transcript
-    from local_operator.session.transcript import Transcript
 
     root = config_dir() / "sessions"
     if not root.is_dir():
@@ -2074,7 +2109,7 @@ def _bootstrap_mobile_attention() -> None:
         # skipped session, bounded by the 100-directory window above.
         try:
             if _durable_user_session_dir(directory.name) is not None:
-                bootstrap_transcript(Transcript(directory, defer_materialise=True))
+                bootstrap_transcript(_OutcomeReader(directory))
         except Exception as exc:  # noqa: BLE001 — see the comment above
             skipped += 1
             logger.warning(
@@ -4912,6 +4947,10 @@ class MobileDaemon:
         # the join point that makes a same-id retry wait on it instead of
         # engaging twice (see ``_prompt_wake``).
         self._prompt_wakes: dict[tuple[str, str], _PromptWake] = {}
+        # Durable bookkeeping the scan loop starts but must not wait for (the
+        # restart attention sweep, discovered-death classification): strong
+        # references until each finishes, since the loop holds tasks weakly.
+        self._scan_side_tasks: set[asyncio.Future[Any]] = set()
         # Per session id: the start task's "child spawned" signal (see
         # ``spawn_session``'s ``on_spawned``).
         self._session_spawned: dict[str, asyncio.Future[int]] = {}
@@ -5532,8 +5571,14 @@ class MobileDaemon:
 
     async def _scan_once(self) -> None:
         if not getattr(self, "_attention_bootstrapped", False):
-            await asyncio.to_thread(_bootstrap_mobile_attention)
+            # DETACHED, not awaited: this sweep visits up to 100 conversations
+            # and used to sit in front of ``registry.scan`` on the first pass
+            # after every relay restart, so a phone waking a session right then
+            # waited for the sweep before its new runtime was even looked for.
+            # Its writes land in the attention store, whose revision check
+            # below repaints the list and watched streams on a later pass.
             self._attention_bootstrapped = True
+            self._detach_scan_work(asyncio.to_thread(_bootstrap_mobile_attention))
         from local_operator.session.attention import AttentionStore
 
         await self._refresh_pins_if_changed()
@@ -5626,6 +5671,13 @@ class MobileDaemon:
                     # the phone by the design round, D6). Passing the record in
                     # is the evidence, and it is exactly as trustworthy as the
                     # scan that produced it.
+                    #
+                    # STILL AWAITED, unlike the restart sweep: the ended frame
+                    # below must carry this outcome (D6), and the read is now a
+                    # lock-free backward walk (``_OutcomeReader``) rather than a
+                    # locked whole-journal open, so it no longer waits on a
+                    # booting runtime's writer lock. It runs only on a death's
+                    # first sighting.
                     await asyncio.to_thread(
                         _classify_discovered_death, record.session_id, reaped_owner=record
                     )
@@ -6062,6 +6114,12 @@ class MobileDaemon:
         table._summaries_at = 0.0
         # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
         table.notify_list_changed()
+
+    def _detach_scan_work(self, work: "Awaitable[None]") -> None:
+        """Run ``work`` beside the scan loop, holding a reference until it ends."""
+        task = asyncio.ensure_future(work)
+        self._scan_side_tasks.add(task)
+        task.add_done_callback(self._scan_side_tasks.discard)
 
     def retain_provisional_active(self, session_id: str) -> None:
         """Hold a wake transition until discovery or one scan interval wins."""
