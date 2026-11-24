@@ -1175,7 +1175,7 @@ def test_validation_refusals_are_legible_and_per_op() -> None:
     refusal = _sessions_validation_error(SessionsParams(op="stop", prompt="p"))
     assert refusal is not None
     assert refusal.startswith("`prompt` applies to spawn/resume only. ")
-    assert "`stop` takes: session|target|pid, peer." in refusal
+    assert "`stop` takes: session|target|pid, peer, force." in refusal
     assert refusal.endswith("Call op='help' for the full per-op reference.")
     refusal = _sessions_validation_error(SessionsParams(op="list", session="a"))
     assert refusal is not None
@@ -1254,7 +1254,13 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     # that tells it apart from `stop` ("keeps wakes/monitors armed") — 1326
     # measured with this test's own ruler, pinned at 1327 (one-token headroom).
     # The rest of park's contract lives in op='help', not the schema.
-    assert count_text_tokens(params) <= 1327
+    # RE-MEASURED for `stop`'s `force` (runtime memory-runaway incident,
+    # 2026-11-24): one boolean whose description was trimmed to its safety
+    # clause ("operator-safety escalation (signals; cuts work)") — 1364 measured
+    # with this test's own ruler, pinned at 1365 (one-token headroom). When it
+    # is legitimate, and what the ladder does, live in op='help' and in every
+    # refusal that names it.
+    assert count_text_tokens(params) <= 1365
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 

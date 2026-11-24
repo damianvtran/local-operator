@@ -140,7 +140,8 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.host_speed": "host-speed threshold label/help rendered by settings_io._t",
     "wire.runtime_memory": (
         "per-runtime memory guard settings rows rendered by settings_io._t, and the "
-        "sessions tool's force-stop hint/approval rendered in-process as plain strings"
+        "sessions tool's force-stop hint and approval prompt rendered in-process as "
+        "plain strings"
     ),
     "wire.guardrails": (
         "guardrails section title/description and row label/help rendered by settings_io._t"

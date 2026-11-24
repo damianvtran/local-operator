@@ -632,8 +632,8 @@
         }
       ],
       "references": {
-        "settings_io.py": 8,
-        "tools/builtin.py": 2
+        "settings_io.py": 10,
+        "tools/builtin.py": 4
       }
     }
   }

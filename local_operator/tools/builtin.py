@@ -18319,11 +18319,7 @@ class SessionsParams(BaseModel):
     # unless the caller says this is an operator-safety stop.
     force: bool = Field(
         default=False,
-        description=(
-            "stop: operator-safety escalation (the operator asked, or the session is a"
-            " memory runaway): signals past a busy/silent owner — SIGTERM, bounded"
-            " drain, then SIGKILL of that exact process. Cuts work in flight."
-        ),
+        description="stop: operator-safety escalation (signals; cuts work).",
     )
 
 
