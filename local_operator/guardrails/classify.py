@@ -1341,7 +1341,8 @@ def _tsbuildinfo_file(full: str) -> bool:
             return False
         with open(full, "rb") as fh:
             data = json.loads(fh.read())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError, MemoryError):
+        # #4550 R1-m2: deeply nested JSON raises RecursionError; hold, quietly.
         return False
     return (
         isinstance(data, dict)
@@ -1524,7 +1525,7 @@ def _removed_worktree_remnant(path: str) -> bool:
                 files.append(full)
                 if len(files) > _REMNANT_FILE_LIMIT:
                     return False
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError, MemoryError):
         return False
     if not files:
         return True
@@ -1532,7 +1533,8 @@ def _removed_worktree_remnant(path: str) -> bool:
         stamps = []
         for f in files:
             st = os.lstat(f)
-            stamps.append((f, st.st_size, st.st_mtime_ns, st.st_ino))
+            # ctime too (#4550 R1-m1): a rewrite can restore mtime, not ctime.
+            stamps.append((f, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino))
     except OSError:
         return False
     fingerprint = hash(tuple(sorted(stamps)))

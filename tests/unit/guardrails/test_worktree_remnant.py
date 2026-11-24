@@ -338,3 +338,26 @@ def test_remnant_memo_skips_only_unchanged_hashing(
     monkeypatch.setattr(c, "_REMNANT_MEMO_TTL_S", 0.0)
     assert c._removed_worktree_remnant(str(gone)) is True
     assert len(hashes) == 4  # expired: re-hashed
+
+
+def test_remnant_review_minors(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#4550 R1-m1: a same-size rewrite with its mtime restored is re-hashed
+    (ctime moves). R1-m2: deeply nested JSON under a tsbuildinfo name holds
+    instead of raising RecursionError out of the guard."""
+    from local_operator.guardrails import classify as c
+
+    monkeypatch.setattr(c, "_REMNANT_MEMO", {})
+    gone = _committed_tree(repo, "minors")
+    shutil.rmtree(repo / ".git" / "worktrees" / "minors")
+    victim = next(p for p in gone.rglob("*") if p.is_file() and p.name != ".git")
+    assert c._removed_worktree_remnant(str(gone)) is True
+    st = victim.stat()
+    body = victim.read_bytes()
+    victim.write_bytes(bytes(b ^ 1 for b in body) if body else b"")
+    os.utime(victim, ns=(st.st_atime_ns, st.st_mtime_ns))
+    if body:
+        assert c._removed_worktree_remnant(str(gone)) is False
+    victim.write_bytes(body)
+    deep = gone / "deep.tsbuildinfo"
+    deep.write_text("[" * 200_000 + "]" * 200_000)
+    assert c._removed_worktree_remnant(str(gone)) is False
