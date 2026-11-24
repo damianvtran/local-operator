@@ -933,7 +933,17 @@ class TestSearchSnippetCharsSetting:
 
     @pytest.mark.parametrize(
         ("raw", "expected"),
-        [("0", 0), ("320", 320), ("off", 0), ("-5", 400), ("lots", 400), ("true", 400)],
+        [
+            ("0", 0),
+            ("320", 320),
+            ("off", 0),
+            ("-5", 400),
+            ("lots", 400),
+            ("true", 400),
+            ("100000", 100_000),
+            # Above the max: clamped to it, not reset to 400 (review R2).
+            ("250000", 100_000),
+        ],
     )
     def test_configured_value_is_read(self, tmp_path, monkeypatch, raw: str, expected: int) -> None:
         from local_operator.mcp.manager import read_search_snippet_chars

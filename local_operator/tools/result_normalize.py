@@ -106,8 +106,8 @@ snippet or url (39/39 and 43/43 across the two arms). 320 lost one of 43, so
 the MCP default is 400. Fetched pages are never clipped, so every cited fact
 the page supports is still there.
 
-Constraints: it applies only to a tool whose bare MCP name contains
-``search`` (``is_search_tool``), only to a JSON list whose every item is a hit
+Constraints: it applies only to a tool whose bare MCP name has ``search``
+as a whole word (``is_search_tool``), only to a JSON list whose every item is a hit
 object (a ``title`` key plus a URL-shaped key, see ``_is_hit``), and inside a
 hit only to snippet-like string fields (``SNIPPET_KEYS``) and empty fields.
 URL-keyed and ``title`` values are never touched (citation-bound workflows
@@ -167,7 +167,12 @@ SEARCH_SNIPPET_CHARS_MAX: Final = 100_000
 #: ``description``). Only these are clipped; every other field (ids, dates,
 #: scores, ``title``, any URL-shaped key) is copied as is.
 SNIPPET_KEYS: Final = frozenset({"snippet", "content", "description", "text", "summary"})
-_SEARCH_TOOL = re.compile(r"search", re.IGNORECASE)
+#: The words of a tool name: an uppercase run not followed by lowercase
+#: (``HTTP`` in ``HTTPSearch``), a capitalised or lowercase word, or a digit
+#: run. Anything else (``_``, ``-``, ``.``, spaces) separates words, so
+#: ``searchWeb``, ``tavily-search`` and ``brave_web_search`` each yield a
+#: ``search`` word while ``research`` and ``elasticsearch`` stay one word.
+_NAME_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
 
 
 def clip_snippet(text: str, limit: int) -> str:
@@ -190,8 +195,15 @@ def is_search_tool(tool_name: str) -> bool:
     The bare name, never the harness label ``mcp__<server>_<tool>``: a server
     called ``elasticsearch`` or ``research`` must not turn its fetch or
     document-read tool into a "search" whose content gets clipped.
+
+    ``search`` must be a whole word of the name (split on ``_``, ``-``,
+    ``.``, camelCase and digits), not a substring: ``perplexity_research``,
+    ``deep_researcher_check`` or ``elasticsearch_get_document`` return
+    documents or reports whose body IS the answer, and clipping their text
+    fields as if they were discovery snippets would drop cited content
+    (agent review R1 / QA Q1 on PR #4525).
     """
-    return bool(_SEARCH_TOOL.search(tool_name))
+    return any(word.lower() == "search" for word in _NAME_WORD.findall(tool_name))
 
 
 #: A line with at least this many visible characters (links rendered as their

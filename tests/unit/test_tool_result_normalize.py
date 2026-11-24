@@ -620,7 +620,27 @@ def test_off_mode_is_byte_identical_even_for_a_search() -> None:
 
 @pytest.mark.parametrize(
     ("name", "expected"),
-    [("search", True), ("web_search_exa", True), ("SearchDocs", True), ("fetch", False)],
+    [
+        ("search", True),
+        ("web_search_exa", True),
+        ("SearchDocs", True),
+        ("web_search", True),
+        ("tavily-search", True),
+        ("searchWeb", True),
+        ("brave_web_search", True),
+        ("docs.search", True),
+        ("search2", True),
+        ("HTTPSearch", True),
+        ("fetch", False),
+        # Substring-only matches are NOT searches (review R1 / QA Q1): their
+        # text fields are the answer, not discovery snippets.
+        ("research_fetch", False),
+        ("deep_researcher_check", False),
+        ("perplexity_research", False),
+        ("company_research_exa", False),
+        ("elasticsearch_get_document", False),
+        ("researchSearchless", False),
+    ],
 )
 def test_is_search_tool(name: str, expected: bool) -> None:
     from local_operator.tools.result_normalize import is_search_tool

@@ -996,9 +996,12 @@ def read_search_snippet_chars() -> int:
 
     Same contract as :func:`read_result_normalization_mode` (live per call,
     never renames a broken config, never fails a result). A hand-typed bare
-    ``off``/``false`` (YAML boolean False) means 0, "keep snippets whole"; a
-    value that is not a whole number in ``0..SEARCH_SNIPPET_CHARS_MAX`` falls
-    back to the default.
+    ``off``/``false`` (YAML boolean False) means 0, "keep snippets whole". A
+    hand-edited whole number above ``SEARCH_SNIPPET_CHARS_MAX`` is clamped to
+    the max: the operator asked for long snippets, and the max already keeps
+    every measured snippet whole, so 400 would be the opposite of their intent.
+    Anything else that is not a whole number ``>= 0`` (negative, text,
+    ``true``) falls back to the default.
     """
     try:
         from local_operator.config import CONFIG_FILE_NAME, ConfigManager
@@ -1016,7 +1019,9 @@ def read_search_snippet_chars() -> int:
         return 0
     if isinstance(value, bool) or not isinstance(value, int):
         return SEARCH_SNIPPET_CHARS_DEFAULT
-    return value if 0 <= value <= SEARCH_SNIPPET_CHARS_MAX else SEARCH_SNIPPET_CHARS_DEFAULT
+    if value < 0:
+        return SEARCH_SNIPPET_CHARS_DEFAULT
+    return min(value, SEARCH_SNIPPET_CHARS_MAX)
 
 
 def _format_with_normalization_setting(
