@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "1636f973f5efab3273eeb4902d41b30ea5ee0eeb8fa4a890eddcbc4298f7466c",
+  "history_sha256": "00b1f77e1c840db956acbf4ace52e2bf9177b3e4ec4410e4588a0555c9a2c140",
   "entries": [
     {
       "locale": "zh-CN",
@@ -7547,6 +7547,31 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #4525 (branch feat/mcp-search-snippet-clip, stacked on #4514), 2026-11-24: the 2 NEW keys wire.settings.mcp_search_snippet_chars.{label,help}, judged against the en source + context sidecar (claims: per-snippet character cap for MCP search tools; titles and URLs never cut; 0 = whole), i18n/glossary.md, i18n/style-guides/zh-CN.md and neighbouring wire.settings keys (accuracy, glossary terms, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; rich.cells.cell_len label 16/29, help 89/188; key parity 2/2. Merge proof: this branch was merged with origin/feat/mcp-result-normalization 197d442a8214; scripted flattened-JSON diff shows this locale's file (and en, and the en context sidecar) == 197d442a's file + exactly the 2 new keys, 0 removed, 0 changed, new values byte-identical to PR head 903751aca151; 197d442a's file matches its last passed receipt (target and source hashes verified). 1 finding, NIT, deferred in the PR thread: both values put a space between Chinese and Latin/digit runs ('MCP 搜索', '和 URL 从', '。0 表示'), against i18n/style-guides/zh-CN.md 'No space inserted between Chinese text and Latin/digit runs' (namespace: 220 values without, 7 with, 3 of those from #4514's MCP keys). Suggested: 'MCP搜索摘要长度' / 'MCP搜索工具返回的每条结果摘要最多保留的字符数；标题和URL从不截断。0表示保留完整摘要。'. Meaning, terminology (工具, 摘要) and width are correct."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "2a696ee73589202ce14053f538541cb2bd901c4e0b6646b772cd1da6bcf58974",
+      "context_sha256": "411b73622dddb59bb1cce4168da16176b2874da60b6f4a2f3386f61cb6d78887",
+      "target_sha256": "021849bf2aa8e7bff37e5ab3f70091c0267b8b11c5e47644c88a263f56ce0210",
+      "keys_audited": 2,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4540 implementer, commit 86d35a271ba3)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 867cc715eef1 (independent of the translator; did not write PR #4540)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #4540 (branch feat/mcp-result-shaping, stacked on #4525), 2026-11-24, at head 7a06565cdbd7 against en wire.settings sha256 2a696ee73589: the 2 NEW keys wire.settings.mcp_result_text_rendering.{label,help}, judged against the en source + context sidecar (claims: MCP search results and fetched pages go to the agent as plain text instead of JSON; every field kept; off = stays JSON), i18n/glossary.md (agent), i18n/style-guides/<locale>.md and neighbouring wire.settings keys (off-state word, MCP/JSON kept Latin). Checks run by the auditor: no ICU arguments in source or target; key parity 2/2; scripted proof that this locale's file at the PR base fc780867 equals its last passed receipt's target_sha256 (and that receipt's source equals the base en hash), and that the head file = base + exactly the 2 new keys, 0 removed, 0 changed. rich.cells.cell_len label 17/29, help 85/188. Label/help accurate, all three claims carried; full-width ，。 used. 1 finding, MINOR, FIXED in the audit commit: spaces between Han and Latin runs (MCP, JSON) violated the zh-CN guide's no-space rule (namespace: 484 unspaced vs 20 spaced boundaries); the 5 spaces were removed, no wording change. target_sha256 is the corrected file."
     }
   ]
 }
