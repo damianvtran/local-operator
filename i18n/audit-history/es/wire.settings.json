@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "475fa491ba5e328ca229e5db1af04f9067bfb317777555ce378d61d354520623",
+  "history_sha256": "c39cb4128eeb266cc8feab58eee9336e84c6efb802c81336e5b4e4333573bb05",
   "entries": [
     {
       "locale": "es",
@@ -7315,6 +7315,31 @@
       },
       "status": "passed",
       "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings (origin/main: 30 keys added since the merge-base; branch: 10 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 10 added/changed keys; origin/main's 895 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "7eaf3e95c31cf444f26de59ba8c5c253de0c6b770c48a0588aee1692861e33c8",
+      "context_sha256": "1946205a2ef39fdff2704ce40007a6325bdfe2349eca4e483e0d6ec8c55e57be",
+      "target_sha256": "651fcf54081a22ae7cd777b275be519f3350a4ffaee5063aef8ae4678e35656d",
+      "keys_audited": 8,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4514 implementer, commit 3dc289d5a384)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session cd2d2ff84424 (independent of the translator; did not write PR #4514)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent semantic audit of PR #4514 (branch feat/mcp-result-normalization, head 3dc289d5a384 + this commit), 2026-11-23: the 8 NEW keys wire.settings.mcp_result_normalization.{label,help,choice.off.label,choice.off.description,choice.prose_links.label,choice.prose_links.description,choice.strip_links.label,choice.strip_links.description}, judged against en source + context sidecar, i18n/glossary.md and i18n/style-guides/es.md (accuracy, glossary terms, neighbouring-key terminology, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; 'prose-links'/'strip-links' labels byte-identical to en per the sidecar; rich.cells.cell_len within every maxCells (label 29, help 188, descriptions 48, off label 12); key parity 8/8. Every other key in this namespace is byte-identical to merge-base 989351cd16c0's file, whose last receipt here passed against that base's en hash b3753dde0a01… (scripted diff: 8 added, 0 changed, 0 removed; context sidecar 8 added, 0 changed). 4 findings, fixed by the auditor in this commit (MINOR): (1-3) register — the three choice descriptions used 3rd-person indicative ('envía', 'conserva … quita'); verb-led neighbours in es/wire.settings use the infinitive ('mantener al día …', 'guardar automáticamente', 'limitar …', 'detener la consulta') per the es guide's infinitive rule; now 'enviar …', 'conservar …', 'conservar …, quitar cada URL' (46/48 cells). (4) grammar — help 'Desactivado los envía sin cambios.' used a bare participle as subject; now 'Desactivado: se envían sin cambios.' (160/188 cells), matching fr's 'Désactivé : …' and ru's 'Отключено: …'."
     }
   ]
 }

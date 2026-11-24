@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "116c4c8634d9100a26e1d984b7546208248d9cd3f906249560ae6f27b4290b6e",
+  "history_sha256": "971f958fc51201c7bf238fb1f3e756b3e23ccf63b1c4cdadb41fcc45a12dd283",
   "entries": [
     {
       "locale": "ur",
@@ -7557,6 +7557,31 @@
       },
       "status": "passed",
       "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings (origin/main: 30 keys added since the merge-base; branch: 10 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 10 added/changed keys; origin/main's 895 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "7eaf3e95c31cf444f26de59ba8c5c253de0c6b770c48a0588aee1692861e33c8",
+      "context_sha256": "1946205a2ef39fdff2704ce40007a6325bdfe2349eca4e483e0d6ec8c55e57be",
+      "target_sha256": "d319f71676d790f12dfdce63ad431e30c20a86651a1b01c02b57f0b4122992a0",
+      "keys_audited": 8,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4514 implementer, commit 3dc289d5a384)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session cd2d2ff84424 (independent of the translator; did not write PR #4514)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent semantic audit of PR #4514 (branch feat/mcp-result-normalization, head 3dc289d5a384 + this commit), 2026-11-23: the 8 NEW keys wire.settings.mcp_result_normalization.{label,help,choice.off.label,choice.off.description,choice.prose_links.label,choice.prose_links.description,choice.strip_links.label,choice.strip_links.description}, judged against en source + context sidecar, i18n/glossary.md and i18n/style-guides/ur.md (accuracy, glossary terms, neighbouring-key terminology, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; 'prose-links'/'strip-links' labels byte-identical to en per the sidecar; rich.cells.cell_len within every maxCells (label 29, help 188, descriptions 48, off label 12); key parity 8/8. Every other key in this namespace is byte-identical to merge-base 989351cd16c0's file, whose last receipt here passed against that base's en hash b3753dde0a01… (scripted diff: 8 added, 0 changed, 0 removed; context sidecar 8 added, 0 changed). 0 findings. ایجنٹ/ٹول per glossary; 'آف' matches the three neighbouring off labels; respectful imperative (بھیجیں، رکھیں، ہٹا دیں) per the ur guide; no manual bidi controls (render layer isolates), Latin MCP/URL kept like neighbours; 'حوالہ نشانات' = reference marks (not واوین). Label 28/29 cells."
     }
   ]
 }

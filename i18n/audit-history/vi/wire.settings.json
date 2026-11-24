@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "fce915f8d7658f905ac6b4c137496ae10f886a60889b280721d145f755895ea3",
+  "history_sha256": "92a05573825bc76cad945093e6366d8088d522723fb6ad6243d9c85878737453",
   "entries": [
     {
       "locale": "vi",
@@ -7374,6 +7374,31 @@
       },
       "status": "passed",
       "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings (origin/main: 30 keys added since the merge-base; branch: 10 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 10 added/changed keys; origin/main's 895 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "7eaf3e95c31cf444f26de59ba8c5c253de0c6b770c48a0588aee1692861e33c8",
+      "context_sha256": "1946205a2ef39fdff2704ce40007a6325bdfe2349eca4e483e0d6ec8c55e57be",
+      "target_sha256": "fa539c87c7211eed4c490085aab36d67614a084a59e665049b78c14a48107300",
+      "keys_audited": 8,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4514 implementer, commit 3dc289d5a384)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session cd2d2ff84424 (independent of the translator; did not write PR #4514)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent semantic audit of PR #4514 (branch feat/mcp-result-normalization, head 3dc289d5a384 + this commit), 2026-11-23: the 8 NEW keys wire.settings.mcp_result_normalization.{label,help,choice.off.label,choice.off.description,choice.prose_links.label,choice.prose_links.description,choice.strip_links.label,choice.strip_links.description}, judged against en source + context sidecar, i18n/glossary.md and i18n/style-guides/vi.md (accuracy, glossary terms, neighbouring-key terminology, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; 'prose-links'/'strip-links' labels byte-identical to en per the sidecar; rich.cells.cell_len within every maxCells (label 29, help 188, descriptions 48, off label 12); key parity 8/8. Every other key in this namespace is byte-identical to merge-base 989351cd16c0's file, whose last receipt here passed against that base's en hash b3753dde0a01… (scripted diff: 8 added, 0 changed, 0 removed; context sidecar 8 added, 0 changed). 0 findings. tác nhân/công cụ per glossary; 'tắt' per the vi guide's choice-label rule and neighbours; no 'bạn', bare verbs. 'dấu trích dẫn' read as citation marks (this catalogue uses 'trích dẫn' for citations, web_search_deepseek_evidence.help); quotation marks would be 'dấu ngoặc kép'. Label 'Rút gọn kết quả MCP' is the same idiomatic 'trim' family as fr 'Alléger' / es 'Aligerar'; help states that only images, nav links and citation marks go."
     }
   ]
 }
