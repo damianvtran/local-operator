@@ -60,11 +60,12 @@ def test_images_become_alt_text_and_empty_alt_is_dropped() -> None:
     assert "px.example" not in out
 
 
-def test_one_link_list_items_are_dropped() -> None:
+def test_on_site_nav_bullets_are_dropped_and_absolute_bullets_become_text() -> None:
     out = normalize_markdown(PAGE)
-    assert "Home" not in out
-    assert "example.com/news" not in out
-    assert "facebook.com" not in out  # an icon-only bullet is one link too
+    assert "Home" not in out  # ``* [Home](/)``: on-site navigation chrome
+    assert "* News" in out  # an absolute one-link bullet keeps its text (R3)
+    assert "example.com/news" not in out  # short line: the URL goes
+    assert "facebook.com" not in out  # an icon-only bullet has no text left
 
 
 def test_cite_markers_dropped_but_bare_brackets_kept() -> None:
@@ -114,25 +115,25 @@ def test_code_is_verbatim() -> None:
 
 
 def test_unclosed_fence_protects_the_rest() -> None:
-    text = "intro  text\n```\n[a](/b)   x"
-    assert normalize_markdown(text) == "intro text\n```\n[a](/b)   x"
+    text = "intro ![](https://px/a.gif)\n```\n[a](/b)   x"
+    assert normalize_markdown(text) == "intro\n```\n[a](/b)   x"
 
 
 def test_list_continuation_is_not_mistaken_for_code() -> None:
-    text = "* item\n\n    continued [rel](/x)"
+    text = "* item ![](https://px/a.gif)\n\n    continued [rel](/x)"
     assert normalize_markdown(text) == "* item\n\n    continued rel"
 
 
-def test_whitespace_collapse() -> None:
+def test_blank_runs_shrink_to_two_and_intra_line_spacing_is_kept() -> None:
     out = normalize_markdown(PAGE)
-    assert "\n\n\n" not in out
-    assert "inline and [[n]]" in out
-    assert not any(line != line.rstrip() for line in out.split("\n"))
+    assert "\n\n\n\n" not in out  # the 3-blank run became 2
+    assert "inline   and  [[n]]" in out  # an unchanged line keeps its spacing
 
 
-def test_plain_text_passes_through_except_whitespace() -> None:
-    text = "Line one.\nLine two has  two spaces.   \n\n\n\nEnd."
-    assert normalize_markdown(text) == "Line one.\nLine two has two spaces.\n\nEnd."
+def test_plain_text_without_web_markup_is_returned_unchanged() -> None:
+    text = "Line one.\nLine two has  two spaces.   \n\n\n\nEnd [a](/b).\n"
+    assert normalize_markdown(text) is text
+    assert normalize_tool_text(text) is text
 
 
 def test_many_unmatched_backticks_and_brackets_stay_linear() -> None:
@@ -173,16 +174,17 @@ def test_json_long_leaves_normalized_short_values_and_urls_untouched() -> None:
 
 
 def test_json_url_keyed_leaves_are_never_normalized_even_when_long() -> None:
-    long_url_text = "see [x](/y) " * 30
+    long_url_text = "see [x](https://e.example/y) " * 30
     raw = json.dumps({"source_url": long_url_text, "body": long_url_text})
-    parsed = json.loads(normalize_tool_text(raw))
+    parsed = json.loads(normalize_tool_text(raw, "strip-links"))
     assert parsed["source_url"] == long_url_text
     assert parsed["body"] != long_url_text
 
 
 def test_json_non_ascii_is_emitted_raw() -> None:
-    out = normalize_tool_text(json.dumps({"name": "Montréal"}))
-    assert out == '{"name":"Montréal"}'
+    leaf = "Montréal " * 30 + "![](https://a.example/b.png)"
+    out = normalize_tool_text(json.dumps({"name": "Montréal", "t": leaf}))
+    assert out == '{"name":"Montréal","t":"' + "Montréal " * 29 + 'Montréal"}'
 
 
 def test_json_with_duplicate_keys_is_returned_unchanged() -> None:
@@ -191,7 +193,7 @@ def test_json_with_duplicate_keys_is_returned_unchanged() -> None:
 
 
 def test_invalid_json_takes_the_markdown_path() -> None:
-    assert normalize_tool_text("{not json  [a](/b)") == "{not json a"
+    assert normalize_tool_text("{not json  [a](/b) ![](https://p/x.gif)") == "{not json  a"
 
 
 def test_scalar_json_takes_the_markdown_path() -> None:
@@ -208,6 +210,145 @@ def test_unknown_mode_is_a_programming_error() -> None:
         normalize_tool_text("x", "everything")
 
 
+# ---- review/QA round 1 regressions (PR #4514: R2-R6, Q1-Q3) ------------------------
+
+# Q1/R2: exact reproductions. None carries web markup, so every one must come
+# back byte-identical -- code, regexes and column layouts are evidence too.
+CODE_AND_PLAIN = [
+    "def dispatch(handlers, name, arg):\n    return handlers[name](arg)\n",
+    "const out = callbacks[i](event);\nconst y = arr[0](x);",
+    "const fn = handlers[type](event);   // dispatch table\nreturn callbacks[0](fn);\n",
+    'ID = re.compile(r"[A-Z](\\d+)")\n\n\n\ndef f(self, name, *args):\n'
+    "    return self.callbacks[name](*args)\n",
+    "match [a-z](foo|bar) here",
+    'import os\n\n\nclass A:\n    pass\n\n\n\ntable  =  {"k":  1}\n',
+    "NAME      PID    CPU\nlop       123    0.5\n",
+]
+
+
+@pytest.mark.parametrize("mode", ("prose-links", "strip-links"))
+@pytest.mark.parametrize("text", CODE_AND_PLAIN)
+def test_code_and_plain_text_are_byte_identical(text: str, mode: str) -> None:
+    assert normalize_tool_text(text, mode) == text
+    # ... and inside a long JSON leaf (a GitHub-style ``{"path", "content"}``).
+    raw = json.dumps({"path": "src/x.py", "content": text * 8})
+    assert normalize_tool_text(raw, mode) == raw
+
+
+def test_index_or_call_syntax_is_never_a_link_even_in_web_content() -> None:
+    # Web content passes the gate, yet ``name[x](y)`` and non-URL targets stay.
+    text = (
+        "![](https://px.example/a.gif)\n"
+        "Call handlers[name](arg) or callbacks[0](fn) or self.cb[k](*args); "
+        "regex [a-z](foo|bar) and [A-Z](\\d+) stay; [Docs](/docs/a) goes."
+    )
+    out = normalize_markdown(text)
+    assert out == (
+        "Call handlers[name](arg) or callbacks[0](fn) or self.cb[k](*args); "
+        "regex [a-z](foo|bar) and [A-Z](\\d+) stay; Docs goes."
+    )
+
+
+def test_trailing_newline_and_line_count_are_preserved() -> None:
+    text = "# T ![](https://px/a.gif)\n\nbody [a](/b)\n\n\n\nend\n"
+    out = normalize_markdown(text)
+    assert out == "# T\n\nbody a\n\n\nend\n"
+
+
+# Q2/R3: exact reproductions. A result that IS a list of links keeps every title.
+SEARCH_RESULTS = (
+    "Search results:\n\n"
+    "1. [Mark Sutcliffe - Wikipedia](https://en.wikipedia.org/wiki/Mark_Sutcliffe)\n"
+    "2. [Mayor of Ottawa | City of Ottawa](https://ottawa.ca/en/mayor)\n"
+    "3. [Mark Sutcliffe (@marksutcliffe) / X](https://x.com/marksutcliffe)\n"
+)
+BOARD_DECKS = (
+    "- [Q3 board deck](https://drive.example.com/q3)\n"
+    "- [Q4 board deck](https://drive.example.com/q4)"
+)
+README = (
+    "# Project\n\n"
+    "Read the guide below. ![build](https://ci.example/badge.svg)\n\n"
+    "## Docs\n\n"
+    "- [Install](docs/INSTALL.md)\n"
+    "- [Usage](docs/USAGE.md)\n"
+    "- [Configuration](docs/CONFIG.md)\n"
+    "- [Changelog](https://github.com/acme/project/blob/main/CHANGELOG.md)\n"
+)
+
+
+@pytest.mark.parametrize("mode", ("prose-links", "strip-links"))
+def test_link_lists_keep_their_titles(mode: str) -> None:
+    out = normalize_tool_text(SEARCH_RESULTS, mode)
+    assert out == (
+        "Search results:\n\n"
+        "1. Mark Sutcliffe - Wikipedia\n"
+        "2. Mayor of Ottawa | City of Ottawa\n"
+        "3. Mark Sutcliffe (@marksutcliffe) / X\n"
+    )
+    assert normalize_tool_text(BOARD_DECKS, mode) == "- Q3 board deck\n- Q4 board deck"
+
+
+def test_nav_bullets_that_are_most_of_the_result_are_kept_as_text() -> None:
+    # 3 of the 8 non-blank lines are on-site one-link bullets: a minority, so
+    # they go. Add more and they become the content, so they stay as text.
+    out = normalize_tool_text(README)
+    assert "Install" not in out and "Changelog" in out
+    docs_index = "".join(f"- [Page {i}](/docs/{i})\n" for i in range(6)) + "![](https://p/x.gif)\n"
+    assert normalize_tool_text(docs_index) == "".join(f"- Page {i}\n" for i in range(6))
+
+
+def test_long_on_site_anchor_is_content_not_nav() -> None:
+    title = "A long article title that is clearly content, not chrome"
+    text = f"intro ![](https://p/x.gif)\n\n* [{title}](/articles/1)\n\n" + "para\n" * 5
+    assert f"* {title}" in normalize_tool_text(text)
+
+
+# R4: a lone surrogate escape must not reach the provider as a raw surrogate.
+def test_json_lone_surrogate_stays_escaped_and_encodable() -> None:
+    raw = json.dumps({"t": "x " * 120 + "![](https://a.example/b.png) end"})[:-2] + '\\ud83d"}'
+    out = normalize_tool_text(raw)
+    out.encode("utf-8")  # raises UnicodeEncodeError if a raw surrogate leaked
+    assert "\\ud83d" in out and "a.example" not in out
+    assert json.loads(out)["t"].endswith("end\ud83d")
+
+
+def test_unencodable_markdown_output_falls_back_to_the_input() -> None:
+    raw = "x ![](https://a.example/b.png) \ud83d"  # already unencodable from the server
+    assert normalize_tool_text(raw) is raw
+
+
+def test_json_with_nothing_to_normalize_keeps_the_server_bytes() -> None:
+    raw = json.dumps({"t": "plain words " * 40, "n": 1.50, "u": "https://e/x"}, indent=2)
+    assert normalize_tool_text(raw) is raw
+
+
+# R5: numbers that would change value on re-emit leave the payload untouched.
+@pytest.mark.parametrize("number", ("1e400", "0.1234567890123456789", "NaN", "-Infinity"))
+def test_json_numbers_that_would_change_keep_the_original(number: str) -> None:
+    leaf = json.dumps("x " * 120 + "![](https://a.example/b.png)")
+    raw = '{"a": ' + number + ', "t": ' + leaf + "}"
+    assert normalize_tool_text(raw) is raw
+
+
+def test_json_number_spelling_may_change_but_not_value() -> None:
+    leaf = json.dumps("x " * 120 + "![](https://a.example/b.png)")
+    out = normalize_tool_text('{"a": 1.50, "b": 12345678901234567890, "t": ' + leaf + "}")
+    assert out.startswith('{"a":1.5,"b":12345678901234567890,')
+
+
+# R6/Q3: inputs that needed a second pass before; f(f(x)) == f(x) must hold.
+IDEMPOTENCE_EDGE_CASES = [
+    "[[a](/b)](/c) ![](https://x.example/y.png)",
+    "[[a](https://x.example/b)](https://x.example/c) " + "w " * 50,
+    "* [N](/w)\n[ ]",
+    " ![](y)```",
+    " ![](https://y.example/z.png)```\n[a](/b)",
+    "![](https://p/x.gif)\n[1, 2]",
+    "- [![](https://i/x.svg)](/home)\n- ![](https://i/y.svg)\n\n\n\ntext",
+]
+
+
 _FIXTURES = [
     PAGE,
     PROSE,
@@ -216,6 +357,11 @@ _FIXTURES = [
     "* item\n\n    continued [rel](/x)\n\n    more",
     "para\n\n* [nav](/x)\n\n    after nav [r](/y)",
     "![](a) * [b](/c)\n![alt](d)",
+    SEARCH_RESULTS,
+    BOARD_DECKS,
+    README,
+    *CODE_AND_PLAIN,
+    *IDEMPOTENCE_EDGE_CASES,
 ]
 
 

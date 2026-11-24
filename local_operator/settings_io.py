@@ -5219,7 +5219,7 @@ SETTINGS: tuple[Setting, ...] = (
     # ``tools.result_normalize.RESULT_NORMALIZATION_{PATH,DEFAULT}`` (not
     # imported, to keep this module cheap; pinned by the consumer-defaults
     # test). ``off`` is the byte-identical escape hatch for a server whose
-    # payload IS a link list, and the A/B switch for cost benchmarks.
+    # exact markup matters, and the A/B switch for cost benchmarks.
     Setting(
         key="mcp.result_normalization",
         path=("mcp", "result_normalization"),
