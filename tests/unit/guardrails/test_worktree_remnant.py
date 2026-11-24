@@ -208,9 +208,18 @@ def test_remnant_rank_carries_the_lossless_reason(repo: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lossless", [True, False], ids=["remnant", "uncommitted"])
+@pytest.mark.parametrize(
+    ("lossless", "status", "held"),
+    [
+        (True, "timed_out", False),
+        (False, "timed_out", True),
+        (True, "declined", True),
+        (True, "open", True),
+    ],
+    ids=["remnant", "uncommitted", "declined-remnant", "open-remnant"],
+)
 async def test_timed_out_ask_does_not_hold_a_lossless_remnant(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, lossless: bool
+    repo: Path, monkeypatch: pytest.MonkeyPatch, lossless: bool, status: str, held: bool
 ) -> None:
     """Field case 2026-11-24 (disk recovery, a-58df): the session that ASKED
     about two leftovers could not delete them after the ask timed out, though
@@ -226,24 +235,28 @@ async def test_timed_out_ask_does_not_hold_a_lossless_remnant(
         check_tool_call,
     )
 
-    gone = _committed_tree(repo, f"asked-{lossless}")
+    name = f"asked-{lossless}-{status}"
+    gone = _committed_tree(repo, name)
     if not lossless:
         (gone / "notes.md").write_text("never committed\n")
-    shutil.rmtree(repo / ".git" / "worktrees" / f"asked-{lossless}")
+    shutil.rmtree(repo / ".git" / "worktrees" / name)
     real = os.path.realpath(gone)
     asked = SimpleNamespace(
         ask_id="a-58df",
         session_id="aaaaaaaaaaa1",
-        status="timed_out",
-        label="TIMED OUT with no answer",
+        # A decline is an answer that approves nothing (#4545 R1-M1).
+        status=status,
+        label={"timed_out": "TIMED OUT with no answer", "open": "still open, not yet answered"}.get(
+            status, "declined"
+        ),
         text=f"May I delete {real}?",
         approved="",
         created_at=0,
-        never_answered=True,
+        never_answered=status != "declined",
         answer=None,
         untrusted_yes=False,
         answered_at=0,
-        has_answer=False,
+        has_answer=status == "declined",
         expires_at=0,
     )
     monkeypatch.setattr(prov, "unanswered_asks", lambda sid, *a, **k: [asked])
@@ -262,8 +275,8 @@ async def test_timed_out_ask_does_not_hold_a_lossless_remnant(
     out = await check_tool_call(
         "bash", {"command": f"rm -rf {real}"}, ctx, settings=GuardSettings(), judge=judge
     )
-    if lossless:
+    if held:
+        assert out is not None and out.blocked, out
+    else:
         assert out is None or not out.blocked, out
         assert calls == []
-    else:
-        assert out is not None and out.blocked
