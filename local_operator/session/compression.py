@@ -1548,6 +1548,24 @@ def acquire_writer(directory: Path, *, wait_s: float = 0.0) -> bool:
         time.sleep(WRITER_WAIT_POLL_S)
 
 
+def writer_holders(directory: Path) -> int:
+    """How many holds THIS process has on the session's writer lock (0 if none).
+
+    WHY (PR #4513 Q1): :func:`acquire_writer` is refcounted per process, so a
+    ``True`` from it means "this process may write", not "this object is the
+    only writer". A second in-process ``Transcript`` on a directory — the
+    parent's peek of a running in-process subagent — shares the child's hold
+    while the child appends. A caller about to REPLACE the journal (the fold on
+    open) needs the stronger fact: a count of exactly 1 is its own hold and
+    nobody else's. The count is a snapshot; such a caller re-checks right
+    before its rename.
+    """
+    key = os.path.realpath(os.fspath(directory))
+    with _writers_guarded():
+        held = _WRITERS.get(key)
+        return 0 if held is None else int(held[1])
+
+
 def release_writer(directory: Path) -> None:
     """Release one hold on the session's writer lock (no-op if none is held).
 
