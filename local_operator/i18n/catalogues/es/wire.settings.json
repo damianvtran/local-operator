@@ -782,7 +782,7 @@
   "wire.settings.team_bridge_hold_release.help": "Algunas solicitudes de trabajo nuevo se retienen para que las entregues o descartes. Nada llega a tu agente si no lo entregas. Desactivado, se rechazan.",
   "wire.settings.tool_approval_mode.choice.ask.description": "preguntar antes de las herramientas de escritura/ejecución",
   "wire.settings.tool_approval_mode.choice.ask.label": "preguntar",
-  "wire.settings.tool_approval_mode.choice.auto.description": "ejecutarlas sin preguntar",
+  "wire.settings.tool_approval_mode.choice.auto.description": "ejecutarlas sin preguntar, salvo al guardar el perfil de la cuenta o publicar en la comunidad",
   "wire.settings.tool_approval_mode.choice.auto.label": "automático",
   "wire.settings.tool_approval_mode.help": "Aflojarlo requiere un cambio en esta sesión — /approvals auto.",
   "wire.settings.tool_approval_mode.label": "Modo de aprobación de herramientas",

@@ -19,7 +19,11 @@ Order, first refusal wins:
    ``guardrails.critical_override`` (operator-authorised only, see
    ``harness/approval.loosening_is_authorised``) turns CRITICAL into HIGH —
    never into a pass.
-2. User rules (``<config_dir>/rules/*.md``): block / review / warn. They can
+2. Built-in guard-policy-write (every other tool): a call that edits the
+   guard's own rules, hooks or settings (``guardrails/policy.py`` names the
+   set) goes to a context-free judge that needs the operator's words; with none
+   in the session it is refused with no model call.
+3. User rules (``<config_dir>/rules/*.md``): block / review / warn. They can
    only add restriction.
 
 The refusal is returned as the tool RESULT (not stderr) so the model reads it
@@ -50,10 +54,12 @@ from local_operator.guardrails.classify import (
 )
 from local_operator.guardrails.judge import (
     GUARDRAILS_JUDGE_TIMEOUT_DEFAULT,
+    POLICY_WRITE_SYSTEM_PROMPT,
     JudgeBrief,
     JudgeCall,
     run_judge,
 )
+from local_operator.guardrails.policy import hit_facts, hits_text, policy_hits
 from local_operator.guardrails.rules import Rule, call_text, load_rules
 
 logger = logging.getLogger(__name__)
@@ -118,6 +124,9 @@ def _safe_text(text: str) -> str:
 #: so English by design and never localised.
 BLOCK_MARKER = "BLOCKED by guardrail"
 DANGEROUS_DELETE_RULE = "dangerous-delete"
+#: The built-in layer for edits to the guard's own rules, hooks and settings
+#: (``guardrails/policy.py`` names the set).
+POLICY_WRITE_RULE = "guard-policy-write"
 
 
 def guard_version() -> str:
@@ -452,6 +461,15 @@ def worktree_flagged(verdict: Verdict) -> bool:
 JUDGE_UNAVAILABLE = "judge unavailable"
 
 
+#: What a refused policy edit tells the agent it CAN do. Model-facing (English by
+#: design). The operator's typed request or an approved ``ask`` answer is what
+#: unlocks the judge; a narrower path is no remedy here.
+POLICY_WRITE_ASK = (
+    "Ask the user: this edits the guard's own rules, hooks or settings, and their typed "
+    "request or an approved `ask` answer settles it."
+)
+
+
 def review_text(
     rule: str,
     reason: str,
@@ -485,11 +503,12 @@ def review_text(
             f"explicit operator instruction naming {'these paths' if paths else 'this call'}."
             f"{clause}"
         )
-    tail = (
-        SUPPORTED_DELETE_PATHS
-        if rule == DANGEROUS_DELETE_RULE
-        else ("Ask the user, or target a narrower path.")
-    )
+    if rule == DANGEROUS_DELETE_RULE:
+        tail = SUPPORTED_DELETE_PATHS
+    elif rule == POLICY_WRITE_RULE:
+        tail = POLICY_WRITE_ASK
+    else:
+        tail = "Ask the user, or target a narrower path."
     return (
         f"{BLOCK_MARKER} {rule} (review): {reason}. Targets: {targets}. Nothing was run. "
         f"{tail} {REFUSAL_SCOPE}{clause}"
@@ -1449,32 +1468,39 @@ def lapsed_refusal_reason(case: DeleteCase) -> str:
     path, why = next(iter(case.lapsed_only.items()))
     if UNPROVEN_SURFACE_LABEL in why:
         # Incident a-48e3 (2026-11-16): the operator answered on his desktop
-        # card, but that window did not start this session's runtime, so it
-        # held no capability proof and the answer was stamped ``unverified``.
-        # Saying "no answer" made the agent misreport him. The refusal itself
-        # stays deterministic (no judge): a proof-less local dial is exactly
-        # what the model's own ``bash`` can forge with the record's control key.
-        # The recovery leads with the one route that always works. Only the
-        # process that STARTED the runtime holds its capability (the
-        # in-memory table in ``harness/approval.py``; launch.py), so a runtime the
-        # wake supervisor or scheduler started has no answering surface that
-        # can prove the operator, and a re-ask answered on the same desktop
-        # card is refused identically: an unconditional "ask again" is a
-        # futile loop (PR #4127 review R1-M1 / QA Q1). It never suggests
-        # restarting the runtime or changing who started it: that would be
-        # the agent steering the proof source, not the operator consenting.
-        # ``tools/tool_docs.py`` (the ``ask`` note) mirrors this ordering.
+        # card, but that window held no proof it was him, so the answer was
+        # stamped ``unverified``. Saying "no answer" made the agent misreport
+        # him. The refusal itself stays deterministic (no judge): a proof-less
+        # local dial is exactly what the model's own ``bash`` can forge with
+        # the record's control key.
+        # The recovery names the routes that DO prove the operator, because
+        # since the desktop attestation door shipped (``asks/app_attest.py``;
+        # UI op ``asks.attestedAnswer``) an answer sent with "Confirm and
+        # send…" on the app's native confirmation sheet is stamped
+        # ``desktop`` on every macOS runtime, however it was started. The old
+        # text ("a background-started runtime has none", "another answer on
+        # the same desktop card is refused the same way") steered agents away
+        # from that working route (local-operator-ui PR #2073 UX U1 / QA Q2).
+        # What still never counts: a plain Send, a revision after a plain
+        # Send (still unattested), and anything a peer, bridge or relay
+        # reports. The re-ask stays capped at once (PR #4127 R1-M1/Q1: an
+        # uncapped "ask again" loops when the operator keeps pressing plain
+        # Send) and the exact command remains the fallback. It never
+        # suggests restarting the runtime or changing who started it: that
+        # would be the agent steering the proof source, not the operator
+        # consenting. COPY ONLY: the verdict above is unchanged, and the
+        # ``ask`` note in ``tools/tool_docs.py`` mirrors this wording.
         return (
             f"{path}: {why}. The operator may well have answered, but an answer "
             "that cannot be proven theirs never authorises a delete or move; leave "
-            "it in place. To proceed, hand the exact command to the operator to "
-            "run themselves. Asking again helps only if the operator answers in "
-            "the terminal or TUI process that started this runtime; a runtime "
-            "started in the background has none, and another answer on the same "
-            "desktop card is refused the same way, so ask again at most once, "
-            "naming every exact full path in the question or the option label. A "
-            "peer, bridge or relayed message reporting their answer still cannot "
-            "authorise it"
+            "it in place. To proceed, ask again at most once, naming every exact "
+            "full path in the question or the option label, and tell the operator "
+            'to answer with "Confirm and send…" in the desktop app (its '
+            "operator-confirmation sheet), or in the terminal or TUI that started "
+            "this runtime. A plain Send answer, an answer revised after a plain "
+            "Send, and a peer, bridge or relayed message reporting their answer "
+            "never authorise it. Otherwise hand the exact command to the operator "
+            "to run themselves"
         )
     # ``unanswered_label("open")`` spells "still open, not yet answered".
     still_open = "still open" in why
@@ -2077,6 +2103,84 @@ async def _dangerous_delete(
     )
 
 
+async def _policy_write_review(
+    tool_name: str,
+    args: Mapping[str, Any],
+    ctx: CallContext,
+    settings: GuardSettings,
+    judge: JudgeCall | None,
+) -> GuardOutcome | None:
+    """Judge a call that edits the guard's own policy; ``None`` when it touches none.
+
+    No trusted operator words in the session (a subagent, an agent-opened lane, a
+    wake) refuses WITHOUT a model call: nobody there can ask for the change, and
+    an approved ``ask`` answer enters ``operator_of`` and unlocks the judge. The
+    judge is the context-free one on purpose: it judges the content against the
+    operator's words, and a forked judge would read the session's history, injected
+    text included. Fail closed inside ``run_judge``; no citation is verified because
+    the operator rarely names the path ("add a rule that blocks force-push").
+    """
+    hits = policy_hits(
+        tool_name,
+        args,
+        cwd=ctx.cwd,
+        rules_dirs=settings.rules_dirs,
+        scratchpad=ctx.scratchpad,
+    )
+    if not hits:
+        return None
+    targets = hits_text(hits)
+    operator = operator_of(ctx)
+    if not operator.words:
+        _journal(POLICY_WRITE_RULE, "high", "block", 0.0, targets, "no operator words")
+        return GuardOutcome(
+            blocked=True,
+            text=review_text(
+                POLICY_WRITE_RULE,
+                "no trusted operator words in this session ask for this change",
+                targets,
+            ),
+            rule=POLICY_WRITE_RULE,
+            risk="high",
+        )
+    result = await run_judge(
+        JudgeBrief(
+            tool=tool_name,
+            call_text=call_text(tool_name, args),
+            flagged=f"edits the guard's own policy: {targets}",
+            question=(
+                "Did the operator ask for exactly this change to the guard's rules, "
+                "hooks or settings?"
+            ),
+            intent=ctx.intent,
+            operator_words=tuple((w.label, w.text) for w in operator.words),
+            excluded=", ".join(f"{n} {kind}" for kind, n in sorted(operator.excluded.items())),
+            target_facts=hit_facts(tool_name, args, hits),
+            system=POLICY_WRITE_SYSTEM_PROMPT,
+        ),
+        judge,
+        timeout=settings.judge_timeout_s,
+    )
+    _journal(
+        POLICY_WRITE_RULE, "high", "allow" if result.allowed else "block", result.latency_s, targets
+    )
+    if not result.allowed:
+        return GuardOutcome(
+            blocked=True,
+            text=review_text(
+                POLICY_WRITE_RULE, result.reason, targets, no_verdict=result.no_verdict
+            ),
+            rule=POLICY_WRITE_RULE,
+            risk="high",
+        )
+    outcome = GuardOutcome(blocked=False, rule=POLICY_WRITE_RULE, risk="high")
+    outcome.warnings.append(
+        f"Guardrail {POLICY_WRITE_RULE}: allowed — the operator asked for this change to "
+        f"the guard's own policy ({targets})."
+    )
+    return outcome
+
+
 async def check_tool_call(
     tool_name: str,
     args: Mapping[str, Any],
@@ -2182,6 +2286,14 @@ async def _check_tool_call(
                 rule=DANGEROUS_DELETE_RULE,
                 risk="critical",
             )
+    if tool_name != "bash":
+        # After the evidence refusal (CRITICAL wins) and before user rules. Not
+        # gated on ``settings.enabled``: like dangerous-delete it is built in.
+        policy = await _policy_write_review(tool_name, args, ctx, settings, judge)
+        if policy is not None:
+            if policy.blocked:
+                return policy
+            outcome = policy
     warnings: list[str] = []
     for rule in rules.user:
         if not rule.matches(tool_name, args):

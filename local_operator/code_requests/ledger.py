@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.code_requests.refs import EMPTY_CONTEXT, HostContext, Ref
 from local_operator.code_requests.scan import (
     EVENT_CUSTOM_TYPE,
@@ -256,17 +257,15 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> bool:
-    """Atomic write (pid-suffixed temp + replace). False when it could not land.
+    """Atomic write (per-write temp + replace). False when it could not land.
 
-    The PID in the temp name is ``session/transcript_index.py``'s measured remedy:
-    two processes building one session wrote the same fixed temp path and produced
-    torn documents.
+    A per-write temp (:mod:`local_operator.atomic_files`), not a fixed or pid-only
+    one: two processes -- or two threads of one -- building one session wrote the
+    same temp path and produced torn documents.
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
-        tmp.replace(path)
+        atomic_write_text(path, json.dumps(payload, separators=(",", ":"), sort_keys=True))
         return True
     except OSError:
         logger.warning("code-request store: could not write %s", path, exc_info=True)

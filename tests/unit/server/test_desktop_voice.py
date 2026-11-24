@@ -493,7 +493,15 @@ async def test_text_reads_the_agents_message_through_speakable(rig: Any) -> None
     response = await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})
     assert response.status_code == 200, response.text
     result = response.json()["result"]
-    assert set(result) == {"text", "spoken_chars", "truncated", "segments", "full_text"}
+    assert set(result) == {
+        "text",
+        "spoken_chars",
+        "truncated",
+        "segments",
+        "full_text",
+        "spoken_source",
+    }
+    assert result["spoken_source"] == "reply"
     assert "".join(result["segments"]) == result["text"]
     assert result["full_text"] == speakable.display_text("Here are the files. ```\nls\n``` Done.")
     assert "(code block omitted)" in result["full_text"] and "```" not in result["full_text"]
@@ -1971,6 +1979,88 @@ def _history_with(message_id: str, text: str):
         return {"entries": [row], "has_more": False, "cursor_missing": False}
 
     return history
+
+
+@pytest.mark.asyncio
+async def test_a_spoken_paragraph_is_what_text_and_every_speech_segment_say(
+    rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Selection is pure, so /text and each /speech call (which re-resolve) agree."""
+    reply = "Here is the long report. " * 30 + "\n\n**Spoken:** First point. Second point."
+    monkeypatch.setattr(FakeBridge, "history", _history_with(ASSISTANT_ID, reply), raising=True)
+    await _enable(rig, SESSION_A)
+    source = {"kind": "message", "message_id": ASSISTANT_ID}
+    result = (await _text(rig, SESSION_A, source)).json()["result"]
+    assert result["spoken_source"] == "summary"
+    assert result["text"] == "First point. Second point." and result["truncated"] is False
+    assert "".join(result["segments"]) == result["text"]
+    assert result["segments"] == ["First point. ", "Second point."]
+    # The screen text is still the whole reply, label included: the transcript is not edited.
+    assert "Here is the long report." in result["full_text"] and "Spoken:" in result["full_text"]
+    for index, expected in enumerate(result["segments"]):
+        assert (await _speech(rig, source, index)).status_code == 200
+        assert cascades.tts[-1][0] == expected
+    assert "".join(spoken for spoken, _ in cascades.tts) == result["text"]
+    assert (await _speech(rig, source, len(result["segments"]))).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_an_empty_spoken_paragraph_falls_back_to_the_reply(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        FakeBridge,
+        "history",
+        _history_with(ASSISTANT_ID, "The answer is here.\n\nSpoken:"),
+        raising=True,
+    )
+    await _enable(rig, SESSION_A)
+    result = (await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})).json()[
+        "result"
+    ]
+    assert result["spoken_source"] == "reply" and result["text"].startswith("The answer is here.")
+
+
+@pytest.mark.asyncio
+async def test_a_summary_cut_by_the_cap_is_truncated_on_the_summary(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator import settings_io
+    from local_operator.voice import speakable
+
+    summary = " ".join(f"Point {n} stands." for n in range(60))
+    monkeypatch.setattr(
+        FakeBridge,
+        "history",
+        _history_with(ASSISTANT_ID, f"Short.\n\nSpoken: {summary}"),
+        raising=True,
+    )
+    settings_io.write_setting(
+        ConfigManager(rig.root), settings_io.BY_KEY["voice.max_spoken_chars"], 150
+    )
+    await _enable(rig, SESSION_A)
+    result = (await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})).json()[
+        "result"
+    ]
+    assert result["spoken_source"] == "summary" and result["truncated"] is True
+    assert result["spoken_chars"] <= 150 and result["text"].endswith(speakable.TRUNCATION_TAIL)
+
+
+@pytest.mark.asyncio
+async def test_a_gate_is_never_narrowed_to_a_spoken_paragraph(rig: Any) -> None:
+    """A card can quote model-written text; a paragraph in it must not stand for the card."""
+    rig.pool.remote.pending_gate = SimpleNamespace(
+        request_id="gate-1",
+        kind="approval",
+        title="bash",
+        detail="rm -rf build/\n\nSpoken: all clear, nothing to see.",
+    )
+    await _enable(rig, SESSION_A)
+    result = (await _text(rig, SESSION_A, {"kind": "gate", "request_id": "gate-1"})).json()[
+        "result"
+    ]
+    assert result["spoken_source"] == "reply"
+    assert "rm -rf build/" in result["text"]
 
 
 @pytest.mark.asyncio

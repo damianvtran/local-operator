@@ -47,6 +47,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from local_operator.atomic_files import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 #: Consecutive identical persistence refusals before the receiver reports a jam.
@@ -135,16 +137,11 @@ class JamTracker:
             pass
 
     def _write(self, payload: dict[str, Any]) -> None:
-        temporary = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-            os.replace(temporary, self._path)
+            atomic_write_text(self._path, json.dumps(payload, sort_keys=True))
         except OSError:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+            pass  # best effort; the writer has already removed its own temp
 
 
 def read_jam(config_dir: Path | str) -> dict[str, Any] | None:

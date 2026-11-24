@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "relay.asks",
-  "history_sha256": "798ef1510562f5cc07fdaab07444f5a88f76513e86bc8b67d11af24c081c5984",
+  "history_sha256": "78c71eb996548a03b9b68f2db4a10caf49572c5bd673f6e780456098c51d170a",
   "entries": [
     {
       "locale": "fr",
@@ -28,6 +28,56 @@
       },
       "status": "passed",
       "note": "PR #3926 suggested-command delta, independent audit 2026-11-13 by reviewer 0f77a9c3b23c (anthropic/claude-opus-5-5, no fallback): 4 added relay.asks.card.command.* keys passed; 78 unchanged keys carried by byte proof from the passed aeae7917 row. Source ebd750dd732723096fbbe195a25f314a4137ba765829b9def0c61787ac2634ad and target 47e0fb24bfb24208e42eb46808a8ce4ddff626c88ff115e16e23ae969cd3e828 recomputed from the files. Evidence: i18n/audits/evidence/fr/relay.asks/askcmd-r1-0f77a9c3b23c/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.asks",
+      "source_sha256": "e19bac73afbfde9abac76d79c60bf7d1e2d8b2b621b49f2770a41d56749bc0ef",
+      "translator": {
+        "agent": "lopdev coder (PR #4495 commits bc826fc62..0e439855a); identity and model as stated in the lopdev manager's audit brief, not recorded in the commits",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "unknown (not recorded in the commits)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, session b7ef3c226fc6; not the translator)",
+        "session": "b7ef3c226fc6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 2
+      },
+      "status": "passed",
+      "note": "PR #4495 relay ask-panel parity delta, independent audit 2026-11-23 by reviewer b7ef3c226fc6 (anthropic/claude-opus-5-5, no fallback): 38 changed/new key(s) passed; 49 unchanged key(s) carried by byte proof from the passed ebd750dd row. Source e19bac73afbfde9abac76d79c60bf7d1e2d8b2b621b49f2770a41d56749bc0ef and target 759ad7b09f52b94ae6c047d2063212f7bd45f5b4a56ab4ddbec4e91caa954a20 recomputed from the files. Evidence: i18n/audits/evidence/fr/relay.asks/askparity-r1-b7ef3c226fc6/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.asks",
+      "source_sha256": "d417c862f4b4af8f52dec92942b50c2d6e9f872d332d8d0b6b0ea89402b8ba5b",
+      "translator": {
+        "agent": "radient/auto (translator of record for the PR commit 8077e80c9, ask-id foot and chip delta); not independently verified",
+        "model": "radient/auto",
+        "fallback": "none",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev i18n-auditor task, session 35f05771f20c; not the translator, did not write or edit the English)",
+        "session": "35f05771f20c",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "minor": 3,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "Relay ask-id foot and chip delta, independent audit 2026-11-23 by i18n-auditor 35f05771f20c (anthropic/claude-sonnet-5-5, no fallback): 14 new relay.asks.id.* / relay.asks.chip.* keys audited, 5 edited by the audit (4 findings: 3 minor, 1 nit, 0 unresolved blocker/major); 87 unchanged keys carried by byte proof from the passed e19bac73 row. Source d417c862f4b4af8f52dec92942b50c2d6e9f872d332d8d0b6b0ea89402b8ba5b and target f398c2649ba1c8c70bca5d686aa9418352aa56acc3fb9ab48f4fc1e698b02b3b recomputed from the files. Evidence: i18n/audits/evidence/fr/relay.asks/relayid-r1-35f05771f20c/record.json"
     }
   ]
 }

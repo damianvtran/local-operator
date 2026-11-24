@@ -782,7 +782,7 @@
   "wire.settings.team_bridge_hold_release.help": "नए काम के कुछ अनुरोध रोके जाते हैं, ताकि आप उन्हें पहुँचाएँ या खारिज करें। आपके पहुँचाए बिना आपके एजेंट तक कुछ नहीं पहुँचता। बंद होने पर वे अस्वीकार होते हैं।",
   "wire.settings.tool_approval_mode.choice.ask.description": "लिखने/चलाने वाले टूल से पहले पूछें",
   "wire.settings.tool_approval_mode.choice.ask.label": "पूछें",
-  "wire.settings.tool_approval_mode.choice.auto.description": "बिना पूछे चलाएँ",
+  "wire.settings.tool_approval_mode.choice.auto.description": "बिना पूछे चलाएँ, सिवाय खाता प्रोफ़ाइल सहेजने और समुदाय में पोस्ट करने के",
   "wire.settings.tool_approval_mode.choice.auto.label": "स्वचालित",
   "wire.settings.tool_approval_mode.help": "ढीला करने के लिए इसी सत्र से लिखना पड़ेगा — /approvals auto।",
   "wire.settings.tool_approval_mode.label": "टूल स्वीकृति मोड",

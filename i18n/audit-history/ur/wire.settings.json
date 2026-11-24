@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "971f958fc51201c7bf238fb1f3e756b3e23ccf63b1c4cdadb41fcc45a12dd283",
+  "history_sha256": "d87aeb92622d8707c3a65d65b82cfd72b5c47eec9188856eb51501b1cfb5fa3f",
   "entries": [
     {
       "locale": "ur",
@@ -7561,6 +7561,56 @@
     {
       "locale": "ur",
       "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "c4cc6718a7f7ed8c7d04bfcab87e9d6862b7d65d82bc459b46914c1a1d326e43",
+      "keys_audited": 1,
+      "round": "i18n-wave-A",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent 744c2de3f3ac)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "c4cc6718a7f7ed8c7d04bfcab87e9d6862b7d65d82bc459b46914c1a1d326e43",
+      "keys_audited": 1,
+      "round": "i18n-wave-B",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent 46aad975bb12)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits. Auditor B shares the translator model but is a different agent session."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
       "source_sha256": "7eaf3e95c31cf444f26de59ba8c5c253de0c6b770c48a0588aee1692861e33c8",
       "context_sha256": "1946205a2ef39fdff2704ce40007a6325bdfe2349eca4e483e0d6ec8c55e57be",
       "target_sha256": "d319f71676d790f12dfdce63ad431e30c20a86651a1b01c02b57f0b4122992a0",
@@ -7582,6 +7632,31 @@
       },
       "status": "passed",
       "note": "Independent semantic audit of PR #4514 (branch feat/mcp-result-normalization, head 3dc289d5a384 + this commit), 2026-11-23: the 8 NEW keys wire.settings.mcp_result_normalization.{label,help,choice.off.label,choice.off.description,choice.prose_links.label,choice.prose_links.description,choice.strip_links.label,choice.strip_links.description}, judged against en source + context sidecar, i18n/glossary.md and i18n/style-guides/ur.md (accuracy, glossary terms, neighbouring-key terminology, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; 'prose-links'/'strip-links' labels byte-identical to en per the sidecar; rich.cells.cell_len within every maxCells (label 29, help 188, descriptions 48, off label 12); key parity 8/8. Every other key in this namespace is byte-identical to merge-base 989351cd16c0's file, whose last receipt here passed against that base's en hash b3753dde0a01… (scripted diff: 8 added, 0 changed, 0 removed; context sidecar 8 added, 0 changed). 0 findings. ایجنٹ/ٹول per glossary; 'آف' matches the three neighbouring off labels; respectful imperative (بھیجیں، رکھیں، ہٹا دیں) per the ur guide; no manual bidi controls (render layer isolates), Latin MCP/URL kept like neighbours; 'حوالہ نشانات' = reference marks (not واوین). Label 28/29 cells."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "4ce6048a2a6fdda1a7e6623d0ffef3202ca684628739a3877d200e48c917d756",
+      "context_sha256": "b0c1332306474a5293f2c69e438208e229f81501806321b15d5512d4558e0873",
+      "target_sha256": "84c3476b49d2c59c96cbde80b5409bd127e7995c4c0fb6a10df6888a8ace4a9c",
+      "keys_audited": 9,
+      "round": "convergence-r1",
+      "translator": {
+        "agent": "not re-translated here: the 8 wire.settings.mcp_result_normalization.* keys from PR #4514 (row above, source 7eaf3e95c31c), wire.settings.tool_approval_mode.choice.auto.description from origin/main (rows above, source 2ffdcc0c9444)",
+        "model": "see the rows above",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 09b1208daf93 (independent of both translators; did not write PR #4514 or the origin/main change)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Convergence audit of PR #4514 merge commit 724de4b1dae8 (parents f246cbc6 PR head + 0fa001da origin/main; merge-base 989351cd16c0), 2026-11-24. Scripted merge proof (flattened JSON, every key): en and this locale's wire.settings.json == merge-base + origin/main's only change (wire.settings.tool_approval_mode.choice.auto.description) + the PR's 8 added mcp_result_normalization keys, values byte-identical to their audited sides; 913 keys, 0 overlap, 0 lost, 0 other changes; en context sidecar likewise (origin/main's note/role/tone for the auto description + the PR's 8 entries). Semantic re-read of the 9 changed keys against the en source, context sidecar, i18n/glossary.md and i18n/style-guides/ur.md: auto description keeps both the rule and both exempt gates (profile save, community post); 'prose-links'/'strip-links' byte-identical; rich.cells.cell_len within every maxCells; no ICU arguments. Audit-history merge: origin/main's rows are a byte-identical prefix and every PR row is present, 0 extra rows. 0 findings."
     }
   ]
 }

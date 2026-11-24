@@ -9659,6 +9659,42 @@ class DesktopSessions:
         except CardBodyNotFound as missing:
             raise KeyError("Unknown bridge card") from missing
 
+    async def agent_notification_picture(self, session_id: str) -> tuple[bytes, str]:
+        """``(picture bytes, verified sha256)`` of the agent this session is bound to.
+
+        The source of the desktop banner composite
+        (``/v1/desktop/sessions/{id}/notification-avatar``). The session gate is
+        an EXISTENCE check over the LOCAL user-session namespace only: a peer
+        session's agent and picture live on another device, and its banner keeps
+        today's app icon rather than reaching across the mesh for decoration.
+        The binding is resolved by the same resolver every listing row uses
+        (``agent_avatar.session_agent_identity``), and the bytes are read
+        through ``agent_avatar.read_stored`` -- metadata authority, no symlink,
+        digest match -- so the sha returned is the body's own, never the
+        index's possibly one-second-stale copy. Any miss (unknown session, no
+        bound agent, no or invalid picture) is ``KeyError``: the route answers
+        all of them with one ``not_found`` refusal, because the desktop's only
+        decision is "composite or today's banner".
+        """
+        from local_operator import agent_avatar
+
+        def read() -> tuple[bytes, str]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                raise KeyError("Unknown session")
+            identity = agent_avatar.session_agent_identity(self.root, session_id)
+            if identity is None or not identity.avatar_sha256:
+                raise KeyError("No agent picture")
+            try:
+                data, _mime, sha = agent_avatar.read_stored(self.root, identity.agent_id)
+            except agent_avatar.AvatarError as exc:
+                raise KeyError("No agent picture") from exc
+            return data, sha
+
+        return await asyncio.to_thread(read)
+
     async def attachment_waveform(self, session_id: str, digest: str) -> dict[str, Any]:
         """The waveform payload ``{version, bars, peaks}`` for one attachment.
 

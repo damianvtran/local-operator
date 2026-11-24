@@ -1539,6 +1539,11 @@ def test_a_killed_writers_temps_are_reclaimed_by_collect(publication):
         _leak(own, f"{'a' * 32}.{pid}.tmp", _OLD),
         _leak(own, f"{'a' * 32}.{pid}.tmp-journal", _OLD),
         _leak(own, f"{'b' * 32}.naming.{pid}.naming.tmp", _OLD),
+        # The per-write names ``atomic_files.unique_temp`` builds now
+        # (``<pid>.<thread>.<hex>``): a killed writer leaves these too.
+        _leak(own, f"{'e' * 32}.sqlite.{pid}.12345.0badf00d.tmp", _OLD),
+        _leak(own, f"{'e' * 32}.sqlite.{pid}.12345.0badf00d.tmp-journal", _OLD),
+        _leak(own, f"{'f' * 32}.naming.json.{pid}.12345.0badf00d.tmp", _OLD),
         # Another LIVE session's directory: _sweep_orphans skips it (its index
         # exists), so only the temp sweep can reach these.
         _leak(other, f"{'c' * 32}.{pid}.tmp", _OLD),
@@ -1562,9 +1567,13 @@ def test_a_young_temp_is_kept_even_when_its_writer_is_dead(publication):
 
 def test_this_processs_own_temps_are_never_swept(publication):
     root, index = publication
-    mine = _leak(_read_models(root) / SID, f"{'a' * 32}.{os.getpid()}.tmp", _OLD)
+    directory = _read_models(root) / SID
+    mine = [
+        _leak(directory, f"{'a' * 32}.{os.getpid()}.tmp", _OLD),
+        _leak(directory, rm.unique_temp(directory / f"{'b' * 32}.sqlite").name, _OLD),
+    ]
     rm.collect(root, SID, rm.token_for(index))
-    assert mine.exists()
+    assert all(path.exists() for path in mine)
 
 
 def test_a_live_foreign_writers_temp_is_kept(publication, monkeypatch):
@@ -1622,7 +1631,7 @@ def test_a_finished_build_removes_its_journal_sibling(tmp_path, monkeypatch):
         # Stand in for SQLite having left its rollback journal beside the temp
         # (it does when the process dies mid-transaction or the journal outlives
         # a failed close); the `finally` must not leave it behind.
-        for temp in (_read_models(tmp_path) / SID).glob(f"*.{os.getpid()}.tmp"):
+        for temp in (_read_models(tmp_path) / SID).glob(f"*.{os.getpid()}.*.tmp"):
             journal = Path(f"{temp}-journal")
             journal.write_bytes(b"journal")
             seen.append(journal)

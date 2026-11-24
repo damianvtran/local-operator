@@ -9,8 +9,13 @@ had JUST USED sorted past ``limit`` and was never fetched — measured rank 61 o
 recent conversations. The sidebar's own contract says the opposite: its
 pagination is "show the latest 10", its sections partition by the ACTIVITY
 clock, and it re-orders whatever it holds by that same clock. ``sort=activity``
-is that membership rule, at the source: rows that need the reader first
-(``CatalogEntry.active``), then everything else newest-activity-first.
+is that membership rule, at the source: work in progress first
+(``CatalogEntry.running``), then everything else newest-activity-first.
+
+Q3 (local-operator-ui#2069) NARROWED THE LEAD from ``active`` to ``running``:
+with more unread completions than ``limit``, the v2 key filled page 1 with old
+unread rows and pushed today's idle chats to page 2, which the sidebar then
+inserted ABOVE rows it had already drawn. The ``test_q3_*`` repro pins that.
 
 WHAT THIS FILE IS CAREFUL ABOUT. The rank order is NOT changed — the TUI
 picker's wake band asked for it and keeps it — so the first tests assert the
@@ -31,6 +36,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +96,22 @@ def _session(
     return directory
 
 
-def _live(root: Path, session_id: str, *, name: str = "live session") -> None:
+def _live(
+    root: Path,
+    session_id: str,
+    *,
+    name: str = "live session",
+    busy: bool = False,
+    pid: int | None = None,
+) -> None:
     """Publish a REAL runtime record for ``session_id`` (this test's own pid).
+
+    ``busy=False`` is an ATTACHED resident terminal (status ``attached``: live,
+    not work in progress); ``busy=True`` is a turn in flight (status ``busy``,
+    a :data:`catalog.RUNNING_STATUS_CODES` member). The registry keys records
+    by PID, so a test with more than one live row passes a distinct live
+    ``pid`` per row (see the ``live_pids`` fixture) -- a second record on the
+    same pid replaces the first.
 
     Through ``registry.publish`` and a real ``SessionRecord``, because
     ``active`` is read from the decorated row and a hand-built one could agree
@@ -102,7 +123,7 @@ def _live(root: Path, session_id: str, *, name: str = "live session") -> None:
 
     registry.publish(
         SessionRecord(
-            pid=os.getpid(),
+            pid=os.getpid() if pid is None else pid,
             kind="daemon",
             session_id=session_id,
             conversation_name=name,
@@ -111,9 +132,64 @@ def _live(root: Path, session_id: str, *, name: str = "live session") -> None:
             control_port=1234,
             control_key="k",
             detached=False,
+            busy=busy,
         ),
         root,
     )
+
+
+def _unread(root: Path, session_id: str) -> None:
+    """Publish an UNREAD completion for ``session_id`` through the real store.
+
+    The attention store is the only writer of ``unseen``, so the row the
+    catalogue decorates is the one the operator's store produces after a
+    finished turn nobody opened -- status ``complete``, ``active`` True,
+    ``running`` False.
+    """
+    from local_operator.session.attention import AttentionStore
+
+    AttentionStore(root / "attention.db").publish(
+        f"session/{session_id}", str(uuid.uuid4()), f"anchor-{session_id}", "complete"
+    )
+
+
+def _activity_token(version: int, key: list[Any]) -> str:
+    """A hand-minted activity token at ``version`` -- the shape a past build sent."""
+    return (
+        base64.urlsafe_b64encode(
+            json.dumps(
+                {"k": key, "o": "activity", "s": None, "v": version},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        .decode("ascii")
+        .rstrip("=")
+    )
+
+
+@pytest.fixture
+def live_pids() -> Any:
+    """Hand out distinct LIVE pids, one parked child each, reaped by exact pid.
+
+    The registry keys a runtime record by its pid and classifies it live only
+    while that pid exists, so several live rows in one store need several
+    real processes. ``sleep`` children are the cheapest such processes; every
+    one is killed and waited on at teardown, pass or fail.
+    """
+    import subprocess
+
+    children: list[subprocess.Popen[bytes]] = []
+
+    def spawn() -> int:
+        child = subprocess.Popen(["sleep", "300"])
+        children.append(child)
+        return child.pid
+
+    yield spawn
+    for child in children:
+        child.kill()
+        child.wait(timeout=10)
 
 
 @pytest.fixture(autouse=True)
@@ -187,26 +263,43 @@ class TestTheDefaultOrderIsUntouched:
 
 
 class TestTheActivityHead:
-    """``sort=activity``: active rows first, then newest-activity-first."""
+    """``sort=activity``: running rows first, then newest-activity-first."""
 
-    def test_active_rows_lead_even_with_the_oldest_activity(self, tmp_path: Path) -> None:
-        """Membership is not recency: a row that NEEDS the reader always fits.
+    def test_only_running_rows_lead_unread_and_attached_rows_sort_by_activity(
+        self, tmp_path: Path, live_pids: Any
+    ) -> None:
+        """Q3 (local-operator-ui#2069): only WORK IN PROGRESS leads the order.
 
-        The live row is stamped OLDEST of the three and born oldest of the
-        three, so a recency-only order and this order give different answers
-        and the test can tell which one it got.
+        Every special row is stamped OLDER than both cold rows, so a recency
+        order and a "needs the reader first" order disagree on each of them
+        and the test can tell which one it got. The busy row still leads
+        (running is what the sidebar lifts); the oldest unread completion and
+        the oldest attached terminal file by their own activity clock, under
+        the newer cold rows -- they no longer reserve page slots.
         """
         _session(tmp_path, "cold00000001", created=1_100.0, stamp=1_200.0)
         _session(tmp_path, "cold00000002", created=1_200.0, stamp=1_150.0)
-        _session(tmp_path, "live00000001", created=1_000.0, stamp=1_000.0)
-        _live(tmp_path, "live00000001")
+        _session(tmp_path, "unread000001", created=1_000.0, stamp=1_010.0)
+        _unread(tmp_path, "unread000001")
+        _session(tmp_path, "attach000001", created=1_000.0, stamp=1_005.0)
+        _live(tmp_path, "attach000001", pid=live_pids())
+        _session(tmp_path, "busy00000001", created=1_000.0, stamp=1_000.0)
+        _live(tmp_path, "busy00000001", busy=True, pid=live_pids())
 
         page = catalogue_page(tmp_path, limit=9, sort=CATALOGUE_SORT_ACTIVITY)
 
+        by_id = {entry.id: entry for entry in page.entries}
+        # The fixture produced the states the order is about, read back from
+        # the decorated rows rather than assumed from the helpers.
+        assert by_id["busy00000001"].running is True
+        assert by_id["unread000001"].active is True and by_id["unread000001"].running is False
+        assert by_id["attach000001"].active is True and by_id["attach000001"].running is False
         assert [entry.id for entry in page.entries] == [
-            "live00000001",
+            "busy00000001",
             "cold00000001",
             "cold00000002",
+            "unread000001",
+            "attach000001",
         ]
 
     def test_cold_rows_follow_the_activity_clock_not_birth_or_the_wake_band(
@@ -265,6 +358,63 @@ class TestTheActivityHead:
         assert "subject00001" not in rank_ids
         assert activity_ids[0] == "subject00001"
 
+    def test_q3_unread_backlog_does_not_push_todays_idle_rows_off_page_one(
+        self, tmp_path: Path
+    ) -> None:
+        """THE Q3 REPRODUCTION (local-operator-ui#2069 QA): an unread backlog
+        larger than the page must not displace today's conversations.
+
+        60 unread completions, all 45h+ old, and 20 idle rows from today. When
+        unread rows led the key, page 1 (limit=50) was 50 stale unread rows and
+        none of today's: the sidebar drew two-day-old chats while today's sat
+        unloaded, then inserted them ABOVE on the next page. Under the fixed key
+        page 1 is newest-first, so it carries all 20 idle rows and the 30
+        newest unread ones, and its non-running rows never go back up in time.
+        """
+        now = time.time()
+        for index in range(60):
+            row = f"unread{index:06d}"
+            _session(tmp_path, row, created=now - 50 * 3600, stamp=now - 45 * 3600 - index * 60)
+            _unread(tmp_path, row)
+        for index in range(20):
+            _session(tmp_path, f"today{index:07d}", created=now - 3600, stamp=now - index * 600)
+
+        page = catalogue_page(tmp_path, limit=50, sort=CATALOGUE_SORT_ACTIVITY)
+
+        ids = [entry.id for entry in page.entries]
+        assert len(ids) == 50
+        assert {f"today{index:07d}" for index in range(20)} <= set(ids)
+        mtimes = [entry.row.mtime for entry in page.entries if not entry.running]
+        assert mtimes == sorted(mtimes, reverse=True), "page 1 must be newest-first"
+        # And nothing from today is left for page 2 to insert above page 1.
+        assert page.next_cursor is not None
+        rest = catalogue_page(
+            tmp_path, cursor=page.next_cursor, limit=50, sort=CATALOGUE_SORT_ACTIVITY
+        )
+        assert all(entry.id.startswith("unread") for entry in rest.entries)
+        assert max(entry.row.mtime for entry in rest.entries) <= min(mtimes)
+
+    def test_the_census_is_the_same_under_either_order(
+        self, tmp_path: Path, live_pids: Any
+    ) -> None:
+        """``counts`` is taken BEFORE the sort, so narrowing what leads the
+        activity key cannot move a badge: ``active`` still counts the unread
+        and attached rows that no longer lead the order."""
+        _session(tmp_path, "cold00000001", stamp=1_200.0)
+        _session(tmp_path, "unread000001", stamp=1_010.0)
+        _unread(tmp_path, "unread000001")
+        _session(tmp_path, "attach000001", stamp=1_005.0)
+        _live(tmp_path, "attach000001", pid=live_pids())
+        _session(tmp_path, "busy00000001", stamp=1_000.0)
+        _live(tmp_path, "busy00000001", busy=True, pid=live_pids())
+
+        rank = catalogue_page(tmp_path, limit=2, with_counts=True)
+        activity = catalogue_page(tmp_path, limit=2, with_counts=True, sort=CATALOGUE_SORT_ACTIVITY)
+
+        assert rank.counts is not None and activity.counts is not None
+        assert activity.counts == rank.counts
+        assert activity.counts.active == 3
+
     def test_an_unknown_sort_is_refused_by_the_page(self, tmp_path: Path) -> None:
         """The route refuses by name before the store; a direct caller gets a
         hard failure rather than a silently different order."""
@@ -315,6 +465,75 @@ class TestActivityCursors:
         assert seen == expected
         assert len(set(seen)) == len(seen), "a walk must not repeat a row"
 
+    def test_a_mixed_walk_visits_every_row_once(self, tmp_path: Path, live_pids: Any) -> None:
+        """Unread, attached, idle and running rows interleaved on the clock:
+        the narrowed key is still a total order, so a 4-row walk covers the
+        store exactly once and running rows open it."""
+        expected_ids: set[str] = set()
+        for index in range(17):
+            row = f"row{index:09d}"
+            _session(tmp_path, row, created=1_000.0, stamp=1_000.0 + (index * 7) % 17)
+            expected_ids.add(row)
+            if index % 3 == 0:
+                _unread(tmp_path, row)
+            elif index % 5 == 1:
+                _live(tmp_path, row, busy=True, pid=live_pids())
+            elif index % 7 == 2:
+                _live(tmp_path, row, pid=live_pids())
+
+        seen: list[str] = []
+        running_seen: list[bool] = []
+        cursor: str | None = None
+        for _ in range(10):
+            page = catalogue_page(tmp_path, cursor=cursor, limit=4, sort=CATALOGUE_SORT_ACTIVITY)
+            # Only the page rows: the first page's running EXTRAS are id-keyed
+            # duplicates by design and would double-count here.
+            seen += [entry.id for entry in page.entries[:4]]
+            running_seen += [entry.running for entry in page.entries[:4]]
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+
+        assert sorted(seen) == sorted(expected_ids)
+        assert len(set(seen)) == len(seen), "a walk must not repeat a row"
+        # Three busy rows by construction (indexes 1, 11, 16), and they open
+        # the walk: the leading run is all running, nothing running after it.
+        assert running_seen.count(True) == 3
+        leading = running_seen.index(False)
+        assert not any(running_seen[leading:])
+
+    def test_a_v2_activity_token_answers_the_first_page(self, tmp_path: Path) -> None:
+        """v2 ordered unread/attached rows first; its positions are not
+        positions in the v3 order, so resuming one would skip or repeat rows.
+        The version bump makes it ``cursor_missing`` -- the scope's first page."""
+        for index in range(6):
+            _session(tmp_path, f"row{index:09d}", created=1_000.0, stamp=1_000.0 + index)
+        stale = _activity_token(2, [0, 1_003.0, "row000000003"])
+
+        assert decode_cursor(stale) is None
+        replayed = catalogue_page(tmp_path, cursor=stale, limit=2, sort=CATALOGUE_SORT_ACTIVITY)
+        fresh = catalogue_page(tmp_path, limit=2, sort=CATALOGUE_SORT_ACTIVITY)
+
+        assert replayed.cursor_missing is True
+        assert [entry.id for entry in replayed.entries] == [entry.id for entry in fresh.entries]
+
+    def test_a_v3_activity_token_round_trips(self, tmp_path: Path) -> None:
+        for index in range(6):
+            _session(tmp_path, f"row{index:09d}", created=1_000.0, stamp=1_000.0 + index)
+        first = catalogue_page(tmp_path, limit=2, sort=CATALOGUE_SORT_ACTIVITY)
+        assert first.next_cursor is not None
+        padded = first.next_cursor + "=" * (-len(first.next_cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+        assert payload["v"] == 3 and payload["o"] == "activity"
+
+        decoded = decode_cursor(first.next_cursor)
+        assert decoded is not None and decoded.order == catalog.CURSOR_ORDER_ACTIVITY
+        second = catalogue_page(
+            tmp_path, cursor=first.next_cursor, limit=2, sort=CATALOGUE_SORT_ACTIVITY
+        )
+        assert second.cursor_missing is False
+        assert [entry.id for entry in second.entries] == ["row000000003", "row000000002"]
+
     @pytest.mark.parametrize("replay_order", [RANK_HEAD, CATALOGUE_SORT_ACTIVITY])
     def test_a_cursor_from_the_other_order_answers_the_first_page(
         self, tmp_path: Path, replay_order: str
@@ -334,7 +553,7 @@ class TestActivityCursors:
         assert replayed.cursor_missing is True
         assert [entry.id for entry in replayed.entries] == [entry.id for entry in fresh.entries]
 
-    def test_a_v2_token_without_its_order_declaration_is_unusable(self, tmp_path: Path) -> None:
+    def test_a_v3_token_without_its_order_declaration_is_unusable(self, tmp_path: Path) -> None:
         """The declaration is part of the position's meaning, so the key is
         read only under it -- a token missing ``o`` is answered as a first
         page, never resumed under an assumed order."""
@@ -342,7 +561,7 @@ class TestActivityCursors:
         forged = (
             base64.urlsafe_b64encode(
                 json.dumps(
-                    {"v": 2, "s": None, "k": [0, 1_000.0, "plain0000001"]},
+                    {"v": 3, "s": None, "k": [0, 1_000.0, "plain0000001"]},
                     separators=(",", ":"),
                     sort_keys=True,
                 ).encode("utf-8")
