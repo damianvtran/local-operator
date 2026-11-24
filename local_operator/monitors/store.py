@@ -27,8 +27,8 @@ would put those on their path. So: stdlib only, pins in
 
 **Divergence from ``wakes/store.py``, deliberate (§10.2)**: this index is NOT
 rewritten on every quiet tick — a 30 s monitor would rewrite it 2,880×/day for
-no reader's benefit; the counters file alone moves, and a cold reader's
-``next_due_at`` is best-effort between change events.
+no reader's benefit; the counters file alone moves. Readers that need live
+status opt into ``effective_rows`` rather than making every scan read counters.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +188,76 @@ def read_index_report(config_dir: Path) -> tuple[dict[str, dict[str, Any]], bool
         entry["session_id"] = session_id
         index[session_id] = entry
     return index, False
+
+
+# Only fields already exposed by the index belong in the status overlay.
+# Counters also contain dedupe hashes, rate-limit internals and notice latches;
+# spreading the counters dict would give those a new public surface in CLI JSON.
+_STATUS_COUNTER_FIELDS = (
+    "last_check_at",
+    "checks",
+    "deliveries",
+    "consecutive_failures",
+    "unavailable_since",
+    "last_error",
+    "suppressed",
+    "blind",
+    "blind_reason",
+    "failing",
+    "failing_notice_checks",
+    "failure_limit",
+    "empty_checks",
+)
+
+
+def effective_rows(
+    config_dir: Path,
+    session_id: str,
+    entry: Mapping[str, Any],
+    *,
+    include_health: bool = True,
+) -> Iterator[dict[str, Any]]:
+    """Read one entry's configured rows with current counters when available.
+
+    Membership, configuration (including ``until_at``) and the stop marker
+    belong to the index. Counters advance even on quiet ticks and own the due
+    time, including an explicit null; a missing/unreadable file falls back to
+    the index. A disable observed in either file remains a disable, matching
+    the supervisor's fail-closed rule across the two independent writes.
+    The supervisor needs only those scheduling fields, not the health overlay.
+    """
+    from local_operator.monitors.state import read_counters
+
+    for raw in entry.get("monitors") or ():
+        if not isinstance(raw, Mapping):
+            continue
+        row = dict(raw)
+        monitor_id = row.get("id")
+        # Index data should only name a file within this owner's state dir.
+        if (
+            isinstance(monitor_id, str)
+            and monitor_id
+            and not any(char in monitor_id for char in ("/", "\\", "\0"))
+        ):
+            try:
+                counters = read_counters(config_dir, session_id, monitor_id)
+            except Exception:  # noqa: BLE001 — a bad counter must not stop the wake pass
+                logger.debug("could not overlay monitor counters", exc_info=True)
+                counters = None
+            if counters is not None:
+                row["next_due_at"] = counters.get("next_due_at")
+                counter_disabled = bool(counters.get("disabled"))
+                index_disabled = bool(row.get("disabled"))
+                row["disabled"] = index_disabled or counter_disabled
+                if include_health:
+                    row.update(
+                        (key, counters[key]) for key in _STATUS_COUNTER_FIELDS if key in counters
+                    )
+                    if "failing_ticks" in counters:
+                        row["failing_checks"] = counters["failing_ticks"]
+                    if "disabled_reason" in counters and (counter_disabled or not index_disabled):
+                        row["disabled_reason"] = counters["disabled_reason"]
+        yield row
 
 
 def write_entry(

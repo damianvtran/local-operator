@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "tui.settings_view.chrome",
-  "history_sha256": "5846d62f045af62615dfcf4df4eb2afd51f60481071370f381df9b3366f2384d",
+  "history_sha256": "e84dc595cb3a7d02bb87721fa39f4e3b5576aec678cd91df788db6f5e753d30d",
   "entries": [
     {
       "locale": "ru",
@@ -89,6 +89,31 @@
       "note": "Independent re-audit (round 2, final) of tui.settings_view.chrome after the translator folded in the round-1 findings and the context caps were corrected (183ed01e92cc). Auditor fe85aeefdaef (anthropic/claude-opus-5-5, quota fallback from openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 2 nit (T-ru-r2-1, T-ru-r2-2, T-ru-r2-3). Remaining minors/nits deferred in the PR thread. Record: i18n/audits/evidence/ru/tui.settings_view.chrome/sc2/record.json. Native-speaker review and rendered-frame certification not claimed.",
       "evidence": "i18n/audits/evidence/ru/tui.settings_view.chrome/sc2/record.json",
       "round": "sc2"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.settings_view.chrome",
+      "source_sha256": "5a6afa145f08d9a3020ec8b758b93becc322bf92dc6c72d36d667a1c9fa9d616",
+      "context_sha256": "c8a9601517f2f7aa03f00d009570e30957a1e1387acad9c290de3b1498f96e46",
+      "target_sha256": "54c41f41e5d551f01bc53e26c93c25a96330e2239ff480b8ac55cb28b26643bb",
+      "keys_audited": 2,
+      "round": "r1",
+      "translator": {
+        "agent": "i18n-translator coder subagents (one per locale, independent contexts), lopdev lane session 8cca634d2d29",
+        "model": "radient/auto (router alias; the served model id was not exposed to the subagents)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor: reviewer-role task subagent 7d9068a7f042 (independent of the translators; read-only; saw the English source, context sidecar, glossary, style guide and neighbouring keys)",
+        "model": "anthropic/claude-sonnet-5-5 (as reported by the harness for the job)",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Delta audit of the 2 keys feat/tui-send-chords adds to tui.settings_view.chrome after folding origin/main 404a21382a30 (capture.chord_grammar, capture.needs_enhanced_keys: the composer-scope send-shortcut recorder hints that were English literals before main moved the recorder line into this catalogue). The other 49 keys are byte-identical to origin/main's audited values (proved by script: 0 changed, 0 removed). Auditor: 0 blocker/major; minors/nits recorded, not fixed: 'enhanced' is rendered literally (no settled term in the repo); ur 'بہتر' ('better') could mislead; vi 'báo phím' is clumsy (plain 'phím nâng cao' is valid); es/fr use exige/necesita across the two keys; ru chord_grammar is exactly 64 cells (cap 64). Widths measured with rich cell_len: chord_grammar es 64, fr 59, hi 58, ru 64, ur 60, vi 64, zh-CN 44 (en 59). Same-family disclosure: translators ran on the router alias, the auditor on claude-sonnet-5-5; not cross-family, not a human review, no second audit (not high-visibility/safety copy)."
     }
   ]
 }

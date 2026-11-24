@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.settings.keymap",
-  "history_sha256": "004709c1d3f8e680d029a8fec13bc99fe6c922332a1270803d7803548717dc54",
+  "history_sha256": "01eee17bf3e640a1db7491aafa2c999d2be60980c5d2feb8d8a0ccce5b47cbf0",
   "entries": [
     {
       "locale": "hi",
@@ -39,6 +39,293 @@
       },
       "status": "passed",
       "note": "Full independent audit: clean-with-findings (0 blocker, 0 major, 5 minor, 4 nit). target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "029002bb07d8a2534091ce337ce670258836aef32f49f8d6a1bd7a620f01c582",
+      "context_sha256": "4d2bdc69dc5612b0cd14bb25c37a0a8dfc92256a3ad9e0ecc5f3e8b9d2efc5fc",
+      "target_sha256": "21055cea5334061957cb91303a832c4bbdf3e38193c7095a467e6bec8d3ffe88",
+      "translator": {
+        "agent": "task subagent (general), translator role for 26 new keymap keys",
+        "session": "228d805f674a",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none reported: the subagent self-reported anthropic/claude-sonnet-5-5; no provider fallback disclosed; the lopdev manager inspected no harness route log"
+      },
+      "auditor": {
+        "agent": "reviewer subagent acting as independent i18n auditor; distinct from the translator",
+        "session": "fb732633e5e1",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none reported: the subagent self-reported anthropic/claude-sonnet-5-5; no provider fallback disclosed; the lopdev manager inspected no harness route log",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 2 minor",
+        "independent_from_translator": true,
+        "translator_session": "228d805f674a",
+        "scope": "the 26 new wire.settings.keymap keys (13 actions x label/help) added by feat/tui-configurable-keybinds"
+      },
+      "status": "passed",
+      "note": "Suffix receipt for 26 new keys. Round 1 (auditor job 4e20751d261a) FAILED with 1 major (aside rendered 'साइड सवाल' vs the existing product noun 'नोट') plus 4 minors; the manager applied the auditor's replacements verbatim, then a fresh independent auditor (job fb732633e5e1) re-audited all 26 keys: PASS. No dedicated i18n-translator/i18n-auditor profile was available in this session; general task and reviewer subagents were used with the repo's glossary/style-guide brief. target_sha256 is the namespace file SHA-256 at recording time. Dates are the day recorded."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "3736fadd1232b8ef4615e497d2149400f679f2dcbe4a9bf6da9542cb075ef088",
+      "context_sha256": "44a7abc7b091cc5a5ce6809d85d3574093df155cefde6d9a7f91a24e4bc04486",
+      "target_sha256": "912760cc5327d37d67dcf307d3a4cf41fa1d199aa4a382642e40914da75cb46d",
+      "changed_keys": [
+        "wire.settings.keymap.transcript_up.label",
+        "wire.settings.keymap.transcript_up.help",
+        "wire.settings.keymap.transcript_down.label",
+        "wire.settings.keymap.transcript_down.help",
+        "wire.settings.keymap.transcript_half_up.label",
+        "wire.settings.keymap.transcript_half_up.help",
+        "wire.settings.keymap.transcript_half_down.label",
+        "wire.settings.keymap.transcript_half_down.help"
+      ],
+      "translator": {
+        "agent": "coder/tui-scroll-keys — self-translated per manager instruction (2026-11-22)",
+        "session": "ed5662a9280c",
+        "session_kind": "lop session id",
+        "model": "radient/auto",
+        "model_kind": "configured session model; concrete upstream provider not exposed to this session",
+        "underlying_model": "unknown (not exposed)",
+        "date": "2026-11-22",
+        "fallback": "not exposed to this session; no provider switch was requested"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "86c5cf020f85",
+        "session_kind": "lop session id (delta re-audit under team lopdev)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-22",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 0,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 0
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent delta re-audit at worktree HEAD 8704efd8e (round 2; round-1 audit was a different run at 94ecb8983). Whole namespace read at the new bytes against en source; source/context/target sha256 re-derived from disk and match the translator draft. Checked: meaning, native idiom, glossary + style-guide terms vs the locale's shipped catalogue usage, display-cell widths (rich cell_len, CJK double-width) vs sidecar maxCells (chip 20/10, hotkey label 24, help 72, legend 44, tip 57) and vs the namespace's widest existing row (no layout widening), literal keys (⌥J/K, alt+g/G), placeholder/ICU parity, key-set parity, NFC/controls/stray spaces, fr U+202F before ';', ur no manual bidi controls. R1 MINOR fixed: 'पृष्ठ'->'पेज' in half-page labels (9/8 cells), helps 'आधी स्क्रीन' (49-50/72), matching source 'half a screen' and shipped 'पेज' usage (40 vs 1). No findings.  Note: en/tui.chrome.bindings.json was re-formatted (minified->pretty-printed, JSON-equal to the audited content) between rounds, so its source_sha256 moved dfe44861…->3189693e…; no wording change."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "c49dee930248dc8f76f3239e42314bf865a0c0410a71cd31a21700b8e724a14b",
+      "context_sha256": "3f13a192ffd7da08bc3c502717d064f28d7da8365c860a6f3927622826eed3d4",
+      "target_sha256": "b9586c03851603aceb33f683246535b1e0cff7d4fdc9529fb9f207235b8ab353",
+      "changed_keys": [
+        "wire.settings.keymap.aside.help",
+        "wire.settings.keymap.aside.label",
+        "wire.settings.keymap.clear_transcript.help",
+        "wire.settings.keymap.clear_transcript.label",
+        "wire.settings.keymap.command_palette.help",
+        "wire.settings.keymap.command_palette.label",
+        "wire.settings.keymap.cycle_effort.help",
+        "wire.settings.keymap.cycle_effort.label",
+        "wire.settings.keymap.focus_sidebar.help",
+        "wire.settings.keymap.focus_sidebar.label",
+        "wire.settings.keymap.fork_aside.help",
+        "wire.settings.keymap.fork_aside.label",
+        "wire.settings.keymap.next_session.help",
+        "wire.settings.keymap.next_session.label",
+        "wire.settings.keymap.prev_session.help",
+        "wire.settings.keymap.prev_session.label",
+        "wire.settings.keymap.toggle_asks.help",
+        "wire.settings.keymap.toggle_asks.label",
+        "wire.settings.keymap.toggle_pin.help",
+        "wire.settings.keymap.toggle_pin.label",
+        "wire.settings.keymap.toggle_sidebar.help",
+        "wire.settings.keymap.toggle_sidebar.label",
+        "wire.settings.keymap.toggle_subagents.help",
+        "wire.settings.keymap.toggle_subagents.label",
+        "wire.settings.keymap.toggle_todos.help",
+        "wire.settings.keymap.toggle_todos.label",
+        "wire.settings.keymap.transcript_down.help",
+        "wire.settings.keymap.transcript_down.label",
+        "wire.settings.keymap.transcript_half_down.help",
+        "wire.settings.keymap.transcript_half_down.label",
+        "wire.settings.keymap.transcript_half_up.help",
+        "wire.settings.keymap.transcript_half_up.label",
+        "wire.settings.keymap.transcript_up.help",
+        "wire.settings.keymap.transcript_up.label"
+      ],
+      "translator": {
+        "agent": "union of two audited translations, no new translation: 26 keys by a task-subagent translator for feat/tui-configurable-keybinds (session 47ab69ad2d9c); 8 transcript keys by coder/tui-scroll-keys (session ed5662a9280c)",
+        "session": "47ab69ad2d9c + ed5662a9280c",
+        "session_kind": "lop task subagent JOB id and lop session id, respectively",
+        "model": "anthropic/claude-sonnet-5-5 + radient/auto",
+        "model_kind": "served models as self-reported by each translating session",
+        "underlying_model": "anthropic/claude-sonnet-5-5 / unknown (radient/auto route not exposed)",
+        "date": "2026-11-22",
+        "fallback": "none reported by either translating session"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "c5195593cf0d",
+        "session_kind": "lop session id (union whole-namespace audit under team lopdev, task from manager)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model reported in this session's system header",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-23",
+        "fallback": "none observed; no provider switch during this audit",
+        "result": "passed",
+        "findings": 1,
+        "findings_by_severity": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 1
+        },
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true,
+        "translator_session": "47ab69ad2d9c + ed5662a9280c",
+        "scope": "whole namespace (44 keys) at the union bytes, cross-set consistency of the 26-key #4469 delta and the 8-key transcript delta plus 10 base keys"
+      },
+      "status": "passed",
+      "note": "Independent whole-namespace audit of the merge union at worktree HEAD 290a76c8c (parents c44fdf1ea tui-scroll-keys side, ce57801168 origin/main side). Purely additive: every one of the 44 keys is byte-equal to its text in a parent (10 base in both, 26 in origin/main 4e32078b2, 8 transcript in 8704efd8e); no key changed, none new. source/context/target sha256 re-derived with shasum -a 256 from disk and match the draft. Checked: meaning vs en, terminology identical across the two halves and vs shipped catalogue usage (transcript, composer, sidebar, aside, fork, pin, asks, dock, todo, effort, subagent, session, row/cursor), glossary + style guide, label/help register, display-cell widths (rich cell_len, CJK double-width) vs declared maxCells (24 label / 72 help on the 8 transcript rows, all within), literal tokens (/new /resume /sidebar /effort esc), NFC, controls, spacing, punctuation, key order parity. Findings (0 BLOCKER, 0 MAJOR, 0 MINOR, 1 NIT): NIT B help rows drop 'in the composer' ('कर्सर अपनी जगह रहता है'; large headroom, e.g. '...कर्सर कंपोज़र में ही रहता है।' 50 cells). Otherwise consistent: सत्र/साइडबार/कंपोज़र/डॉक/उप-एजेंट/पंक्ति/कर्सर identical in both halves and the corpus."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "7d7c99be977d274ef0cc085e8c39b835deb8610d20b37cdf3f684f83287f6fea",
+      "context_sha256": "46b2338b08fcaefaf543bf874bf5c48d00ed76401c55ee73e8f7aa4f18c4176c",
+      "target_sha256": "c495292243834e41b68ab349c41aae7a9506c8416d4a33d9b27bb10a3d70ae16",
+      "keys_audited": 6,
+      "round": "r1",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts, new keys only; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S3 TUI send-chord rows 5425d7845 (branch feat/tui-send-chords, 2026-11-11): 6 NEW keys wire.settings.keymap.send_steer/send_queue/send_both (label/help); en source and en context sidecar gained the 6 keys in 77d1fa2ba; keys_audited 6. Translator and auditor as row. Audit: hi r1 FAIL (3 majors, one per help: 'Alt+अक्षर' should stay 'Alt+letter', and danda should be '.'); REJECTED with reasons put to the auditor in r2 — danda is mandated by i18n/style-guides/hi.md line 72, and translating only the word 'letter' is consistent with the other six locales (all auditor-passed) and the brief; auditor r2 verdict on hi: PASS ('translating letter is allowed and consistent with the other locales'). hi catalogue bytes unchanged since translation. Receipt records round r1 with final bytes.  No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "ba8eba05a347b728f6956d2da6292ce98d67857b50a559555c8078250ca267ae",
+      "context_sha256": "69ced296d8ea842453c6c69213c73520c8bf9680e8855d580a92959dfb95c442",
+      "target_sha256": "b7146a52c8e0e0c9bff516dc0ba0630edb2ef9c74fc6aea53b365fd933ac43b9",
+      "keys_audited": 3,
+      "round": "r2",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, changed keys only; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S6 re-translation (branch feat/tui-send-chords, HEAD 73bb22ca2 + uncommitted catalogues, 2026-11-11): 3 CHANGED-ENGLISH keys wire.settings.keymap.send_steer.help / send_queue.help / send_both.help (en source changed in 73bb22ca2: helps now name Delivery override behaviour); existing translations updated, values changed only in these 3 keys. keys_audited 3. Translator and auditor as row. Audit: es/zh-CN/ru/vi/ur PASS 0/0 first pass; fr FAIL round 1 (3 majors: tu-imperative register + 1 minor) -> auditor replacements applied, round 2 PASS 0/0; hi FAIL round 1 (4 majors: override wording) -> auditor replacements applied, round 2 PASS 0/0. Receipt records round r2 (repo's next round id for this namespace) with final bytes. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "7407d69c7173aaa5390e6ca1f06e0abbab4d0f43dacceef02970432ee3ae5144",
+      "context_sha256": "fdd22221ca4fc3768b486a1690ccd6ce1baae0a69f4a15a0c1291a58f410f964",
+      "target_sha256": "8493c381696c4b07105ab9d39bd21a3f28af6b9ea5c50dcef18c8e92c06b6a52",
+      "keys_audited": 2,
+      "round": "r1",
+      "translator": {
+        "agent": "task subagent tr8-hi (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-hi job)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt)",
+        "model": "gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Wave S8 queue-then-steer rename, backend (branch feat/tui-send-chords at ae5669467, English source in 3b2bc7423, translated strings audited while still uncommitted, 2026-11-11): 2 keys in this namespace: wire.settings.keymap.send_both.label (changed), wire.settings.keymap.send_both.help (changed). Translator: task subagent tr8-hi (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine); anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-hi job). Auditor: codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt); model gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered). The same audit prompts also carried the matching desktop (local-operator-ui) keys; only backend keys are recorded in this row. Audit rounds for hi until PASS: round 1 PASS, 0 blocker/major at the final round. Residual minor from the final round, accepted and not fixed: send_both.help substantially exceeds the ~72-cell one-line help budget. keys_audited counts only this wave's keys. This is an independent cross-family audit of exactly these keys, not a full-file audit and not a human review; `status: passed` records the auditor's final verdict. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "8e7be10120f99c1307f7e6c8b20b7514dc06dc69e4b2dd40c238b55728216b83",
+      "context_sha256": "b00b31c4087525cbcaec23da6eec1ee04e1dca4a7790ba6e18d80531bd9a1625",
+      "target_sha256": "ebd80b9390c20ad132bde954d7577ad3ad2273d070f0ee6b531a8aacfe1f3f01",
+      "keys_audited": 6,
+      "round": "r4",
+      "translator": {
+        "agent": "upstream (origin/main's rows above) and this branch's per-locale translators (rows above); not re-translated here",
+        "model": "see the rows above",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "no new audit: union of independent audits already recorded above (origin/main's receipts, and this branch's receipts audited by the codex MCP server, gpt-5.6-sol requested)",
+        "model": "see the rows above",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings.keymap (origin/main: 26 keys added since the merge-base; branch: 6 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 6 added/changed keys; origin/main's 36 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "e69e379d7291829626192446d396e1955863d973654795ae7af1058436f1ce22",
+      "context_sha256": "bfa3bb6a27443a38a4297aaca09021c9ee1917efe9d78954d06d3c933543ff64",
+      "target_sha256": "b0de2a9966427dc64b4d3615026e2ad49810a316261804df179a990a2f819e6f",
+      "keys_audited": 6,
+      "round": "r5",
+      "translator": {
+        "agent": "upstream (origin/main's rows above) and this branch's per-locale translators (rows above); not re-translated here",
+        "model": "see the rows above",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "no new audit: union of independent audits already recorded above (origin/main's receipts, and this branch's receipts audited by the codex MCP server, gpt-5.6-sol requested)",
+        "model": "see the rows above",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): fourth fold of feat/tui-send-chords onto origin/main 5ba8f49cd84f; both sides added keys to wire.settings.keymap (origin/main: 8 keys added since the merge-base; branch: 6 keys added or changed). Reconciled 2026-11-23 (second fold of the day, after #4469's transcript-scroll rows landed) by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 6 added/changed keys; origin/main's 44 key values byte-identical to origin/main, the branch's values byte-identical to the committed 6173ab789 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
     }
   ]
 }

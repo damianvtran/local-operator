@@ -1,0 +1,7 @@
+{
+  "tui.transcript_display.save_failed": "Couldn't save the transcript display: {reason}",
+  "tui.transcript_display.set": "Transcript: {mode}",
+  "tui.transcript_display.slash": "Condense the transcript by turn or by response",
+  "tui.transcript_display.unknown": "Unknown mode {echo} · choose by-turn or by-response",
+  "tui.transcript_display.usage": "Transcript: {mode} · choose by-turn or by-response"
+}

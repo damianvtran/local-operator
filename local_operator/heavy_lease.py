@@ -107,6 +107,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
 
 from local_operator import heavy_audit
+from local_operator.atomic_files import atomic_write_text
 
 try:  # POSIX only; Windows has no flock and runs without the lease.
     import fcntl
@@ -195,6 +196,11 @@ class HeavyClass:
     #: the lease would last as long as the server (PR #4104 R2-1). The caller
     #: prints a note telling the agent to run the build on its own so it queues.
     long_lived: bool = False
+    #: The line also POLLS the lease (``lop services status`` inside a loop):
+    #: leased, it would hold the slot it waits for and wait on itself until
+    #: killed (2026-11-22: ~21 min, two other sessions timed out behind it). The
+    #: bash tool refuses such a line before taking a slot; see :func:`polls_lease`.
+    polls_lease: bool = False
 
     def label(self, command: str) -> str:
         """The holder label: the segment that made the line heavy, else argv[0].
@@ -259,6 +265,10 @@ def supported() -> bool:
 #: harmless because ``2>`` stays with its command and ``1`` names no tool.
 _SEPARATORS = {"&&", "||", ";", "|", "&", "\n", "(", ")", ";;", "|&"}
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+#: Shell reserved words that open a command in a loop or branch body
+#: (``do pytest x``, ``then pytest x``, ``if pytest x``); the command is what
+#: follows. ``time`` is not here: it is a wrapper in :data:`_PREFIX_WRAPPERS`.
+_RESERVED_WORDS = frozenset({"do", "then", "else", "elif", "if", "while", "until", "!", "{"})
 
 #: Wrappers that run "the rest of the line" as the real command: name ->
 #: (positional arguments eaten before the wrapped command, options that take a
@@ -277,6 +287,8 @@ _PREFIX_WRAPPERS: dict[str, tuple[int, frozenset[str]]] = {
     "stdbuf": (0, frozenset({"-i", "-o", "-e"})),
     "ionice": (0, frozenset({"-c", "--class", "-n", "--classdata"})),
     "caffeinate": (0, frozenset({"-t", "-w"})),
+    # `arch -arm64 pod install`: the Apple Silicon spelling of CocoaPods.
+    "arch": (0, frozenset()),
     "taskset": (1, frozenset()),
     "chrt": (1, frozenset()),
     "prlimit": (0, frozenset({"-p", "--pid", "-o", "--output"})),
@@ -342,6 +354,14 @@ _SHALLOW_HEAVY_TOOLS = {"esbuild", "tsc", "vue-tsc", "vitest", "jest", "electron
     "webpack",
     "rollup",
 }
+#: ``xcodebuild`` options that only PRINT something (versions, schemes, build
+#: settings, destinations); anything else compiles or tests. Single-dash
+#: spellings, which :data:`_INFO_FLAGS_ANYWHERE` does not cover.
+_XCODEBUILD_INFO_FLAGS = frozenset(
+    {"-version", "-list", "-showsdks", "-showBuildSettings", "-showBuildSettingsForIndex"}
+    | {"-showdestinations", "-showTestPlans", "-usage", "-help", "-license"}
+    | {"-checkFirstLaunchStatus", "-runFirstLaunch"}
+)
 
 #: Placeholder for a ``$(…)``/backtick substitution, masked out of the line
 #: before tokenising. Why (node2, 2026-11-18): ``env $(env | grep -o
@@ -437,6 +457,14 @@ def _shallow_guess(command: str) -> str | None:
         name = os.path.basename(word.strip("'\""))
         if name in _SHALLOW_HEAVY_TOOLS:
             return name
+        if (tool := _native_tool_name(word)) in _NATIVE_MOBILE_TOOLS:
+            after_words: list[str] = []
+            for later in words[index + 1 :]:
+                if later in ("&&", "||", ";", "|", "&"):
+                    break
+                after_words.append(later.strip("'\""))
+            if verdict := _classify_native_mobile(tool, after_words):
+                return verdict
         is_module = name == "-m" and words[index + 1 : index + 2] == ["pytest"]
         if name == "pytest" or is_module:
             # Past the recursion bound a pytest gets the same verdict as a
@@ -457,17 +485,87 @@ def _shallow_guess(command: str) -> str | None:
     return None
 
 
+def _logical_lines(command: str) -> list[str] | None:
+    """Split ``command`` at unquoted newlines; None when a quote never closes.
+
+    A newline ends a simple command in the shell, but shlex reads it as plain
+    whitespace, so ``echo hi\\npytest tests/unit`` lexed as ONE command (``echo``)
+    and the pytest was never classified. This pre-pass restores the boundary:
+    a newline inside single or double quotes stays in its token, a backslash-
+    newline is a line continuation (removed, as the shell does), and a ``#`` at
+    the start of a word is a comment to the end of its line, dropped so an
+    apostrophe in it (``# don't``) cannot flip the quote state. ``\\r\\n`` is
+    one newline. Heredoc bodies are NOT special-cased: they are classified as
+    command lines, which errs toward leasing. Linear, no subprocess.
+    """
+    lines: list[str] = []
+    buf: list[str] = []
+    in_single = in_double = False
+    i, n = 0, len(command)
+    while i < n:
+        char = command[i]
+        if char == "\\" and not in_single:
+            following = command[i + 1 : i + 3]
+            if following.startswith("\n") or following == "\r\n":
+                i += 2 if following.startswith("\n") else 3  # continuation: joins the lines
+                continue
+            buf.append(command[i : i + 2])
+            i += 2
+            continue
+        if in_single or in_double:
+            if char == "'" and in_single:
+                in_single = False
+            elif char == '"' and in_double:
+                in_double = False
+            buf.append(char)
+        elif char == "'":
+            in_single = True
+            buf.append(char)
+        elif char == '"':
+            in_double = True
+            buf.append(char)
+        elif char == "#" and (not buf or buf[-1] in " \t\r;&|()"):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        elif char == "\n" or (char == "\r" and command[i + 1 : i + 2] == "\n"):
+            lines.append("".join(buf))
+            buf = []
+            i += 1 if char == "\n" else 2
+            continue
+        else:
+            buf.append(char)
+        i += 1
+    if in_single or in_double:
+        return None
+    lines.append("".join(buf))
+    return lines
+
+
 def _segments(command: str) -> list[list[str]]:
-    """Split ``command`` into simple-command token lists; [] when unparseable."""
+    """Split ``command`` into simple-command token lists; [] when unparseable.
+
+    Simple commands end at ``; & | ( )``, ``&&``/``||`` AND an unquoted newline
+    (see :func:`_logical_lines`).
+    """
+    lines = _logical_lines(command)
+    tokens: list[str] = []
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
-        lexer.whitespace_split = True
-        lexer.commenters = "#"
-        tokens = list(lexer)
+        if lines is None:
+            raise ValueError("unbalanced quote")
+        for line in lines:
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+            lexer.whitespace_split = True
+            lexer.commenters = ""  # comments were dropped, quote-aware, above
+            tokens.extend(lexer)
+            tokens.append("\n")
     except ValueError:
-        # An unbalanced quote: fall back to a plain whitespace split rather
-        # than give up, so a heavy build with a stray quote still queues.
-        tokens = command.split()
+        # An unbalanced quote: fall back to a plain whitespace split per line
+        # rather than give up, so a heavy build with a stray quote still queues.
+        tokens = []
+        for line in command.splitlines():
+            tokens.extend(line.split())
+            tokens.append("\n")
     segments: list[list[str]] = [[]]
     for token in tokens:
         if token in _SEPARATORS:
@@ -478,12 +576,12 @@ def _segments(command: str) -> list[list[str]]:
 
 
 def _strip_wrappers(tokens: list[str]) -> list[str]:
-    """Drop env assignments and runner prefixes to reach the real program."""
+    """Drop env assignments, reserved words and runner prefixes to reach the real program."""
     i = 0
     while i < len(tokens):
         token = tokens[i]
         base = os.path.basename(token)
-        if _ENV_ASSIGNMENT.match(token):
+        if _ENV_ASSIGNMENT.match(token) or token in _RESERVED_WORDS:
             i += 1
             continue
         if base == "systemd-run":
@@ -655,6 +753,49 @@ def _shell_c_string(args: list[str]) -> str | None:
     return None
 
 
+_NATIVE_MOBILE_TOOLS = frozenset({"xcodebuild", "pod-install", "expo", "pod", "eas", "eas-cli"})
+
+
+def _native_tool_name(token: str) -> str:
+    """The tool a token names: no quotes, directory or npx ``@version``; the
+    package ``@expo/cli`` (what ``npx @expo/cli`` runs) is ``expo``."""
+    token = token.strip("'\"")
+    if re.fullmatch(r"@expo/cli(@[^/]*)?", token):
+        return "expo"
+    return re.sub(r"@[^/]*$", "", os.path.basename(token))
+
+
+def _classify_native_mobile(program: str, args: list[str]) -> str | None:
+    """Native iOS/Expo build tools: ``xcodebuild``, ``expo run:ios|prebuild``,
+    ``pod install``/``pod-install``, ``eas build --local``.
+
+    Why (2026-11-22): the lease counted none of these, so several lanes compiled
+    iOS apps at once and the host reached load 290-750 on 14 cores. ``program``
+    may carry an npx version (``eas-cli@latest``). Informational calls
+    (``xcodebuild -version|-list``, ``pod --version``, ``-h``) and everything else
+    (``expo start``, ``pod repo update``, a REMOTE ``eas build``) are not heavy.
+    """
+    if "-h" in args:  # `-h` is help for these tools (`xcodebuild -help` is listed below)
+        return None
+    first = _positionals(args)[:1]
+    if program == "xcodebuild":
+        return None if any(a in _XCODEBUILD_INFO_FLAGS for a in args) else "xcodebuild"
+    if program == "pod-install":
+        return "pod install"
+    # Subcommand anywhere in the line, not the first positional: an option VALUE
+    # can come first (`pod --project-directory ios install`, `expo --config a run:ios`).
+    if program == "pod" and "install" in args:
+        return "pod install"
+    if program == "expo":
+        for sub in ("run:ios", "prebuild"):
+            if sub in args:
+                return f"expo {sub}"
+    local = any(a in ("--local", "--local=true") for a in args)
+    if program in ("eas", "eas-cli") and first == ["build"] and local:
+        return "eas build --local"
+    return None
+
+
 def _classify_pm(
     program: str, args: list[str], cwd: str | None, depth: int, seen: _Seen = frozenset()
 ) -> str | None:
@@ -759,6 +900,8 @@ def _classify_segment(
     if not tokens:
         return None
     program = os.path.basename(tokens[0])
+    if (tool := _native_tool_name(tokens[0])) in _NATIVE_MOBILE_TOOLS:
+        program = tool  # `expo@latest`, `eas-cli@12`, `@expo/cli`: strip the package spec
     args = tokens[1:]
     # pytest's `-v` is VERBOSE (its version flag is `-V`/`--version`): a bare
     # `pytest -v` is a whole-suite run and must reach the pytest rules.
@@ -832,6 +975,12 @@ def _classify_segment(
         return f"{program} {heavy}" if heavy else None
     if program in ("cargo", "go") and args[:1] and args[0] in ("build", "test"):
         return f"{program} {args[0]}"
+    if program == "bundle" and args[:1] == ["exec"]:
+        # `bundle exec pod install`: the Gemfile-pinned CocoaPods most iOS repos use.
+        rest = [a for a in args[1:] if a != "--"]
+        return _classify_segment(rest, cwd, depth + 1, seen) if rest else None
+    if native := _classify_native_mobile(program, args):
+        return native
     if program == "make" and any(a.startswith("test") for a in args if not a.startswith("-")):
         return "make test"
     if program == "affected_tests.py" or (
@@ -1049,8 +1198,17 @@ def is_heavy(
     nearest config's ``addopts`` and a ``PYTEST_ADDOPTS=`` prefix), a directory
     or whole-suite pytest (``-k`` or not),
     ``affected_tests.py --run|--evidence``, ``make test*`` and
-    ``cargo``/``go`` build|test. ``$(…)``/backtick bodies are classified too,
+    ``cargo``/``go`` build|test, and native iOS builds: ``xcodebuild`` (not its
+    print-only ``-version``/``-list``/``-showBuildSettings`` family),
+    ``expo run:ios|prebuild``, ``pod install``/``pod-install`` and ``eas build
+    --local`` (also under ``npx``/``pnpm exec``/``bundle exec``/``arch``).
+    ``expo run:ios`` stays attached to Metro unless ``--no-bundler`` is given, so
+    it holds its slot until stopped or timed out. ``$(…)``/backtick bodies are classified too,
     and never hide the command around them.
+
+    The line is split into simple commands at ``; & | ( )``, ``&&``/``||`` and
+    unquoted newlines, and a loop/branch body (``do``/``then``/``else``/``if``
+    …) is classified by the command after its reserved word.
 
     Classified by what actually runs: wrappers (``cd x &&``, env assignments,
     ``timeout N``, ``nice``, ``taskset``, ``chrt``, ``prlimit``, ``xvfb-run``,
@@ -1078,7 +1236,41 @@ def is_heavy(
     reason, long_lived = _unpack(_classify_command(command, cwd, 0))
     if reason is None:
         return None
-    return HeavyClass(reason, long_lived=long_lived)
+    return HeavyClass(reason, long_lived=long_lived, polls_lease=polls_lease(command))
+
+
+#: A lease READ: ``lop|lo|local-operator [options] services [heavy] status``.
+_LEASE_READ = re.compile(
+    r"(?:^|[\s;&|(`'\"])(?:\S*/)?(?:lop|lo|local-operator)(?=\s)[^;&|\n]*?"
+    r"\bservices\s+(?:heavy\s+)?status\b"
+)
+#: A shell loop keyword in command position: start of a line, or after a
+#: separator, newline, brace, ``!``, quote, ``do``/``then``/``else``/``elif``,
+#: so an argument that merely reads ``for`` is not one.
+_SHELL_LOOP = re.compile(
+    r"(?:^|[;&|(){!`'\"\n]|\b(?:do|then|else|elif)\b)[ \t]*(?:while|until|for)\s"
+)
+
+
+def polls_lease(command: str) -> bool:
+    """Whether ``command`` reads the heavy-job lease from inside a shell loop.
+
+    A leased command holds a slot for its whole life, so a loop that waits for
+    the slot to free (``while lop services status | grep "1/1 slots held"; do
+    sleep 50; done; vitest run``) waits for ITSELF. Only a loop counts: one
+    status read beside a heavy command (``lop services status; pytest -n 4``)
+    returns at once and is harmless, so the read must come AFTER a loop keyword.
+
+    Best effort, not a parser: it can still refuse an unrelated loop that
+    follows a loop keyword and a status read in one line (the refusal says to
+    split the call), and it does not see a renamed or variable binary
+    (``$LOP services status``), ``watch lop services status`` or a script that
+    shells out to ``lop``.
+    """
+    return any(
+        _LEASE_READ.search(command, loop.end() - 1) is not None
+        for loop in _SHELL_LOOP.finditer(command)
+    )
 
 
 # -- slot sizing ------------------------------------------------------------
@@ -1467,16 +1659,12 @@ def nested_line(inherited: InheritedLease) -> str:
 
 
 def _write_record(path: Path, record: dict[str, Any]) -> None:
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{id(record)}.tmp")
     try:
-        tmp.write_text(json.dumps(record), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_text(path, json.dumps(record))
     except OSError:
         # The record is advisory; a failed write only costs a waiter the name.
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        # The writer has already removed its own temp.
+        pass
 
 
 def try_acquire(

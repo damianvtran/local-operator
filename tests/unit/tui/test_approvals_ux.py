@@ -293,7 +293,8 @@ async def test_the_session_switch_stops_offering_a_save_the_file_already_has(
 
         receipt = _notices(app)[-1]
         assert receipt == (
-            "tool approvals: auto — every tool runs without asking (this session)"
+            "tool approvals: auto — every tool runs without asking, except account "
+            "profile saves and community posts (this session)"
         ), receipt
         assert app._approve_all is True
 
@@ -866,6 +867,9 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # OPTIONAL like `/theme`: bare `/language` answers with the active
         # language, and the space opens the value list.
         "language": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/language`: bare `/transcript` answers with the layout
+        # in force, and the space opens the two modes.
+        "transcript": ArgumentMode.OPTIONAL,
         "approvals": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/approvals`: bare `/mcp` lists the servers, and the
         # space opens the login/logout/reauth subcommand list.

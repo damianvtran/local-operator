@@ -1137,11 +1137,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "or an entry of a session directory",
     ),
     "local_operator/asks/store.py": (
-        5,
+        6,
         "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
         "directories the queue's paths are built UNDER, never entries of a session "
-        "directory. Plus the three row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``, "
-        "and ``ask-relay-``, the watcher's settle-note row), "
+        "directory. Plus the four row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``, "
+        "``ask-relay-``, the watcher's settle-note row, and ``ask-withdrawn-``, the "
+        "display-only row an agent's withdrawal leaves), "
         "joined to a row id and never a bare filename. The third name constant in that "
         "module, ``ASKS_LOG_NAME`` "
         "(``asks.jsonl``), IS an entry of one and is classified instead — it sits in "
@@ -1651,7 +1652,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``compaction-carried`` prefixes the synthetic carried-tier row's message id in "
         "the live/replay context, never a filename or session entry",
     ),
-    "local_operator/keymap.py": (1, "``keymap.`` prefixes a config key name"),
+    "local_operator/keymap.py": (
+        2,
+        "``keymap.`` prefixes a config key name, and ``keymap.transcript_`` is the "
+        "printable-chord id prefix — the same kind of name, not a path",
+    ),
     "local_operator/mobile/peer_send.py": (1, "``peer-`` prefixes a message id"),
     "local_operator/mobile/push_payload.py": (1, "``attention-`` prefixes a push payload key"),
     "local_operator/network/invite.py": (1, "``lop1`` prefixes an invite token string"),

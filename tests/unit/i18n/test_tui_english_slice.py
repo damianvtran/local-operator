@@ -213,8 +213,12 @@ ENGLISH_PARITY: list[tuple[str, Msg, str]] = [
     ),
 ]
 
-#: The ten hotkey rows' copy: ``(action id, label, help)`` exactly as
-#: ``keymap.KEY_ACTIONS`` (and so origin/main's settings rows) carried them.
+#: The hotkey rows' copy: ``(action id, label, help)`` exactly as
+#: ``keymap.KEY_ACTIONS`` (and so origin/main's settings rows for all but
+#: the three send rows) carried them. The three send rows are the composer-scope batch:
+#: their English is the `wire.settings.keymap` catalogue, which is also
+#: what the settings rows paint, so registry and settings agree by
+#: construction.
 KEYMAP_ENGLISH = {
     "keymap.new_session": ("New session", "Starts a fresh conversation, the same as /new."),
     "keymap.resume": (
@@ -229,6 +233,74 @@ KEYMAP_ENGLISH = {
     "keymap.start_recording": (
         "Start recording",
         "Starts speech-to-text recording in the desktop window.",
+    ),
+    "keymap.command_palette": (
+        "Command palette",
+        "Searches every command, setting and conversation from one box.",
+    ),
+    "keymap.toggle_sidebar": (
+        "Sessions list",
+        "Shows or hides the session sidebar; /sidebar does the same.",
+    ),
+    "keymap.focus_sidebar": (
+        "Focus sessions",
+        "Moves the keys into the sessions list; esc returns to the composer.",
+    ),
+    "keymap.aside": ("Aside", "Asks a side question without spending the composer's draft."),
+    "keymap.fork_aside": (
+        "Fork aside",
+        "Promotes the open aside exchange into the conversation.",
+    ),
+    "keymap.toggle_todos": ("Todo panel", "Expands or collapses the dock's todo list."),
+    "keymap.toggle_subagents": (
+        "Subagent panel",
+        "Cycles the dock's subagent panel: full, summary, hidden.",
+    ),
+    "keymap.toggle_pin": (
+        "Pin session",
+        "Pins or unpins the row under the pointer, else the sidebar's cursor.",
+    ),
+    "keymap.toggle_asks": ("Queued asks", "Opens or collapses the questions waiting on an answer."),
+    "keymap.prev_session": (
+        "Previous session",
+        "Switches to the previous conversation in the sidebar.",
+    ),
+    "keymap.next_session": ("Next session", "Switches to the next conversation in the sidebar."),
+    "keymap.cycle_effort": (
+        "Reasoning effort",
+        "Cycles the reasoning effort level; /effort sets one directly.",
+    ),
+    "keymap.clear_transcript": (
+        "Clear transcript",
+        "Clears the transcript view; the stored history stays.",
+    ),
+    "keymap.transcript_up": (
+        "Scroll transcript up",
+        "Scrolls the conversation up two rows; the caret stays in the composer.",
+    ),
+    "keymap.transcript_down": (
+        "Scroll transcript down",
+        "Scrolls the conversation down two rows; the caret stays in the composer.",
+    ),
+    "keymap.transcript_half_up": (
+        "Half-page transcript up",
+        "Scrolls the conversation up half a screen; the caret stays in the composer.",
+    ),
+    "keymap.transcript_half_down": (
+        "Half-page transcript down",
+        "Scrolls the conversation down half a screen; the caret stays in the composer.",
+    ),
+    "keymap.send_steer": (
+        "Send as steer",
+        "Send now, interrupting the step. Overrides Delivery when busy.",
+    ),
+    "keymap.send_queue": (
+        "Send as queue",
+        "Wait for the step; never interrupt tools. Overrides Delivery when busy.",
+    ),
+    "keymap.send_both": (
+        "Send as queue, then steer",
+        "Wait, then steer if slow. Overrides Delivery when busy.",
     ),
 }
 

@@ -1,4 +1,10 @@
 {
+  "tui.settings_view.chrome.capture.chord_grammar": {
+    "role": "status",
+    "tone": "plain, terse",
+    "maxCells": 64,
+    "note": "Detail line while a SEND-SHORTCUT row (composer scope) waits for the key to bind. Teaches the chord grammar where it is bound: alt+<letter> works in every terminal, ctrl+enter arrives as plain Enter in terminals without enhanced (kitty-protocol) key reporting. `alt+<letter>` and `ctrl+enter` are key names: keep them verbatim, untranslated, including the angle brackets; translate only 'works anywhere' and 'needs enhanced keys'. No ICU arguments."
+  },
   "tui.settings_view.chrome.capture.contract_cancel": {
     "role": "key hint",
     "tone": "plain, terse",
@@ -16,6 +22,11 @@
     "tone": "plain, terse",
     "note": "Detail line while a shortcut row waits for the user to press the key to bind.",
     "maxCells": 24
+  },
+  "tui.settings_view.chrome.capture.needs_enhanced_keys": {
+    "role": "status",
+    "tone": "plain, terse",
+    "note": "Short warning joined in front of a conflict note (' — ') or shown alone on the capture line after a send-shortcut chord that only works in terminals with enhanced (kitty-protocol) key reporting was pressed. Warns and stores; it is not a refusal. 'enhanced keys' is the terminal feature, not a product term. No ICU arguments."
   },
   "tui.settings_view.chrome.capture.press_another": {
     "role": "key hint",

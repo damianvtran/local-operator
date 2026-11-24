@@ -1,7 +1,9 @@
 {
+  "tui.settings_view.chrome.capture.chord_grammar": "alt+<letter> हर जगह काम करता है, ctrl+enter के लिए उन्नत कुंजियाँ चाहिए",
   "tui.settings_view.chrome.capture.contract_cancel": "{cancel_key} रद्द करें",
   "tui.settings_view.chrome.capture.contract_confirm": "{save_key} पुष्टि · {cancel_key} रद्द",
   "tui.settings_view.chrome.capture.listening": "कुंजी की प्रतीक्षा है",
+  "tui.settings_view.chrome.capture.needs_enhanced_keys": "उन्नत कुंजियाँ चाहिए",
   "tui.settings_view.chrome.capture.press_another": "कोई दूसरी कुंजी दबाएँ",
   "tui.settings_view.chrome.capture.saved": "{shortcut} सहेजा गया",
   "tui.settings_view.chrome.capture.takes_from": "{shortcut} को “{victim}” से ले लेगा",

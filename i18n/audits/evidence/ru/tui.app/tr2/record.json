@@ -1,0 +1,26 @@
+{
+  "auditor": {"agent": "i18n-auditor (lopdev team)", "session": "4d9bfc799017", "model": "anthropic/claude-opus-5-5 (from session system prompt; no fallback observed)", "date": "2026-11-23", "independent_from_translator": true},
+  "round": "tr2",
+  "pr": "https://github.com/damianvtran/local-operator/pull/4508",
+  "trigger": "design D1 https://github.com/damianvtran/local-operator/pull/4508#issuecomment-7116430818 (team pane 27 cells; old 'псевдонимы: {aliases}' hid the alias)",
+  "repo": {"worktree": "~/local-operator/.worktrees/i18n-model-persist-notice", "head": "8af9dfbc13ce"},
+  "audited_input": "~/.local-operator/sessions/56f0822a10dd/scratchpad/translations/ru.json (sha256 f966fcfe6d0af6ce2d8a005ea76d601ce791ec4787808149c99e34ada70f965b) = {\"tui.app.skills.team_aliases\": \"псевд.: {aliases}\"}; translator i18n-translator session 56f0822a10dd, anthropic/claude-opus-5-5; notes: ../notes.md",
+  "source_sha256": {"local_operator/i18n/catalogues/en/tui.app.json": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584"},
+  "context_sha256": {"local_operator/i18n/catalogues/en/tui.app.context.json": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5"},
+  "reference_sha256": {
+    "local_operator/i18n/catalogues/ru/tui.app.json (pre-change; member_count arms used for width renders)": "ba98c62f661c51fa61acacdf38ab7333eb7dc3c2d14aaa19057bfcf622a7f1c8",
+    "i18n/style-guides/ru.md": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+  },
+  "per_namespace": {
+    "tui.app": {
+      "result": "clean",
+      "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 1},
+      "findings": [
+        {"id": "N1", "severity": "nit", "key": "tui.app.skills.team_aliases", "current": "псевд.: {aliases}", "problem": "The ru style guide's Width rules name the accepted abbreviations ('мин', 'сек'; 'настр.' only if a wave records it). 'псевд.' is a standard dictionary abbreviation, so recording it is not required, but it is not documented.", "suggestion": "Keep the value. When convenient, add 'alias → «псевдоним»; «псевд.» in width-constrained facts lines' to the ru style guide's Width rules (the translator already proposes this). Non-gating."}
+      ],
+      "notes": "Placeholder: message_arguments is (('aliases','simple'),) in both en and ru. One key; valid JSON; the only Cf/Zs/Cc character is a plain U+0020 space, so no bidi or format characters. Accuracy: 'псевд.' = 'псевдоним(ы)'. It is number-neutral, so it fits the en singular 'alias' for any count of names. The term matches tui.team_authoring.aliases 'псевдонимы' and aliases_hint, and ru catalogues already abbreviate this way ('сохр.'). I agree with rejecting 'алиасы': it is dev slang, and the guide prefers the settled Russian term; it is the same width, so width does not favour it. Readability: 'N участников · псевд.: lop' parses unambiguously. Width (rich cell_len; ru member_count rendered via render_message): 6 members/lop 26, 12/lop 27, 1/lop 24, so D1 is met (≤27). Residual, not a copy finding: aliases 's1, s2' give 29 at 6 members and 30 at 12, and 100/lop gives 28. No faithful shorter label exists ('имена:' still gives 28 at 6/'s1, s2'), so this is a layout issue."
+    }
+  },
+  "validator": "Repo check.py was not run: the value is not applied to a catalogue, and the brief is read-only with no tree copy. Run instead with the primary .venv python, PYTHONPATH=worktree@8af9dfbc13ce: JSON parse and key count; unicodedata scan; runtime.message_arguments en vs ru; runtime.render_message of the ru member_count plus the new value for counts 1, 2, 6, 12, 21, 100 × aliases 'lop' and 's1, s2'; rich.cells.cell_len. The coder should run the i18n check after applying the value."
+}

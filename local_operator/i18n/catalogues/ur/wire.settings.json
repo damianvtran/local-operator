@@ -770,7 +770,7 @@
   "wire.settings.team_bridge_hold_release.help": "نئے کام کی کچھ درخواستیں روکی جاتی ہیں تاکہ آپ انہیں پہنچائیں یا مسترد کریں۔ آپ کے پہنچائے بغیر ایجنٹ تک کچھ نہیں پہنچتا۔ بند ہونے پر ان سے انکار ہوتا ہے۔",
   "wire.settings.tool_approval_mode.choice.ask.description": "لکھنے/چلانے والے ٹولز سے پہلے پوچھیں",
   "wire.settings.tool_approval_mode.choice.ask.label": "پوچھیں",
-  "wire.settings.tool_approval_mode.choice.auto.description": "بغیر پوچھے چلائیں",
+  "wire.settings.tool_approval_mode.choice.auto.description": "بغیر پوچھے چلائیں، سوائے اکاؤنٹ پروفائل محفوظ کرنے اور کمیونٹی میں پوسٹ کرنے کے",
   "wire.settings.tool_approval_mode.choice.auto.label": "خودکار",
   "wire.settings.tool_approval_mode.help": "نرم کرنے کے لیے اسی سیشن میں لکھنا ہوگا — /approvals auto۔",
   "wire.settings.tool_approval_mode.label": "ٹول منظوری موڈ",
@@ -893,5 +893,15 @@
   "wire.settings.mesh_move_working_set_max_bytes.label": "فی منتقلی ورکنگ فائلوں کی حد (بائٹس)",
   "wire.settings.mesh_move_working_set_max_bytes.help": "کام کی فائلوں کے ڈیٹا کی زیادہ سے زیادہ مقدار جو ایک منتقلی دوسری ڈیوائس کو بھیج یا اس سے قبول کر سکتی ہے۔ اس میں بنڈل شدہ commits اور اسٹیج کی گئی، اسٹیج نہ کی گئی اور Git میں شامل نہ کی گئی فائلیں شامل ہیں۔ حد سے زیادہ ہونے پر منتقلی مسترد ہوتی ہے اور کچھ نہیں بدلتا۔ ڈیفالٹ 256 MiB۔",
   "wire.settings.mesh_move_working_set_roots.label": "وہ فولڈر جو منتقل شدہ ریپوزٹریز وصول کر سکتے ہیں",
-  "wire.settings.mesh_move_working_set_roots.help": "اس ڈیوائس پر سیشن کی منتقلی کہاں ریپوزٹری بنا یا بحال کر سکتی ہے: آپ کے ہوم کے اندر فولڈر، ~ کے ساتھ لکھے اور کوما سے الگ کیے گئے (مثلاً ~/code, ~/work)۔ پوشیدہ، سسٹم، کمانڈ (PATH پر) اور node_modules فولڈر کبھی استعمال نہیں ہوتے۔ سیٹ نہ ہو تو: ریپوزٹری وہیں بحال ہوتی ہے جہاں وہ پہلے سے ہے، اور غائب ریپوزٹری صرف ایسے فولڈر میں کلون ہوتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں؛ دوسرے فولڈروں کی اجازت کے لیے اسے سیٹ کریں۔"
+  "wire.settings.mesh_move_working_set_roots.help": "اس ڈیوائس پر سیشن کی منتقلی کہاں ریپوزٹری بنا یا بحال کر سکتی ہے: آپ کے ہوم کے اندر فولڈر، ~ کے ساتھ لکھے اور کوما سے الگ کیے گئے (مثلاً ~/code, ~/work)۔ پوشیدہ، سسٹم، کمانڈ (PATH پر) اور node_modules فولڈر کبھی استعمال نہیں ہوتے۔ سیٹ نہ ہو تو: ریپوزٹری وہیں بحال ہوتی ہے جہاں وہ پہلے سے ہے، اور غائب ریپوزٹری صرف ایسے فولڈر میں کلون ہوتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں؛ دوسرے فولڈروں کی اجازت کے لیے اسے سیٹ کریں۔",
+  "wire.settings.composer.description": "ایجنٹ کے کام کے دوران بھیجا گیا پیغام کیسے پہنچایا جائے۔ تبدیلی ٹرمینل اور ڈیسک ٹاپ ایپ میں فوراً لاگو ہوتی ہے۔",
+  "wire.settings.composer.title": "پیغام بھیجنا",
+  "wire.settings.delivery_busy_default.choice.both.description": "انتظار، پھر دیر ہو تو ہدایت",
+  "wire.settings.delivery_busy_default.choice.both.label": "قطار، پھر ہدایت",
+  "wire.settings.delivery_busy_default.choice.queue.description": "انتظار کریں؛ ٹولز کو کبھی نہ روکیں",
+  "wire.settings.delivery_busy_default.choice.queue.label": "قطار",
+  "wire.settings.delivery_busy_default.choice.steer.description": "چلتے ٹول میں فوراً مداخلت",
+  "wire.settings.delivery_busy_default.choice.steer.label": "ہدایت دیں",
+  "wire.settings.delivery_busy_default.help": "ایجنٹ کے کام کے دوران Enter کیا کرتا ہے۔ “… کے طور پر بھیجیں” والی کلید اسے بدل دیتی ہے۔",
+  "wire.settings.delivery_busy_default.label": "مصروف ہونے پر ترسیل"
 }

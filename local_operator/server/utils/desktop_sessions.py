@@ -2193,7 +2193,13 @@ class DesktopSessionBridge:
             "verified_at": verified_at,
         }
 
-    async def acquire(self, *, read: bool = False, control_only: bool = False) -> AttachedSession:
+    async def acquire(
+        self,
+        *,
+        read: bool = False,
+        control_only: bool = False,
+        ingress_trace: open_trace.DesktopEventsIngressTrace | None = None,
+    ) -> AttachedSession:
         """Take one reference on this bridge, binding the owner if it is cold.
 
         ``control_only`` reserves the same reference without binding display
@@ -2231,12 +2237,17 @@ class DesktopSessionBridge:
         (see :meth:`_read_attach_settled`).
         """
         tracing = open_trace.enabled()
+        trace_id = uuid.uuid4().hex if tracing else None
+        if ingress_trace is not None:
+            # Join the existing acquisition diagnostics without copying their
+            # session field into the new, payload-free request trace. Keep this
+            # extra write outside the existing acquire/witness duration.
+            ingress_trace.mark("desktop.events.acquire", acquire_id=trace_id)
         trace_at = time.monotonic() if tracing else 0.0
         # Nested spans, not additive: birth/cold belong to facade, facade to
         # held. Missing fields mean the phase was skipped or did not finish.
         # Pass this call's metadata explicitly; readers share the bridge/task.
         phases: dict[str, float] | None = {} if tracing else None
-        trace_id = uuid.uuid4().hex if tracing else None
         loop_handle: asyncio.Handle | None = None
         loop_delay_ms: float | None = None
         if tracing:
@@ -9648,6 +9659,42 @@ class DesktopSessions:
         except CardBodyNotFound as missing:
             raise KeyError("Unknown bridge card") from missing
 
+    async def agent_notification_picture(self, session_id: str) -> tuple[bytes, str]:
+        """``(picture bytes, verified sha256)`` of the agent this session is bound to.
+
+        The source of the desktop banner composite
+        (``/v1/desktop/sessions/{id}/notification-avatar``). The session gate is
+        an EXISTENCE check over the LOCAL user-session namespace only: a peer
+        session's agent and picture live on another device, and its banner keeps
+        today's app icon rather than reaching across the mesh for decoration.
+        The binding is resolved by the same resolver every listing row uses
+        (``agent_avatar.session_agent_identity``), and the bytes are read
+        through ``agent_avatar.read_stored`` -- metadata authority, no symlink,
+        digest match -- so the sha returned is the body's own, never the
+        index's possibly one-second-stale copy. Any miss (unknown session, no
+        bound agent, no or invalid picture) is ``KeyError``: the route answers
+        all of them with one ``not_found`` refusal, because the desktop's only
+        decision is "composite or today's banner".
+        """
+        from local_operator import agent_avatar
+
+        def read() -> tuple[bytes, str]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                raise KeyError("Unknown session")
+            identity = agent_avatar.session_agent_identity(self.root, session_id)
+            if identity is None or not identity.avatar_sha256:
+                raise KeyError("No agent picture")
+            try:
+                data, _mime, sha = agent_avatar.read_stored(self.root, identity.agent_id)
+            except agent_avatar.AvatarError as exc:
+                raise KeyError("No agent picture") from exc
+            return data, sha
+
+        return await asyncio.to_thread(read)
+
     async def attachment_waveform(self, session_id: str, digest: str) -> dict[str, Any]:
         """The waveform payload ``{version, bars, peaks}`` for one attachment.
 
@@ -11380,6 +11427,7 @@ class DesktopSessions:
         read: bool = False,
         allow_draft: bool = False,
         control_only: bool = False,
+        ingress_trace: open_trace.DesktopEventsIngressTrace | None = None,
     ) -> AsyncIterator[DesktopSessionBridge]:
         """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
 
@@ -11472,6 +11520,8 @@ class DesktopSessions:
         takes 2453 ms and **24** requests complete inside it (median 70 ms, worst
         308 ms). See ``docs/evidence/session-load-central-cache``.
         """
+        if ingress_trace is not None:
+            ingress_trace.mark("desktop.events.pool")
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
         await self._refuse_deleted_temporary(session_id)
@@ -11683,7 +11733,11 @@ class DesktopSessions:
                             )
                             self.bridges[session_id] = bridge
             assert bridge is not None  # resolved above: either found or built
-            if control_only:
+            if ingress_trace is not None:
+                await bridge.acquire(
+                    read=read, control_only=control_only, ingress_trace=ingress_trace
+                )
+            elif control_only:
                 await bridge.acquire(read=read, control_only=True)
             else:
                 await bridge.acquire(read=read)

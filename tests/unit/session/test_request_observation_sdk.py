@@ -318,6 +318,98 @@ async def test_ordinary_unset_is_allocation_free_and_turn_output_unchanged(
         assert calls == [], "an unsubscribed request must not build a record"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cap", "receipt", "admitted", "reason"),
+    [
+        (None, 0.000001, 4, None),  # no-hook control with the same wire script
+        (2, 0.000001, 2, "budget-cap"),
+        (1, 0.0000004, 3, "budget-cap"),  # 0.8µ admits; 1.2µ refuses the next request
+        (0, 0.000001, 0, "budget-cap"),
+        (2, None, 1, "cost-unreported"),
+    ],
+)
+async def test_episode_recorded_spend_admission_uses_the_sdk_wire(
+    scratch: Any,
+    wire: Wire,
+    cap: int | None,
+    receipt: float | None,
+    admitted: int,
+    reason: str | None,
+) -> None:
+    from local_operator.evaluation.session_arm import open_episode_session
+    from local_operator.harness.types import AgentEndEvent
+
+    def turn(_request: ChatRequest) -> list[Any]:
+        if receipt is None:
+            return [StreamTextDelta(delta="no usage"), StreamEndEvent(stop_reason="stop")]
+        usage = Usage(input_tokens=1, usd_cost=receipt)
+        return [StreamUsageEvent(usage=usage), *text_turn("recorded spend", usage=usage)]
+
+    wire.script("parent", turn, turn, turn, turn)
+    ends: list[AgentEndEvent] = []
+
+    def observe(event: Any) -> None:
+        if isinstance(event, AgentEndEvent):
+            ends.append(event)
+
+    handle = await open_episode_session(
+        spec=_spec(), roots=scratch, on_event=observe, max_recorded_spend_micros=cap
+    )
+    try:
+        for _ in range(min(admitted + 1, 4)):
+            await handle.session.prompt(f"{_PARENT_MARKER}: reply")
+        assert len(wire.scoped("parent")) == admitted
+        assert len(handle.request_rows) == admitted, "refusals are not billable requests"
+        assert handle.admission_refusal == reason
+        assert ends and ends[-1].error is None
+        assert ends[-1].aborted is (reason is not None)
+        shutdown = await handle.session.shutdown_owned_work("recorded-spend test")
+        assert shutdown.complete and shutdown.observer_callback_errors == 0
+        if handle._admission is not None:
+            assert not handle._admission.pending
+    finally:
+        await handle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_typed_admission_follows_preforked_isolated_requests(
+    scratch: Any, wire: Wire
+) -> None:
+    from local_operator.sdk import RequestAdmissionRefused
+
+    wire.script("helper", text_turn("no-hook control"))
+    async with _opened(scratch) as session:
+        child = session._stream_fn.fork("capped-child")
+        grandchild = child.fork("capped-grandchild")
+        request = session._errand_request(session._lowest_effort(session._model), "sys", "name")
+        assert request.isolated
+
+        def refuse(_request_id: str) -> None:
+            raise RequestAdmissionRefused("synthetic-denial")
+
+        try:
+            uninstall = session.install_request_admission(refuse)
+            for stream in (session._stream_fn, child, grandchild):
+                with pytest.raises(RequestAdmissionRefused, match="synthetic-denial"):
+                    async for _ in stream(request, None):
+                        pytest.fail("a declined request yielded a provider event")
+            assert not wire.requests
+
+            uninstall()
+            uninstall_again = session.install_request_admission(refuse)
+            uninstall()  # A stale uninstaller cannot disarm its replacement.
+            with pytest.raises(RequestAdmissionRefused, match="synthetic-denial"):
+                await session._drain_errand(request)
+            uninstall_again()
+
+            assert await session._drain_errand(request) == "no-hook control"
+            assert len(wire.requests) == 1 and wire.requests[0].isolated
+        finally:
+            await grandchild.close()
+            await child.close()
+
+
 # ---------------------------------------------------------------------------
 # Single native tool loop -- one row per request, duplicate frames once
 # ---------------------------------------------------------------------------
@@ -432,6 +524,62 @@ async def test_native_task_tree_records_parent_child_and_grandchild(
     )
     assert "child-file-marker" in launch_carrier, "the read result rides the launch request"
     assert "no subagents launched" in launch_carrier, "the hub result rides it too"
+
+
+@pytest.mark.asyncio
+async def test_episode_recorded_spend_refuses_native_task_child(scratch: Any, wire: Wire) -> None:
+    from local_operator.evaluation.session_arm import open_episode_session
+    from local_operator.harness.types import SubagentStartEvent
+
+    cap_micros = 1
+    receipt = Usage(input_tokens=1, usd_cost=cap_micros / 1_000_000)
+    wire.script(
+        "parent",
+        [
+            StreamUsageEvent(usage=receipt),
+            *tool_turn(
+                "task",
+                {"label": "kid", "prompt": f"{_CHILD_MARKER}: reply"},
+                "call-task",
+                usage=receipt,
+            ),
+        ],
+        text_turn("unexpected parent follow-up", usage=receipt),
+    )
+    wire.script("child", text_turn("unexpected child reply", usage=receipt))
+    wire.script("delivery-root", text_turn("unexpected delivery reply", usage=receipt))
+    starts: list[SubagentStartEvent] = []
+
+    def observe(event: Any) -> None:
+        if isinstance(event, SubagentStartEvent):
+            starts.append(event)
+
+    handle = await open_episode_session(
+        spec=_spec(), roots=scratch, on_event=observe, max_recorded_spend_micros=cap_micros
+    )
+    session = handle.session
+    root_id = session.session_id
+    try:
+        await session.prompt(f"{_PARENT_MARKER}: delegate the work")
+        await _settle(session)
+        # The parent's own follow-up can hit the cap too. A started and settled
+        # child distinguishes shared admission from a task that never launched.
+        (start,) = starts
+        job = session.jobs.get(start.job_id)
+        assert job is not None and job.type == "task" and job.label == "kid"
+        assert job.status == "completed" and job.settled_at is not None
+        shutdown = await session.shutdown_owned_work("recorded-spend task test")
+        assert shutdown.complete and shutdown.observer_callback_errors == 0
+        assert handle._admission is not None and not handle._admission.pending
+    finally:
+        await handle.aclose()
+
+    assert handle.admission_refusal == "budget-cap"
+    assert not wire.scoped("child"), "the launched child must be refused before transport"
+    assert [wire.scope_of(request) for request in wire.requests] == ["parent"]
+    (row,) = handle.request_rows
+    assert row["session_id"] == root_id and row["job_id"] is None
+    assert row["usage"]["usd_cost"] == receipt.usd_cost
 
 
 # ---------------------------------------------------------------------------
@@ -727,8 +875,9 @@ async def test_served_route_and_upstream_host_are_distinct_facts(scratch: Any, w
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cap", [None, 120_000])
 async def test_partial_usage_then_fail_keeps_reported_receipt_never_fabricated(
-    scratch: Any, wire: Wire
+    scratch: Any, wire: Wire, cap: int | None
 ) -> None:
     """A failed attempt that DID report usage keeps that reported receipt --
     faithful capture, never fabricated, never re-priced.
@@ -737,7 +886,10 @@ async def test_partial_usage_then_fail_keeps_reported_receipt_never_fabricated(
     retry/fallback attempts below the stream wrapper may carry bills it never
     saw, so invoice totals must not be claimed from request-final rows. The
     no-receipt-at-all shape (usage=None, unknown) is pinned by the
-    ``missing_usage`` case."""
+    ``missing_usage`` case. With admission enabled, the failed request's
+    reported receipt still counts against the cap."""
+    from local_operator.evaluation.session_arm import open_episode_session
+
     wire.script(
         "parent",
         [
@@ -758,20 +910,28 @@ async def test_partial_usage_then_fail_keeps_reported_receipt_never_fabricated(
         ],
     )
 
-    async with _opened(scratch) as session:
-        seen: list[RequestFinalObservation] = []
-        session.subscribe_requests(seen.append)
+    handle = await open_episode_session(spec=_spec(), roots=scratch, max_recorded_spend_micros=cap)
+    seen: list[RequestFinalObservation] = []
+    handle.session.subscribe_requests(seen.append)
+    try:
         try:
-            await session.prompt(f"{_PARENT_MARKER}: partial")
+            await handle.session.prompt(f"{_PARENT_MARKER}: partial")
         except Exception:  # noqa: BLE001 -- the ROW is the contract, not the raise
             pass
-        await session.prompt(f"{_PARENT_MARKER}: follow-up")
+        await handle.session.prompt(f"{_PARENT_MARKER}: follow-up")
+    finally:
+        await handle.aclose()
 
-    first, second = seen
+    assert len(seen) == len(wire.scoped("parent")) == (2 if cap is None else 1)
+    first = seen[0]
     assert first.ok is False and first.usage_reported is True
     assert first.usage is not None and first.usage.usd_cost == 0.12, "the reported receipt is kept"
     assert first.usage_coverage == "reported_final"
     assert first.outcome != "stop"
+    if cap is not None:
+        assert handle.admission_refusal == "budget-cap"
+        return
+    second = seen[1]
     assert second.usage is not None and second.usage.usd_cost == 0.03
     from local_operator.model.costs import cost_summary
 

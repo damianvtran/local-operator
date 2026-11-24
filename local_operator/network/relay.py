@@ -83,6 +83,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from local_operator import supervisors
+from local_operator.atomic_files import atomic_write_text
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
 from local_operator.network import nat64, projection, redial, store, uplink, wire
@@ -9026,11 +9027,11 @@ class RelayServer:
         # pair before this was fixed, and caught by the e2e test rather than by
         # review).
         if result is None:
-            reply: dict[str, Any] = {"op": "ack", "req": req, "detail": ""}
+            reply = wire.peer_ack(req, "")
         elif result.get("op") in ("ack", "error"):
             reply = result
         else:
-            reply = {"op": "ack", "req": req, "detail": result}
+            reply = wire.peer_ack(req, result)
         # EVERY REPLY LEAVES THROUGH ONE WRAP (agent review round 1, R1-2), the empty
         # ack above included. A reply carrying SECRET material — the broker's `copy`
         # value, the epoch-rotation answers, the reconcile catch-up — is an ack with
@@ -18739,21 +18740,15 @@ def mark_deliberate_stop(reason: str, root: Path | None = None) -> None:
     whatever the status), it only loses the guarantee for a non-systemd signal.
     """
     path = deliberate_stop_marker_path(root)
-    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(
-            json.dumps({"reason": str(reason), "at": time.time(), "by_pid": os.getpid()}),
-            encoding="utf-8",
+        # The writer removes its own staging file on failure, so none is left
+        # behind in run/ (review n1).
+        atomic_write_text(
+            path, json.dumps({"reason": str(reason), "at": time.time(), "by_pid": os.getpid()})
         )
-        os.replace(tmp, path)
     except OSError:
         logger.debug("relay: could not write the stop marker %s", path, exc_info=True)
-        # Never leave this writer's own staging file behind in run/ (review n1).
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def clear_deliberate_stop(root: Path | None = None) -> None:

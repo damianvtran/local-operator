@@ -66,6 +66,7 @@ from local_operator.i18n.messages import Msg, _namespace_for
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Scope, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
+from local_operator.tui import hotkey_hints
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import score_command_text_match
 from local_operator.tui.error_text import error_text
@@ -1650,6 +1651,23 @@ class SettingsView(Vertical):
         self._model_catalogue = list(model_catalogue)
         self._repaint()
 
+    def set_teams(self, teams: Sequence[tuple[str, str, str]]) -> None:
+        """Replace ONLY the team rows and repaint.
+
+        Why a narrow setter rather than calling :meth:`load` again: team rows
+        are handed over already resolved to display strings (member count,
+        alias label, "no description" fallback), so a live language switch
+        must re-hand them or the Teams pane keeps the old language (PR #4508
+        R1/Q1). ``load`` would also replace agents, provider state and both
+        catalogues, which means re-resolving the credential store and model
+        catalogue on every language change for rows that do not need it —
+        agent facts are rendered at paint time, so they already follow the
+        locale. Cursor, pane and expansion state are untouched; ``_repaint``
+        clamps the selection exactly as it does for any other rebuild.
+        """
+        self._teams = list(teams)
+        self._repaint()
+
     # -- rows ---------------------------------------------------------------
     def _rows_key(self) -> tuple[Any, ...] | None:
         """Everything :meth:`_build_rows` reads, as one comparable value.
@@ -1796,12 +1814,13 @@ class SettingsView(Vertical):
                     # synthesised rather than registered (see `_choices_for`).
                     for choice in _choices_for(setting):
                         rows.append(_Row(kind="choice", setting=setting, choice=choice))
-                        if setting.key == "language" and getattr(choice, "description", ""):
-                            # The Urdu capability note is longer than the
-                            # narrowest list, and single-line fitting turned
-                            # it into "Terminal: best ef…" — dropping the
-                            # caveat. Unselectable rows keep one line per
-                            # index while showing the whole sentence.
+                        if _description_needs_its_own_rows(setting, choice):
+                            # The language row's Urdu capability note and the
+                            # auto mode's exemption are longer than their slot,
+                            # and single-line fitting turned the first into
+                            # "Terminal: best ef…" — dropping the caveat.
+                            # Unselectable rows keep one line per index while
+                            # showing the whole sentence.
                             rows.extend(_note_rows(choice.description, self._list_width()))
         return rows
 
@@ -2877,7 +2896,11 @@ class SettingsView(Vertical):
         normalized = (
             keymap_mod.normalize_desktop_key(key, action_id=capture.setting_key)
             if scope == "desktop"
-            else keymap_mod.normalize_key(key)
+            else (
+                keymap_mod.normalize_composer_key(key)
+                if scope == "composer"
+                else keymap_mod.normalize_key(key)
+            )
         )
         self._capture = capture._replace(key=normalized, refused="")
         self._repaint()
@@ -4501,11 +4524,14 @@ class SettingsView(Vertical):
                 # see the difference between "I chose this" and "this is what
                 # it came with" before touching anything.
                 line.append(_t(_x.settings_view_default_marker()), style=dim)
-            if row.choice.description and row.setting.key != "language":
+            if row.choice.description and not _description_needs_its_own_rows(
+                row.setting, row.choice
+            ):
                 line.append(f"  {_paint(row.choice.description, source_locale='en')}", style=faint)
-            # The language row's note is painted by `_note_rows` above it,
-            # wrapped whole; repeating it here is the truncated copy the
-            # expansion exists to stop showing.
+            # A description painted by `_note_rows` above it is shown whole,
+            # wrapped; repeating it here is the truncated copy the expansion
+            # exists to stop showing (the language row's rule, now shared with
+            # the auto mode's exemption).
             return line
 
         if row.kind == "chain" and row.chain is not None:
@@ -4622,13 +4648,19 @@ class SettingsView(Vertical):
                 else:
                     line.append(_t(_x.settings_view_press_key()), style=accent)
                 return line
-            # `display_key`, not `format_key_display`: a desktop value maps its
-            # platform tokens for display in its OWN scope (primary reads
-            # cmd/ctrl), where the app vocabulary would show it verbatim.
-            line.append(
-                keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
-                style=value_style,
-            )
+            # An unbound hotkey (the composer-scope send rows ship unbound)
+            # has an empty value: paint the page's "nothing to show" glyph
+            # in dim ink rather than a blank cell, which reads as an unset
+            # row the user has broken or never opened (D4). The empty string
+            # is the omission encoding of unbound, so it is the only case
+            # that paints this.
+            if not str(value):
+                line.append("—", style=dim)
+            else:
+                line.append(
+                    keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
+                    style=value_style,
+                )
             if selected:
                 # The same cursor-row-only affordance glyph the bool/enum rows
                 # carry, answering "what does `enter` do here?" before the
@@ -5161,6 +5193,9 @@ class SettingsView(Vertical):
             lead: str
             lead_style: Style
             reason: str
+            # Bound on every path so the style line below reads a definite
+            # value; only the pending arm ever sets it True.
+            enhanced_hint = False
             if capture.refused:
                 # A refusal is a report that the press did not land, so it
                 # takes the danger ink: the one thing here that must not read
@@ -5185,6 +5220,19 @@ class SettingsView(Vertical):
                 # something stopped working. So it is named, and the user
                 # presses enter having read it.
                 reason = self._capture_conflict()
+                # A kitty-only chord needs its terminal limit stated where
+                # it is bound, not only in row help the user may never open
+                # (UX round 1, U1): without it a legacy terminal silently
+                # receives plain Enter for the very press that was bound.
+                # Painted as a hint (dim), not a refusal: it warns and
+                # stores, so the error ink would read as a rejection the
+                # capture never made.
+                if keymap_mod.scope_of(capture.setting_key) == "composer" and (
+                    keymap_mod.composer_chord_needs_enhanced_keys(capture.key)
+                ):
+                    need = _t_chrome(_svc.capture_needs_enhanced_keys())
+                    reason = f"{need} — {reason}" if reason else need
+                    enhanced_hint = not self._capture_conflict()
                 contract_text = _t_chrome(
                     _svc.capture_contract_confirm(save_key=_KEY_SAVE, cancel_key=_KEY_CANCEL)
                 )
@@ -5193,18 +5241,22 @@ class SettingsView(Vertical):
                 # column's `press a key…`; carrying both phrasings made a user
                 # check whether the difference was meaningful (design round 1,
                 # D7). The value column keeps the prompt, this line explains
-                # the way out.
-                lead, lead_style, reason = (
-                    _t_chrome(_svc.capture_listening()),
-                    dim + Style(bold=True),
-                    "",
-                )
+                # the way out. On a composer-scope row the lead teaches the
+                # chord grammar instead: a send chord that only works in
+                # kitty terminals must say so where the user binds it, and a
+                # legacy terminal would otherwise receive plain Enter for
+                # the very press the user believed was bound (UX round 1, U1).
+                if keymap_mod.scope_of(capture.setting_key) == "composer":
+                    lead = _t_chrome(_svc.capture_chord_grammar())
+                else:
+                    lead = _t_chrome(_svc.capture_listening())
+                lead_style, reason = dim + Style(bold=True), ""
                 contract_text = _t_chrome(_svc.capture_contract_cancel(cancel_key=_KEY_CANCEL))
 
             width = self._detail_width()
             contract_part = (contract_text, dim, False)
             lead_part = (lead, lead_style, False)
-            reason_style = error if reason else dim
+            reason_style = error if reason and not enhanced_hint else dim
             capture_rungs: list[list[tuple[str, Style, bool]]] = []
             if reason:
                 capture_rungs.append([lead_part, (reason, reason_style, False), contract_part])
@@ -5365,7 +5417,7 @@ class SettingsView(Vertical):
                 # finding names.
                 clause_style = _bridge_ink()
             width = self._detail_width()
-            help_text = _paint(row.setting.help, source_locale="en")
+            help_text = hotkey_hints.live_copy(self, _paint(row.setting.help, source_locale="en"))
             if row.setting.key == "notifications.sound.id":
                 # The registry help is SHARED with the desktop and `lop config`,
                 # so it names `lop sound add` / `lop sound doctor`. Inside the
@@ -7168,6 +7220,24 @@ def _note_rows(text: str, width: int) -> list["_Row"]:
     without ellipsising the caveat away.
     """
     return [_Row(kind="note", text=line) for line in wrap_cells(text, max(1, width - _NOTE_INDENT))]
+
+
+def _description_needs_its_own_rows(
+    setting: settings_io.Setting, choice: settings_io.Choice
+) -> bool:
+    """Whether a choice's description is painted as note rows rather than inline.
+
+    A description that does not fit its row is ellipsised, which is exactly how
+    the language row dropped "Terminal: best ef…" — the caveat, painted as the
+    cut. Both callers here need the whole sentence: the tool-approval mode's
+    auto gloss is 73 cells against a 55-cell slot at 80 columns, and the part
+    that would be cut is the EXEMPTION (which gates still ask a person).
+    """
+    if not getattr(choice, "description", ""):
+        return False
+    if setting.key == "language":
+        return True
+    return setting.key == "tool_approval_mode" and choice.value == "auto"
 
 
 _BOOL_CHOICES: tuple[settings_io.Choice, ...] = _bool_choices()

@@ -963,6 +963,61 @@ def test_the_timeout_card_expands_to_what_went_unanswered():
     assert "not answered" in expanded
 
 
+def test_the_receipt_row_spends_its_width_on_the_state_not_the_name():
+    """Review round 1 M1b: the name shrinks; the state is never cut for it.
+
+    Before this, the collapsed row fitted the WHOLE sentence by trimming its
+    end — so at 80 columns the state read ``Answered, d…`` and a timeout lost
+    "the agent goes ahead without your answer": the audit content of the row
+    was what gave way. The name is a handle the id beside it already
+    disambiguates, so it is the part that shrinks, and below the floor
+    (:data:`ASK_NAME_MIN_CELLS` of room) it is dropped altogether.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.tui.widgets.transcript import AskResponseBlock
+
+    question = {"question": "Which database should I use for the new service?"}
+    answered = {"ask_id": "a-745e", "status": "answered", "questions": [question]}
+
+    for width in (80, 100, 120):
+        row = AskResponseBlock(answered, kind="response")._build_content(width).plain
+        assert "Answered, delivering" in row, (width, row)
+        assert cell_len(row) <= width, (width, row)
+
+    # The state's FIRST clause survives 80 columns for the timeout — the row
+    # that lost the most before.
+    timed = {"ask_id": "a-745e", "questions": [question], "waited_s": 2520}
+    at_80 = AskResponseBlock(timed, kind="timeout")._build_content(80).plain
+    assert "Timed out after 42m" in at_80, at_80
+    assert at_80.count('"') == 0, "the name was kept at the state's expense"
+    # Wide enough and the whole consequence fits, with the name in front of it.
+    at_120 = AskResponseBlock(timed, kind="timeout")._build_content(120).plain
+    assert "Timed out after 42m, the agent goes ahead without your answer" in at_120, at_120
+    assert cell_len(at_120) <= 120
+
+    # Narrow: under the floor the row is the id and the state alone.
+    narrow = AskResponseBlock(answered, kind="response")._build_content(56).plain
+    assert '"' not in narrow and "Answered, delivering" in narrow, narrow
+
+    # A CJK name is TWO cells a character: at 100 columns this one used to
+    # swallow the state whole.
+    cjk = {
+        "ask_id": "a-745e",
+        "status": "answered",
+        "questions": [{"question": "你想让我把生产环境的数据库迁移到新的集群吗然后确认一下"}],
+    }
+    cjk_row = AskResponseBlock(cjk, kind="response")._build_content(100).plain
+    assert "Answered, delivering" in cjk_row, cjk_row
+    assert cell_len(cjk_row) <= 100
+
+    # The late answer's consequence reads whole at 100 too.
+    late = (
+        AskResponseBlock({**answered, "status": "late"}, kind="response")._build_content(100).plain
+    )
+    assert "Answered late, the agent was told" in late, late
+
+
 def test_a_row_with_no_structured_questions_falls_back_to_the_envelope():
     """An older runtime's row (or a timeout with none) must not expand to nothing."""
     from local_operator.tui.widgets.transcript import AskResponseBlock

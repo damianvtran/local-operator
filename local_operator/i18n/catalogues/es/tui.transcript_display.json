@@ -1,0 +1,7 @@
+{
+  "tui.transcript_display.save_failed": "No se pudo guardar la visualización de la transcripción: {reason}",
+  "tui.transcript_display.set": "Transcripción: {mode}",
+  "tui.transcript_display.slash": "Condensa la transcripción por turno o por respuesta",
+  "tui.transcript_display.unknown": "Modo desconocido {echo} · elige by-turn o by-response",
+  "tui.transcript_display.usage": "Transcripción: {mode} · elige by-turn o by-response"
+}

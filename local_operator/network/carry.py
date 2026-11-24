@@ -68,6 +68,8 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from local_operator.atomic_files import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 #: The journal's file name (``session.transcript.TRANSCRIPT_FILENAME``). Local
@@ -336,11 +338,7 @@ def _write_marker(marker: Path, document: Mapping[str, Any]) -> None:
     written file a runtime would read as corrupt — and 0600 matches what the marker
     is: this device's own note about where the conversation lives, never shared.
     """
-    temporary = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(document, sort_keys=True))
-    os.replace(temporary, marker)
+    atomic_write_text(marker, json.dumps(document, sort_keys=True), mode=0o600)
 
 
 def rewrite_host_cwd(

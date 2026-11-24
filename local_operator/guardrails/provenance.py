@@ -1496,6 +1496,16 @@ _REGENERABLE = frozenset(
         # create-vite ``.gitignore`` beside ``dist``. Its ignored ``dist-ssr/``
         # alone made that merged, change-free tree read ``dirty``.
         "dist-ssr",
+        # Added 2026-11-23 (PR #4493, CI lane's own native-scope worktree):
+        # the Windows counterparts of ``.DS_Store``, folder metadata Explorer
+        # rewrites on its own (thumbnail cache, per-folder view settings).
+        "Thumbs.db",
+        "desktop.ini",
+        # Added 2026-11-23 (PR #4493, lane QA worktrees qa2069-head/base in
+        # local-operator-ui): electron-vite's build output directory, the
+        # same standing as ``build``/``dist`` (only ever matched when Git
+        # itself reports the entry IGNORED).
+        "out",
     }
 )
 #: Basename patterns with the same standing as :data:`_REGENERABLE`:
@@ -1509,6 +1519,34 @@ _REGENERABLE_GLOBS = ("*.pyc", "*.egg-info", "._*", "_*.bundle.mjs", "_*.bundle.
 
 def _regenerable(name: str) -> bool:
     return name in _REGENERABLE or any(fnmatch.fnmatchcase(name, g) for g in _REGENERABLE_GLOBS)
+
+
+#: OS folder-metadata FILE names on :data:`_REGENERABLE` (plus ``._*``). Under
+#: these names only a regular file is the OS's (#4503): a directory or special
+#: file named ``.DS_Store`` is someone's data and stays held.
+_OS_METADATA_FILES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+def _own_tree_sheds(physical: str) -> bool:
+    """May removal of a ledger-proven OWN tree take this ignored entry? (#4493)
+
+    Operator directive 2026-11-23, after repeated disk-full crashes: "Guardrails
+    MUST be much more permissive and MUST allow all agents to clean up after
+    themselves, no human approval required." An agent's own tree is its own
+    work product, so EVERY ignored entry in it goes with the tree (``.env``,
+    ``out/``, caches, OS metadata, links; Git removes a link, never its
+    target). The one exception: an entry holding a nested Git repository,
+    whose commits may exist nowhere else and cannot be regenerated. One rule
+    for the plain and the ``--force`` routes. Unreadable is no (fail closed).
+    Foreign trees never reach this (``classify`` passes ``own_regenerable``
+    only for ledger-proven own, non-kin creation)."""
+    try:
+        st = os.lstat(physical)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    return not _holds_git(physical)
 
 
 #: Bound on ONE process-cwd inventory (``lsof -a -u <uid> -d cwd -Fn -w``).
@@ -2277,7 +2315,9 @@ def worktree_state(
     if live is not False:
         return "busy"  # unknown process inventory also fails closed
     if interrupted_cleanup:
-        return "locked" if stale_initializing else _interrupted_cleanup_state(real, facts)
+        if stale_initializing:
+            return "locked"
+        return _interrupted_cleanup_state(real, facts, own_regenerable=own and bool(session_id))
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
     # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy
     # of its history went with it). Only regenerable entries may remain. A
@@ -2443,6 +2483,35 @@ def _shared_dependencies_link(real: str, entry: str) -> bool:
     return False
 
 
+def _finder_metadata_file(real: str, entry: str) -> bool:
+    """An ignored ``.DS_Store`` that is a plain regular file inside the tree.
+
+    Why (operator request 2026-11-23, guard 0.112.5 field case): removing an
+    agent's own clean, merged worktree was held for "ignored entries the guard
+    cannot prove regenerable" when the only ignored entries were Finder
+    ``.DS_Store`` files. Finder rewrites them whenever a folder is viewed, so
+    that hold can never be satisfied on an indexed tree, and they carry only
+    view state (icon positions, sort order): losing them loses no user data.
+
+    Constraints: exact basename only, and only a regular file by ``lstat`` — a
+    directory, symlink or special file under that name is not Finder's and
+    stays held. This is deliberately NOT the broad regenerable basename set
+    (build/dist/.venv stay held, PR #4399), and AppleDouble ``._*`` files are
+    excluded because they can carry resource-fork data. Fails closed.
+    """
+    if os.path.basename(entry) != ".DS_Store":
+        return False
+    physical = os.path.join(real, entry)
+    try:
+        if not stat.S_ISREG(os.lstat(physical).st_mode):
+            return False
+        # A symlinked parent would put the file outside the tree being removed.
+        parent = os.path.realpath(os.path.dirname(physical))
+    except OSError:
+        return False
+    return parent == real or parent.startswith(real + os.sep)
+
+
 def _strict_cleanup_status(real: str) -> str | None:
     return _git_quiet(
         [
@@ -2482,15 +2551,34 @@ class IgnoredInventory:
     the verdict already needed — no extra filesystem walk, no file names.
     """
 
-    #: Ignored entries Git would delete that are not the one supported
-    #: regenerable witness (the shared ``node_modules`` link).
+    #: Ignored entries Git would delete that are not a supported witness (the
+    #: shared ``node_modules`` link or a regular-file Finder ``.DS_Store``).
     unverified_ignored: int
     #: Tracked or untracked status rows (the work plain Git itself refuses).
     changes: int
 
 
-def plain_cleanup_ignored_inventory(real: str) -> IgnoredInventory | None:
-    """Count unverified ignored entries and other changes; ``None`` = unreadable."""
+def plain_cleanup_ignored_inventory(
+    real: str, *, own_regenerable: bool = False
+) -> IgnoredInventory | None:
+    """Count unverified ignored entries and other changes; ``None`` = unreadable.
+
+    ``own_regenerable`` (PR #4493): the caller proved, through the creation
+    ledger, that the removing session or its family (descendants, or an ancestor
+    that delegated the cleanup; never a sibling) made
+    this tree. Then an ignored entry whose basename is on :data:`_REGENERABLE`
+    (``.venv``, ``__pycache__``, ``.pytest_cache``, ``node_modules`` …) and that
+    holds no nested repository is build output the creator produced, and Git
+    may take it. WHY: the operator's escalation of 2026-11-11 (finished own
+    trees refused for ignored ``.expo``/``.pnpm-store``) was settled by the
+    "OWN FIRST" rule in ``classify``; this inventory, added in #4240, then
+    held every ignored entry "regardless of creator" and silently reversed
+    it (disk-reclamation field reports 2026-11-23: three owners refused on
+    their own merged trees holding only ``.venv``/``__pycache__``). A name is
+    NOT a witness for anyone else's tree (#4240's point stands there), and
+    any ignored entry off the list (``.env``, ``.terraform``) stays held even
+    in an own tree: it may be the only copy of hand-made local data.
+    """
     status = _strict_cleanup_status(real)
     if status is None:
         return None
@@ -2505,8 +2593,13 @@ def plain_cleanup_ignored_inventory(real: str) -> IgnoredInventory | None:
         entry = _cleanup_status_path(row)
         if entry is None:
             return None
-        if not _shared_dependencies_link(real, entry):
-            unverified += 1
+        # Any tree (#4503): the shared ``node_modules`` link and a regular-file
+        # Finder ``.DS_Store`` are verified witnesses for plain removal.
+        if _shared_dependencies_link(real, entry) or _finder_metadata_file(real, entry):
+            continue
+        if own_regenerable and _own_tree_sheds(os.path.join(real, entry)):
+            continue
+        unverified += 1
     return IgnoredInventory(unverified, changes)
 
 
@@ -2518,7 +2611,20 @@ def plain_cleanup_ignored_preserved(real: str) -> bool | None:
     return inventory.unverified_ignored == 0
 
 
-def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
+def _interrupted_cleanup_state(
+    real: str, facts: dict[str, bool] | None, *, own_regenerable: bool = False
+) -> str:
+    """The payload state for the exact-removal (``--force``) route.
+
+    ``own_regenerable`` (PR #4493, QA Q-R4-1): the caller proved through the
+    creation ledger that this session or its delegating family made the tree
+    (``classify`` drops kin/sibling attribution before calling). Then an
+    ignored symlink (Git removes the link, never its target) or an ignored
+    entry on :data:`_REGENERABLE` with no nested repository is shed here
+    exactly as in :func:`plain_cleanup_ignored_inventory`; without that the
+    ``--force`` spelling held an own tree whose only ignored file was
+    ``.DS_Store`` while plain ``git worktree remove`` allowed it. Any other
+    ignored entry (``.env``) still makes it dirty."""
     # An index entry marked assume-unchanged or skip-worktree can conceal a
     # modified file from status. Gitlinks can conceal an independent repo.
     index = _git_quiet(["ls-files", "-v", "--stage", "-z"], real)
@@ -2553,8 +2659,15 @@ def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
         # A name or package manifest cannot account for the bytes under an
         # ignored directory. The only supported witness is a shared dependency
         # link: Git removes the reproducible link entry, not its referent.
-        if not _shared_dependencies_link(real, entry):
-            return "dirty"
+        # For a tree this session did not make, Finder ``.DS_Store`` is NOT a
+        # witness on this ``--force`` route (#4503 R1/Q1 kept ``--force`` as on
+        # base for foreign trees). A ledger-proven OWN tree sheds the same
+        # regenerable names and links as plain removal (#4493 QA Q-R4-1).
+        if _shared_dependencies_link(real, entry):
+            continue
+        if own_regenerable and _own_tree_sheds(physical):
+            continue
+        return "dirty"
     if _nested_repository(real, worktrees=True, linked_root=True) is not None:
         return "dirty"
     return "deletions-only" if deleted else "clean"
@@ -3448,6 +3561,14 @@ def _glab_mrs(repo: str, branch: str) -> list[ForgeChange] | None:
         return None
 
 
+class UnattributedWorktree(OSError):
+    """No current-generation ``git worktree add`` row for this path: the
+    ledger was read and holds none, or no ledger file exists yet (nothing was
+    ever recorded). Either way nobody is on record as its owner. Distinct
+    from an unreadable ledger (plain ``OSError``/``sqlite3.Error``), which
+    says nothing (QA Q-R2-1, PR #4493)."""
+
+
 def worktree_creators(real: str, *, strict: bool = True) -> frozenset[str]:
     """Current generation attribution for strict cleanup (missing is unknown)."""
     creators: set[str] = set()
@@ -3473,11 +3594,13 @@ def worktree_creators(real: str, *, strict: bool = True) -> frozenset[str]:
         logger.debug("guardrail ledger unreadable", exc_info=True)
     # No attributed creator is unknown ownership, not proof of an idle tree.
     if strict and not creators:
-        raise OSError("worktree owner attribution unavailable")
+        raise UnattributedWorktree("worktree owner attribution unavailable")
     return frozenset(creators)
 
 
-def _running_owners(real: str, session_id: str, *, strict: bool = False) -> tuple[str, ...]:
+def _running_owners(
+    real: str, session_id: str, *, strict: bool = False, allow_unattributed: bool = False
+) -> tuple[str, ...]:
     """Running sessions (not the caller) that own the worktree at ``real``.
 
     Owner = the session the creation ledger attributes the ``git worktree
@@ -3487,8 +3610,20 @@ def _running_owners(real: str, session_id: str, *, strict: bool = False) -> tupl
     Read fresh on every call (no cache). Default: unreadable sources name no
     owner. ``strict`` requires current-generation attribution and a complete
     registry, raising on missing/unreadable facts rather than claiming idle.
+
+    ``allow_unattributed`` (strict only; the operator's exact-path approval
+    waiver, PR #4493 Q-R2-1): a tree made in a terminal, before the ledger,
+    or whose Linux ctime stamp drifted has NO recorded creator, so the only
+    owner left to find is a live session whose cwd is inside it, and the
+    strict registry scan below still finds that (and still raises when the
+    registry is incomplete). An unreadable ledger still raises.
     """
-    creators = worktree_creators(real, strict=strict)
+    try:
+        creators = worktree_creators(real, strict=strict)
+    except UnattributedWorktree:
+        if not (strict and allow_unattributed):
+            raise
+        creators = frozenset()
     # A RUNNING ANCESTOR that created the tree is the delegator, not a
     # conflicting owner (field case 2026-11-14): a parent is live for as long
     # as its cleanup subagent runs, so counting it as "owning session
@@ -5180,6 +5315,11 @@ class UnansweredAsk:
     #: Answered, non-declining, but on an untrusted surface (``remote``,
     #: ``chat``, ``unverified``): not consent, not a refusal (:func:`_untrusted_yes`).
     untrusted_yes: bool = False
+    #: Effective answer time is the revision time, not the first answer time.
+    answered_at: int = 0
+    #: An expired folded record can still contain a late answer or a decline.
+    has_answer: bool = False
+    expires_at: int = 0
 
 
 #: Statuses that mean "the operator never answered".
@@ -5216,10 +5356,13 @@ def unanswered_label(status: str) -> str:
 #: generic label made the agent tell the operator he had "no answer approving
 #: it" after he had answered. The fail-closed itself is deliberate and stays:
 #: the model's own ``bash`` can dial the socket with the 0600 control key and
-#: is indistinguishable from a proof-less window, and an unforgeable desktop
-#: credential (Electron fuse hardening + code-signature check) is an operator
-#: decision not yet taken. :func:`lapsed_refusal_reason` keys its recovery
-#: text on this exact string.
+#: is indistinguishable from a proof-less window. The unforgeable desktop
+#: credential (Electron fuse hardening + code-signature check) has since
+#: shipped as ``asks/app_attest.py`` (F2, 2026-11-16): the desktop app's main
+#: process attests an answer the operator confirms on its native sheet, and
+#: an attested answer is stamped ``desktop``, so this label now marks only
+#: answers no attestation or capability vouched for. :func:`lapsed_refusal_reason` keys
+#: its recovery text on this exact string.
 UNPROVEN_SURFACE_LABEL = (
     "answered from a surface that could not prove it is the operator's "
     "(it did not start this session's runtime)"
@@ -5327,6 +5470,9 @@ def unanswered_asks(
                     created_at=int(record.get("created_at") or 0),
                     never_answered=status in _UNANSWERED_LABEL,
                     untrusted_yes=words is None and _untrusted_yes(record, status, questions),
+                    answered_at=int(record.get("revised_at") or record.get("answered_at") or 0),
+                    has_answer=bool(record.get("answered_at") or record.get("answers")),
+                    expires_at=int(record.get("expires_at") or 0),
                 )
             )
     return out

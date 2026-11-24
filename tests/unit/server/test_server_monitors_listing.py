@@ -124,6 +124,56 @@ async def _list(client: AsyncClient, **params: str | int) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+async def test_listing_uses_live_counters_and_keeps_index_authority(desktop) -> None:
+    from local_operator.monitors.state import write_counters
+
+    client, root = desktop
+    owner = "aaaaaaaaaaaa"
+    index = _entry(
+        root,
+        owner,
+        rows=[
+            _row(due=PAST),
+            _row("m2", due=PAST, until_at=PAST),
+            _row("m3", due=PAST),
+            _row("m4", due=PAST),
+            _row("m5", due=PAST, disabled=True, disabled_reason="index disable"),
+        ],
+    )
+    before = index.read_bytes()
+    for monitor_id in ("m1", "m2"):
+        write_counters(
+            root,
+            owner,
+            monitor_id,
+            {"schema": 1, "next_due_at": FUTURE, "checks": 3, "until_at": FUTURE},
+        )
+
+    write_counters(
+        root,
+        owner,
+        "m4",
+        {"schema": 1, "next_due_at": None, "disabled": True, "disabled_reason": "counter disable"},
+    )
+    write_counters(
+        root,
+        owner,
+        "m5",
+        {"schema": 1, "next_due_at": FUTURE, "disabled": False, "disabled_reason": ""},
+    )
+
+    entry = (await _list(client))["entries"][0]
+    rows = {row["id"]: row for row in entry["monitors"]}
+    assert (rows["m1"]["next_due_at"], rows["m1"]["checks"]) == (FUTURE, 3)
+    assert (rows["m2"]["state"], rows["m2"]["until_at"]) == ("expired", PAST)
+    assert (rows["m3"]["next_due_at"], rows["m3"]["checks"]) == (PAST, 0)
+    assert (rows["m4"]["state"], rows["m4"]["disabled_reason"]) == ("disabled", "counter disable")
+    assert rows["m4"]["next_due_at"] is None
+    assert (rows["m5"]["state"], rows["m5"]["disabled_reason"]) == ("disabled", "index disable")
+    assert index.read_bytes() == before
+
+
+@pytest.mark.asyncio
 async def test_an_absent_store_is_an_empty_list_and_not_an_error(desktop) -> None:
     """No ``monitors/`` directory is the ordinary state of a machine that has
     never armed a watch, and it must not read as a failed read."""

@@ -31,8 +31,9 @@ def test_catalogue_matches_the_extraction_golden() -> None:
     # NINETY-SEVEN: the P2 edit slice added the read-only notice and the form's
     # done-gate refusal (QA/UX round 1) to this English-only namespace; the
     # pin keeps the extraction golden and the shipped page vocabulary from
-    # drifting apart silently.
-    assert len(GOLDEN) == 97
+    # drifting apart silently. NINETY-EIGHT: the start picker's team detail
+    # (`start.team_detail`) replaced a hand-rolled English plural.
+    assert len(GOLDEN) == 98
     context = json.loads(
         (catalogues.catalogue_root() / "en" / "tui.projects.context.json").read_text()
     )

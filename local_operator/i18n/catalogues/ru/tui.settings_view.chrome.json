@@ -1,7 +1,9 @@
 {
+  "tui.settings_view.chrome.capture.chord_grammar": "alt+<letter> везде, ctrl+enter — только с расширенными клавишами",
   "tui.settings_view.chrome.capture.contract_cancel": "{cancel_key} отмена",
   "tui.settings_view.chrome.capture.contract_confirm": "{save_key} принять · {cancel_key} отмена",
   "tui.settings_view.chrome.capture.listening": "ожидание клавиши",
+  "tui.settings_view.chrome.capture.needs_enhanced_keys": "нужны расширенные клавиши",
   "tui.settings_view.chrome.capture.press_another": "нажмите другую клавишу",
   "tui.settings_view.chrome.capture.saved": "сочетание {shortcut} сохранено",
   "tui.settings_view.chrome.capture.takes_from": "заберёт {shortcut} у «{victim}»",

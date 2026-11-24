@@ -46,13 +46,16 @@ from local_operator.guardrails.check import (
     BUILTIN_REFUSE_CRITICAL,
     DANGEROUS_DELETE_RULE,
     FILE_DESTINATION_TOOLS,
+    POLICY_WRITE_RULE,
     CallContext,
     GuardSettings,
     _critical_text,
     _safe_text,
     _targets_text,
+    apply_cleanup_consent,
     build_delete_case,
     builtin_branch,
+    cleanup_consent_fresh,
     cleanup_hold_text,
     credential_path_masks,
     credential_refusal_text,
@@ -69,6 +72,7 @@ from local_operator.guardrails.check import (
     worktree_flagged,
 )
 from local_operator.guardrails.classify import Verdict, classify_bash
+from local_operator.guardrails.policy import hit_facts, hits_text, policy_hits
 from local_operator.guardrails.rules import call_text, load_rules
 
 #: ``""`` means the built-in layer does not apply (not bash, or no command text)
@@ -154,6 +158,9 @@ class PreviewReport:
     builtin_risk: str = ""
     builtin_targets: str = ""
     builtin_effect: str = ""
+    #: Which built-in layer produced ``builtin_effect``: the delete review or the
+    #: guard-policy-write review (``guardrails/policy.py``).
+    builtin_rule: str = DANGEROUS_DELETE_RULE
     #: The built-in layer's own refusal text (CRITICAL / credential), byte for
     #: byte what the checkpoint returns; for a judge branch, its denial shape.
     builtin_text: str = ""
@@ -176,7 +183,7 @@ class PreviewReport:
             lines.append(f"guard: {self.guard_version} (installed)")
         if self.builtin_effect:
             lines.append(
-                f"built-in {DANGEROUS_DELETE_RULE}: risk={self.builtin_risk or 'LOW'} "
+                f"built-in {self.builtin_rule}: risk={self.builtin_risk or 'LOW'} "
                 f"targets={self.builtin_targets} → {_EFFECT_WORDS[self.builtin_effect]}"
             )
             for fact in self.builtin_facts:
@@ -349,6 +356,10 @@ def preview_tool_call(
     effect = ""
     builtin_text = ""
     builtin_facts: tuple[str, ...] = ()
+    builtin_rule = DANGEROUS_DELETE_RULE
+    #: Set only by the policy-write layer, whose risk and targets are not a
+    #: ``Verdict``'s.
+    policy_targets = ""
     # The same forge auth the checkpoint gives its PR-state lookups (QA Q1,
     # PR #4161): without it a preview on a gh-borrowing node read "PR state
     # unknown" where ``check_tool_call`` read the merged PR, and refusal text
@@ -369,6 +380,8 @@ def preview_tool_call(
                 )
                 # Same ranking the checkpoint applies (unanswered asks lift LOW).
                 verdict = escalate_asked_targets(verdict, context)
+                before_consent = verdict
+                verdict = apply_cleanup_consent(verdict, context)
                 effect = builtin_branch(verdict, critical_override=live.critical_override)
                 if effect == BUILTIN_REFUSE_CRITICAL:
                     builtin_text = _critical_text(verdict)
@@ -376,13 +389,30 @@ def preview_tool_call(
                     builtin_text = credential_refusal_text(command)
                 elif effect == BUILTIN_HOLD_CLEANUP:
                     builtin_text = cleanup_hold_text(verdict)
+                elif effect == BUILTIN_JUDGE and not cleanup_consent_fresh(
+                    before_consent, verdict, context
+                ):
+                    effect = BUILTIN_HOLD_CLEANUP
+                    builtin_text = cleanup_hold_text(verdict)
                 elif effect == BUILTIN_JUDGE:
                     case = build_delete_case(verdict, context)
                     builtin_facts = (*case.facts, *case.evidence.describe())
                     if case.excluded:
                         builtin_facts += (f"excluded as untrusted: {case.excluded}",)
-                    proven = case.evidence_basis()
-                    if proven:
+                    consent_paths = frozenset(
+                        r.target.path
+                        for r in verdict.targets
+                        if r.cleanup_consent and r.target.path
+                    )
+                    proven = (
+                        case.evidence_basis(consent_paths)
+                        if consent_paths
+                        else case.evidence_basis()
+                    )
+                    if proven and not cleanup_consent_fresh(before_consent, verdict, context):
+                        effect = BUILTIN_HOLD_CLEANUP
+                        builtin_text = cleanup_hold_text(verdict)
+                    elif proven:
                         # The checkpoint allows this without the judge
                         # (``DeleteCase.evidence_basis``); report that branch.
                         effect = BUILTIN_PASS
@@ -406,13 +436,34 @@ def preview_tool_call(
                             worktree=worktree_flagged(verdict),
                         )
 
-        elif tool_name in FILE_DESTINATION_TOOLS:
-            # The checkpoint refuses a write/edit of the guard's own evidence
-            # before any rule; report that same branch and text.
-            verdict = evidence_write_verdict(tool_name, args, context)
-            if verdict is not None:
-                effect = BUILTIN_REFUSE_CRITICAL
-                builtin_text = _critical_text(verdict)
+        else:
+            if tool_name in FILE_DESTINATION_TOOLS:
+                # The checkpoint refuses a write/edit of the guard's own evidence
+                # before any rule; report that same branch and text.
+                verdict = evidence_write_verdict(tool_name, args, context)
+                if verdict is not None:
+                    effect = BUILTIN_REFUSE_CRITICAL
+                    builtin_text = _critical_text(verdict)
+            if verdict is None:
+                # Same hits the checkpoint reviews next (``_policy_write_review``).
+                hits = policy_hits(
+                    tool_name,
+                    args,
+                    cwd=context.cwd,
+                    rules_dirs=live.rules_dirs,
+                    scratchpad=context.scratchpad,
+                )
+                if hits:
+                    effect = BUILTIN_JUDGE
+                    builtin_rule = POLICY_WRITE_RULE
+                    policy_targets = hits_text(hits)
+                    builtin_facts = (
+                        *hit_facts(tool_name, args, hits),
+                        "refused without the judge when the session has no trusted operator "
+                        "words (a subagent or an agent-opened session): the operator's typed "
+                        "request or an approved `ask` answer settles it",
+                    )
+                    builtin_text = review_text(POLICY_WRITE_RULE, "<judge reason>", policy_targets)
     finally:
         prov.FORGE_AUTH.reset(forge_token)
 
@@ -426,9 +477,12 @@ def preview_tool_call(
     base: dict[str, Any] = {
         "tool": tool_name,
         "call_text": call_text(tool_name, args),
-        "builtin_risk": verdict.risk.name if verdict is not None else "",
-        "builtin_targets": private(_ranked_targets(verdict)),
+        "builtin_risk": (
+            verdict.risk.name if verdict is not None else ("HIGH" if policy_targets else "")
+        ),
+        "builtin_targets": private(policy_targets or _ranked_targets(verdict)),
         "builtin_effect": effect,
+        "builtin_rule": builtin_rule,
         # Stamped like the checkpoint's result so the preview stays byte-equal.
         "builtin_text": stamp_guard_version(private(builtin_text)),
         "builtin_facts": tuple(private(f) for f in builtin_facts),

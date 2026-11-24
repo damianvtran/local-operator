@@ -544,18 +544,11 @@ _monitor_backoff = _MonitorBackoff()
 
 
 def _read_monitor_index(config_dir: Path) -> dict[str, dict[str, Any]]:
-    """The monitor index, each row's due time taken from its COUNTERS file.
+    """The monitor index with current due/disable state for wake decisions.
 
-    The index row's ``next_due_at`` is not rewritten on quiet ticks (§10.2: a
-    30 s monitor would rewrite it 2,880×/day), so a live session's index says
-    "due" long after the counters moved on — trusting it would re-engage every
-    slice. The counters file is what the scheduler writes on every check; the
-    index row is the fallback only when no counters file exists yet (an arm
-    whose first counters write has not landed). ``disabled`` is OR-ed in from
-    the counters for the same reason. Never raises: a monitors read that fails
-    must not take the wake pass with it.
+    The index is not rewritten on quiet ticks: trusting its due time alone
+    would re-engage every slice after the counters had already moved on.
     """
-    from local_operator.monitors import state as monitor_state
     from local_operator.monitors import store as monitor_store
 
     try:
@@ -564,22 +557,9 @@ def _read_monitor_index(config_dir: Path) -> dict[str, dict[str, Any]]:
         logger.warning("monitor index unreadable; skipping the monitors pass", exc_info=True)
         return {}
     for session_id, entry in index.items():
-        rows: list[dict[str, Any]] = []
-        for raw in entry.get("monitors") or ():
-            if not isinstance(raw, Mapping):
-                continue
-            row = dict(raw)
-            monitor_id = row.get("id")
-            if isinstance(monitor_id, str) and monitor_id:
-                try:
-                    counters = monitor_state.read_counters(config_dir, session_id, monitor_id)
-                except Exception:  # noqa: BLE001 — one bad file costs one row's freshness
-                    counters = None
-                if counters is not None:
-                    row["next_due_at"] = counters.get("next_due_at")
-                    row["disabled"] = bool(row.get("disabled") or counters.get("disabled"))
-            rows.append(row)
-        entry["monitors"] = rows
+        entry["monitors"] = list(
+            monitor_store.effective_rows(config_dir, session_id, entry, include_health=False)
+        )
     return index
 
 

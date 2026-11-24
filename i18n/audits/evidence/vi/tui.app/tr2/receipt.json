@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "audit_id": "tr2",
+  "locale": "vi",
+  "namespace": "tui.app",
+  "record": "i18n/audits/evidence/vi/tui.app/tr2/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable record, copied byte-for-byte from ~/.local-operator/sessions/4fd509aa4aca/scratchpad/i18n-settings-residual/audit/vi-r2/record.json. One record covers both namespaces it audited.",
+  "record_sha256": "fd8eca1beddffb6c600325e811758d69ada99209c59e4d64621d48a573c6ebb4",
+  "source_sha256": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+  "context_sha256": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+  "target_sha256": "76f95f540df706944f8789fb53eb6be3f1a603d867cea7a7f74f9400c0c9dec9",
+  "verdict": "passed",
+  "commit_audited": "c3ba6a516c6a (worktree head; values audited from translator files before apply)",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team, task audit-vi-r2)",
+    "session": "4fd509aa4aca",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "ledger_receipt": {
+    "locale": "vi",
+    "namespace": "tui.app",
+    "source_sha256": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+    "context_sha256": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+    "target_sha256": "76f95f540df706944f8789fb53eb6be3f1a603d867cea7a7f74f9400c0c9dec9",
+    "translator": {
+      "agent": "i18n-translator (lopdev team)",
+      "session": "17b81fee8ed1",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-23",
+      "provenance": "translator's own files (translations/<locale>.json + notes.md in session 17b81fee8ed1 scratchpad, notes.md states no fallback); values applied byte-exact by the integrating coder"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (lopdev team, task audit-vi-r2), not the translator; did not edit values",
+      "session": "4fd509aa4aca",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-23",
+      "result": "clean",
+      "findings": 0,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "finding_ids": [],
+      "fallback_used": false,
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own record (auditor.model field)"
+    },
+    "status": "passed",
+    "note": "tr2: independent i18n-auditor 4fd509aa4aca (anthropic/claude-opus-5-5, no fallback observed) of translator 17b81fee8ed1 input sha256 c2bb94103ef8bd84ef1c10ba10f9fc0a67d57a51d622fe37245a09b16fb5dc79: clean for tui.app (0 blocker, 0 major, 0 minor, 0 nit). Keys: settings team facts / start-picker team detail added at c3ba6a516c6a. Round-2 delta audit by a different auditor session than round 1. Record i18n/audits/evidence/vi/tui.app/tr2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/vi/tui.app/tr2/record.json",
+    "round": "tr2"
+  }
+}

@@ -66,6 +66,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.session.transcript import (
     ABSENCE_SCAN_MAX_BYTES,
     TRANSCRIPT_FILENAME,
@@ -226,20 +227,12 @@ def write_anchor(directory: str | Path, anchor: TailAnchor) -> bool:
     costs one open the cost it removes — never an answer.
     """
     target = anchor_path(directory)
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(anchor.as_dict(), handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
+        atomic_write_text(target, json.dumps(anchor.as_dict()), fsync=True, hidden=True)
         return True
     except OSError:
+        # The writer has already removed its own temp.
         logger.debug("tail anchor not written for %s", directory, exc_info=True)
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
         return False
 
 

@@ -11,7 +11,8 @@
         }
       ],
       "references": {
-        "settings_io.py": 884
+        "settings_io.py": 894,
+        "tui/app.py": 1
       }
     },
     "wire.settings.hub_defaults": {
@@ -228,7 +229,7 @@
         }
       ],
       "references": {
-        "slash_commands.py": 54
+        "slash_commands.py": 55
       }
     },
     "wire.slash.library": {
@@ -302,10 +303,30 @@
           "path": "local_operator/settings_io.py",
           "symbol": "settings_io._keymap_copy -> settings_io._t",
           "note": "hotkey row label/help merged into the settings registry as plain strings; /v1/settings carries the strings, never a code"
+        },
+        {
+          "path": "local_operator/keymap.py",
+          "symbol": "keymap._apply_send_copy -> keymap._keymap_t",
+          "note": "send-row label/help resolved into the registry so group_conflict names the other row in-process as a plain string; no code leaves the process"
         }
       ],
       "references": {
-        "settings_io.py": 12
+        "keymap.py": 8,
+        "settings_io.py": 52
+      }
+    },
+    "wire.settings.transcript_display": {
+      "reason": "transcript layout row label/help and its two choice labels/descriptions rendered by settings_io._t as plain strings; the slash command reuses the rendered label as a receipt, never a code",
+      "render_points": [
+        {
+          "path": "local_operator/settings_io.py",
+          "symbol": "settings_io._t",
+          "note": "the `display.transcript_display` row's label/help/choices merged into the settings registry as plain strings; /v1/settings carries the strings, never a code"
+        }
+      ],
+      "references": {
+        "settings_io.py": 8,
+        "tui/app.py": 4
       }
     },
     "wire.language_receipts": {

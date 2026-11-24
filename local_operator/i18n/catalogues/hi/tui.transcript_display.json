@@ -1,0 +1,7 @@
+{
+  "tui.transcript_display.save_failed": "ट्रांसक्रिप्ट प्रदर्शन सहेजा नहीं जा सका: {reason}",
+  "tui.transcript_display.set": "ट्रांसक्रिप्ट: {mode}",
+  "tui.transcript_display.slash": "ट्रांसक्रिप्ट को टर्न या उत्तर के अनुसार समेटें",
+  "tui.transcript_display.unknown": "अज्ञात मोड {echo} · by-turn या by-response चुनें",
+  "tui.transcript_display.usage": "ट्रांसक्रिप्ट: {mode} · by-turn या by-response चुनें"
+}

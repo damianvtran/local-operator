@@ -50,6 +50,12 @@ def test_shipped_wire_namespaces_exist() -> None:
     # audit chain, and so a disposition cannot silently drop a shipped wave.
     assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "ur", "vi", "zh-CN")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
+        # A settled ask's state phrase ("Answered, delivering"), painted by the
+        # terminal, the phone projection and the desktop bridge: the ID and the
+        # ask's own few words are composed around it in code, so the phrase
+        # cannot be translated client-side. Carried by the seven translated
+        # locales; each needs its own passed ledger row before it may ship.
+        "wire.ask_receipts",
         # Agent badges are now fully audited in every supported locale; pin
         # this single admitted namespace without admitting future wire slices.
         "wire.agent_badges",
@@ -113,6 +119,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.settings",
         "wire.settings.keymap",
         "wire.settings.hub_defaults",
+        # The transcript layout switch (`display.transcript_display`) is its own
+        # child for the same reason: its six keys never move wire.settings'
+        # audited source hash.
+        "wire.settings.transcript_display",
         # The org Agent Hub section (Radient Team only) is its own child so its
         # copy never moves the audited wire.settings locale hashes.
         "wire.settings.hub_org",

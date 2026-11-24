@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.session.approval_policy import OVERRIDE_FILENAME
 from local_operator.session.runtime.artefact_names import SIGNAL_REFUSALS_NAME
 
@@ -747,9 +748,7 @@ def write_replica_cursor(root: Path, session_id: str, payload: dict[str, Any]) -
     directory = replica_dir(root, session_id)
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / REPLICA_CURSOR_NAME
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, target)
+    atomic_write_text(target, json.dumps(payload, indent=2, sort_keys=True), hidden=True)
     return target
 
 

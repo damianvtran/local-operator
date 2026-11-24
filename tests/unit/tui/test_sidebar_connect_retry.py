@@ -80,6 +80,7 @@ from local_operator.session.attached import (
     FRONTEND_ATTACH_MIN_PROTOCOL,
     FRONTEND_CAPABILITY,
     AttachedSession,
+    _PublicationWaiter,
 )
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
@@ -179,7 +180,11 @@ class RecoveringRemote(AttachedSession):
         return 1
 
     async def _ensure_bound(
-        self, *, foreground: bool = True, deadline: float | None = None
+        self,
+        *,
+        foreground: bool = True,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
     ) -> None:
         self.bind_calls += 1
         if self._heals_after is not None and self.bind_calls >= self._heals_after:
@@ -211,7 +216,11 @@ class UnreachableRemote(RecoveringRemote):
         self.display_calls = 0
 
     async def _ensure_bound(
-        self, *, foreground: bool = True, deadline: float | None = None
+        self,
+        *,
+        foreground: bool = True,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
     ) -> None:
         self.bind_calls += 1
 
@@ -622,7 +631,11 @@ class BindsThenLosesItsOwner(RecoveringRemote):
         self._cold = False
 
     async def _ensure_bound(
-        self, *, foreground: bool = True, deadline: float | None = None
+        self,
+        *,
+        foreground: bool = True,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
     ) -> None:
         self.bind_calls += 1
 
@@ -1338,7 +1351,11 @@ class _LostDuringPreparation(RecoveringRemote):
         self._cold = False
 
     async def _ensure_bound(
-        self, *, foreground: bool = True, deadline: float | None = None
+        self,
+        *,
+        foreground: bool = True,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
     ) -> None:
         self.bind_calls += 1
 
@@ -1572,7 +1589,11 @@ class PrewarmRemote(RecoveringRemote):
         self.dials = 0
 
     async def _ensure_bound(
-        self, *, foreground: bool = True, deadline: float | None = None
+        self,
+        *,
+        foreground: bool = True,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
     ) -> None:
         self.bind_calls += 1
         if not self._can_go_cold or self._disposed:
@@ -1849,7 +1870,11 @@ class RefreshNotSyncedRemote(RecoveringRemote):
         return self._client is None or not self._client.connected or not self._ready_for_events
 
     async def _ensure_bound(
-        self, *, foreground: bool = True, deadline: float | None = None
+        self,
+        *,
+        foreground: bool = True,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
     ) -> None:
         self.bind_calls += 1
         # The refresh COMPLETING, not a dial, and on the round after the one that
@@ -1936,7 +1961,11 @@ class StoppedOwnerRemote(RecoveringRemote):
         self.dials = 0
 
     async def _ensure_bound(
-        self, *, foreground: bool = True, deadline: float | None = None
+        self,
+        *,
+        foreground: bool = True,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
     ) -> None:
         self.bind_calls += 1
         # The measured shape: a record that exists with nothing listening, so

@@ -51,6 +51,7 @@ import json
 import logging
 import os
 import stat
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -3061,6 +3062,24 @@ def _validated_session_id(value: Any) -> str:
         ) from None
 
 
+def _is_handoff_directory(path: Path) -> bool:
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        # lstat can follow some reparse tags on Windows. Read the entry's own
+        # attributes first so only ordinary directories can lead to handoff mutations.
+        get_attributes = ctypes.WinDLL("kernel32", use_last_error=True).GetFileAttributesW
+        get_attributes.argtypes = (wintypes.LPCWSTR,)
+        get_attributes.restype = wintypes.DWORD
+        attributes = get_attributes(os.fspath(path))
+        if attributes == 0xFFFFFFFF:  # INVALID_FILE_ATTRIBUTES
+            raise ctypes.WinError(ctypes.get_last_error())
+        if attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            return False
+    return stat.S_ISDIR(path.lstat().st_mode)
+
+
 def _contained_handoff_path(
     root: Path,
     path: Path,
@@ -3072,14 +3091,13 @@ def _contained_handoff_path(
 ) -> Path | None:
     """Resolve one handoff directory only through real directories.
 
-    ``root`` is the operator-selected configuration anchor; everything below it
-    is checked with ``lstat`` so a pre-existing alias cannot redirect rename or
-    recursive deletion. The selected root is resolved once, and an absent final
-    ``sessions`` directory may be created, but no missing staging path is made.
+    Resolve the operator-selected ``root`` once. Check each existing component
+    below it, including the leaf: reject the Windows reparse-point attribute
+    before requiring directory mode with ``lstat``. An absent final ``sessions``
+    directory may be created, but no missing staging path is made.
 
-    These checks fail closed against static traversal and pre-existing links.
-    They are not filesystem-namespace locking against another same-UID process
-    replacing components between the final check and the following syscall.
+    These checks are not filesystem-namespace locking against another same-UID
+    process replacing components between the final check and the following syscall.
     """
     from local_operator.network.store import safe_component
     from local_operator.network.types import MeshRefusal
@@ -3092,8 +3110,7 @@ def _contained_handoff_path(
         lexical = Path(os.path.abspath(root))
         # THE ROOT'S OWN SPELLING IS NOT A TRUST QUESTION (macOS /var -> /private/var,
         # an isolation mktemp root): resolve the anchor once and compare the caller's
-        # spelling against it. Everything BELOW the anchor is still checked by lstat,
-        # so a link there refuses exactly as before.
+        # spelling against it. Check the components below that anchor separately.
         anchor = lexical.resolve(strict=True)
         if not stat.S_ISDIR(anchor.stat().st_mode):
             return None
@@ -3109,10 +3126,10 @@ def _contained_handoff_path(
                     current.mkdir()
                 except FileExistsError:
                     pass
-            if not stat.S_ISDIR(current.lstat().st_mode):
+            if not _is_handoff_directory(current):
                 return None
         try:
-            if not stat.S_ISDIR(candidate.lstat().st_mode):
+            if not _is_handoff_directory(candidate):
                 return None
         except FileNotFoundError:
             if require_leaf:

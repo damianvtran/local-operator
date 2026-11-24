@@ -61,6 +61,10 @@ DESKTOP_ONLY_FEATURES = frozenset(
         # The relay answers asks on its own route, which carries no
         # `consent_bearing` receipt (a phone answer is stamped `remote` anyway).
         "ask_consent_bearing",
+        # Same class: the relay serves no
+        # `/v1/desktop/sessions/{id}/notification-avatar`; it is the desktop main
+        # process's OS-banner image, and a phone told it may ask would 404.
+        "desktop_session_notification_avatar",
     }
 )
 
@@ -276,17 +280,26 @@ def static_feature_flags() -> dict[str, Any]:
         "session_catalogue_page": 1,
         # An ORDER the chats list can be read in, named by the `sort`
         # parameter on GET /v1/desktop/sessions: `sort=activity` is the
-        # sidebar's own head order (rows that need the reader first, then
-        # everything else newest-activity-first), which keeps a reader's
-        # recent conversations inside the first page on a store whose cold
+        # sidebar's own head order (running rows first, then everything
+        # else newest-activity-first), which keeps a reader's recent
+        # conversations inside the first page on a store whose cold
         # population a wake band would otherwise fill.
+        #
+        # v2: only RUNNING rows lead; unread completions and attached
+        # terminals sort by their activity clock (v1 led with every
+        # "active" row, so >limit unread completions filled page 1 and
+        # today's idle chats arrived on page 2 ABOVE already-drawn rows --
+        # local-operator-ui#2069 Q3). The wire shape is unchanged, so a
+        # client gating on `>= 1` keeps working; the bump lets a client
+        # that wants the chronological guarantee require `>= 2`. Stale
+        # activity cursors from v1 daemons answer `cursor_missing`.
         #
         # ITS OWN KEY, the same rule `session_catalogue_page` states above:
         # a client that does not see it sends no `sort` and reads the rank
         # order byte-for-byte as today, and a backend that lacks it refuses
         # the parameter BY NAME (`sort must be one of activity.`) rather
         # than silently answering a different ordering.
-        "session_catalogue_sort": 1,
+        "session_catalogue_sort": 2,
         # Searching past conversations by their CONTENT (name, id, exact
         # body, bounded soft match) rather than by the page a client
         # already holds. Its own key rather than a bump of
@@ -1155,6 +1168,20 @@ def static_feature_flags() -> dict[str, Any]:
         # renderer reads this key). Two faces, deliberately separate: they
         # gate two different wires, and neither implies the other.
         "input_mode": 1,
+        # THE BUSY-SEND DELIVERY MODES: the optional ``delivery`` enum on a
+        # message body (`POST /v1/desktop/sessions/{id}/messages`,
+        # ``Prompt.delivery``) -- ``steer`` (today's urgent behaviour),
+        # ``queue`` (never cancels a running tool), ``both`` (``queue`` until it
+        # has waited, then urgent). WHY A KEY -- the `input_mode` argument
+        # verbatim: `Prompt` is `extra="forbid"`, so an ungated send to an older
+        # backend would 422 the user's own message. Gated, the composer omits
+        # the field and steers exactly as today; absence is the legacy path.
+        #
+        # THE ATTACH-WIRE HALF is `busy-delivery-v1` in the owner record (the
+        # mobile stream reads that string; the desktop renderer reads this
+        # key). Two faces, deliberately separate: they gate two different
+        # wires, and neither implies the other.
+        "busy_delivery": 1,
         # IMAGES ON A QUEUED-ASK ANSWER: the optional ``images`` list on
         # ``POST /v1/desktop/sessions/{id}/answers`` (``Answer.images``, the
         # Other door's attachments), plus the ``attachments`` refs the folded ask
@@ -1265,6 +1292,12 @@ def static_feature_flags() -> dict[str, Any]:
         # ignores an unknown query and would silently serve the original, which is
         # harmless, but a client must know to expect the sized ETag/body.
         "agent_avatar_sizes": 1,
+        # `GET /v1/desktop/sessions/{id}/notification-avatar?size=64|256&theme=light|dark`:
+        # the OS-banner image for a session bound to an agent with its own stored
+        # picture (picture + LO corner badge, no agent marker). Own key so a
+        # desktop facing an older core posts today's banner instead of 404-probing
+        # every notification; a 404 from a newer core means "no picture" only.
+        "desktop_session_notification_avatar": 1,
         # THE PER-SESSION FILE INDEX: `GET /v1/desktop/sessions/{id}/files` (the files this
         # conversation and its subagents produced: written, edited, command outputs,
         # screenshots, downloads, generated images/videos and Highlights callouts, derived

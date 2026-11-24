@@ -1,7 +1,9 @@
 {
+  "tui.settings_view.chrome.capture.chord_grammar": "alt+<letter> works anywhere, ctrl+enter needs enhanced keys",
   "tui.settings_view.chrome.capture.contract_cancel": "{cancel_key} cancels",
   "tui.settings_view.chrome.capture.contract_confirm": "{save_key} confirms · {cancel_key} cancels",
   "tui.settings_view.chrome.capture.listening": "listening for a key",
+  "tui.settings_view.chrome.capture.needs_enhanced_keys": "needs enhanced keys",
   "tui.settings_view.chrome.capture.press_another": "press another key",
   "tui.settings_view.chrome.capture.saved": "{shortcut} saved",
   "tui.settings_view.chrome.capture.takes_from": "takes {shortcut} from “{victim}”",

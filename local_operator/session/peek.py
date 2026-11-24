@@ -7,8 +7,8 @@ coordinator peeking a session on a mesh peer therefore got a degraded tail of
 the synced display window and was refused ``head``/``query``/``regex``/
 ``digest`` outright — it could not see a remote session's original request or
 search its history. The owner device now answers ``net_session_peek``
-(``network/peek.py``) with THESE functions, so a remote peek and a local one
-run the same code under the same budgets, and the rows cannot drift apart.
+(``network/peek.py``) with THESE functions. Plain windows share readers;
+counted search and turn digest are peer-specific views under the same budgets.
 
 CONSTRAINTS. Everything here is synchronous file I/O meant to run in a worker
 thread (the tool's ``asyncio.to_thread``; the relay's slow lane). Nothing here
@@ -22,15 +22,18 @@ over-budget request refuses with the same sentence on either path.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
+from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, NamedTuple, Protocol
 
 if TYPE_CHECKING:
+    from local_operator.harness.comms import PeekStep
     from local_operator.session.transcript import TranscriptEntry
 
 
@@ -150,8 +153,8 @@ _PEEK_DEFAULT_STEPS = 12
 _PEEK_MAX_PAGES = 4
 
 
-#: Byte depth the backward needle search may scan before it returns the honest
-#: miss (design §8.1). It is the SAME 16 MiB window the reader gives its cursor
+#: Byte depth for the local backward needle search and the owner's forward
+#: counted search. It is the SAME 16 MiB window the reader gives its cursor
 #: locator (``transcript._PAGE_LOCATE_WINDOW_BYTES``), so "deep" means one
 #: thing in the reader and in the search that rides it; a test pins the two
 #: numbers equal so they cannot drift apart silently.
@@ -199,6 +202,8 @@ class _PeekWindow(NamedTuple):
     match_step: int | None = None
     miss: str = ""
     note: str = ""
+    match_count: int | None = None
+    match_count_complete: bool | None = None
 
 
 class _PeekDigest(NamedTuple):
@@ -394,29 +399,35 @@ def _peek_head(directory: Path, *, need: int) -> _PeekWindow:
         raise FileNotFoundError(f"{directory} holds no transcript")
     entries: list[TranscriptEntry] = []
     scanned = 0
-    capped = False
+    shown = 0
+    has_newer = False
+    from local_operator.harness.comms import is_peek_step_entry
+
     with path.open("rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        end_of_file = handle.tell()
-        walker = _iter_complete_lines_forward(handle, 0, end_of_file=end_of_file)
-        for raw in walker:
-            scanned += len(raw) + 1
+        file_size = handle.seek(0, os.SEEK_END)
+        end_of_file = min(file_size, _PEEK_SCAN_BYTES)
+        bounded = end_of_file < file_size
+        for raw in _iter_complete_lines_forward(handle, 0, end_of_file=end_of_file):
+            # A lookahead must not pull a huge newest row across the scan bound.
+            if bounded and scanned + len(raw) + 1 > end_of_file:
+                scanned = end_of_file
+                break
+            scanned = min(end_of_file, scanned + len(raw) + 1)
+            if shown >= need:
+                if raw.strip():
+                    has_newer = True
+                    break
+                continue
             entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
             if entry is not None:
                 entries.append(entry)
-            if len(_peek_message_entries(entries)) >= need:
-                break
-            if scanned >= _PEEK_SCAN_BYTES:
-                capped = True
-                break
-        # One lookahead beyond the window answers ``has_newer``; blank lines are
-        # not rows, so skip them rather than counting a torn journal's noise.
-        has_newer = any(raw.strip() for raw in walker)
+                shown += int(is_peek_step_entry(entry))
+        capped = bounded and shown < need
     return _peek_window(
         entries,
         need=need,
         has_older=False,  # the walk began at byte zero; nothing precedes it
-        has_newer=has_newer,
+        has_newer=True if has_newer else None if bounded else False,
         scanned_bytes=scanned,
         note=(
             f"the read stopped at the {_PEEK_SCAN_BYTES >> 20} MiB scan bound before "
@@ -563,6 +574,271 @@ def _peek_search(
     return window._replace(scanned_bytes=scanned)
 
 
+def _peer_search_has_raw_text(payload: Mapping[str, Any]) -> bool:
+    """Reject coercion of message text, not missing or malformed decoration.
+
+    Inspect only the slots the renderer uses as prose. In particular, an
+    array/object in a text slot fails on its outer type; we never walk it.
+    """
+    from local_operator.harness.message_types import (
+        HUB_MESSAGE_TYPE,
+        PEER_MESSAGE_MESSAGE_TYPE,
+    )
+
+    if payload.get("kind") == "custom":
+        custom_type = payload.get("custom_type")
+        details = payload.get("details")
+        if details is None:
+            return True
+        if not isinstance(details, dict):
+            return False
+        if custom_type == "compaction_summary":
+            return isinstance(details.get("summary", ""), str)
+        if custom_type in (HUB_MESSAGE_TYPE, PEER_MESSAGE_MESSAGE_TYPE):
+            if "body" in details and not isinstance(details["body"], str):
+                return False
+            if details.get("body"):
+                return True
+        return isinstance(details.get("text", ""), str)
+
+    content = payload.get("content")
+    return content is None or (
+        isinstance(content, list)
+        and all(
+            not isinstance(block, dict) or isinstance(block.get("text", ""), str)
+            for block in content
+        )
+    )
+
+
+def _peer_search_display_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int | None]:
+    """Give the shared formatter safe decoration without losing real text.
+
+    Valid string labels still match as before. Keep an integer peer PID
+    separately for display: neither it nor the renderer's fallback is stored
+    searchable text. Never stringify a container: its contents are not a label,
+    and stringifying it could recurse or expand unseen metadata.
+    """
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+
+    def label(value: object, default: str) -> str:
+        if isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                pass
+            else:
+                return value
+        return default
+
+    if payload.get("kind") == "custom":
+        custom_type = label(payload.get("custom_type"), "custom")
+        if custom_type != PEER_MESSAGE_MESSAGE_TYPE:
+            return {**payload, "custom_type": custom_type}, None
+        details = payload.get("details") or {}
+        sender = details.get("sender")
+        if not isinstance(sender, dict):
+            sender = {}
+        name = label(sender.get("conversation_name"), "")
+        raw_pid = sender.get("pid")
+        pid = raw_pid if not name and type(raw_pid) is int and raw_pid else None
+        safe_sender = {"conversation_name": name, "pid": label(raw_pid, "")}
+        return {**payload, "details": {**details, "sender": safe_sender}}, pid
+
+    role = payload.get("role")
+    if role == "tool":
+        return {**payload, "tool_name": label(payload.get("tool_name"), "tool")}, None
+    if role == "assistant":
+        calls = payload.get("tool_calls")
+        safe_calls = []
+        if isinstance(calls, list):
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                args = call.get("arguments")
+                # The formatter only uses string intent and arguments; dropping
+                # other values here cannot hide any real searchable tool text.
+                safe_args = (
+                    {k: label(v, "") for k, v in args.items() if isinstance(v, str)}
+                    if isinstance(args, dict)
+                    else {}
+                )
+                safe_calls.append({"name": label(call.get("name"), "?"), "arguments": safe_args})
+        return {**payload, "tool_calls": safe_calls}, None
+    return {**payload, "role": "user"}, None
+
+
+def _peer_peek_search(
+    directory: Path, *, needle: str, pattern: RowMatcher | None, need: int
+) -> _PeekWindow:
+    """Count eligible steps on the owner and retain only the first hit's window.
+
+    The local search still walks newest-first and stops at one hit. A peer asks
+    for the first chronological hit and a count, so retain its neighbours as
+    we walk forward; re-locating by id would price a second read from the tail.
+    """
+    from local_operator.harness.comms import (
+        _clip,
+        _render_message_step,
+        is_peek_step_entry,
+    )
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.session import compression
+    from local_operator.session.transcript import (
+        ENTRY_COMPACTION,
+        ENTRY_CUSTOM,
+        ENTRY_MESSAGE,
+        ENTRY_PRUNE,
+        TranscriptEntry,
+        _iter_complete_lines_forward,
+    )
+
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
+    before = need // 2
+    after = need - before - 1
+    preceding: deque[tuple[str, PeekStep]] = deque(maxlen=before)
+    selected: list[tuple[str, PeekStep]] = []
+    hit_id = ""
+    match_step = None
+    count = skipped = depth_skips = 0
+    older = newer = False
+    eligible = 0
+    consumed = 0
+    with path.open("rb") as handle:
+        file_size = handle.seek(0, os.SEEK_END)
+        scanned = min(file_size, _PEEK_SCAN_BYTES)
+        complete = scanned == file_size
+        for raw in _iter_complete_lines_forward(handle, 0, end_of_file=scanned):
+            consumed += len(raw) + 1
+            if not complete and consumed > scanned:
+                # The byte bound may bisect a row. Never count its prefix.
+                break
+            try:
+                # Identity and searchable text come from raw stored JSON types,
+                # never from the replay decoder's or renderer's coerced values.
+                # Reject before a malformed row can consume a cursor or make the
+                # count look complete. Replay and non-query display stay lenient.
+                try:
+                    stored = json.loads(raw.decode("utf-8"))
+                except RecursionError:
+                    skipped += 1
+                    depth_skips += 1
+                    continue
+                row_type = stored.get("type")
+                # An exact count may omit only known non-steps, never a row
+                # whose eligibility, text or preview could not be established.
+                # Such omissions must increment skipped, even before matching.
+                if row_type != ENTRY_MESSAGE:
+                    if row_type not in (ENTRY_COMPACTION, ENTRY_CUSTOM, ENTRY_PRUNE):
+                        skipped += 1
+                    continue
+                # A timestamp never participates in a counted query.
+                row_id = stored["id"]
+                payload = stored.get("payload", {})
+                if not isinstance(row_id, str) or not row_id or not isinstance(payload, dict):
+                    skipped += 1
+                    continue
+                entry = TranscriptEntry(id=row_id, ts=0.0, type=row_type, payload=payload)
+                if not is_peek_step_entry(entry):
+                    continue
+                if not _peer_search_has_raw_text(entry.payload):
+                    skipped += 1
+                    continue
+                display_payload, display_pid = _peer_search_display_payload(entry.payload)
+                step = None
+                peer_details = (
+                    display_payload["details"]
+                    if display_payload.get("kind") == "custom"
+                    and display_payload.get("custom_type") == PEER_MESSAGE_MESSAGE_TYPE
+                    else None
+                )
+                if peer_details is not None and not any(peer_details["sender"].values()):
+                    # With no stored string label, the entire sender heading
+                    # is presentation. A fallback must not steal the cursor.
+                    text = peer_details.get("body") or peer_details.get("text") or ""
+                else:
+                    step = _render_message_step(0, display_payload, body_limit=None)
+                    text = f"{step.heading}\n{step.body}"
+                # JSON escapes can introduce unpaired surrogates; identity
+                # and full text must survive the wire, even beyond the clip.
+                entry.id.encode("utf-8")
+                text.encode("utf-8")
+            except Exception:
+                # This guard is deliberately per row, not a list of known parser
+                # and renderer exceptions. File I/O and query-wide errors (e.g.
+                # a regex budget refusal) stay outside it and still surface.
+                skipped += 1
+                continue
+            found = pattern.search(text) is not None if pattern is not None else needle in text
+            try:
+                # Build the preview only after matching, but don't commit a hit
+                # until the row can actually occupy a slot in the result window.
+                if step is None:
+                    if display_pid is not None:
+                        details = {**display_payload["details"], "sender": {"pid": display_pid}}
+                        display_payload = {**display_payload, "details": details}
+                    step = _render_message_step(0, display_payload)
+                else:
+                    step = replace(step, body=_clip(step.body))
+                row = (entry.id, step)
+            except Exception:
+                skipped += 1
+                continue
+            if hit_id:
+                if after:
+                    selected.append(row)
+                    after -= 1
+                else:
+                    newer = True
+            if found:
+                count += 1
+                if not hit_id:
+                    hit_id = row[0]
+                    older = eligible > len(preceding)
+                    selected = [*preceding, row]
+                    match_step = len(selected)
+            if not hit_id:
+                preceding.append(row)
+            eligible += 1
+
+    # This is model-facing tool-result metadata. Rows beyond the byte bound
+    # or skipped for invalid shape could contain matches; neither is a miss.
+    count_complete = complete and skipped == 0
+    scope = ["whole transcript" if complete else f"first {scanned:,} bytes"]
+    if skipped:
+        scope.append(f"{skipped} unrenderable {'row' if skipped == 1 else 'rows'} skipped")
+    if not count_complete:
+        scope.append("count is a lower bound")
+    if depth_skips:
+        scope.append(f"JSON decoding depth bound reached ({depth_skips} skipped)")
+    note = f"match count: {count} ({'; '.join(scope)})"
+    if not hit_id:
+        return _PeekWindow(
+            steps=[],
+            scanned_bytes=scanned,
+            match_count=count,
+            match_count_complete=count_complete,
+            miss=f"no match for {needle!r}: {note}.",
+        )
+    # Assemble only already-validated previews. Passing raw entries to the
+    # shared window renderer would reopen the unguarded row path after counting.
+    return _PeekWindow(
+        steps=[replace(step, index=index) for index, (_, step) in enumerate(selected, 1)],
+        has_older=older,
+        has_newer=True if newer else False if complete else None,
+        before_cursor=selected[0][0],
+        after_cursor=selected[-1][0],
+        scanned_bytes=scanned,
+        match_id=hit_id,
+        match_step=match_step,
+        match_count=count,
+        match_count_complete=count_complete,
+        note=f"{note}; first match, up to {before} before and {need - before - 1} after",
+    )
+
+
 def _peek_live_state(record: Any) -> str:
     """``stored``, or ``live`` plus the record's own busy/pending words.
 
@@ -659,6 +935,88 @@ def _peek_digest(directory: Path, *, live_state: str) -> _PeekDigest:
     )
 
 
+# A fold is a receipt of references, not a filesystem or Git audit. Recognize
+# only explicit commit/PR markers in already-rendered step text; arbitrary hex
+# in a log isn't evidence of a commit.
+_DIGEST_REFERENCE = re.compile(
+    r"https://[^\s)\]>]+/(?:pull|merge_requests)/\d+|"
+    r"\b(?:PR|MR)\s*#\d+|\b(?:commit|git show)\s+[0-9a-f]{7,40}\b|"
+    r"^\[[^\]\n]+ [0-9a-f]{7,40}\]",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _peer_peek_digest(directory: Path, *, live_state: str) -> _PeekDigest:
+    """Fold eligible tail entries into recent turns without shipping their prose.
+
+    Derive names and paths from recorded calls, and references from the same
+    clipped text a step can show. Don't turn arbitrary tool arguments or
+    hidden journal rows into a second transcript surface.
+    """
+    from local_operator.harness.comms import PEEK_STEP_CHARS, _render_transcript_steps
+    from local_operator.session.transcript import read_transcript_page
+
+    page = read_transcript_page(directory, limit=_PEEK_DIGEST_ROWS)
+    entries = _peek_message_entries(page.entries)
+    steps = _render_transcript_steps(entries)
+    turns: list[dict[str, list[str]]] = []
+    starts_mid_turn = False
+    for entry, step in zip(entries, steps, strict=True):
+        payload = entry.payload or {}
+        if step.kind == "user" or not turns:
+            if not turns and step.kind != "user" and page.has_more:
+                starts_mid_turn = True
+            turns.append({"tools": [], "file paths": [], "commits/PRs": [], "refusals/errors": []})
+        turn = turns[-1]
+        if step.kind == "assistant":
+            for call in payload.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                name = call.get("name")
+                if isinstance(name, str):
+                    turn["tools"].append(name[:PEEK_STEP_CHARS])
+                args = call.get("arguments")
+                if isinstance(args, dict) and isinstance(args.get("path"), str):
+                    turn["file paths"].append(args["path"][:PEEK_STEP_CHARS])
+        elif step.kind == "tool":
+            name = str(payload.get("tool_name") or "tool")[:PEEK_STEP_CHARS]
+            turn["tools"].append(name)
+            # Success output and assistant prose can discuss failures without
+            # being failures. Only the recorded tool result can make that claim.
+            if payload.get("is_error") is True:
+                turn["refusals/errors"].append(f"{name}: {_fold_line(step.body, 60)}")
+        turn["commits/PRs"].extend(match[0] for match in _DIGEST_REFERENCE.finditer(step.body))
+
+    # Reuse the existing digest's ten-line and tail-row budgets. Even the
+    # longest identifiers fit a step-sized line; an ellipsis marks omitted
+    # references, and older turns are named but never transferred.
+    first = max(0, len(turns) - 9)
+    # has_older describes the source read, not the independent turn cap.
+    scope = "older rows omitted" if page.has_more else "no older rows"
+    if first:
+        scope += f"; {first} earlier turns folded out"
+    lines = [
+        f"digest fold (not the full transcript): {len(steps)} steps in the newest "
+        f"{_PEEK_DIGEST_ROWS} rows; showing {len(turns) - first} turn(s) — {live_state}; {scope}"
+    ]
+    for i, turn in enumerate(turns[first:], first):
+        fields = [
+            f"{label}: {_fold_line(', '.join(dict.fromkeys(values)), 120)}"
+            for label, values in turn.items()
+            if values
+        ]
+        label = "partial turn" if i == 0 and starts_mid_turn else f"turn {i + 1}"
+        lines.append(
+            _fold_line(f"{label}: {'; '.join(fields) or 'no recorded references'}", PEEK_STEP_CHARS)
+        )
+    return _PeekDigest(
+        text="\n".join(lines),
+        steps_seen=len(steps),
+        tool_calls=sum(step.kind == "tool" for step in steps),
+        has_older=bool(page.has_more),
+    )
+
+
 def _peek_body(
     name: str,
     session_id: str,
@@ -687,7 +1045,8 @@ def _peek_body(
     if not window.steps:
         if mode == "tail":
             return f'"{name}" ({session_id}) — no steps yet: the transcript has no ' "message rows."
-        return f'"{name}" ({session_id}) — no steps {phrase}.'
+        empty = f'"{name}" ({session_id}) — no steps {phrase}.'
+        return f"{empty}\n({window.note})" if window.note else empty
     lines = [f'"{name}" ({session_id}) — {len(window.steps)} step(s) {phrase}:']
     for step in window.steps:
         marker = "  ← match" if step.index == window.match_step else ""
@@ -947,18 +1306,48 @@ def peek_need(params: PeekRequest) -> int:
 
 
 def window_to_wire(window: _PeekWindow) -> dict[str, Any]:
-    """A window as JSON — every field, so the viewer re-renders it byte-for-byte."""
+    """Project bounded fields on the owner, never on the receiving device."""
+    from local_operator.harness.comms import PEEK_STEP_CHARS
+
+    def heading_for_wire(heading: str) -> str:
+        # Body elision is already marked by the renderer; unusual tool lists
+        # and custom headings must not defeat the character budget either.
+        if len(heading) <= PEEK_STEP_CHARS:
+            return heading
+        return heading[:PEEK_STEP_CHARS] + f" [… {len(heading) - PEEK_STEP_CHARS} chars elided …]"
 
     out = window._asdict()
     out["steps"] = [
-        {"index": step.index, "kind": step.kind, "heading": step.heading, "body": step.body}
+        {
+            "index": step.index,
+            "kind": step.kind,
+            "heading": heading_for_wire(step.heading),
+            "body": step.body,
+        }
         for step in window.steps
     ]
     return out
 
 
-def window_from_wire(raw: Mapping[str, Any]) -> _PeekWindow:
-    """The inverse of :func:`window_to_wire` (tolerant of absent optional keys)."""
+# Version 1 is the per-turn fold with failure markers from tool results only.
+# A pre-versioned owner can still supply useful text, but must not be credited
+# with these semantics just because it sent a digest.
+_PEER_DIGEST_FOLD_VERSION = 1
+
+
+def digest_receipt(raw: object) -> tuple[dict[str, Any], str]:
+    """Normalize owner provenance for JSON and both coordinator renderers."""
+    digest: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+    version = digest.get("fold_version")
+    known = type(version) is int and version == _PEER_DIGEST_FOLD_VERSION
+    note = "" if known else "digest format unverified: the owner may be running an older build"
+    digest.update(fold_version=version if known else None, note=note)
+    text = str(digest.get("text") or "")
+    return digest, "\n".join(part for part in (note, text) if part)
+
+
+def window_from_wire(raw: Mapping[str, Any], *, mode: str = "") -> _PeekWindow:
+    """Decode a peer window without upgrading an old search to a counted one."""
 
     from local_operator.harness.comms import PeekStep
 
@@ -976,6 +1365,21 @@ def window_from_wire(raw: Mapping[str, Any]) -> _PeekWindow:
     fields["steps"] = steps
     fields["miss"] = str(fields.get("miss") or "")
     fields["note"] = str(fields.get("note") or "")
+    if mode == "search" and type(fields.get("match_count")) is not int:
+        # V1 could return a useful newest-match window or a miss, but has no
+        # count and makes no first-chronological-match guarantee.
+        diagnostic = (
+            "match count unavailable: the owner may be running an older build; "
+            "first chronological match not guaranteed"
+        )
+        fields["match_count"] = None
+        fields["match_count_complete"] = False
+        # The CLI emits a qualified JSON receipt that the sessions tool may
+        # decode again. Re-reading the receipt must not repeat the diagnostic.
+        if fields["miss"] and not fields["miss"].endswith(f"({diagnostic})"):
+            fields["miss"] += f" ({diagnostic})"
+        elif not fields["miss"] and not fields["note"].endswith(diagnostic):
+            fields["note"] = "; ".join(filter(None, (fields["note"], diagnostic)))
     return _PeekWindow(**fields)
 
 
@@ -1006,9 +1410,20 @@ def serve_peek(
     if isinstance(pattern, str):
         return {"refusal": pattern}
     if params.digest:
-        digest = _peek_digest(directory, live_state=live_state)
-        return {"mode": "digest", "digest": digest._asdict()}
-    window, mode = _peek_read(directory, params, need=peek_need(params), pattern=pattern)
+        digest = _peer_peek_digest(directory, live_state=live_state)
+        return {
+            "mode": "digest",
+            "digest": dict(digest._asdict(), fold_version=_PEER_DIGEST_FOLD_VERSION),
+        }
+    need = peek_need(params)
+    query = str(params.query or "").strip()
+    if query:
+        window, mode = (
+            _peer_peek_search(directory, needle=query, pattern=pattern, need=need),
+            "search",
+        )
+    else:
+        window, mode = _peek_read(directory, params, need=need, pattern=pattern)
     if isinstance(window, str):
         return {"refusal": window, "mode": mode}
     return {"mode": mode, "window": window_to_wire(window)}

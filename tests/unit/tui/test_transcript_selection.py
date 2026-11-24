@@ -85,7 +85,7 @@ from local_operator.tui.widgets.assistant import (
 )
 from local_operator.tui.widgets.editor import BARREN_CLICK_WINDOW_S, Editor
 from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
-from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ROW_INDENT, ToolCard
+from local_operator.tui.widgets.tool_card import ToolCard, detail_indent, row_indent
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     SPINE_INDENT,
@@ -699,8 +699,10 @@ async def test_tool_card_expanded_output_copies_unindented() -> None:
     Both gutters at once: the summary row loses its Nerd Font icon field — a
     private-use codepoint that pastes as a replacement box and restates nothing
     the tool NAME beside it does not — and every row below loses the card's own
-    ``OUTPUT_INDENT``. The receipt itself (name, what ran, outcome, duration)
-    stays, because that is what a user selecting a settled row is after.
+    detail indent (``OUTPUT_INDENT`` at the plain spine, one more cell for each
+    fold step the row took). The receipt itself (name, what ran, outcome,
+    duration) stays, because that is what a user selecting a settled row is
+    after.
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(64, 40)) as pilot:
@@ -717,11 +719,17 @@ async def test_tool_card_expanded_output_copies_unindented() -> None:
         assert rows[0].startswith("bash")  # no icon, no leading pad
         assert tool_icon("bash") not in copied
         assert "✗" in rows[0] and "pytest -q" in rows[0]  # the receipt survives
-        # The summary's gutter is the icon field PLUS the row's left inset:
+        # The summary's gutter is the row's left inset PLUS the icon field:
         # both are this widget's own layout, so both leave with the copy
-        # rather than pasting a leading space into a bug report.
-        assert card.copy_gutter(0) == ROW_INDENT + ToolCard.ICON_COLS
-        assert card.copy_gutter(1) == OUTPUT_INDENT
+        # rather than pasting a leading space into a bug report. Read off the
+        # row's own fold depth and width, never a fixed count: a call inside a
+        # turn sits one step in (the fold's tool-row column), and the detail
+        # rows follow it one cell further, both of which still paste
+        # unindented.
+        assert card.fold_depth == 1, "a lone call in a turn is a step"
+        inset = row_indent(card._built_width, card.fold_depth)
+        assert card.copy_gutter(0) == inset + ToolCard.ICON_COLS
+        assert card.copy_gutter(1) == detail_indent(card._built_width, card.fold_depth)
 
 
 # -- highlight and clipboard cannot disagree ---------------------------------
