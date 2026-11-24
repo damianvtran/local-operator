@@ -28,6 +28,7 @@
   "wire.errors.desktop.claim_origin_outside_configured": "A claim cannot install an origin outside the configured desktop origins.",
   "wire.errors.desktop.claim_origin_wildcard": "A wildcard origin cannot be claimed.",
   "wire.errors.desktop.claim_origins_not_list": "The claim body's 'origins' must be a list.",
+  "wire.errors.desktop.conversation_deleted": "This conversation was deleted, so this question can no longer be answered. Dismiss or decline it instead.",
   "wire.errors.desktop.conversations_unreadable": "Conversations could not be read right now. This recovers on its own; retry in a moment.",
   "wire.errors.desktop.credential_operation_failed": "The credential operation did not complete",
   "wire.errors.desktop.cwd_marker_read_failed": "cannot read the session's working-directory marker: {error}",

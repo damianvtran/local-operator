@@ -125,6 +125,10 @@ def claim_origins_not_list() -> Msg:
     return Msg("wire.errors.desktop.claim_origins_not_list", {})
 
 
+def conversation_deleted() -> Msg:
+    return Msg("wire.errors.desktop.conversation_deleted", {})
+
+
 def conversations_unreadable() -> Msg:
     return Msg("wire.errors.desktop.conversations_unreadable", {})
 
