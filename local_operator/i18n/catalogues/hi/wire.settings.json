@@ -368,6 +368,8 @@
   "wire.settings.mcp_result_normalization.choice.strip_links.label": "strip-links",
   "wire.settings.mcp_result_normalization.help": "एजेंट के देखने से पहले MCP टूल परिणामों से चित्र, नेविगेशन लिंक और फ़ुटनोट चिह्न हटाता है। बंद होने पर परिणाम बिना बदलाव भेजे जाते हैं।",
   "wire.settings.mcp_result_normalization.label": "MCP परिणामों का मार्कअप घटाएँ",
+  "wire.settings.mcp_result_text_rendering.help": "MCP खोज परिणाम और प्राप्त पेज एजेंट को JSON के बजाय सादे पाठ के रूप में भेजता है; हर फ़ील्ड बना रहता है। बंद होने पर वे JSON ही रहते हैं।",
+  "wire.settings.mcp_result_text_rendering.label": "MCP परिणाम पाठ के रूप में",
   "wire.settings.mcp_search_snippet_chars.help": "MCP खोज टूल से मिले हर परिणाम-अंश में अधिकतम कितने अक्षर रखे जाएँ; शीर्षक और URL कभी नहीं काटे जाते। 0 पर अंश पूरे रखे जाते हैं।",
   "wire.settings.mcp_search_snippet_chars.label": "MCP खोज अंश की लंबाई",
   "wire.settings.memory_guard.description": "प्रति-कमांड RAM सीमा, ताकि ज़रूरत से बड़ा कमांड पूरे डिवाइस को गिराने के बजाय बंद कर दिया जाए।",

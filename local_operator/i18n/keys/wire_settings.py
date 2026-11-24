@@ -1517,6 +1517,14 @@ def mcp_result_normalization_label() -> Msg:
     return Msg("wire.settings.mcp_result_normalization.label", {})
 
 
+def mcp_result_text_rendering_help() -> Msg:
+    return Msg("wire.settings.mcp_result_text_rendering.help", {})
+
+
+def mcp_result_text_rendering_label() -> Msg:
+    return Msg("wire.settings.mcp_result_text_rendering.label", {})
+
+
 def mcp_search_snippet_chars_help() -> Msg:
     return Msg("wire.settings.mcp_search_snippet_chars.help", {})
 

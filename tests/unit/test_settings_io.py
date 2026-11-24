@@ -203,6 +203,7 @@ def _consumer_defaults() -> dict[str, object]:
     )
     from local_operator.tools.result_normalize import (
         RESULT_NORMALIZATION_DEFAULT,
+        RESULT_TEXT_RENDERING_DEFAULT,
         SEARCH_SNIPPET_CHARS_DEFAULT,
     )
     from local_operator.tui import settings as tui_settings
@@ -301,6 +302,7 @@ def _consumer_defaults() -> dict[str, object]:
         # lives beside the pure normalizer it configures.
         "mcp.result_normalization": RESULT_NORMALIZATION_DEFAULT,
         "mcp.search_snippet_chars": SEARCH_SNIPPET_CHARS_DEFAULT,
+        "mcp.result_text_rendering": RESULT_TEXT_RENDERING_DEFAULT,
         "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
         "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
         # The guardrail keys; consumer constants live beside the reader in

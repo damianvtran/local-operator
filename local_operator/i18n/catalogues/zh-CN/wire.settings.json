@@ -368,6 +368,8 @@
   "wire.settings.mcp_result_normalization.choice.strip_links.label": "strip-links",
   "wire.settings.mcp_result_normalization.help": "在智能体读取前，从 MCP 工具结果中去除图片、导航链接和引用标记。关闭则原样发送结果。",
   "wire.settings.mcp_result_normalization.label": "精简 MCP 结果标记",
+  "wire.settings.mcp_result_text_rendering.help": "将 MCP 搜索结果和抓取的页面以纯文本而非 JSON 发送给智能体，保留所有字段。关闭则保持 JSON。",
+  "wire.settings.mcp_result_text_rendering.label": "MCP 结果以文本呈现",
   "wire.settings.mcp_search_snippet_chars.help": "MCP 搜索工具返回的每条结果摘要最多保留的字符数；标题和 URL 从不截断。0 表示保留完整摘要。",
   "wire.settings.mcp_search_snippet_chars.label": "MCP 搜索摘要长度",
   "wire.settings.memory_guard.description": "逐命令的内存上限，让某条过大命令被终止，而不是拖垮整台设备。",

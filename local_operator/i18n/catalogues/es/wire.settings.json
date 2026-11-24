@@ -368,6 +368,8 @@
   "wire.settings.mcp_result_normalization.choice.strip_links.label": "strip-links",
   "wire.settings.mcp_result_normalization.help": "Quita imágenes, enlaces de navegación y marcas de cita de los resultados de herramientas MCP antes de que el agente los lea. Desactivado: se envían sin cambios.",
   "wire.settings.mcp_result_normalization.label": "Aligerar resultados MCP",
+  "wire.settings.mcp_result_text_rendering.help": "Envía al agente los resultados de búsqueda y las páginas obtenidas por MCP como texto plano en lugar de JSON; se conservan todos los campos. Desactivado: siguen en JSON.",
+  "wire.settings.mcp_result_text_rendering.label": "Resultados MCP como texto",
   "wire.settings.mcp_search_snippet_chars.help": "Máximo de caracteres que se conservan de cada fragmento que devuelve una herramienta de búsqueda MCP; títulos y URL nunca se recortan. 0 los conserva completos.",
   "wire.settings.mcp_search_snippet_chars.label": "Fragmentos de búsqueda MCP",
   "wire.settings.memory_guard.description": "Un límite máximo de RAM por comando, para que un solo comando demasiado grande se mate en vez de tumbar todo el dispositivo.",

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -463,7 +464,40 @@ def _mcp_search_snippet_chars_applied(_watcher: ConfigWatcher) -> int:
         machine_read=False,
         mcp_tool_name="search",
     )
-    return len(json.loads(result.text)["results"][0]["snippet"])
+    # The longest ``x…`` run is the clipped snippet whichever form carries it:
+    # JSON, or the text ``mcp.result_text_rendering`` (default on) renders.
+    return max(len(run) for run in re.findall("x+…", result.text))
+
+
+def _mcp_result_text_rendering_applied(_watcher: ConfigWatcher) -> bool:
+    """Whether a model-facing MCP fetch result reaches the model as rendered text.
+
+    Observed through ``_format_with_normalization_setting``, which reads
+    ``mcp.result_text_rendering`` via ``read_result_text_rendering`` (a fresh
+    ``ConfigManager`` on ``paths.config_dir()``) per result. The probe formats a
+    real ``{url, content}`` page payload and reports whether the text the model
+    gets is the rendered ``url: ...`` header form (True) or still JSON (False),
+    so it fails if the read is live but the renderer ignores it.
+    """
+    from mcp.types import CallToolResult, TextContent
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.mcp.manager import _format_with_normalization_setting
+
+    raw = json.dumps({"url": "https://example.com/probe", "content": "Probe page body."})
+    result = _format_with_normalization_setting(
+        CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False),
+        "probe-call",
+        "mcp__probe_fetch",
+        ToolContext(),
+        producer_scope=None,
+        machine_read=False,
+        mcp_tool_name="fetch",
+    )
+    if result.text == raw:
+        return False
+    assert result.text == "url: https://example.com/probe\n\nProbe page body.", result.text
+    return True
 
 
 def _guardrails(_watcher: ConfigWatcher, *, authorised: bool = True) -> Any:
@@ -992,6 +1026,10 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # Observed as the clipped snippet's actual length (400 before, 120 after),
     # not the reader's return value.
     "mcp.search_snippet_chars": (120, lambda s, w: _mcp_search_snippet_chars_applied(w)),
+    # Read per MCP result by ``mcp.manager.read_result_text_rendering``.
+    # Observed as the form the model receives (rendered text before, the
+    # server's JSON after), not the reader's return value.
+    "mcp.result_text_rendering": (False, lambda s, w: _mcp_result_text_rendering_applied(w)),
     # ``bash.query_budget.*`` is the same shape: read per ``bash`` call through a
     # fresh ``ConfigManager`` (``builtin._query_budget_config``), so an edit lands
     # on the next command. Observed through that reader, not the raw mapping.

@@ -820,8 +820,13 @@ class TestDroppedArgumentNote:
         tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
 
         model_call = await tool.execute("c0", {"command": "q"}, None, None, ToolContext())
-        hits = json.loads(model_call.text)["results"]
-        assert all(len(h["snippet"]) <= 400 and "published_date" not in h for h in hits)
+        # ``mcp.result_text_rendering`` (default on) renders the hit list as
+        # text: one 3-space snippet line per hit, clipped, the null field gone.
+        lines = model_call.text.split("\n")
+        snippets = [line[3:] for line in lines if line.startswith("   Mayor of Ottawa")]
+        assert len(snippets) == 2 and all(len(s) <= 400 for s in snippets)
+        assert "published_date" not in model_call.text
+        assert lines.count("   https://example.com/m") == 2
         machine = await tool.execute(
             "c1",
             {"command": "q"},
@@ -830,6 +835,33 @@ class TestDroppedArgumentNote:
             ToolContext().model_copy(update={"monitor_check": True}),
         )
         assert machine.text == raw
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_seen_url_ledger_is_per_session_and_skips_machine_reads(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repeat of a URL the SAME session was shown loses its snippet;
+        another session (a subagent) and a machine-read call do not share or
+        feed that ledger."""
+        hit = {"title": "Olivia Chow", "url": "https://example.com/chow", "snippet": "Mayor."}
+        raw = json.dumps({"query": "q", "results": [hit]})
+        session = FakeSession(
+            call_result=CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False)
+        )
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        async def call(session_id: str, **flags: bool) -> str:
+            ctx = ToolContext(session_id=session_id).model_copy(update=flags)
+            return (await tool.execute("c", {"command": "q"}, None, None, ctx)).text
+
+        assert "Mayor." in await call("parent")
+        assert "Mayor." not in await call("parent")  # seen in this session
+        assert "https://example.com/chow" in await call("parent")  # title + url stay
+        assert "Mayor." in await call("child")  # its own ledger
+        assert await call("watched", monitor_check=True) == raw  # machine read: server bytes
+        assert "Mayor." in await call("watched")  # ... and it recorded nothing
         await manager.disconnect_all()
 
     @pytest.mark.asyncio

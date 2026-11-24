@@ -376,6 +376,8 @@
   "wire.settings.mcp_result_normalization.choice.strip_links.label": "strip-links",
   "wire.settings.mcp_result_normalization.help": "Strip images, nav links and citation markers from MCP tool results before the agent sees them. Off sends results unchanged.",
   "wire.settings.mcp_result_normalization.label": "Trim MCP result markup",
+  "wire.settings.mcp_result_text_rendering.help": "Send MCP search results and fetched pages to the agent as plain text instead of JSON; every field is kept. When off, they stay JSON.",
+  "wire.settings.mcp_result_text_rendering.label": "Render MCP results as text",
   "wire.settings.mcp_search_snippet_chars.help": "Max characters kept from each result snippet an MCP search tool returns; titles and URLs are never cut. 0 keeps snippets whole.",
   "wire.settings.mcp_search_snippet_chars.label": "MCP search snippet length",
   "wire.settings.memory_guard.description": "A per-command RAM ceiling, so one oversized command is killed instead of taking the whole device down.",

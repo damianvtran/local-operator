@@ -646,3 +646,504 @@ def test_is_search_tool(name: str, expected: bool) -> None:
     from local_operator.tools.result_normalize import is_search_tool
 
     assert is_search_tool(name) is expected
+
+
+# --- result shaping v2: glued/truncated link leak (structural-economy §6) ----
+
+
+@pytest.mark.parametrize("mode", ["prose-links", "strip-links"])
+def test_glued_absolute_links_become_their_anchor(mode: str) -> None:
+    """Infobox cells glue a label to its link (``Preceded by[Carolyn
+    Parrish](…)``): the target is absolute, so it is a link, not an index."""
+    line = (
+        "Preceded by[Carolyn Parrish](https://en.wikipedia.org/wiki/Carolyn_Parrish) "
+        "p[Canada](https://en.wikipedia.org/wiki/Canada)"
+    )
+    out = normalize_markdown(line, keep_prose_links=mode == "prose-links")
+    assert out == "Preceded byCarolyn Parrish pCanada"
+
+
+def test_glued_absolute_link_after_a_close_paren_converts() -> None:
+    out = normalize_markdown("Born (1957)[Hong Kong](https://en.wikipedia.org/wiki/HK) x [y](/z)")
+    assert out == "Born (1957)Hong Kong x y"
+
+
+def test_glued_code_stays_byte_identical_beside_glued_links() -> None:
+    """Regression: the glued-link allowance is for ABSOLUTE targets only.
+    ``handlers[name](arg)`` and friends are code and keep every byte, even
+    on a line that also carries a glued absolute link."""
+    code = (
+        "Call handlers[name](arg) or callbacks[0](fn) or f(x)[i](y) or "
+        "self.cb[k](*args) or docs[i](./a.md) or m[k](/root)"
+    )
+    page = (
+        "![](https://px.example/a.gif)\n" + code + "\nTitle[Canada](https://x.example/Canada) end"
+    )
+    out = normalize_markdown(page, keep_prose_links=False)
+    assert out == code + "\nTitleCanada end"
+
+
+@pytest.mark.parametrize("mode", ["prose-links", "strip-links"])
+@pytest.mark.parametrize("terminator", ["", "\n"])
+def test_trailing_unterminated_link_is_cut_to_its_anchor(mode: str, terminator: str) -> None:
+    """A server chunk boundary that lands inside a link target leaves
+    ``[anchor](http…`` with no ``)``; the anchor is the content."""
+    text = (
+        "Olivia Chow is the 66th mayor of Toronto and was preceded in office by "
+        "[John Tory](https://en.wikipedia.org/wiki/John_Tory) and earlier by "
+        "[Rob Ford](https://en.wikipedia.org/wiki/Rob_(polit" + terminator
+    )
+    out = normalize_markdown(text, keep_prose_links=mode == "prose-links")
+    assert out.endswith("earlier by Rob Ford" + terminator)
+    assert "](https://en.wikipedia.org/wiki/Rob_(polit" not in out
+
+
+@pytest.mark.parametrize("cut", ["h", "http", "https:", "https:/", "HTTP:/"])
+def test_link_cut_inside_its_scheme_is_cut_to_its_anchor(cut: str) -> None:
+    """Run 2, rec-006: ``... trailed [Pierre Poilievre](http`` ended a chunk."""
+    text = (
+        "[a](https://x.example/a) and [b](https://x.example/b)\ntrailed [Pierre Poilievre](" + cut
+    )
+    assert normalize_markdown(text, keep_prose_links=False) == "a and b\ntrailed Pierre Poilievre"
+
+
+def test_scheme_cut_tail_is_cut_even_with_no_other_link() -> None:
+    """Regression (replay): the text had no ``//`` link left to pass the gate."""
+    text = "By late 2024 the government trailed [Pierre Poilievre](http"
+    assert normalize_markdown(text) == "By late 2024 the government trailed Pierre Poilievre"
+    assert normalize_markdown("plain text, no links\n") == "plain text, no links\n"
+
+
+def test_trailing_short_non_url_target_keeps_its_bytes() -> None:
+    for tail in ("handlers[name](help", "[x](ftp", "[x](/", "[x]("):
+        text = "[a](https://x.example/a) and [b](https://x.example/b)\n" + tail
+        assert normalize_markdown(text, keep_prose_links=False).endswith(tail)
+
+
+def test_trailing_unterminated_image_is_cut_to_its_alt() -> None:
+    text = (
+        "[a](https://x.example/a) and [b](https://x.example/b)\n![Portrait of Chow](https://img.ex"
+    )
+    assert normalize_markdown(text, keep_prose_links=False) == "a and b\nPortrait of Chow"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # unterminated but NOT at the end of the text block
+        "see [John Tory](https://en.wikipedia.org/wiki/John_T and more text "
+        "[a](https://x.example/a)",
+        # code: unterminated call with a non-URL argument at the end
+        "[a](https://x.example/a)\nresult = handlers[name](arg",
+        # inside a fenced code block at the end
+        "[a](https://x.example/a)\n```\nx = links[0](https://example.com/cut",
+        # inside an inline code span at the end
+        "[a](https://x.example/a)\nuse `[x](https://example.com/cut`",
+    ],
+    ids=["mid-text", "code-call", "fenced", "inline-code"],
+)
+def test_unterminated_link_elsewhere_keeps_its_bytes(text: str) -> None:
+    out = normalize_markdown(text, keep_prose_links=False)
+    # The unterminated ``[..](..`` keeps its bytes wherever it is not a cut tail.
+    tail = text.split("\n")[-1]
+    kept = tail[: tail.index("https://x.example/a")] if text.startswith("see") else tail
+    assert kept.split(" and more")[0] in out
+
+
+def test_trailing_unterminated_link_inside_a_json_page_leaf() -> None:
+    content = (
+        "Olivia Chow is the mayor of Toronto. " * 8
+    ) + "Preceded by [John Tory](https://en.wik"
+    raw = json.dumps({"url": "https://www.toronto.ca/mayor", "content": content})
+    out = json.loads(normalize_tool_text(raw, "prose-links"))
+    assert out["content"].endswith("Preceded by John Tory")
+    assert out["url"] == "https://www.toronto.ca/mayor"
+
+
+# --- result shaping v2: seen-URL snippet elision (structural-economy §2) -----
+
+
+def test_seen_url_key_strips_only_fragment_and_trailing_slash() -> None:
+    from local_operator.tools.result_normalize import seen_url_key
+
+    assert seen_url_key("https://Example.com/a/#top") == "https://Example.com/a"
+    assert seen_url_key("https://example.com/a?x=1") == "https://example.com/a?x=1"
+    assert seen_url_key("http://www.example.com/a") == "http://www.example.com/a"
+
+
+def _elide(text: str, seen: frozenset[str], tool_name: str = "search", **kw: Any) -> str:
+    return normalize_tool_text(
+        text, "prose-links", tool_name=tool_name, search_snippet_chars=400, seen_urls=seen, **kw
+    )
+
+
+def test_seen_hit_keeps_title_and_url_but_drops_its_snippet() -> None:
+    from local_operator.tools.result_normalize import seen_url_key
+
+    raw = json.loads(_TAVILY_SHAPE)
+    # The ledger holds keys; a fragment/trailing-slash variant still matches.
+    seen = frozenset({seen_url_key(raw["results"][0]["url"] + "#section")})
+    out = json.loads(_elide(_TAVILY_SHAPE, seen))
+    first, second = out["results"]
+    assert first == {"title": raw["results"][0]["title"], "url": raw["results"][0]["url"]}
+    assert second["url"] == raw["results"][1]["url"]
+    assert second["snippet"].startswith("Mark Sutcliffe was elected")
+
+
+def test_seen_elision_drops_every_snippet_like_field() -> None:
+    hit = {
+        "title": "T",
+        "url": "https://a.example/x",
+        "content": "c " * 50,
+        "summary": "s",
+        "score": 0.5,
+    }
+    out = json.loads(
+        _elide(json.dumps({"query": "q", "results": [hit]}), frozenset({"https://a.example/x"}))
+    )
+    assert out["results"] == [{"title": "T", "url": "https://a.example/x", "score": 0.5}]
+
+
+def test_seen_elision_never_touches_non_search_tools_or_off_mode() -> None:
+    seen = frozenset({json.loads(_TAVILY_SHAPE)["results"][0]["url"]})
+    assert _elide(_TAVILY_SHAPE, seen, tool_name="fetch") == _TAVILY_SHAPE
+    off = normalize_tool_text(_TAVILY_SHAPE, "off", tool_name="search", seen_urls=seen)
+    assert off == _TAVILY_SHAPE
+
+
+def test_empty_seen_set_is_byte_identical_to_no_elision() -> None:
+    assert _elide(_TAVILY_SHAPE, frozenset()) == _clip(_TAVILY_SHAPE)
+
+
+def test_seen_elision_is_idempotent_for_a_fixed_ledger() -> None:
+    seen = frozenset({json.loads(_TAVILY_SHAPE)["results"][1]["url"]})
+    once = _elide(_TAVILY_SHAPE, seen)
+    assert _elide(once, seen) == once
+
+
+def test_shown_urls_names_hit_and_page_urls_in_order() -> None:
+    from local_operator.tools.result_normalize import shown_urls
+
+    hits = json.loads(_TAVILY_SHAPE)["results"]
+    assert shown_urls(_TAVILY_SHAPE, tool_name="search") == [h["url"] for h in hits]
+    # A non-search tool's hit-shaped list is not a search; nothing is recorded.
+    assert shown_urls(_TAVILY_SHAPE, tool_name="list_issues") == []
+    page = json.dumps({"url": "https://example.com/p", "content": "body", "offset": 0})
+    assert shown_urls(page, tool_name="fetch") == ["https://example.com/p"]
+    assert shown_urls("not json", tool_name="search") == []
+
+
+# --- result shaping v2: JSON -> text rendering (structural-economy §2) -------
+
+
+def _decode_scalar(value: str) -> Any:
+    """Inverse of ``result_normalize._scalar``: JSON when it parses, else the raw string."""
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value
+
+
+def _decode_hits(lines: list[str]) -> list[dict[str, Any]]:
+    """Reference decoder for the rendered hit list (see ``render_result_text``)."""
+    import re
+
+    field = re.compile(r"([A-Za-z_][A-Za-z0-9_.-]*): (.*)\Z")
+    hits: list[dict[str, Any]] = []
+    slot = 0
+    for line in lines:
+        head = re.match(r"(\d+)\. (.*)\Z", line)
+        if head:
+            assert int(head.group(1)) == len(hits) + 1
+            hits.append({"title": _decode_scalar(head.group(2))})
+            slot = 0
+            continue
+        assert line.startswith("   "), line
+        body = line[3:]
+        if slot == 0:
+            hits[-1]["url"] = _decode_scalar(body)
+            slot = 1
+            continue
+        match = field.match(body)
+        if slot == 1 and not match:
+            hits[-1]["snippet"] = _decode_scalar(body)
+            slot = 2
+            continue
+        assert match, body
+        hits[-1][match.group(1)] = _decode_scalar(match.group(2))
+        slot = 2
+    return hits
+
+
+def _decode_search(text: str) -> Any:
+    lines = text.split("\n")
+    if lines[0][:1].isdigit():
+        return _decode_hits(lines)
+    out: dict[str, Any] = {}
+    i = 0
+    while i < len(lines):
+        key, sep, value = lines[i].partition(":")
+        assert sep, lines[i]
+        if value == "":
+            j = i + 1
+            while j < len(lines) and (lines[j][:1].isdigit() or lines[j].startswith("   ")):
+                j += 1
+            out[key] = _decode_hits(lines[i + 1 : j])
+            i = j
+            continue
+        assert value.startswith(" ")
+        out[key] = _decode_scalar(value[1:])
+        i += 1
+    return out
+
+
+def _decode_page(text: str) -> dict[str, Any]:
+    header, sep, content = text.partition("\n\n")
+    assert sep
+    out: dict[str, Any] = {}
+    for line in header.split("\n"):
+        key, _, value = line.partition(": ")
+        out[key] = _decode_scalar(value)
+    out["content"] = content
+    return out
+
+
+def _render(text: str, tool_name: str = "search", mode: str = "prose-links", **kw: Any) -> str:
+    return normalize_tool_text(
+        text, mode, tool_name=tool_name, search_snippet_chars=400, text_rendering=True, **kw
+    )
+
+
+def test_search_hit_list_renders_as_numbered_text_and_decodes_losslessly() -> None:
+    out = _render(_TAVILY_SHAPE)
+    lines = out.split("\n")
+    assert lines[0] == "query: Mark Sutcliffe Ottawa"
+    assert lines[1] == "results:"
+    assert lines[2] == "1. Mark Sutcliffe - result 1"
+    assert lines[3] == "   https://example.com/sutcliffe/1?utm_source=x&id=1"  # url byte-equal
+    assert lines[4].startswith("   Mark Sutcliffe was elected")
+    # Lossless against the JSON this would otherwise have sent.
+    assert _decode_search(out) == json.loads(_clip(_TAVILY_SHAPE))
+
+
+def test_fetch_payload_renders_as_header_plus_raw_content() -> None:
+    content = (
+        '# Olivia Chow\n\nOlivia Chow (born March 24, 1957) is the mayor.\n\n"quoted" \\ tab\t.'
+    )
+    raw = json.dumps(
+        {
+            "url": "https://x.example/chow",
+            "content": content,
+            "offset": 0,
+            "next_offset": None,
+            "total_chars": 81,
+        },
+        indent=2,
+    )
+    out = _render(raw, tool_name="fetch")
+    assert out.startswith(
+        "url: https://x.example/chow\noffset: 0\nnext_offset: null\ntotal_chars: 81\n\n"
+    )
+    assert out.endswith(content)  # raw markdown, no JSON escaping
+    assert _decode_page(out) == json.loads(raw)
+
+
+@pytest.mark.parametrize(
+    "hit",
+    [
+        {"title": "Line\nbreak", "url": "https://a.example/1", "snippet": "Note: a colon prefix"},
+        {"title": "", "url": "https://a.example/2", "snippet": "0"},
+        {"title": "  padded ", "url": "https://a.example/3", "snippet": "true", "score": 0.91},
+        {"title": "T", "url": "https://a.example/4", "score": 1, "rank": "2"},
+        {
+            "url": "https://a.example/5",
+            "title": "Order",
+            "snippet": "s",
+            "tags": ["a", {"b": None}],
+        },
+        {"title": "Lone \ud83d half", "url": "https://a.example/6", "snippet": "x"},
+    ],
+    ids=[
+        "newline+field-like",
+        "empty+numeric",
+        "padded+literal",
+        "extras-only",
+        "nested",
+        "surrogate",
+    ],
+)
+def test_rendering_is_lossless_for_awkward_values(hit: dict[str, Any]) -> None:
+    raw = json.dumps(
+        {"query": "q", "results": [hit, {"title": "B", "url": "https://b.example", "snippet": "s"}]}
+    )
+    out = _render(raw)
+    out.encode("utf-8")
+    assert _decode_search(out) == json.loads(_clip(raw))
+
+
+def test_top_level_hit_list_renders_without_a_header() -> None:
+    raw = json.dumps([_hit(1), _hit(2)])
+    out = _render(raw)
+    assert out.startswith("1. Mark Sutcliffe - result 1\n")
+    assert _decode_search(out) == json.loads(_clip(raw))
+
+
+@pytest.mark.parametrize(
+    ("payload", "tool_name"),
+    [
+        (_TAVILY_SHAPE, "list_issues"),  # a hit-shaped list from a NON-search tool
+        (json.dumps({"web": {"results": [_hit(1)]}}), "search"),  # nested hit list
+        (json.dumps({"q": "x", "a": [_hit(1)], "b": [_hit(2)]}), "search"),  # two hit lists
+        (json.dumps([{"id": 1, "body": "x " * 200}]), "list_issues"),  # arbitrary JSON
+        (json.dumps({"url": "https://x.example", "content": "c", "bad key": 1}), "fetch"),
+        (json.dumps({"url": "https://x.example", "content": "c\ud800"}), "fetch"),
+        (json.dumps({"content": "no url"}), "fetch"),
+    ],
+    ids=[
+        "non-search",
+        "nested",
+        "two-lists",
+        "arbitrary",
+        "bad-key",
+        "surrogate-content",
+        "no-url",
+    ],
+)
+def test_other_shapes_are_never_rendered(payload: str, tool_name: str) -> None:
+    out = _render(payload, tool_name=tool_name)
+    assert out == normalize_tool_text(
+        payload, "prose-links", tool_name=tool_name, search_snippet_chars=400
+    )
+
+
+def test_rendering_off_keeps_json() -> None:
+    assert _clip(_TAVILY_SHAPE) == normalize_tool_text(
+        _TAVILY_SHAPE,
+        "prose-links",
+        tool_name="search",
+        search_snippet_chars=400,
+        text_rendering=False,
+    )
+    assert (
+        normalize_tool_text(_TAVILY_SHAPE, "off", tool_name="search", text_rendering=True)
+        == _TAVILY_SHAPE
+    )
+
+
+def test_rendered_text_that_markdown_would_rewrite_falls_back_to_json() -> None:
+    """Idempotence by construction: a rendering the markdown pass would change
+    on a second trip (a short title still carrying image markup) is not used."""
+    hit = {
+        "title": "Logo ![](https://px.example/1.gif) Chow",
+        "url": "https://a.example",
+        "snippet": "s",
+    }
+    raw = json.dumps({"query": "q", "results": [hit]})
+    out = _render(raw)
+    assert json.loads(out)["results"][0]["title"] == hit["title"]
+
+
+@pytest.mark.parametrize("mode", ["prose-links", "strip-links"])
+def test_rendering_is_idempotent(mode: str) -> None:
+    page = json.dumps({"url": "https://x.example/p", "content": PAGE, "offset": 0})
+    for raw, tool in ((_TAVILY_SHAPE, "search"), (page, "fetch")):
+        once = _render(raw, tool_name=tool, mode=mode)
+        assert once != raw
+        assert _render(once, tool_name=tool, mode=mode) == once
+
+
+# --- result shaping v2: boilerplate section elision (structural-economy §5) --
+
+_WIKI = "\n".join(
+    [
+        "# Olivia Chow",
+        "",
+        "Olivia Chow (born 24 March 1957) is the 66th mayor of Toronto.",
+        "",
+        "## Career",
+        "",
+        "She served on Toronto City Council from 1991 to 2005.",
+        "",
+        "### Notes",
+        "",
+        "1. A footnote that is not a cited fact.",
+        "",
+        "### Electoral record",
+        "",
+        "Won the 2023 by-election.",
+        "",
+        "## See also",
+        "",
+        "* Jack Layton",
+        "",
+        "## References",
+        "",
+        "1. Smith, J. (2023). *Chow wins*.",
+        "",
+        "```",
+        "## Not a heading inside code",
+        "```",
+        "",
+        "## External links",
+        "",
+        "* Official site",
+        "",
+        "## Personal life",
+        "",
+        "Chow married Jack Layton in 1988.",
+        "",
+        "## Further reading",
+        "",
+        "* A book",
+    ]
+)
+
+
+def _page(content: str, url: str = "https://en.wikipedia.org/wiki/Olivia_Chow") -> str:
+    return json.dumps({"url": url, "content": content, "offset": 0, "total_chars": len(content)})
+
+
+@pytest.mark.parametrize("mode", ["prose-links", "strip-links"])
+def test_boilerplate_sections_are_dropped_from_page_content(mode: str) -> None:
+    content = json.loads(normalize_tool_text(_page(_WIKI), mode))["content"]
+    assert content == "\n".join(
+        [
+            "# Olivia Chow",
+            "",
+            "Olivia Chow (born 24 March 1957) is the 66th mayor of Toronto.",
+            "",
+            "## Career",
+            "",
+            "She served on Toronto City Council from 1991 to 2005.",
+            "",
+            "### Electoral record",
+            "",
+            "Won the 2023 by-election.",
+            "",
+            "## Personal life",
+            "",
+            "Chow married Jack Layton in 1988.",
+        ]
+    )
+
+
+def test_section_elision_is_only_for_page_payloads() -> None:
+    # Plain markdown text (a README read, a docs tool) keeps its Notes section.
+    plain = _WIKI + "\n[x](https://x.example)"
+    assert "### Notes" in normalize_tool_text(plain, "prose-links")
+    # A JSON leaf that is not a fetched page keeps it too.
+    issue = json.dumps({"title": "Bug", "body": _WIKI + "\n" + "detail " * 40})
+    assert "## References" in json.loads(normalize_tool_text(issue, "prose-links"))["body"]
+    # A relative/non-web ``url`` is not a fetched page.
+    relative = normalize_tool_text(_page(_WIKI, url="docs/a.md"), "prose-links")
+    assert "## References" in json.loads(relative)["content"]
+    # ``off`` is the identity.
+    assert normalize_tool_text(_page(_WIKI), "off") == _page(_WIKI)
+
+
+def test_section_elision_keeps_nav_chrome_lines_and_is_idempotent() -> None:
+    """Rejected lever (lost a cited fact): short chrome-looking lines stay."""
+    content = "Minister of Foreign Affairs\nShare\nEdit links\n\n## References\n\n* ref"
+    once = normalize_tool_text(_page(content), "prose-links")
+    assert json.loads(once)["content"] == "Minister of Foreign Affairs\nShare\nEdit links"
+    assert normalize_tool_text(once, "prose-links") == once
