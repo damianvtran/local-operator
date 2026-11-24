@@ -5,9 +5,16 @@ Why: on a windows-latest runner every roster write raised PermissionError from
 descriptor — so the parent-directory fsync must be POSIX-only. POSIX keeps its
 strict semantics (a refused directory sync still fails the write), and the
 publish step rides out a transient Windows sharing violation on ``os.replace``
-for a bounded number of attempts. These tests simulate the non-POSIX branch by
+for a bounded number of attempts.
+
+The tests are host-agnostic: both branches are exercised on every host by
 swapping the session module's ``os`` binding for a forwarding stand-in that
-reports ``name == "nt"`` (see ``_pretend_non_posix``).
+reports the platform under test (``_pretend_posix`` / ``_pretend_non_posix``),
+and no test forwards a directory ``os.open`` to the host (Windows refuses it).
+No test reads the real ``os.name`` except to capture it as ``host`` and assert
+the swap did not leak into the interpreter. Earlier revisions asserted
+``os.name == "posix"`` and relied on the host for the POSIX cases, so all six
+tests failed on a windows-latest runner.
 """
 
 from __future__ import annotations
@@ -43,7 +50,7 @@ def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return sleeps
 
 
-class _NonPosixOs:
+class _PlatformOs:
     """Forward every attribute to the real ``os`` except ``name``.
 
     Why not ``monkeypatch.setattr(os, "name", "nt")``: that flips the global
@@ -56,7 +63,8 @@ class _NonPosixOs:
     ...)`` on the real module is still seen through the stand-in.
     """
 
-    name = "nt"
+    def __init__(self, name: str) -> None:
+        self.name = name
 
     def __getattr__(self, attribute: str):
         return getattr(os, attribute)
@@ -64,7 +72,13 @@ class _NonPosixOs:
 
 def _pretend_non_posix(monkeypatch: pytest.MonkeyPatch) -> None:
     # monkeypatch restores the binding at teardown, even when the write raises.
-    monkeypatch.setattr(session_module, "os", _NonPosixOs())
+    monkeypatch.setattr(session_module, "os", _PlatformOs("nt"))
+
+
+def _pretend_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Symmetric to _pretend_non_posix: without it the POSIX-behaviour tests
+    # would follow the real host and take the non-POSIX branch on Windows.
+    monkeypatch.setattr(session_module, "os", _PlatformOs("posix"))
 
 
 def _refuse_directory_open(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -83,10 +97,11 @@ def _refuse_directory_open(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def test_non_posix_skips_directory_fsync(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    host = os.name
     refused = _refuse_directory_open(monkeypatch)
     _pretend_non_posix(monkeypatch)
     _write_roster_sidecar(target, PAYLOAD)
-    assert os.name == "posix"
+    assert os.name == host  # the simulation stayed local to the session module
     assert json.loads(target.read_text(encoding="utf-8")) == PAYLOAD
     assert refused == []
     assert _leftover_temps(target.parent) == []
@@ -95,11 +110,13 @@ def test_non_posix_skips_directory_fsync(monkeypatch: pytest.MonkeyPatch, target
 def test_posix_directory_fsync_failure_still_raises(
     monkeypatch: pytest.MonkeyPatch, target: Path
 ) -> None:
-    assert os.name == "posix"
+    host = os.name
     refused = _refuse_directory_open(monkeypatch)
+    _pretend_posix(monkeypatch)
     with pytest.raises(PermissionError):
         _write_roster_sidecar(target, PAYLOAD)
     assert refused == [str(target.parent)]
+    assert os.name == host
 
 
 def test_posix_directory_fsync_oserror_propagates(
@@ -109,10 +126,15 @@ def test_posix_directory_fsync_oserror_propagates(
     directory_fds: set[int] = set()
 
     def open_spy(path, flags, *args, **kwargs):
-        fd = real_open(path, flags, *args, **kwargs)
         if os.path.isdir(path):
+            # Never forward the directory open to the host: Windows refuses
+            # ``os.open(<dir>, O_RDONLY)`` with PermissionError before the
+            # fsync spy runs (PR #4544 R1). os.devnull opens on every host and
+            # gives a real fd for the product's ``finally: os.close`` to close.
+            fd = real_open(os.devnull, os.O_RDONLY)
             directory_fds.add(fd)
-        return fd
+            return fd
+        return real_open(path, flags, *args, **kwargs)
 
     def fsync(fd: int) -> None:
         if fd in directory_fds:
@@ -121,8 +143,11 @@ def test_posix_directory_fsync_oserror_propagates(
 
     monkeypatch.setattr(os, "open", open_spy)
     monkeypatch.setattr(os, "fsync", fsync)
+    host = os.name
+    _pretend_posix(monkeypatch)
     with pytest.raises(OSError, match="Invalid argument"):
         _write_roster_sidecar(target, PAYLOAD)
+    assert os.name == host
     assert len(directory_fds) == 1
     # The rename already happened before the directory sync, as before.
     assert json.loads(target.read_text(encoding="utf-8")) == PAYLOAD
@@ -141,9 +166,10 @@ def test_non_posix_replace_retries_transient_sharing_violation(
         real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", flaky)
+    host = os.name
     _pretend_non_posix(monkeypatch)
     _write_roster_sidecar(target, PAYLOAD)
-    assert os.name == "posix"
+    assert os.name == host
     assert len(calls) == 3
     assert len(_no_sleep) == 2
     assert json.loads(target.read_text(encoding="utf-8")) == PAYLOAD
@@ -160,10 +186,11 @@ def test_non_posix_replace_gives_up_after_bounded_attempts(
         raise PermissionError(13, "sharing violation", os.fspath(dst))
 
     monkeypatch.setattr(os, "replace", refuse)
+    host = os.name
     _pretend_non_posix(monkeypatch)
     with pytest.raises(PermissionError):
         _write_roster_sidecar(target, PAYLOAD)
-    assert os.name == "posix"
+    assert os.name == host
     assert len(calls) == session_module._ROSTER_REPLACE_ATTEMPTS
     assert sum(_no_sleep) < 0.5
     assert not target.exists()
@@ -180,8 +207,11 @@ def test_posix_replace_permission_error_is_not_retried(
         raise PermissionError(13, "Permission denied", os.fspath(dst))
 
     monkeypatch.setattr(os, "replace", refuse)
+    host = os.name
+    _pretend_posix(monkeypatch)
     with pytest.raises(PermissionError):
         _write_roster_sidecar(target, PAYLOAD)
+    assert os.name == host
     assert len(calls) == 1
     assert _no_sleep == []
     assert _leftover_temps(target.parent) == []
