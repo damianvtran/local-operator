@@ -1177,3 +1177,28 @@ def test_the_scan_is_linear_in_the_text():
         cost(("```\nx\n```\n" * 2000) + "a-745e"),
     )
     assert full < max(quarter * 8, 0.02), (quarter, full)
+
+
+def test_ask_is_a_registered_frontend_local_slash_command() -> None:
+    """Review round 8: `/ask` acts on THIS terminal's ask list.
+
+    The list it moves the cursor in, the scope it re-points and the notice it
+    paints are all painted by this frontend, so the command is advertised as
+    ``FRONTEND_LOCAL`` — the runtime has no list to move. Without the
+    classification the capability surface advertised an authoritative command
+    the runtime never dispatched (merge gate, 3.13 shard).
+    """
+    from local_operator.session.frontend_state import (
+        _FRONTEND_LOCAL_SLASHES,
+        CommandScope,
+        _slash_capabilities,
+    )
+    from local_operator.slash_commands import SLASH_COMMANDS, slash_command_for
+
+    command = slash_command_for("/ask")
+    assert command is not None
+    assert command.name == "ask"
+    assert "ask" in _FRONTEND_LOCAL_SLASHES
+    assert "ask" in {entry.name for entry in SLASH_COMMANDS}
+    capabilities = _slash_capabilities()
+    assert next(c for c in capabilities if c.command == "ask").scope == CommandScope.FRONTEND_LOCAL
