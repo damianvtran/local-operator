@@ -303,7 +303,7 @@ class _FakeHandoff:
 #: * the OTHER candidate is bound too, so a console that reached either one meets
 #:   the impostor instead of a free port.
 _IMPOSTOR = textwrap.dedent("""
-    import hashlib, json, os, select, socket, sys, tempfile
+    import hashlib, json, os, selectors, socket, sys, tempfile
     from pathlib import Path
     root = Path(sys.argv[1])
     out = Path(sys.argv[2])
@@ -354,7 +354,13 @@ _IMPOSTOR = textwrap.dedent("""
     # Ready to be contacted; the marker goes out BEFORE the wait, so the test
     # knows the listener is bound rather than waiting out its own deadline.
     Path(sys.argv[3]).write_text("ready")
-    ready, _w, _x = select.select([listener for listener, _p in listeners], [], [], 25.0)
+    # selectors, not select.select: the latter caps at fd 1024 (see
+    # tests/fd_readiness.py); this child starts with few fds, but the scan in
+    # tests/unit/test_no_select_select.py keeps the whole tree on one rule.
+    with selectors.DefaultSelector() as waiter:
+        for listener, _p in listeners:
+            waiter.register(listener, selectors.EVENT_READ)
+        ready = [key.fileobj for key, _m in waiter.select(25.0)]
     if ready:
         listener = ready[0]
         conn, _ = listener.accept()
