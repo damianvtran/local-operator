@@ -1,6 +1,6 @@
 {
   "relay.approvals.card.always_ask": "ہمیشہ پوچھیں",
-  "relay.approvals.card.guardrails_still_apply": "گارڈ ریل کے انکار اور خطرناک حذف کا جائزہ بدستور لاگو رہتے ہیں۔",
+  "relay.approvals.card.guardrails_still_apply": "حفاظتی اصولوں کے انکار اور خطرناک حذف کا جائزہ بدستور لاگو رہتے ہیں۔",
   "relay.approvals.card.notice_session_auto": "یہ سیشن اب auto ہے",
   "relay.approvals.card.request_needs_answer": "اس درخواست کا جواب ابھی دینا باقی ہے۔",
   "relay.approvals.card.set_auto_all": "تمام سیشنز کو خودکار منظوری دیں",

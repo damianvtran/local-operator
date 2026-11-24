@@ -1,10 +1,10 @@
 {
   "relay.approvals.card.always_ask": "Luôn hỏi",
-  "relay.approvals.card.guardrails_still_apply": "Các từ chối của quy tắc bảo vệ và bước xem xét lệnh xóa nguy hiểm vẫn được áp dụng.",
+  "relay.approvals.card.guardrails_still_apply": "Các lần từ chối của quy tắc bảo vệ và bước xem xét lệnh xóa nguy hiểm vẫn được áp dụng.",
   "relay.approvals.card.notice_session_auto": "phiên này giờ là auto",
   "relay.approvals.card.request_needs_answer": "Yêu cầu này vẫn đang chờ bạn trả lời.",
-  "relay.approvals.card.set_auto_all": "Tự động duyệt mọi phiên",
-  "relay.approvals.card.set_auto_session": "Tự động duyệt phiên này",
+  "relay.approvals.card.set_auto_all": "Tự động phê duyệt mọi phiên",
+  "relay.approvals.card.set_auto_session": "Tự động phê duyệt phiên này",
   "relay.approvals.card.still_needs_answer": "Lệnh gọi này vẫn đang chờ bạn trả lời.",
   "relay.approvals.gate.body_scope.after": "sau đó.",
   "relay.approvals.gate.body_scope.before": "Hai lựa chọn đầu chỉ đổi",
