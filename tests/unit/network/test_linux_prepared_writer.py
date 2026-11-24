@@ -12,7 +12,6 @@ import contextlib
 import dataclasses
 import multiprocessing
 import os
-import select
 import socket
 import sys
 import threading
@@ -28,6 +27,7 @@ from local_operator.network.linux_prepared_writer import (
     LinuxPreparedRecordWriter,
 )
 from local_operator.network.wire import FrameReader, LinkCrypto, LinkKeys
+from tests import fd_readiness
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux mechanics only")
 
@@ -676,7 +676,7 @@ def test_invalid_input_refuses_before_boundary_or_send(kwargs):
             with pytest.raises(TypeError):
                 writer.write_record(**values)
             assert boundary.entries == 0
-            assert not select.select([peer], [], [], 0)[0]
+            assert not fd_readiness.is_readable(peer, 0)
         finally:
             writer.close()
 
@@ -889,7 +889,7 @@ def test_positive_timeout_control_and_kernel_mode_race():
                 try:
                     accepted += duplicate.send(b"x" * 65536, socket.MSG_DONTWAIT)
                 except BlockingIOError:
-                    if not select.select([], [duplicate], [], 0.02)[1]:
+                    if not fd_readiness.is_writable(duplicate, 0.02):
                         break
             started = time.monotonic()
             with pytest.raises(TimeoutError):
