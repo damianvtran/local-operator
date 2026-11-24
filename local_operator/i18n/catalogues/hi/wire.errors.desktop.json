@@ -28,7 +28,7 @@
   "wire.errors.desktop.claim_origin_outside_configured": "दावा कॉन्फ़िगर किए गए डेस्कटॉप ऑरिजिन के बाहर कोई ऑरिजिन नहीं जोड़ सकता।",
   "wire.errors.desktop.claim_origin_wildcard": "वाइल्डकार्ड ऑरिजिन पर दावा नहीं किया जा सकता।",
   "wire.errors.desktop.claim_origins_not_list": "दावा बॉडी का 'origins' सूची होना चाहिए।",
-  "wire.errors.desktop.conversation_deleted": "यह बातचीत हटा दी गई है, इसलिए अब इस सवाल का जवाब नहीं दिया जा सकता। इसके बजाय इसे हटाएँ या अस्वीकार करें।",
+  "wire.errors.desktop.conversation_deleted": "यह बातचीत मिटा दी गई है, इसलिए अब इस सवाल का जवाब नहीं दिया जा सकता। इसके बजाय इसे हटाएँ या अस्वीकार करें।",
   "wire.errors.desktop.conversations_unreadable": "अभी बातचीतें पढ़ी नहीं जा सकीं। यह अपने आप ठीक हो जाता है; थोड़ी देर में फिर कोशिश करें।",
   "wire.errors.desktop.credential_operation_failed": "क्रेडेंशियल कार्रवाई पूरी नहीं हुई",
   "wire.errors.desktop.cwd_marker_read_failed": "सत्र की कार्य-डायरेक्टरी मार्कर पढ़ी नहीं जा सकी: {error}",
