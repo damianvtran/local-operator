@@ -537,6 +537,17 @@ def _history(config_dir) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _history_columns(config_dir) -> list[str]:
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        return [row[1] for row in conn.execute("PRAGMA table_info(screening_receipt_history)")]
+
+
+def _history_row_ref(config_dir) -> tuple[int, str]:
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        row = conn.execute("SELECT history_id, model FROM screening_receipt_history").fetchone()
+    return int(row[0]), str(row[1])
+
+
 def _live(store, owner) -> Policy:
     """The rig policy object matching the store's live revision."""
 
@@ -655,6 +666,14 @@ def test_only_a_fully_current_preferred_allow_may_supersede(
     for damaged in ("", "not json", '{"a": 1}', '["personal_info_request"]'):
         _tamper(config_dir, "categories", damaged)
         assert _classify(config_dir, store, owner, _fresh(prior)) is None, damaged
+    # #4533 m2: every integrity check runs on a STALE row, not only categories.
+    _tamper(config_dir, "categories", "[]")
+    assert _classify(config_dir, store, owner, _fresh(prior)) == "supersede"  # control
+    for column in ("creator_generation", "policy_epoch"):
+        original = _receipt_row(config_dir)[column]
+        _tamper(config_dir, column, "not-a-number")
+        assert _classify(config_dir, store, owner, _fresh(prior)) is None, column
+        _tamper(config_dir, column, original)
     assert _history(config_dir) == []
 
 
@@ -815,11 +834,40 @@ def test_receipt_history_is_append_only_and_additive(
         ):
             with pytest.raises(sqlite3.IntegrityError, match="append-only"):
                 conn.execute(statement)
+    # S-1 / Q-1: REPLACE's implicit delete fires no DELETE trigger, so an
+    # explicit existing ``history_id`` must be refused at INSERT.
+    history_id, model = _history_row_ref(config_dir)
+    columns = _history_columns(config_dir)
+    forged = ", ".join("'FORGED'" if name == "model" else name for name in columns)
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        for verb in ("INSERT OR REPLACE INTO", "REPLACE INTO"):
+            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                conn.execute(
+                    f"{verb} screening_receipt_history ({', '.join(columns)}) "
+                    f"SELECT {forged} FROM screening_receipt_history WHERE history_id = ?",
+                    (history_id,),
+                )
+    assert _history_row_ref(config_dir) == (history_id, model) and model != "FORGED"
     assert len(_history(config_dir)) == 1
+    # A table created before the INSERT trigger existed gains it on the next
+    # supersession's ensure, the only writer, before it writes.
+    from local_operator.team_bridge.store import _ensure_receipt_history_table
+
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("DROP TRIGGER screening_receipt_history_no_replace")
+        _ensure_receipt_history_table(conn)
+        triggers = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name = 'screening_receipt_history'"
+            )
+        }
+    assert "screening_receipt_history_no_replace" in triggers
     # Additive, never part of the damage floor: a store without it still opens.
     assert "screening_receipt_history" not in _V3_TABLES
     with sqlite3.connect(state_db_path(config_dir)) as conn:
-        for verb in ("update", "delete"):
+        for verb in ("update", "delete", "replace"):
             conn.execute(f"DROP TRIGGER screening_receipt_history_no_{verb}")
         conn.execute("DROP TABLE screening_receipt_history")
     assert store.current_screening_policy(owner) is not None
@@ -912,6 +960,25 @@ def test_an_owner_deliver_never_overrides_a_screener_reject(
     assert _receipt_row(config_dir) == prior and _history(config_dir) == []
     lines = [r.getMessage() for r in caplog.records if "write_once_conflict:" in r.getMessage()]
     assert lines and "path=owner_release" in lines[0] and "differing=" in lines[0]
+
+
+def test_an_owner_deliver_never_supersedes_a_damaged_screener_allow(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    """#4533 m2: readable empty categories are not enough. A committed allow
+    that ``receipt_authority`` classifies CORRUPT (here a creator generation
+    that is not a number) keeps its head and gets no history, exactly as on
+    the screener path."""
+
+    config_dir, store, owner = rig
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _decide(config_dir, owner, "deliver")
+    _screener_receipt(config_dir, store, owner)
+    _tamper(config_dir, "creator_generation", "not-a-number")
+    prior = _receipt_row(config_dir)
+    out = _screen(config_dir, owner, Runner(DELIVER))
+    assert out.disposition == "hold"
+    assert _receipt_row(config_dir) == prior and _history(config_dir) == []
 
 
 def test_an_unverified_release_cannot_move_the_head(

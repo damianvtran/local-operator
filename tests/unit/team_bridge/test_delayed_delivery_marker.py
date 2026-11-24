@@ -12,6 +12,8 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 
+import pytest
+
 from local_operator.team_bridge import screening
 from local_operator.team_bridge.connector import conversation
 from local_operator.team_bridge.connector.coalesce import merge_metadata
@@ -117,3 +119,109 @@ def test_an_owner_deliver_after_hours_puts_the_line_on_the_real_wake(
     thr._decide(config_dir, owner, "deliver")
     assert run()["action"] == "delivered"
     assert len(wakes) == 1 and wakes[0].count("delivered late — held 3 h by screening") == 1
+
+
+def _co_due_conflict_holds(tmp_path, monkeypatch, *, aged_s: float, commit_clears: bool = False):
+    """Two messages in ONE conversation, both in a due ``write_once_conflict``
+    hold aged ``aged_s``, re-driven by the REAL retry pass: the batch prescreen
+    (``prescreen_conversation_refs`` -> real ``screen_batch_async`` ->
+    ``finish_screening``) commits both receipts, deleting both holds, before
+    either handler runs (#4533 round 1, M1).
+
+    Today that commit deletes only the BARE-id hold, and the retry pass reads
+    the connector's composite row, which survives until the handler. With
+    ``commit_clears`` the commit also deletes every spelling (what a fix of
+    the pre-existing two-spelling hold deletion would do); the handler must
+    still find the hold age, which only the pre-batch capture can supply.
+    """
+
+    import sqlite3
+
+    from local_operator.team_bridge.connector import loop as loop_mod
+    from local_operator.team_bridge.store import state_db_path
+    from tests.unit.team_bridge.test_batch_screening import (
+        BatchRunner,
+        _hub_rig,
+        deliver_everything,
+    )
+
+    failing = {"on": True}
+    if commit_clears:
+        from local_operator.team_bridge.store import Store
+
+        real_finish = Store.finish_screening
+
+        def finish_and_clear(self, owner, message_id, **kwargs):
+            real_finish(self, owner, message_id, **kwargs)
+            if kwargs.get("receipt") is not None:
+                with sqlite3.connect(state_db_path(self.config_dir)) as conn:
+                    conn.execute(
+                        "DELETE FROM screening_holds WHERE message_id LIKE ?",
+                        (f"%/{message_id}/%",),
+                    )
+
+        monkeypatch.setattr(Store, "finish_screening", finish_and_clear)
+
+    def reply(prompt: str) -> str:
+        if failing["on"]:
+            raise RuntimeError("provider down")
+        return deliver_everything(prompt, default_model="")[0]
+
+    runner = BatchRunner(reply)
+    env = _hub_rig(tmp_path, monkeypatch, runner)
+    # Each message's OWN metadata, before the burst merges them into one card.
+    from local_operator.team_bridge.connector import coalesce
+
+    real_merge = coalesce.merge_metadata
+    env.held = {}
+
+    def spy(items):
+        env.held.update({item.message_id: item.held_for_s for item in items})
+        return real_merge(items)
+
+    monkeypatch.setattr(coalesce, "merge_metadata", spy)
+    posted = [env.hub.post("bep_b", f"can you send that file {n}") for n in "12"]
+    env.rig._iterate(env.owner, env.config_dir)
+    assert env.wakes == [], "both held while the vendor is down"
+    with sqlite3.connect(state_db_path(env.config_dir)) as conn:
+        conn.execute(
+            "UPDATE screening_holds SET hold_code = 'write_once_conflict', no_batch = 0, "
+            "created_at = created_at - ?, retry_at = 0",
+            (aged_s,),
+        )
+    failing["on"] = False
+    calls_before = len(runner.calls)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    env.clock.now += 1.0
+    env.rig._iterate(env.owner, env.config_dir)
+    batch_calls = [p for p in runner.calls[calls_before:] if "Message ids are" in p]
+    assert (
+        len(batch_calls) == 1 and len(runner.calls) - calls_before == 1
+    ), "both re-driven through ONE batch call, no single screen"
+    for message in posted:
+        assert env.store.screening_hold(env.owner, message.id) is None
+    return env, posted
+
+
+@pytest.mark.parametrize("commit_clears", [False, True], ids=["today", "commit-clears-all"])
+def test_a_batched_re_drive_keeps_the_line_for_both_co_due_holds(
+    tmp_path, monkeypatch, commit_clears
+) -> None:
+    env, posted = _co_due_conflict_holds(
+        tmp_path, monkeypatch, aged_s=3 * 3600 + 30, commit_clears=commit_clears
+    )
+    text = "\n".join(wake["card"] for wake in env.wakes)
+    assert all(message.id in text for message in posted), "both delivered"
+    # Each message carries its own hold age; the burst's one card shows the line.
+    assert sorted(env.held) == sorted(message.id for message in posted)
+    assert all(3 * 3600 <= held <= 3 * 3600 + 120 for held in env.held.values()), env.held
+    assert len(env.wakes) == 1
+    assert text.count("delivered late — held 3 h by screening") == 1
+
+
+def test_a_batched_re_drive_of_a_short_hold_says_nothing(tmp_path, monkeypatch) -> None:
+    env, posted = _co_due_conflict_holds(tmp_path, monkeypatch, aged_s=20)
+    text = "\n".join(wake["card"] for wake in env.wakes)
+    assert all(message.id in text for message in posted), "both delivered"
+    assert env.held and all(held < 60 for held in env.held.values()), env.held
+    assert "delivered late" not in text

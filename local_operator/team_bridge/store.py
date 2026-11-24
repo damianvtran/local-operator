@@ -691,12 +691,25 @@ def _ensure_receipt_history_table(conn: sqlite3.Connection) -> None:
     receipt is never rewritten" is kept by copying the prior row here
     VERBATIM, inside the same write transaction, before the head moves.
 
-    APPEND-ONLY BY CONSTRUCTION. Two triggers abort any UPDATE or DELETE, so
-    no code path — including a future one written in ignorance of this
-    docstring — can rewrite or drop history; removing them takes a deliberate
-    migration. No purge or re-enrolment sweep deletes ``screening_receipts``
-    today (re-enrolment invalidates receipts through ``creator_generation``),
-    so history has the same lifetime as the receipts it records.
+    APPEND-ONLY BY CONSTRUCTION. Triggers abort any UPDATE or DELETE, and any
+    INSERT naming a ``history_id`` that already exists. The INSERT one is
+    needed because ``INSERT OR REPLACE`` / ``REPLACE INTO`` resolves the key
+    conflict by an implicit delete that does NOT fire DELETE triggers
+    (``recursive_triggers`` is off), so without it a REPLACE rewrote a row in
+    place (PR #4533 round 1, S-1 / Q-1). The only shipped writer,
+    :func:`_supersede_receipt`, never names a ``history_id``. Within SQL these
+    are the statements that can change a row; removing a trigger takes a
+    deliberate migration. They bind statements, not the file: anyone who can
+    write the database file can still rewrite it.
+
+    LIFETIME. No purge or re-enrolment sweep deletes ``screening_receipts``
+    (re-enrolment invalidates receipts through ``creator_generation``). The one
+    ``DELETE FROM screening_receipts`` is :meth:`Store.retire_unsent_fallback_allow`,
+    a targeted retirement of a NON-preferred allow whose template is not the
+    owner-release template, and only while no handoff exists. A head that has
+    history was put there by a supersession, which writes only a
+    ``screener_preferred = 1`` allow or the owner-release template, so that
+    retirement can never delete a head with history and orphan its rows.
 
     ADDITIVE, NOT IN ``_V3_TABLES``. Registering it there would make every
     existing stamped store "damaged" (the V3 floor refuses before any DDL) and
@@ -747,6 +760,15 @@ def _ensure_receipt_history_table(conn: sqlite3.Connection) -> None:
             f"BEFORE {verb} ON screening_receipt_history "
             "BEGIN SELECT RAISE(ABORT, 'screening_receipt_history is append-only'); END"
         )
+    # ``IF NOT EXISTS`` on its own statement, so a table created by an earlier
+    # head of this PR (UPDATE/DELETE triggers only) gains it on the next call.
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS screening_receipt_history_no_replace "
+        "BEFORE INSERT ON screening_receipt_history "
+        "WHEN NEW.history_id IS NOT NULL AND EXISTS ("
+        "SELECT 1 FROM screening_receipt_history WHERE history_id = NEW.history_id) "
+        "BEGIN SELECT RAISE(ABORT, 'screening_receipt_history is append-only'); END"
+    )
 
 
 def _supersede_receipt(
@@ -1459,6 +1481,50 @@ def is_owner_principal(owner: OwnerSnapshot, sender_account: str, sender_kind: s
     )
 
 
+def receipt_integrity(receipt: Mapping[str, Any]) -> tuple[list[str] | None, str]:
+    """The INTEGRITY half of :func:`receipt_authority`, independent of currency.
+
+    ``(decoded_categories, "")`` for a row whose own bytes are well formed, or
+    ``(None, note)`` for damage: a non-numeric epoch or creator generation,
+    categories that do not decode to a list from the closed set, an unknown
+    verdict, or an ``allow`` carrying categories.
+
+    WHY SEPARATE (PR #4533 round 1, m2). ``receipt_authority`` answers STALE
+    before it reaches these checks, which is right for admission (a stale row
+    admits nothing either way) but wrong for the two write-once supersession
+    paths, whose subject IS a stale row: "a damaged row never supersedes"
+    needs the damage checks on a stale row too. ``receipt_authority`` calls
+    this for its own tail, so there is ONE copy of the checks.
+    """
+
+    if (
+        _receipt_int(receipt.get("policy_epoch"), -1) is None
+        or _receipt_int(receipt.get("creator_generation"), -1) is None
+    ):
+        return None, "epoch or creator generation is not a number"
+    try:
+        decoded = _decode_categories_text(receipt.get("categories"))
+    except StoreRefused as refusal:
+        # The decoder's own sentence ("empty categories text" / "categories
+        # decode failed" / "categories not a list"): unchanged from before the
+        # refactor, when it propagated straight out of the consume path.
+        return None, str(refusal)
+    if (
+        not isinstance(decoded, list)
+        or not all(isinstance(item, str) for item in decoded)
+        or not set(decoded) <= _CLOSED_CATEGORIES
+    ):
+        # Unknown category strings (or wrong shapes) can never be handed to a
+        # receipt: typed uncertainty, zero spend.
+        return None, "categories failed validation"
+    verdict = receipt.get("verdict")
+    if verdict not in ("allow", "reject"):
+        return None, "unknown verdict"
+    if verdict == "allow" and decoded:
+        return None, "allow verdict with categories"
+    return decoded, ""
+
+
 def receipt_authority(
     owner: OwnerSnapshot,
     policy: Mapping[str, Any],
@@ -1569,26 +1635,10 @@ def receipt_authority(
         epoch_bound and policy_epoch != receipt_epoch
     ) or creator_generation != owner.enrollment_generation:
         return None, RECEIPT_STALE, ""
-    try:
-        decoded = _decode_categories_text(receipt.get("categories"))
-    except StoreRefused as refusal:
-        # The decoder's own sentence ("empty categories text" / "categories
-        # decode failed" / "categories not a list"): unchanged from before the
-        # refactor, when it propagated straight out of the consume path.
-        return None, RECEIPT_CORRUPT, str(refusal)
-    if (
-        not isinstance(decoded, list)
-        or not all(isinstance(item, str) for item in decoded)
-        or not set(decoded) <= _CLOSED_CATEGORIES
-    ):
-        # Unknown category strings (or wrong shapes) can never be handed to a
-        # receipt: typed uncertainty, zero spend.
-        return None, RECEIPT_CORRUPT, "categories failed validation"
+    decoded, note = receipt_integrity(receipt)
+    if decoded is None:
+        return None, RECEIPT_CORRUPT, note
     verdict = receipt.get("verdict")
-    if verdict not in ("allow", "reject"):
-        return None, RECEIPT_CORRUPT, "unknown verdict"
-    if verdict == "allow" and decoded:
-        return None, RECEIPT_CORRUPT, "allow verdict with categories"
     return (
         {
             "verdict": verdict,
@@ -9218,11 +9268,11 @@ class Store:
                 return "replay"
             return None
         # STALE. Integrity of the committed row still matters: receipt_authority
-        # answers STALE before it decodes categories, so check them here — a
-        # damaged "allow" is never something to supersede quietly.
-        try:
-            committed_categories = _decode_categories_text(existing["categories"])
-        except StoreRefused:
+        # answers STALE before its damage checks, so run them here (all of
+        # them, m2 — not only categories): a damaged "allow" is never
+        # something to supersede quietly.
+        committed_categories, _damage_note = receipt_integrity(dict(existing))
+        if committed_categories is None:
             return None
         if (
             existing["verdict"] == "allow"
@@ -11319,10 +11369,25 @@ class Store:
             and existing["template_sha256"] not in (_owner_release_sha256(), OWNER_PRINCIPAL_SHA256)
         ):
             return False
-        try:
-            if _decode_categories_text(existing["categories"]) != []:
-                return False
-        except StoreRefused:
+        # A DAMAGED committed row never supersedes (PR #4533 round 1, m2): the
+        # same two checks the screener path makes (``_write_once_transition``):
+        # ``receipt_authority`` (epoch waived) must not say CORRUPT, and, since
+        # it answers STALE before its damage checks, ``receipt_integrity`` on
+        # the row itself. Categories alone missed a malformed generation or
+        # epoch. STALE is fine: the owner's verified Deliver is exactly what
+        # replaces a stale allow.
+        committed_categories, _damage_note = receipt_integrity(dict(existing))
+        if committed_categories != []:
+            return False
+        policy = conn.execute(
+            "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+        ).fetchone()
+        if policy is None:
+            return False
+        _decoded, damage, _note = receipt_authority(
+            owner, dict(policy), dict(existing), epoch_bound=False
+        )
+        if damage == RECEIPT_CORRUPT:
             return False
         self._ensure_work_scope_tables(conn)
         release = self._verified_release(conn, key, message_id)

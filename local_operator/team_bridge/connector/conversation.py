@@ -85,6 +85,7 @@ from .batch_screen import (
     allocation_for,
     came_from_void_batch,
     take_fetched,
+    take_prior_hold,
     take_result,
 )
 from .coalesce import CARD_COALESCED, card_is_buffered
@@ -3400,7 +3401,10 @@ async def handle_conversation_available(
         # A batch screen of THIS body hash in this pass is this message's own
         # verdict (one call, one verdict per message); anything else screens
         # here, unchanged.
-        prior_hold = prior_delay_hold(store, owner, message_id)
+        # A batch pass may already have committed this message's receipt and
+        # deleted its hold (M1), so its pre-batch capture wins; otherwise the
+        # hold rows are still here to read.
+        prior_hold = take_prior_hold(ref) or prior_delay_hold(store, owner, message_id)
         result = take_result(ref, body_hash) or await screen_item(
             owner, item, config_dir=config_dir, auth_store=auth_store, settings=settings
         )
