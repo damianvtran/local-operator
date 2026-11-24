@@ -116,6 +116,8 @@ def format_search_status(manager: ConfigManager, config_dir: Path | None) -> str
         provider_statuses,
         state_legend,
     )
+    from rich.cells import cell_len
+
     from local_operator.web_search.service import load_search_settings
 
     settings = load_search_settings(manager)
@@ -131,14 +133,18 @@ def format_search_status(manager: ConfigManager, config_dir: Path | None) -> str
         f"chain: {chain_label(statuses)}"
     )
     rows = [header]
-    for status in statuses:
+    # The state column is as wide as its widest word, in CELLS: the keyed words
+    # (`auto Radient credits`, and every translation) can outrun the old fixed
+    # 16-character pad, which pushed that row's columns out of line.
+    states = [provider_state_label(status) for status in statuses]
+    width = max([16, *(cell_len(state) for state in states)])
+    for status, state in zip(statuses, states):
         # ONE state column, no readiness column: a provider that cannot serve is
         # never in a chain, so `off`/`setup needed` said the same thing twice on
         # every such row (round-1 D6). The words and meanings come from
         # providers.py, and the legend below defines them in place.
-        rows.append(
-            f"{status.id:<12} {provider_state_label(status):<16} {status.access} | {status.detail}"
-        )
+        pad = " " * (width - cell_len(state))
+        rows.append(f"{status.id:<12} {state}{pad} {status.access} | {status.detail}")
     rows.append("Setup: local-operator search setup <provider>")
     # The legend is scoped to the states these rows actually paint: the full table
     # costs 526 cells and defines states this install does not have (round-3 D3-3).
