@@ -891,6 +891,70 @@ async def test_split_a_role_effort_tag_edit_that_crosses_providers_is_refused_wi
 
 
 @pytest.mark.asyncio
+async def test_split_a_resume_under_a_live_bound_parent_keeps_its_ceiling_after_root_clears_team(
+    tmp_path, monkeypatch
+):
+    """The ``target.authority`` hinge in ``SubagentComms`` resume.
+
+    A resume passes the LAUNCH PARENT's ``/team`` snapshot to
+    ``_resolve_subagent_selection``; without it the resolver falls back to the
+    ROOT's own binding. The two only differ when the launch parent is a live
+    bound child and the root has since run ``/team clear`` -- exactly the shape
+    here, and the only one where dropping the hinge is observable (every other
+    resume test resumes under a still-bound root, so the fallback hides it).
+
+    Shape: the root binds ``teamwork``; a ``task`` child (which inherits the
+    bound authority) stays live and launches a ``worker`` grandchild on the
+    snapshotted ``lo`` tag; the root clears ``/team``; the worker's tag is
+    re-pinned to ``hi`` (another provider); the grandchild is resumed. Its
+    launch parent is still the live child, whose snapshot keeps the provider
+    ceiling: the child stays on ``lo`` and the receipt says why.
+
+    Negative control (run when this test was written): with the comms resume
+    passing ``authority=None`` instead of ``target.authority``, the root's
+    cleared binding is used, no ceiling applies, the child runs on
+    ``elsewhere/far-model`` and the model assertion below fails.
+    """
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "hi": "elsewhere/far-model"})
+    agents = AgentRegistry(tmp_path / "agents")
+    pin_role(agents, "worker", "lo")
+    registry = TeamRegistry(config)
+    make_team(registry, "teamwork", [TeamMember(role="worker")])
+
+    stream = HoldingStream(hold="manage it")
+    root = make_session(tmp_path, registry, stream, team="teamwork", agents=agents)
+    try:
+        lead_id = root._launch_subagent(label="lead", prompt="manage it")
+        await wait_for(lambda: (r := root.subagent_comms._record(lead_id)) is not None and r.child)
+        lead = root.subagent_comms._record(lead_id).child
+        assert lead._team_authority is not None
+        worker_id = lead._launch_subagent(label="worker", prompt="do the work", agent="worker")
+        await wait_for(lambda: completed(lead, worker_id))
+        assert stream.model_for("do the work") == LO
+
+        # The root detaches (``/team clear``) while the bound child is live.
+        root.attach_team(None)
+        assert root._team_authority is None and root.active_team is None
+        assert not root.subagent_comms._record(lead_id).settled
+
+        _repin_role(agents, "worker", "hi")
+        text = await hub_resume(root, worker_id)
+        await wait_for(lambda: completed(root, resumed_id(root, text)))
+        assert stream.model_for(RESUME_PROMPT) == LO
+        reason = (
+            "role 'worker': kept the attached effort tag 'lo' (provider test); the edited "
+            "tag 'hi' routes to provider elsewhere, which this binding did not authorize; "
+            "re-attach via /team to use it"
+        )
+        assert f"[selection: role; not applied: {reason}]" in text, text
+    finally:
+        stream.release.set()
+        await root.dispose()
+
+
+@pytest.mark.asyncio
 async def test_split_a_same_provider_role_effort_tag_edit_is_taken(tmp_path, monkeypatch):
     """The other arm of the ceiling, so it is not a blanket freeze: a role-pin
     edit to a tier on the SAME provider reaches the resumed child, with no
