@@ -327,12 +327,31 @@ def _ceiling(name: str, allowed: Any, actual: dict[str, Any]) -> None:
         )
 
 
+def _role_digest(profile: AgentProfile | None, prompt: str) -> str:
+    """The revision a role's record attests. ONE rule, shared by the snapshot
+    (``_role_authority``) and the restore-time effort substitution
+    (``_with_recorded_efforts``), so the two can never hash differently."""
+    from local_operator.network.definitions import digest_of
+
+    # A seed's identity is its packaged name; a specialist/role's identity
+    # comes from the very lookup that produced its applied prompt or pins.
+    # Hash the authored profile, not any machine-local delivery pointer.
+    profile_data = asdict(profile) if profile is not None else {}
+    profile_data.pop("label", None)
+    profile_data.pop("agent_id", None)
+    # Pins and delegation permissions are ordered, not identity fields: hashing
+    # them into the revision would reject a provably narrower role after the
+    # ceiling check had already accepted it.
+    profile_data.pop("tools", None)
+    profile_data.pop("may_delegate", None)
+    return digest_of({"profile": profile_data, "prompt": prompt})
+
+
 def _role_authority(
     team_name: str, role: str, registry: Any, *, delegated: bool = False
 ) -> tuple[dict[str, Any], AgentProfile | None, str]:
     from local_operator.agent_profiles import resolve_profile_or_specialist_identity
     from local_operator.harness.subagent import is_readonly_shell_role
-    from local_operator.network.definitions import digest_of
 
     try:
         kind, profile, prompt, _, author = resolve_profile_or_specialist_identity(
@@ -367,23 +386,12 @@ def _role_authority(
         )
     if kind is None:
         raise _DefinitionNotLoaded(team_name, f"manager definition {role!r}")
-    # A seed's identity is its packaged name; a specialist/role's identity
-    # comes from the very lookup that produced its applied prompt or pins.
-    # Hash the authored profile, not any machine-local delivery pointer.
-    profile_data = asdict(profile) if profile is not None else {}
-    profile_data.pop("label", None)
-    profile_data.pop("agent_id", None)
-    # Pins and delegation permissions are ordered, not identity fields: hashing
-    # them into the revision would reject a provably narrower role after the
-    # ceiling check had already accepted it.
-    profile_data.pop("tools", None)
-    profile_data.pop("may_delegate", None)
     return (
         {
             "name": role,
             "kind": kind,
             "id": author or "",
-            "digest": digest_of({"profile": profile_data, "prompt": prompt}),
+            "digest": _role_digest(profile, prompt),
             "pins": sorted(set(profile.tools or ())) if profile is not None else [],
             "unrestricted_tools": delegated and (profile is None or not profile.tools),
             "may_delegate": profile.may_delegate if profile is not None else kind == "specialist",
@@ -738,7 +746,7 @@ def bind_runtime_authority(
         team, teams, agents, max_depth=depth, readonly_shell=readonly_shell or confined
     )
     if restoring:
-        snapshot = _with_recorded_tiers(snapshot, expected)
+        snapshot = _with_recorded_efforts(_with_recorded_tiers(snapshot, expected), expected)
     record = snapshot.record()
     if restoring:
         _compare(expected, record, local=True)
@@ -758,6 +766,7 @@ def bind_runtime_authority(
                 **record,
                 "explicit_local": explicit_local,
                 MEMBER_TIERS_KEY: _member_tiers(snapshot),
+                ROLE_EFFORTS_KEY: _role_efforts(snapshot),
             },
         )
     return snapshot
@@ -840,6 +849,72 @@ def _with_recorded_tiers(authority: TeamAuthority, expected: Any) -> TeamAuthori
         teams[key] = team.model_copy(update={"members": members})
     root = teams[authority.team.name.casefold()]
     return replace(authority, team=root, teams=teams)
+
+
+# The SAME split for a role's own ``effort:`` tag (the third tier layer: launch
+# tier -> roster slot -> role tag). The tag is part of the role's profile, so
+# it is inside the role ``digest`` the record attests, and an edited tag made
+# the reopen refuse ("role definition ... differs from the recorded one") just
+# as an edited slot tier did. The fix mirrors ``member_tiers``: the binding
+# journals each role's attested tag; restore puts it back on the live profile
+# and re-derives that role's digest with ``_role_digest`` (the one rule
+# ``_role_authority`` uses) before the unchanged ``_compare``/``_ceiling``.
+#
+# ONLY ``effort`` IS SUBSTITUTED, AND THAT IS THE BOUNDARY. ``effort`` is a
+# live preference -- reasoning depth on an already-chosen model -- whose
+# provider consequence ``live_role_tier`` then gates (same provider taken;
+# crossing keeps the attested tag with a ``not applied`` receipt). A role's
+# ``model:`` and ``hosting:`` ARE provider authority: an edit to either still
+# changes the digest and still refuses. That refusal is correct behaviour, not
+# a gap -- do not "complete" this by substituting them too. Pins, delegation
+# and shell confinement are judged by ``_ceiling`` on the record, untouched.
+#
+# As with the slot pairs, a tag that is not the attested one cannot reproduce
+# the attested digest, so a tampered or stale journal refuses; a binding
+# without the key gets no substitution (the pre-existing behaviour).
+
+#: Binding key for each role's attested ``effort:`` tag (roles and manager).
+#: Local journal only, like :data:`MEMBER_TIERS_KEY`.
+ROLE_EFFORTS_KEY = "role_efforts"
+
+
+def _role_efforts(authority: TeamAuthority) -> dict[str, str | None]:
+    entries = [
+        *authority.roles.items(),
+        (str(authority.manager[0].get("name", "")), authority.manager),
+    ]
+    return {name: data[1].effort for name, data in entries if data[1] is not None}
+
+
+def _with_recorded_effort(
+    entry: tuple[dict[str, Any], AgentProfile | None, str], recorded: dict[Any, Any], name: str
+) -> tuple[dict[str, Any], AgentProfile | None, str]:
+    meta, profile, prompt = entry
+    if profile is None or name not in recorded:
+        return entry
+    effort = recorded[name]
+    if effort is not None and not isinstance(effort, str):
+        return entry  # malformed: compare the live bytes, which then refuse
+    if effort == profile.effort:
+        return entry
+    attested = replace(profile, effort=effort)
+    return {**meta, "digest": _role_digest(attested, prompt)}, attested, prompt
+
+
+def _with_recorded_efforts(authority: TeamAuthority, expected: Any) -> TeamAuthority:
+    """``authority`` with each role's (and the manager's) ``effort`` replaced by
+    the recorded tag and its digest re-derived. See the section comment above."""
+    recorded = expected.get(ROLE_EFFORTS_KEY) if isinstance(expected, dict) else None
+    if not isinstance(recorded, dict):
+        return authority
+    roles = {
+        name: _with_recorded_effort(entry, recorded, name)
+        for name, entry in authority.roles.items()
+    }
+    manager = _with_recorded_effort(
+        authority.manager, recorded, str(authority.manager[0].get("name", ""))
+    )
+    return replace(authority, roles=roles, manager=manager)
 
 
 # ---------------------------------------------------------------------------

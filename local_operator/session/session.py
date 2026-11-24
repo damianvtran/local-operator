@@ -428,6 +428,24 @@ BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
 REMOTE_PROMPT_KEY = "lop_remote_prompt"
 
 
+#: The remedy a refused team restore names in ``attachment_restore_notice``.
+_TEAM_REMEDY = "re-attach via /team"
+
+
+def _with_team_remedy(refusal: BaseException) -> str:
+    """The restore notice for a refused team: the refusal, then the remedy ONCE.
+
+    Some refusals already carry it (``role definition ... differs from the
+    recorded one; re-attach via /team``, ``recorded delegation does not match;
+    re-attach via /team``) because the same text crosses the relay protocol on a
+    move, where the remedy has to travel with it. Appending unconditionally read
+    ``...; re-attach via /team; re-attach via /team`` -- in text quoted as gate
+    evidence -- so the remedy is added only when the refusal does not end with it.
+    """
+    text = str(refusal)
+    return text if text.endswith(_TEAM_REMEDY) else f"{text}; {_TEAM_REMEDY}"
+
+
 def _stamp_remote_prompt(message: Any) -> None:
     payload = dict(getattr(message, "provider_payload", None) or {})
     payload[REMOTE_PROMPT_KEY] = True
@@ -9612,12 +9630,12 @@ class Session:
                     # grants nothing; a RECORD that does not match still raises
                     # below, exactly as before.
                     self._unresolved_team = stored.team
-                    self.attachment_restore_notice = f"{refusal}; re-attach via /team"
+                    self.attachment_restore_notice = _with_team_remedy(refusal)
                     return
                 if not was_authorized_locally(directory):
                     raise
                 self._unresolved_team = stored.team
-                self.attachment_restore_notice = f"{refusal}; re-attach via /team"
+                self.attachment_restore_notice = _with_team_remedy(refusal)
                 return
         # A stored agent name is SUPERSEDED, not missing, when the same sidecar
         # named a team (issue #2014): the team owns the agent slot, so the

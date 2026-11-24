@@ -36,7 +36,12 @@ from local_operator.harness.types import (
     TextContent,
     ToolContext,
 )
-from local_operator.network.move_team import KEY, LOCAL_BINDING_NAME, MEMBER_TIERS_KEY
+from local_operator.network.move_team import (
+    KEY,
+    LOCAL_BINDING_NAME,
+    MEMBER_TIERS_KEY,
+    ROLE_EFFORTS_KEY,
+)
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
@@ -1154,6 +1159,186 @@ async def test_restore_a_roster_edit_beyond_tier_still_refuses(tmp_path, monkeyp
         assert reopened._unresolved_team == "teamwork"
         notice = reopened.attachment_restore_notice or ""
         assert "'teamwork'" in notice and notice.endswith("re-attach via /team"), notice
+    finally:
+        await reopened.dispose()
+
+
+# The role's own ``effort:`` tag on RESTORE: the same split, one layer down.
+# ``effort`` is a live preference and goes through ``live_role_tier``'s provider
+# ceiling; a role's ``model:``/``hosting:`` are provider authority and the
+# reopen still refuses them -- correct behaviour, not a gap.
+
+
+def _role_session(
+    tmp_path: Path, registry: TeamRegistry, agents: AgentRegistry, stream: RecordingStream
+) -> Session:
+    """A session whose AGENT registry is known at construction, because the
+    restore (``_restore_attachment``) runs inside ``Session.__init__``."""
+    return Session(
+        model=BIRTH,
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+        team_registry=registry,
+        agent_registry=agents,
+    )
+
+
+async def _bind_role_and_store(
+    tmp_path: Path, monkeypatch: Any, models: dict[str, str]
+) -> tuple[TeamRegistry, AgentRegistry, RecordingStream]:
+    """Bind ``teamwork`` whose ``worker`` role pins ``effort: lo`` and tools
+    ``bash,read``; launch once; close the session so it is STORED only."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models=models)
+    agents = AgentRegistry(config)
+    _edit_worker(agents, creating=True)
+    registry = TeamRegistry(config)
+    make_team(registry, "teamwork", [TeamMember(role="worker")])
+    stream = RecordingStream()
+    session = _role_session(tmp_path, registry, agents, stream)
+    try:
+        session.attach_team(registry.get_team_by_name("teamwork"))
+        row = await launch(session, stream, "before the role edit", agent="worker")
+        assert row.model_label == LO
+    finally:
+        await session.dispose()
+    return registry, agents, stream
+
+
+def _edit_worker(
+    agents: AgentRegistry,
+    *,
+    creating: bool = False,
+    effort: str = "lo",
+    tools: tuple[str, ...] = ("bash", "read"),
+) -> None:
+    write_profile(
+        agents,
+        AgentParams(
+            op="create" if creating else "update",
+            name="worker",
+            description="worker role",
+            instructions="You are worker.",
+            effort=effort,
+            tools=list(tools),
+        ),
+        creating=creating,
+        scope="global",
+    )
+
+
+@pytest.mark.asyncio
+async def test_restore_a_same_provider_role_effort_edit_reopens_on_the_new_tag(
+    tmp_path, monkeypatch
+):
+    """Negative control (run when this test was written): with the effort
+    substitution disabled (``_with_recorded_efforts`` returning the live
+    snapshot), the reopen refuses and the notice assertion fails on "role
+    definition 'worker' differs from the recorded one; re-attach via /team"."""
+    registry, agents, stream = await _bind_role_and_store(
+        tmp_path, monkeypatch, {"lo": LO, "med": MED}
+    )
+    _edit_worker(agents, effort="med")
+    reopened = _role_session(tmp_path, registry, agents, stream)
+    try:
+        assert not reopened.attachment_restore_notice, reopened.attachment_restore_notice
+        assert reopened.active_team_name == "teamwork" and not reopened._unresolved_team
+        receipt = await _task_receipt(reopened, "worker", "after the same-provider tag edit")
+        await wait_for(lambda: len(stream.requests_for("after the same-provider tag edit")) == 1)
+        assert stream.model_for("after the same-provider tag edit") == MED, receipt
+        assert "not applied" not in receipt, receipt
+    finally:
+        await reopened.dispose()
+
+
+@pytest.mark.asyncio
+async def test_restore_a_cross_provider_role_effort_edit_reopens_on_the_attested_tag(
+    tmp_path, monkeypatch
+):
+    """The reopen succeeds, but the attested tag is the snapshot's, so the
+    provider ceiling keeps the child on ``lo`` and the receipt says why; the
+    re-written binding keeps the attested tag (a reopen never promotes it).
+
+    Negative control (run when this test was written): with the ceiling in
+    ``live_role_tier`` bypassed (a crossing tag taken as read), the child runs on
+    ``elsewhere/far-model`` and the model assertion fails."""
+    registry, agents, stream = await _bind_role_and_store(
+        tmp_path, monkeypatch, {"lo": LO, "hi": "elsewhere/far-model"}
+    )
+    _edit_worker(agents, effort="hi")
+    reopened = _role_session(tmp_path, registry, agents, stream)
+    try:
+        assert not reopened.attachment_restore_notice, reopened.attachment_restore_notice
+        assert reopened.active_team_name == "teamwork" and not reopened._unresolved_team
+        receipt = await _task_receipt(reopened, "worker", "after the cross-provider tag edit")
+        await wait_for(lambda: len(stream.requests_for("after the cross-provider tag edit")) == 1)
+        assert stream.model_for("after the cross-provider tag edit") == LO, receipt
+        reason = (
+            "role 'worker': kept the attached effort tag 'lo' (provider test); the edited "
+            "tag 'hi' routes to provider elsewhere, which this binding did not authorize; "
+            "re-attach via /team to use it"
+        )
+        assert f"[selection: role; not applied: {reason}]" in receipt, receipt
+        binding = json.loads((tmp_path / "sess" / LOCAL_BINDING_NAME).read_text("utf-8"))
+        assert binding[KEY][ROLE_EFFORTS_KEY]["worker"] == "lo", binding
+    finally:
+        await reopened.dispose()
+
+
+def _edit_worker_row(agents: AgentRegistry, **fields: Any) -> None:
+    from local_operator.agents import AgentEditFields
+
+    row = agents.get_agent_by_name("worker")
+    assert row is not None
+    agents.update_agent(row.id, AgentEditFields(**fields))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("edit", "refusal"),
+    [
+        # model:/hosting: are PROVIDER AUTHORITY, not a live preference: only
+        # ``effort`` is substituted on restore, so these must keep refusing.
+        pytest.param(
+            lambda agents: _edit_worker_row(agents, model="elsewhere/far-model"),
+            "teamwork: role definition 'worker' differs from the recorded one; "
+            "re-attach via /team",
+            id="role-model",
+        ),
+        pytest.param(
+            lambda agents: _edit_worker_row(agents, hosting="elsewhere"),
+            "teamwork: role definition 'worker' differs from the recorded one; "
+            "re-attach via /team",
+            id="role-hosting",
+        ),
+        pytest.param(
+            lambda agents: _edit_worker(agents, tools=("bash", "read", "write")),
+            "teamwork: would grant tool pins: write; re-attach via /team",
+            id="tool-pin",
+        ),
+    ],
+)
+async def test_restore_a_role_authority_edit_still_refuses(tmp_path, monkeypatch, edit, refusal):
+    """The boundary of the effort substitution: a role's model, hosting or a
+    widened tool pin is authority, so the reopen refuses and the team stays
+    unresolved. The notice names the remedy ONCE: the role refusal already ends
+    with it, and the restore used to append it again.
+
+    Negative control (run when this test was written): with the restore
+    skipping ``_compare``, every case attaches and the ``not active_team_name``
+    assertion fails."""
+    registry, agents, stream = await _bind_role_and_store(
+        tmp_path, monkeypatch, {"lo": LO, "med": MED}
+    )
+    edit(agents)
+    reopened = _role_session(tmp_path, registry, agents, stream)
+    try:
+        assert not reopened.active_team_name and reopened.active_team is None
+        assert reopened._unresolved_team == "teamwork"
+        assert reopened.attachment_restore_notice == refusal
     finally:
         await reopened.dispose()
 
