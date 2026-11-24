@@ -4072,6 +4072,68 @@ async def _publish_failed_wake(daemon: "MobileDaemon", session_id: str) -> None:
             pass
 
 
+async def _resume_answering_on_spawn(
+    daemon: "MobileDaemon", cwd: str, session_id: str
+) -> tuple[int, bool]:
+    """Resume ``session_id``, answering as soon as its runtime is SPAWNED.
+
+    Returns ``(pid, starting)``. ``starting`` is True when the child exists but
+    has not finished booting: the phone may open the session's stream at once,
+    because the stream serves the durable seed with no runtime
+    (``api_session_events``' payload-less live-entry branch) and the live
+    frames follow once discovery adopts the record.
+
+    WHY. The resume route held the request through boot AND the relay's
+    handshake under ``SESSION_START_TIMEOUT_S`` (30 s), and a cold boot under
+    load routinely exceeds that (wake supervisor, Nov 21-23 2026: p90 39.1 s,
+    p99 106.8 s; 15% of boots over 30 s), so the Past screen's resume answered
+    500 with an empty message while the runtime was still constructing -- and
+    the 30 s bound then asked the still-booting child to retire. Here the
+    readiness wait runs under ``PROMPT_WAKE_DEADLINE_S`` (180 s, above the
+    observed max) in the daemon-owned start task (``spawn_session`` shields it
+    from this request), and a failure after the early answer sends the stream
+    its terminal ``ended`` frame, as a failed prompt wake does.
+
+    An owner that already exists answers exactly as before: the handshake with
+    a live record is not a boot, so ``spawned`` never fires and the request
+    waits for the (short) ready.
+    """
+    loop = asyncio.get_running_loop()
+    spawned: asyncio.Future[int] = loop.create_future()
+
+    def child_spawned(pid: int) -> None:
+        if not spawned.done():
+            spawned.set_result(pid)
+
+    start = asyncio.ensure_future(
+        daemon.spawn_session(
+            cwd,
+            resume=session_id,
+            on_spawned=child_spawned,
+            ready_timeout_s=PROMPT_WAKE_DEADLINE_S,
+        )
+    )
+    await asyncio.wait({start, spawned}, return_when=asyncio.FIRST_COMPLETED)
+    if start.done():
+        spawned.cancel()
+        return start.result(), False
+
+    daemon._early_resumes.add(start)
+
+    def settled(done: "asyncio.Future[int]") -> None:
+        daemon._early_resumes.discard(done)
+        if done.cancelled() or done.exception() is None:
+            return
+        # The phone was told "starting"; the stream is where it learns the
+        # start did not finish. Held in the same set until it has run.
+        notice = loop.create_task(_publish_failed_wake(daemon, session_id))
+        daemon._early_resumes.add(notice)
+        notice.add_done_callback(daemon._early_resumes.discard)
+
+    start.add_done_callback(settled)
+    return spawned.result(), True
+
+
 def _journal_page(
     directory: Path,
     state: Any,
@@ -4850,6 +4912,12 @@ class MobileDaemon:
         # the join point that makes a same-id retry wait on it instead of
         # engaging twice (see ``_prompt_wake``).
         self._prompt_wakes: dict[tuple[str, str], _PromptWake] = {}
+        # Per session id: the start task's "child spawned" signal (see
+        # ``spawn_session``'s ``on_spawned``).
+        self._session_spawned: dict[str, asyncio.Future[int]] = {}
+        # Strong references to resumes answered before readiness, until their
+        # start settles (``_resume_answering_on_spawn``).
+        self._early_resumes: set[asyncio.Future[Any]] = set()
         #: The tag marker this daemon last PUBLISHED to the list stream (or
         #: adopted on its first scan pass). Deliberately separate from the
         #: table's ``_tags_token``, which any read path may advance by
@@ -6511,22 +6579,59 @@ class MobileDaemon:
         model_id: str | None = None,
         resume: str | None = None,
         effort: str | None = None,
+        *,
+        on_spawned: Callable[[int], None] | None = None,
+        ready_timeout_s: float = SESSION_START_TIMEOUT_S,
     ) -> int:
+        """Start (or join the start of) a session's runtime; its pid once READY.
+
+        ``on_spawned`` is told the child's pid as soon as the child process
+        exists, before it has booted -- including for a caller that JOINS a
+        start already in flight. ``ready_timeout_s`` bounds the wait for the
+        record and the relay's handshake; concurrent starts of one id share the
+        first caller's task and therefore its bound. See
+        ``_resume_answering_on_spawn`` for the caller that uses both.
+        """
         session_id = resume or uuid.uuid4().hex[:12]
         task = self._session_starts.get(session_id)
         if task is None:
+            spawned: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+            def child_spawned(pid: int) -> None:
+                if not spawned.done():
+                    spawned.set_result(pid)
+
             task = asyncio.create_task(
-                self._spawn_session(cwd, provider, model_id, session_id, effort)
+                self._spawn_session(
+                    cwd,
+                    provider,
+                    model_id,
+                    session_id,
+                    effort,
+                    on_spawned=child_spawned,
+                    ready_timeout_s=ready_timeout_s,
+                )
             )
             self._session_starts[session_id] = task
+            self._session_spawned[session_id] = spawned
 
             def finished(done: asyncio.Task[int]) -> None:
                 if self._session_starts.get(session_id) is done:
                     self._session_starts.pop(session_id, None)
+                    self._session_spawned.pop(session_id, None)
+                if not spawned.done():
+                    # Ended without spawning (an existing owner, a refusal).
+                    spawned.cancel()
                 if not done.cancelled():
                     done.exception()  # retrieve failure even if the HTTP client left
 
             task.add_done_callback(finished)
+        if on_spawned is not None:
+            notify = on_spawned
+            # Registered with the task above; never one without the other.
+            self._session_spawned[session_id].add_done_callback(
+                lambda signal: None if signal.cancelled() else notify(signal.result())
+            )
         # Two resume requests share one constructor. A disconnected caller must
         # not cancel the other caller's operation; the startup deadline and
         # handoff lease still bound an abandoned request.
@@ -6539,9 +6644,16 @@ class MobileDaemon:
         model_id: str | None,
         session_id: str,
         effort: str | None = None,
+        *,
+        on_spawned: Callable[[int], None] | None = None,
+        ready_timeout_s: float = SESSION_START_TIMEOUT_S,
     ) -> int:
         """Spawn a daemon-owned session in a supervised CHILD process and let
         discovery adopt it.
+
+        ``on_spawned`` is told the child's pid right after the spawn succeeds,
+        and ``ready_timeout_s`` bounds the wait for its record and handshake
+        (see ``_resume_answering_on_spawn`` for the caller that needs both).
 
         A child process, not an in-process session: the daemon is supervisable
         state (launchd restarts it), and a session living inside it would die
@@ -6725,8 +6837,11 @@ class MobileDaemon:
                 await asyncio.sleep(0.05)
 
         readiness = asyncio.create_task(ready())
+        started = time.monotonic()
+        if on_spawned is not None:
+            on_spawned(process.pid)
         try:
-            async with asyncio.timeout(SESSION_START_TIMEOUT_S):
+            async with asyncio.timeout(ready_timeout_s):
                 done, _ = await asyncio.wait(
                     {readiness, exited}, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -6734,8 +6849,19 @@ class MobileDaemon:
                     raise RuntimeError("session exited before becoming ready; check mobile logs")
                 await readiness
                 self._arm_phone_handoff(session_id)
+                # INFO so phone start/resume latency is measurable from
+                # mobile.log, which otherwise carries only warnings.
+                logger.info(
+                    "phone start %s: ready after %.1fs", session_id, time.monotonic() - started
+                )
                 return process.pid
-        except BaseException:
+        except BaseException as exc:
+            logger.info(
+                "phone start %s: failed after %.1fs (%s)",
+                session_id,
+                time.monotonic() - started,
+                type(exc).__name__,
+            )
             self.release_phone_view(session_id)
             # ``poll`` rather than ``returncode``: a sync process object only
             # learns its status when someone asks, and the watcher thread may not
@@ -11228,11 +11354,26 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": refused.message[:300]}, status_code=409)
         replay_cwd = replay_cwd or str(Path.home())
         try:
-            pid = await daemon.spawn_session(replay_cwd, resume=session_id)
+            pid, starting = await _resume_answering_on_spawn(daemon, replay_cwd, session_id)
+        except TimeoutError:
+            # ``str(TimeoutError())`` is empty: this used to answer 500 with
+            # ``{"error": ""}``, which a phone can only render as a blank toast.
+            logger.warning("mobile resume timed out", exc_info=True)
+            return JSONResponse(
+                {"error": "The session took too long to start. Try again."}, status_code=504
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("mobile resume spawn failed", exc_info=True)
-            return JSONResponse({"error": str(exc)[:300]}, status_code=500)
-        return JSONResponse({"ok": True, "pid": pid, "session_id": session_id})
+            return JSONResponse(
+                {"error": (str(exc) or type(exc).__name__)[:300]}, status_code=500
+            )
+        answer: dict[str, Any] = {"ok": True, "pid": pid, "session_id": session_id}
+        if starting:
+            # ADDITIVE: the runtime was spawned and is still booting; the
+            # stream seeds from disk now and goes live when it publishes. An
+            # older app reads the same ``ok``/``pid`` it always did.
+            answer["starting"] = True
+        return JSONResponse(answer)
 
     async def api_search_sessions(request: Request) -> Response:
         """Search past sessions by name, id, OR what was said in them.

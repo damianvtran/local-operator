@@ -16,6 +16,7 @@ without spending 40 real seconds.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 from pathlib import Path
@@ -201,3 +202,123 @@ def test_capabilities_advertise_the_background_prompt_wake(
         "background": True,
         "version": 1,
     }
+
+
+# -- resume (fix 2) -----------------------------------------------------------
+
+
+class _SlowStart:
+    """A ``MobileDaemon._spawn_session`` whose child is spawned but still booting.
+
+    The 10 s hold is a backstop for the same reason as ``_SlowBoot``'s: a
+    build without the fix awaits the whole boot inside the request.
+    """
+
+    def __init__(self, *, fail: BaseException | None = None, spawn: bool = True) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.release = asyncio.Event()
+        self.fail = fail
+        self.spawn = spawn
+        self.finished = False
+
+    async def __call__(self, cwd, provider, model_id, session_id, effort=None, **start):  # noqa: ANN001, ANN003, ANN204
+        self.calls.append({"session_id": session_id, **start})
+        on_spawned = start.get("on_spawned")
+        if self.spawn and on_spawned is not None:
+            on_spawned(4242)
+        try:
+            if self.spawn:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self.release.wait(), timeout=10.0)
+            if self.fail is not None:
+                raise self.fail
+            return 4242
+        finally:
+            self.finished = True
+
+
+async def _resume_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start: _SlowStart):  # noqa: ANN202
+    import httpx
+
+    from local_operator.harness.types import Message
+    from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
+    from local_operator.session.transcript import Transcript
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = tmp_path / "sessions" / SESSION
+    directory.mkdir(parents=True)
+    await Transcript(directory).append_message(Message.user("existing", id="existing"))
+    daemon = MobileDaemon(password="pw")
+    monkeypatch.setattr(daemon, "_spawn_session", start)
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(daemon)),
+        base_url="http://fixture",
+        cookies={COOKIE_NAME: sign_cookie("pw")},
+    )
+    return daemon, client
+
+
+async def _settle(daemon: MobileDaemon) -> None:
+    for _ in range(300):
+        if not daemon._session_starts and not daemon._early_resumes:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the start never settled")
+
+
+@pytest.mark.asyncio
+async def test_resume_answers_once_the_child_is_spawned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance (fix 2): a booting resume is a 2xx with the pid, not a 30 s 500."""
+    start = _SlowStart()
+    daemon, client = await _resume_rig(tmp_path, monkeypatch, start)
+    async with client:
+        first, second = await asyncio.gather(
+            client.post("/api/sessions/resume", json={"session_id": SESSION}),
+            client.post("/api/sessions/resume", json={"session_id": SESSION}),
+        )
+    assert first.status_code == 200, first.text
+    # Both answers arrived while the boot was still held open.
+    assert not start.finished, "the resume held the request for the whole boot"
+    expected = {"ok": True, "pid": 4242, "session_id": SESSION, "starting": True}
+    assert first.json() == expected
+    assert second.json() == expected
+    # Coalesced onto ONE start, bounded by the boot deadline, not the 30 s ack.
+    assert len(start.calls) == 1
+    assert start.calls[0]["ready_timeout_s"] == PROMPT_WAKE_DEADLINE_S
+    start.release.set()
+    await _settle(daemon)
+
+
+@pytest.mark.asyncio
+async def test_a_resume_that_fails_after_starting_ends_the_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start = _SlowStart(fail=RuntimeError("session exited before becoming ready"))
+    daemon, client = await _resume_rig(tmp_path, monkeypatch, start)
+    frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    daemon.table.session_subscribers.setdefault(SESSION, set()).add(frames)
+    async with client:
+        response = await client.post("/api/sessions/resume", json={"session_id": SESSION})
+    assert response.status_code == 200, response.text
+    assert response.json()["starting"] is True
+    start.release.set()
+    await _settle(daemon)
+    published = [frames.get_nowait() for _ in range(frames.qsize())]
+    assert published, "the stream was never told the resume failed"
+    assert published[-1].get("ended") is True
+
+
+@pytest.mark.asyncio
+async def test_a_resume_timeout_says_what_happened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``str(TimeoutError())`` is empty; the phone must get a real sentence."""
+    start = _SlowStart(fail=TimeoutError(), spawn=False)
+    daemon, client = await _resume_rig(tmp_path, monkeypatch, start)
+    async with client:
+        response = await client.post("/api/sessions/resume", json={"session_id": SESSION})
+    assert response.status_code == 504, response.text
+    assert response.json() == {"error": "The session took too long to start. Try again."}
+    await _settle(daemon)
