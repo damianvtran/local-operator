@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +59,7 @@ def _composite(message_id: str, seq: int = 1) -> str:
 
 
 def _owner_key(root: Path) -> str:
-    with sqlite3.connect(state_db_path(root)) as conn:
+    with closing(sqlite3.connect(state_db_path(root))) as conn, conn:
         return conn.execute("SELECT owner_key FROM enrollments").fetchone()[0]
 
 
@@ -67,7 +68,7 @@ def _raw_hold(root: Path, message_id: str, code: str, *, created_at: Any, **extr
 
     columns = ["owner_key", "message_id", "hold_code", "retry_at", "created_at", *extra]
     values = [_owner_key(root), message_id, code, None, created_at, *extra.values()]
-    with sqlite3.connect(state_db_path(root)) as conn:
+    with closing(sqlite3.connect(state_db_path(root))) as conn, conn:
         conn.execute(
             f"INSERT INTO screening_holds ({', '.join(columns)}) "
             f"VALUES ({', '.join('?' for _ in columns)})",
@@ -78,7 +79,7 @@ def _raw_hold(root: Path, message_id: str, code: str, *, created_at: Any, **extr
 def _receipt(
     root: Path, message_id: str, *, verdict: str, categories: list[str], created_at: float
 ) -> None:
-    with sqlite3.connect(state_db_path(root)) as conn:
+    with closing(sqlite3.connect(state_db_path(root))) as conn, conn:
         conn.execute(
             "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
             "template_sha256, prompt_version, model, verdict, categories, envelope_digest, "
@@ -109,7 +110,7 @@ def _add_failure_class(root: Path) -> None:
     while an upgraded store gains it through the additive ALTER this mirrors.
     """
 
-    with sqlite3.connect(state_db_path(root)) as conn:
+    with closing(sqlite3.connect(state_db_path(root))) as conn, conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
         if "failure_class" not in columns:
             conn.execute("ALTER TABLE screening_holds ADD COLUMN failure_class TEXT")
@@ -122,7 +123,7 @@ def _legacy_holds_table(root: Path) -> None:
     be built explicitly to keep the legacy-reader case covered.
     """
 
-    with sqlite3.connect(state_db_path(root)) as conn:
+    with closing(sqlite3.connect(state_db_path(root))) as conn, conn:
         conn.execute("DROP TABLE screening_holds")
         conn.execute(
             "CREATE TABLE screening_holds (owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
@@ -265,7 +266,7 @@ def test_store_without_failure_class_column_works(tmp_path) -> None:
     assert status["held"]["count"] == 1
     assert status["held"]["dominant_failure_class"] is None
     # The read-only reader never migrates: the table is still the legacy shape.
-    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+    with closing(sqlite3.connect(state_db_path(tmp_path))) as conn, conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
     assert "failure_class" not in columns
 
@@ -354,7 +355,7 @@ def test_damaged_rows_are_skipped_not_fatal(tmp_path) -> None:
     _raw_hold(tmp_path, "bmsg_p2", "breaker_open", created_at=now - 120)
     _receipt(tmp_path, "bcmsg_r1", verdict="reject", categories=[], created_at=now)
     _receipt(tmp_path, "bcmsg_r2", verdict="reject", categories=["spam"], created_at=now)
-    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+    with closing(sqlite3.connect(state_db_path(tmp_path))) as conn, conn:
         conn.execute(
             "UPDATE screening_receipts SET categories = ? WHERE message_id = ?",
             ('[["x"], {"k": 1}]', "bcmsg_r1"),
@@ -388,7 +389,7 @@ def _seed_canaries(root: Path, store: Store, owner: OwnerSnapshot) -> None:
     _raw_hold(root, "bmsg_pair1", CANARY, created_at=now - 120, failure_class=CANARY)
     _raw_hold(root, _composite("bcmsg_a1"), "breaker_open", created_at=now - 60)
     _receipt(root, "bcmsg_r1", verdict="reject", categories=[CANARY], created_at=now - 60)
-    with sqlite3.connect(state_db_path(root)) as conn:
+    with closing(sqlite3.connect(state_db_path(root))) as conn, conn:
         conn.execute(
             "UPDATE screening_receipts SET categories = ? WHERE message_id = ?",
             (CANARY, "bcmsg_r1"),
@@ -490,7 +491,7 @@ def _damage(root: Path) -> None:
     now = time.time()
     _raw_hold(root, "bmsg_p1", "provider_error", created_at="not-a-number")
     _receipt(root, "bcmsg_r1", verdict="reject", categories=[], created_at=now)
-    with sqlite3.connect(state_db_path(root)) as conn:
+    with closing(sqlite3.connect(state_db_path(root))) as conn, conn:
         conn.execute(
             "UPDATE screening_receipts SET categories = ? WHERE message_id = ?",
             ('[["x"]]', "bcmsg_r1"),
@@ -576,7 +577,7 @@ def _non_finite(root: Path) -> None:
         _raw_hold(root, message_id, "provider_error", created_at=value)
     _raw_hold(root, "bmsg_ok", "breaker_open", created_at=time.time() - 120)
     owner = _owner()
-    with sqlite3.connect(state_db_path(root)) as conn:
+    with closing(sqlite3.connect(state_db_path(root))) as conn, conn:
         conn.execute(
             "INSERT INTO screening_breaker (account_scope, failures, open_until, updated_at) "
             "VALUES (?,?,?,?)",

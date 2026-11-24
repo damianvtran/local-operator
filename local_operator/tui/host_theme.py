@@ -21,7 +21,6 @@ import logging
 import os
 import re
 import select
-import selectors
 import sys
 import time
 
@@ -78,26 +77,37 @@ def _readable_within(fd: int, wait_s: float) -> bool:
     already holds ~1k descriptors (a long session, the test suite) is handed one
     up there and the probe would crash instead of degrading to "no theme".
 
-    Why not ``selectors`` for every fd: this is a character device, and select
-    is the readiness call that has always worked on ttys everywhere (older
-    macOS kqueue and macOS ``poll()`` both mishandled character devices), so the
-    common low-fd path keeps exactly the behaviour it shipped with. Same split
-    as ``providers.auth_cli._readable_within``. A failure reads as "nothing to
-    read", which ends the probe early: the safe outcome for a cosmetic query.
+    Why not ``select.poll`` for every fd: this is a character device, and
+    select is the readiness call that has always worked on ttys everywhere
+    (macOS ``poll()`` has historically mishandled character devices), so the
+    common low-fd path keeps exactly the behaviour it shipped with. Above the
+    limit it falls back to ``poll``, not ``selectors.DefaultSelector``: that is
+    kqueue on macOS, which #4532's review reported refusing a ``/dev/tty``
+    registration with EINVAL (not reproduced here: a pty slave registers fine
+    under both, and a sandbox has no controlling terminal to try), and ``poll``
+    has no FD_SETSIZE ceiling. Same split as
+    ``providers.auth_cli._readable_within``.
+
+    Failures: on the low-fd path an ``OSError`` propagates, so ``probe``
+    returns ``b""`` exactly as it did before this helper existed. On the high-fd
+    fallback a failure reads as "nothing to read", which ends the probe early:
+    the safe outcome for a cosmetic query.
     """
     if fd < _SELECT_FD_LIMIT:
         try:
             return bool(select.select([fd], [], [], wait_s)[0])
         except ValueError:
-            pass  # a platform with a smaller FD_SETSIZE: use a selector below
-        except OSError:
-            return False
+            pass  # a platform with a smaller FD_SETSIZE: poll below
+    poll_factory = getattr(select, "poll", None)
+    if poll_factory is None:
+        return False
     try:
-        with selectors.DefaultSelector() as selector:
-            selector.register(fd, selectors.EVENT_READ)
-            return bool(selector.select(wait_s))
+        poller = poll_factory()
+        poller.register(fd, select.POLLIN)
+        events = poller.poll(max(0, int(wait_s * 1000)))
     except (OSError, ValueError):
         return False
+    return any(mask & select.POLLIN for _, mask in events)
 
 
 def probe(timeout: float = 1.0) -> bytes:

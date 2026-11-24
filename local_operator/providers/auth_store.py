@@ -70,6 +70,7 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 import zlib
 from _thread import LockType
 from collections import OrderedDict
@@ -1629,6 +1630,26 @@ class _SerializedConnection:
         # is applied, and a future caller holding the lock across a helper that
         # also executes must not deadlock against itself.
         self._lock = threading.RLock()
+        # Close the sqlite handle when this wrapper is RELEASED, not when the
+        # cyclic GC eventually finds it. CPython's ``sqlite3.Connection`` holds
+        # its own statement cache, an ``lru_cache`` wrapped around the
+        # connection itself -- a reference cycle -- so a connection that is
+        # dropped without ``close()`` keeps ``auth.db`` and both WAL sidecars
+        # (three descriptors) open until a generation-2 collection. Plenty of
+        # owners drop a store rather than close it: the shared-store map
+        # evicts by dropping its reference (see :func:`shared_auth_store`), and
+        # one-shot ``AuthStore(...)`` constructions across the tree never call
+        # ``close()``. Measured on tests/unit/tools/test_builtin_tools.py run
+        # alone: 455 unclosed connections at test end, a 466-fd peak.
+        #
+        # The wrapper itself is in no cycle, so refcounting releases it the
+        # moment its last holder lets go -- the same instant the "descriptors
+        # return by refcount" contract in ``shared_auth_store`` promised. The
+        # finalizer references only the raw connection, never ``self``, and an
+        # explicit :meth:`close` first makes it a no-op (sqlite's ``close`` is
+        # idempotent). Closing here cannot cut a live caller short: a caller
+        # mid-statement holds the wrapper, so the finalizer cannot have run.
+        weakref.finalize(self, conn.close)
 
     @property
     def lock(self) -> threading.RLock:

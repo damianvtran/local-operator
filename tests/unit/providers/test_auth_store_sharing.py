@@ -21,6 +21,8 @@ AuthStore())`` in ``tunnels/`` — must still close theirs.
 from __future__ import annotations
 
 import asyncio
+import gc
+import os
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -330,6 +332,76 @@ def test_the_map_is_bounded_and_never_closes_a_held_store(
     # The held store survived eviction and is still live.
     assert not held.closed
     assert held.list_credentials() == []
+
+
+def _open_fd_count() -> int:
+    for candidate in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(candidate):
+            return len(os.listdir(candidate))
+    pytest.skip("no fd directory on this platform")
+
+
+@pytest.fixture()
+def no_cyclic_gc() -> Iterator[None]:
+    """Disable the cyclic collector so only REFCOUNT release is measured.
+
+    A dropped ``sqlite3.Connection`` sits in a reference cycle with its own
+    statement cache, so with the collector on a leak would hide behind
+    whenever generation 2 happened to run. These tests pin that release is
+    deterministic, which is the property a long-lived process relies on.
+    """
+    was_enabled = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+def test_a_dropped_store_releases_its_descriptors_without_gc(
+    root: Path, tmp_path: Path, no_cyclic_gc: None
+) -> None:
+    """``AuthStore(...)`` dropped without ``close()`` frees auth.db + WAL + SHM.
+
+    Regression: before the wrapper's finalizer, each dropped store kept three
+    descriptors until a cyclic collection; test_builtin_tools.py alone peaked
+    at 466 open fds from them.
+    """
+    db = tmp_path / "dropped" / "auth.db"
+    db.parent.mkdir()
+    AuthStore(db, config_dir=db.parent).list_credentials()  # first open creates the files
+    baseline = _open_fd_count()
+    for _ in range(20):
+        AuthStore(db, config_dir=db.parent).list_credentials()
+    assert _open_fd_count() == baseline
+
+
+def test_evicted_shared_stores_release_their_descriptors_without_gc(
+    root: Path, tmp_path: Path, no_cyclic_gc: None
+) -> None:
+    """Eviction drops the map's reference; that must actually free the fds.
+
+    ``shared_auth_store`` documents that evicted descriptors "return by
+    refcount once the last holder lets go"; a per-test ``tmp_path`` root is
+    exactly the many-roots shape that evicts. Open fds may grow by at most the
+    map's bound (three per resident root), never by the number of roots seen.
+    """
+    baseline = _open_fd_count()
+    for index in range(auth_store_module._SHARED_STORES_MAX * 5):
+        extra = tmp_path / f"evict-{index}"
+        extra.mkdir()
+        shared_auth_store(extra / "auth.db", config_dir=extra).list_credentials()
+    assert _open_fd_count() - baseline <= auth_store_module._SHARED_STORES_MAX * 3
+
+
+def test_close_after_release_is_still_safe(root: Path, tmp_path: Path) -> None:
+    """An explicit close followed by the finalizer must not raise or double-free."""
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    store.close()
+    del store
+    gc.collect()
 
 
 def test_a_caller_that_owns_its_connection_still_closes_it(

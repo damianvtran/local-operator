@@ -3,13 +3,14 @@
 Regression for PR #4472's CI run 45338434283 (job 138256298160): deep in an
 xdist worker a fresh socketpair lands above fd 1024 and ``select.select`` raises
 ``ValueError: filedescriptor out of range in select()``. Each test here moves
-its socket above that ceiling with ``os.dup2`` and proves the raw call still
+its socket above that ceiling with ``fcntl.F_DUPFD`` and proves the raw call still
 fails there (the control: without it a low-fd run would pass vacuously) while
 the replacements give the same answers ``select.select`` gives at a low fd.
 """
 
 from __future__ import annotations
 
+import fcntl
 import os
 import resource
 import select
@@ -47,8 +48,11 @@ def high_socketpair() -> Iterator[tuple[socket.socket, socket.socket]]:
         resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
     low, peer = socket.socketpair()
     try:
-        os.dup2(low.fileno(), _HIGH_FD)
-        high = socket.socket(fileno=_HIGH_FD)
+        # F_DUPFD, not dup2: dup2 would silently CLOSE whatever already sits at
+        # fd 1500 in a worker deep enough to have one (an unrelated test's
+        # socket or sqlite file). F_DUPFD takes the lowest FREE fd >= 1500.
+        high = socket.socket(fileno=fcntl.fcntl(low.fileno(), fcntl.F_DUPFD, _HIGH_FD))
+        assert high.fileno() >= _HIGH_FD
         low.close()
         try:
             yield high, peer
@@ -127,3 +131,59 @@ def test_host_theme_low_fd_path_is_unchanged() -> None:
         assert not host_theme._readable_within(reader.fileno(), 0)
         writer.send(b"x")
         assert host_theme._readable_within(reader.fileno(), 5)
+
+
+def test_host_theme_high_fd_tty_uses_poll_not_kqueue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Above the ceiling the probe waits with ``poll``, on a real character device.
+
+    ``selectors.DefaultSelector`` is kqueue on macOS, which #4532's review saw
+    refuse a ``/dev/tty`` registration; ``poll`` is what ``auth_cli`` uses too.
+    A pty slave stands in for ``/dev/tty`` (both are character devices).
+    """
+    pty = pytest.importorskip("pty")
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    needed = _HIGH_FD + 16
+    if hard != resource.RLIM_INFINITY and hard < needed:
+        pytest.skip(f"RLIMIT_NOFILE hard limit {hard} cannot reach fd {_HIGH_FD}")
+    if soft != resource.RLIM_INFINITY and soft < needed:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
+    master, slave = pty.openpty()
+    high = fcntl.fcntl(slave, fcntl.F_DUPFD, _HIGH_FD)
+    polls: list[int] = []
+    real_poll = select.poll
+
+    def recording_poll() -> object:
+        polls.append(1)
+        return real_poll()
+
+    monkeypatch.setattr(host_theme.select, "poll", recording_poll)
+    monkeypatch.setattr(
+        "selectors.DefaultSelector",
+        lambda: pytest.fail("high-fd tty wait must not build a kqueue/DefaultSelector"),
+    )
+    try:
+        assert not host_theme._readable_within(high, 0)
+        os.write(master, b"x\n")  # canonical mode: a line is what makes it readable
+        assert host_theme._readable_within(high, 5)
+        assert polls
+    finally:
+        for fd in (high, slave, master):
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_host_theme_low_fd_oserror_still_reaches_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A select() failure on the low path propagates, so ``probe`` returns b"".
+
+    Before the high-fd split, ``probe``'s own ``except OSError`` turned it into
+    ``b""``; swallowing it inside the helper would instead return whatever
+    partial reply had been read so far. (A stubbed failure rather than a closed
+    fd: a closed number can be reused by another thread before the call.)
+    """
+
+    def failing_select(*_args: object) -> object:
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr(host_theme.select, "select", failing_select)
+    with pytest.raises(OSError):
+        host_theme._readable_within(3, 0)
