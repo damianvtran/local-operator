@@ -58,25 +58,60 @@ def test_a_live_linked_worktree_is_not_a_remnant(repo: Path) -> None:
     assert not _removed_worktree_remnant(str(_tree(repo, "live")))
 
 
-def test_admin_dir_gone_and_unregistered_is_a_remnant(repo: Path) -> None:
-    wt = _tree(repo, "half-removed")
+def test_admin_dir_gone_with_committed_files_and_ds_store_is_a_remnant(repo: Path) -> None:
+    wt = _committed_tree(repo, "half-removed")
+    (wt / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")  # Finder's mid-delete write
     # What a failed ``git worktree remove`` leaves: admin dir gone, folder kept.
     shutil.rmtree(repo / ".git" / "worktrees" / "half-removed")
-    _git("worktree", "prune", cwd=repo)
     assert _removed_worktree_remnant(str(wt))
 
 
-def test_a_moved_tree_whose_admin_name_differs_is_not_a_remnant(repo: Path) -> None:
-    wt = _tree(repo, "orig")
-    moved = repo / ".worktrees" / "moved"
-    wt.rename(moved)  # manual move: the pointer still names admin ``orig``
-    shutil.rmtree(repo / ".git" / "worktrees" / "orig")
-    assert not _removed_worktree_remnant(str(moved))
+@pytest.mark.parametrize("extra", ["untracked", "symlink", "ds-store-dir"])
+def test_any_content_git_does_not_hold_keeps_the_rank(repo: Path, extra: str) -> None:
+    wt = _committed_tree(repo, f"extra-{extra}")
+    if extra == "untracked":
+        (wt / "notes.md").write_text("never committed\n")
+    elif extra == "symlink":
+        (wt / "link").symlink_to(wt / "kept.txt")
+    else:
+        (wt / ".DS_Store").mkdir()
+        (wt / ".DS_Store" / "data").write_text("not Finder's\n")
+    shutil.rmtree(repo / ".git" / "worktrees" / f"extra-{extra}")
+    assert not _removed_worktree_remnant(str(wt))
+
+
+def _committed_tree(repo: Path, name: str) -> Path:
+    """A tree whose only file is committed: a true remnant loses nothing."""
+    wt = repo / ".worktrees" / name
+    _git("worktree", "add", "-q", "-b", f"fix/{name}", str(wt), cwd=repo)
+    (wt / "kept.txt").write_text(f"tracked {name}\n")
+    _git("add", "kept.txt", cwd=wt)
+    _git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", name, cwd=wt)
+    return wt
+
+
+@pytest.mark.parametrize("dirty", [False, True], ids=["committed", "uncommitted"])
+def test_moved_then_pruned_tree_is_a_remnant_only_without_new_content(
+    repo: Path, tmp_path: Path, dirty: bool
+) -> None:
+    """#4536 R1-B1: a hand-moved tree (same basename) that ``git worktree
+    prune`` unregistered passes every pointer check; only its content decides."""
+    wt = _committed_tree(repo, "feat")
+    if dirty:
+        (wt / "kept.txt").write_text("uncommitted work\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    moved = elsewhere / "feat"
+    wt.rename(moved)
+    _git("worktree", "prune", cwd=repo)
+    assert not (repo / ".git" / "worktrees" / "feat").exists()
+    assert _removed_worktree_remnant(str(moved)) is (not dirty)
 
 
 @pytest.mark.parametrize("shape", ["git-dir", "two-lines", "relative-outside", "admin-present"])
 def test_any_other_shape_keeps_the_repository_rank(repo: Path, shape: str) -> None:
-    wt = _tree(repo, f"shape-{shape}")
+    # Committed content, so ONLY the pointer shape can make it fail.
+    wt = _committed_tree(repo, f"shape-{shape}")
     marker = wt / ".git"
     pointer = marker.read_text()
     (
@@ -100,7 +135,7 @@ def test_rm_rf_rank_follows_the_remnant_rule(repo: Path) -> None:
     from local_operator.guardrails.classify import Risk, classify_bash
 
     live = _tree(repo, "still-live")
-    gone = _tree(repo, "remnant")
+    gone = _committed_tree(repo, "remnant")
     shutil.rmtree(repo / ".git" / "worktrees" / "remnant")
     env = {"HOME": str(repo.parent)}
 
