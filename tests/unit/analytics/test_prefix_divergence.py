@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -38,7 +38,9 @@ def _message(
     )
 
 
-def _request(*messages: Any, system: tuple[str, ...] = ("system",), tools: tuple = ()) -> Any:
+def _request(
+    *messages: Any, system: tuple[str, ...] = ("system",), tools: tuple[Any, ...] = ()
+) -> Any:
     return SimpleNamespace(system_blocks=list(system), messages=list(messages), tools=list(tools))
 
 
@@ -155,7 +157,9 @@ def _break_log(caplog: pytest.LogCaptureFixture, divergence: str) -> str:
     from local_operator.harness.types import Usage
     from local_operator.model.configure import SessionStreamFn
 
-    stub = SimpleNamespace(_session_id="abc")
+    # A PARTIAL stream fn is the point: the line only reads ``_session_id``,
+    # and the recording cells build the real class the same way.
+    stub = cast(Any, SimpleNamespace(_session_id="abc"))
     usage = Usage(
         input_tokens=1_000,
         cache_read_tokens=5_000,
