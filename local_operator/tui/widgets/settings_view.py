@@ -7213,7 +7213,7 @@ def _description_needs_its_own_rows(
     A description that does not fit its row is ellipsised, which is exactly how
     the language row dropped "Terminal: best ef…" — the caveat, painted as the
     cut. Both callers here need the whole sentence: the tool-approval mode's
-    auto gloss is 76 cells against a 55-cell slot at 80 columns, and the part
+    auto gloss is 73 cells against a 55-cell slot at 80 columns, and the part
     that would be cut is the EXEMPTION (which gates still ask a person).
     """
     if not getattr(choice, "description", ""):

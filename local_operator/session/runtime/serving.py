@@ -2218,7 +2218,7 @@ class ServingSessionHandle(SessionHandle):
 
         The receipt goes out as a :class:`NoticeEvent` from THIS process, the
         one that owns the gate, so every attached viewer and the phone see
-        the effect ("every tool runs without asking"). It is now the ONLY
+        the effect (AUTO_MODE_EFFECT). It is now the ONLY
         receipt for the event: the TUI no longer prints a value clause when a
         runtime is attached (design round 1, D1), on the same "the process that
         decided is the one the user should read" rule the ``model`` section
