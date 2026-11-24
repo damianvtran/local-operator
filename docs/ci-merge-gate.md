@@ -227,7 +227,7 @@ replacement. No duplicate live suites are armed just to obtain this evidence;
 CI must still prove the unchanged full matrix and required aggregate on the
 final head. Never report a dispatch or local YAML assertion as that proof.
 
-## Cost gate: fast CI first, superseded main runs skipped (GH #4074)
+## Cost gate: fast CI first, main batched hourly (GH #4074)
 
 The `precondition` job in `full-suite.yml` runs `scripts/fast_gate_check.py`
 (stdlib only, fetched from the PR's **base** commit, never the PR checkout)
@@ -237,8 +237,9 @@ before any heavy job. Every heavy job needs it and tests `outputs.ok == 'true'`.
 |---|---|
 | `pull_request` (label arm) | newest `ci.yml` `pull_request` run bound to this PR number, head SHA and head repo; latest attempt; exactly one `CI Gate` job `success`. Pending, red, missing, fork/unbound, API error: the check goes **red in seconds**, no test job starts. |
 | `workflow_dispatch` (`train/*`, WIDE route) | newest `ci.yml` **push/dispatch** run on the same SHA, branch and repo, `CI Gate` green. A carrier PR's run tests `refs/pull/<n>/merge`, a different tree, and never counts. Train route: `gh workflow run ci.yml --ref train/<t>` -> wait for `CI Gate` on that SHA -> `gh workflow run full-suite.yml --ref train/<t>`. Always the **full** suite. |
-| `push` to `main` | after a 300 s settle, if a newer non-release, untagged tip descends from this SHA and has its own live full-suite run, this run is skipped and `Merge gate (full suite)` shows grey with `SUPERSEDED by <tip>`. Anything unknown runs in full. |
-| `schedule` | never gated or coalesced; own concurrency group `full-suite-nightly`. |
+| `push` to `main` | **BATCHED** (cut 1): an ordinary merge runs two tiny jobs and no heavy job; `Merge gate (full suite)` shows grey with `BATCHED`. A release commit (`chore(release)` subject, or a `Merge pull request` commit whose PR title is `chore(release)`) or a tagged commit runs in **full** on its exact SHA. Each push has its own concurrency group (`full-suite-main-push-<sha>`), so a pending release run is never replaced. An unreadable commit or tag lookup runs in full. |
+| `schedule` `41 * * * *` (hourly batch) | the full matrix on the newest main tip, in `full-suite-main`. Skipped (grey, `HOURLY SKIP`) only when that exact SHA already has a full verdict (green **or red**: an unchanged red tip is not re-proved every hour; fix forward moves the tip), a run with heavy jobs in flight, or an OLDER scheduled/release run still deciding. Unknown runs in full. |
+| `schedule` `17 7 * * *` (nightly) | never gated or coalesced; own concurrency group `full-suite-nightly`. |
 
 There is no bypass input. The runner never waits for CI; use
 `make fast-gate PR=<n>` (one-shot client check of the same helper via `--local`;
@@ -268,20 +269,38 @@ lands `scripts/fast_gate_check.py` (+ its tests) on main with no workflow
 change. (2) Only then can the PR carrying the `full-suite.yml` change pass its
 own gate. Until step 1 is on main that PR's required check is red by design.
 
-**Coverage claims.** Every labeled PR head, the final main tip of each burst,
-every release/tagged commit and the nightly still run every test. A tag on a
+**Coverage claims.** Every labeled PR head (unchanged), the main tip once per
+hour when it moved, every release/tagged commit and the nightly still run every
+test. A tag on a
 commit is found whatever its name or age: every tag ref is listed
 (`git/matching-refs/tags/`, `Link` followed on the same API origin only) and
 annotated tag objects are peeled to their commit; any cap, cycle, timeout or API
 error means UNKNOWN, which runs in full.
 
-**Limits.** The 300 s settle adds ~5 runner-minutes to a main run even when it
-turns out to be the final tip. The settle was chosen from 99 commit gaps among
-the last 100 main commits (61 < 5 min, 78 < 10 min, median 2 min): a sample, not
-fleet statistics, and no savings figure is claimed. A run cancelled by hand or
-lost to a startup failure can leave a main commit without a full verdict until
-the nightly run, which is the backstop; no extra daemon or cancel API exists.
-A red tip verdict is a legitimate result for superseded commits, not a gap.
+**Red batch: the merge range.** A red main run (hourly, release push or main
+dispatch) has a last `Merge gate (full suite)` step that names
+`<last green full main SHA>..<this SHA>` and every merged PR in it (first-parent:
+`#N title (sha7)`), in the step summary and log, plus the `git log
+--first-parent` command to reproduce it. "Last green" reads the jobs: a batched
+or skipped run is run-level success with nothing run and never counts. The
+step is fail-soft three ways (`if: failure()`, `continue-on-error`, the helper's
+`--red-range` mode always exits 0) and runs after the verdict step has already
+failed the job, so it can neither turn a green run red nor hide a red one. On a
+PR it is skipped (the gate names its own head).
+
+**Release pre-cut check.** `make release-check SHA=<40-hex>` (the helper's
+`--release-check` mode) exits 0 only when a full-suite run on EXACTLY that SHA
+on main concluded `success` with the full matrix: both Python legs of `test`
+and `coverage-report`, linux and macOS `tui-e2e`, a green aggregate. The
+release owner runs it before `gh release create` (AGENTS.md runbook step 4). It
+is deliberately not a step in `publish.yml`: that workflow starts after the tag
+and GitHub Release exist, so a refusal there would strand a half-made release.
+
+**Limits.** A main commit between two hourly ticks gets no verdict of its own;
+the range report is how a red batch is attributed. A run cancelled by hand or
+lost to a startup failure leaves the tip uncovered until the next hourly tick
+(it is not a verdict, so the hourly re-runs it). A release bump now waits for
+its own full run (~40 min) before `make release-check` passes.
 
 ## Matrix axes: PR merge gate vs `main` / nightly / `workflow_dispatch`
 
@@ -289,7 +308,7 @@ A red tip verdict is a legitimate result for superseded commits, not a gap.
 for `tui-e2e`) and varies `python-version`, `os`, and `fail-fast` by
 `github.event_name`:
 
-| Job | `pull_request` (merge gate) | `push` (`main`), `schedule` (nightly), `workflow_dispatch` |
+| Job | `pull_request` (merge gate) | `push` (`main` release commits), `schedule` (hourly/nightly), `workflow_dispatch` |
 |---|---|---|
 | `test` | Python `3.13` × 6 shards (`fail-fast: true`) | Python `3.12` + `3.13` × 6 shards (`fail-fast: false`) |
 | `coverage-report` | Python `3.13` (`fail-fast: true`, skipped on `affected` lane) | Python `3.12` + `3.13` (`fail-fast: false`) |

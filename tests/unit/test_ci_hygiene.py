@@ -3740,11 +3740,118 @@ def test_every_heavy_full_suite_job_is_gated_on_the_precondition() -> None:
     assert {"changes", "precondition"} <= set(jobs["merge-gate"]["needs"])
 
 
-def test_nightly_schedule_has_its_own_concurrency_group() -> None:
-    """A push must never replace a pending nightly (full coverage backstop)."""
-    group = yaml.safe_load(FULL_SUITE_YML.read_text())["concurrency"]["group"]
-    assert "github.event_name == 'schedule' && 'full-suite-nightly'" in group
-    assert group.index("full-suite-nightly") < group.index("full-suite-main")
+def _full_suite_group(**kw: Any) -> tuple[str, bool]:
+    concurrency = yaml.safe_load(FULL_SUITE_YML.read_text())["concurrency"]
+    return _eval_ci_concurrency(concurrency, workflow="Main Full Suite", **kw)
+
+
+def test_full_suite_concurrency_groups_by_role() -> None:
+    """GH #4074 cut 1, evaluated, not string-matched.
+
+    * the NIGHTLY keeps its own group (never replaced by a push or the hourly);
+    * the HOURLY batch and main dispatches share `full-suite-main` (newest tip
+      pending, cancel-in-progress false);
+    * every main PUSH is isolated per SHA, so a pending RELEASE push run -- the
+      run `make release-check` needs on that exact SHA -- can never be replaced
+      by a later merge or the next hourly;
+    * a PR gate keeps exactly its old per-ref group.
+    """
+    from scripts.fast_gate_check import HOURLY_CRON
+
+    main = {"ref": "refs/heads/main"}
+    assert _full_suite_group(event_name="schedule", sha="a1", schedule="17 7 * * *", **main) == (
+        "full-suite-nightly",
+        False,
+    )
+    assert _full_suite_group(event_name="schedule", sha="a1", schedule=HOURLY_CRON, **main) == (
+        "full-suite-main",
+        False,
+    )
+    assert (
+        _full_suite_group(event_name="workflow_dispatch", sha="a1", **main)[0] == "full-suite-main"
+    )
+    release = _full_suite_group(
+        event_name="push",
+        sha="cccc3333",
+        commit_message="chore(release): bump version to 1.0.0",
+        **main,
+    )
+    ordinary = _full_suite_group(event_name="push", sha="dddd4444", **main)
+    assert release[1] is False and "cccc3333" in release[0] and "dddd4444" in ordinary[0]
+    assert len({release[0], ordinary[0], "full-suite-main", "full-suite-nightly"}) == 4
+    assert _full_suite_group(
+        ref="refs/pull/7/merge", event_name="pull_request", sha="eeee5555"
+    ) == ("full-suite-refs/pull/7/merge", False)
+    assert _full_suite_group(ref="refs/heads/train/x", event_name="workflow_dispatch", sha="f")[
+        0
+    ] == ("full-suite-refs/heads/train/x")
+
+
+def test_hourly_cron_is_the_one_the_helper_gates() -> None:
+    """The cron string is the ONLY hourly-vs-nightly discriminator: pin the pair."""
+    from scripts.fast_gate_check import HOURLY_CRON
+
+    full = yaml.safe_load(FULL_SUITE_YML.read_text())
+    crons = [entry["cron"] for entry in full.get("on", full.get(True))["schedule"]]
+    assert sorted(crons) == sorted(["17 7 * * *", HOURLY_CRON]), crons
+    minute = HOURLY_CRON.split()[0]
+    assert minute not in ("0", "17") and HOURLY_CRON.split()[1:] == ["*"] * 4
+    step = next(st for st in full["jobs"]["precondition"]["steps"] if st.get("id") == "gate")
+    assert step["env"]["SCHEDULE"] == "${{ github.event.schedule }}"
+    assert '--schedule "$SCHEDULE"' in step["run"] and '--run-id "$GITHUB_RUN_ID"' in step["run"]
+
+
+def test_release_check_axes_match_the_non_pr_matrix() -> None:
+    """`make release-check` requires these axes; they must be what main runs."""
+    from scripts.fast_gate_check import RELEASE_OSES, RELEASE_PYTHONS
+
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    for event in ("push", "schedule", "workflow_dispatch"):
+        for job in ("test", "coverage-report"):
+            raw = jobs[job]["strategy"]["matrix"]["python-version"]
+            assert tuple(_eval_pr_conditional_matrix(raw, event)) == RELEASE_PYTHONS, job
+        raw_os = jobs["tui-e2e"]["strategy"]["matrix"]["os"]
+        assert tuple(_eval_pr_conditional_matrix(raw_os, event)) == RELEASE_OSES
+    makefile = (REPO / "Makefile").read_text()
+    assert "release-check:" in makefile and "--release-check" in makefile
+    agents = (REPO / "AGENTS.md").read_text()
+    assert agents.index("release-check SHA=<the SHA you just checked>") < agents.index(
+        "gh release create vX.Y.Z --target"
+    )
+
+
+def test_pr_merge_gate_path_still_runs_every_shard() -> None:
+    """Cut 1 must not touch the labeled-PR gate: every shard, same conditions.
+
+    The heavy jobs' `if:` texts are pinned to their pre-cut form (no hourly,
+    batched or schedule clause may leak into the PR path), the shard lists
+    stay literal and complete, and the red-range step is a failure-only,
+    main-only, continue-on-error step after the verdict.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    gate = (
+        "!cancelled() && needs.precondition.result == 'success' && "
+        "needs.precondition.outputs.ok == 'true' && needs.changes.outputs.{} != 'false'"
+    )
+    assert " ".join(jobs["test"]["if"].split()) == gate.format("unit")
+    assert " ".join(jobs["tui-e2e"]["if"].split()) == gate.format("tui")
+    assert jobs["test"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3, 4, 5]
+    assert jobs["tui-e2e"]["strategy"]["matrix"]["shard"] == [0, 1]
+    for job in ("test", "coverage-report"):
+        raw = jobs[job]["strategy"]["matrix"]["python-version"]
+        assert _eval_pr_conditional_matrix(raw, "pull_request") == ["3.13"]
+    raw_os = jobs["tui-e2e"]["strategy"]["matrix"]["os"]
+    assert _eval_pr_conditional_matrix(raw_os, "pull_request") == ["ubuntu-latest"]
+    steps = jobs["merge-gate"]["steps"]
+    names = [st.get("name") for st in steps]
+    red = steps[names.index("Name the merge range of a red main run")]
+    assert names.index("Fail unless every needed job succeeded or was skipped") < names.index(
+        red["name"]
+    )
+    assert red["if"] == "failure() && github.ref == 'refs/heads/main'"
+    assert red["continue-on-error"] is True
+    assert "--red-range" in red["run"] and "|| true" in red["run"]
+    assert jobs["merge-gate"]["permissions"] == {"contents": "read", "actions": "read"}
 
 
 def test_merge_gate_aggregates_every_full_suite_job() -> None:
@@ -3772,7 +3879,8 @@ def test_merge_gate_aggregates_every_full_suite_job() -> None:
     assert not gate.get(
         "continue-on-error"
     ), "continue-on-error makes a required check report success for a red run"
-    _assert_gate_allowlists_results(gate["steps"][-1]["run"])
+    # The verdict step by name: the fail-soft red-range step follows it.
+    _assert_gate_allowlists_results(_gate_step_runs()["merge-gate"])
 
 
 def test_no_merge_gate_job_is_conditional_on_the_label_name() -> None:
@@ -4993,7 +5101,14 @@ def _assert_gate_allowlists_results(run: str) -> None:
 def _gate_step_runs() -> dict[str, str]:
     ci = yaml.safe_load(CI_YML.read_text())["jobs"]["ci-gate"]
     full = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]["merge-gate"]
-    return {"ci-gate": ci["steps"][-1]["run"], "merge-gate": full["steps"][-1]["run"]}
+    # By NAME for merge-gate: the fail-soft red-range step now follows the
+    # verdict step, so "last step" would test the wrong script.
+    (verdict,) = [
+        step["run"]
+        for step in full["steps"]
+        if step.get("name") == "Fail unless every needed job succeeded or was skipped"
+    ]
+    return {"ci-gate": ci["steps"][-1]["run"], "merge-gate": verdict}
 
 
 @pytest.mark.skipif(
@@ -5156,6 +5271,7 @@ def _eval_ci_concurrency(
     sha: str,
     commit_message: str = "feat(cli): ordinary merge (#4200)",
     workflow: str = "Pre-release CI Testing",
+    schedule: str = "",
 ) -> tuple[str, bool]:
     """Evaluate ci.yml's concurrency `group` and `cancel-in-progress` expressions.
 
@@ -5181,6 +5297,7 @@ def _eval_ci_concurrency(
         "github.sha": sha,
         "github.event.head_commit.message": commit_message,
         "github.workflow": workflow,
+        "github.event.schedule": schedule,
     }
 
     # Translate the Actions subset (`&&`, `||`, `==`, `!=`, string literals,
