@@ -616,6 +616,25 @@
       "references": {
         "team_bridge/integrations.py": 2
       }
+    },
+    "wire.runtime_memory": {
+      "reason": "per-runtime memory guard settings rows rendered by settings_io._t, and the sessions tool's force-stop hint and approval prompt rendered in-process as plain strings",
+      "render_points": [
+        {
+          "path": "local_operator/settings_io.py",
+          "symbol": "settings_io._t",
+          "note": "section, row and choice copy rendered as plain strings"
+        },
+        {
+          "path": "local_operator/tools/builtin.py",
+          "symbol": "builtin._runtime_memory_copy",
+          "note": "stop refusal hint and forced-stop approval prompt rendered as plain strings"
+        }
+      ],
+      "references": {
+        "settings_io.py": 8,
+        "tools/builtin.py": 2
+      }
     }
   }
 }

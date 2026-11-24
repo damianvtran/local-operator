@@ -1295,6 +1295,16 @@ export type MessageParams = {
   "wire.remote_compute.unknown_run": undefined;
   "wire.remote_compute.unreachable": undefined;
   "wire.remote_compute.unreadable_envelope": undefined;
+  "wire.runtime_memory.approval_stop_local_force": { "address": string };
+  "wire.runtime_memory.enabled.choice.false.description": undefined;
+  "wire.runtime_memory.enabled.choice.true.description": undefined;
+  "wire.runtime_memory.enabled.help": undefined;
+  "wire.runtime_memory.enabled.label": undefined;
+  "wire.runtime_memory.limit_mb.help": undefined;
+  "wire.runtime_memory.limit_mb.label": undefined;
+  "wire.runtime_memory.section.description": undefined;
+  "wire.runtime_memory.section.title": undefined;
+  "wire.runtime_memory.stop_force_hint": undefined;
   "wire.session.status.scheduled": { "count": number };
   "wire.session_status.answer_needed": undefined;
   "wire.session_status.approval_needed": undefined;

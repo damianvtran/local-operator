@@ -1,0 +1,49 @@
+{
+  "wire.runtime_memory.approval_stop_local_force": {
+    "role": "approval prompt for a forced stop",
+    "tone": "plain, warning",
+    "note": "{address} is the session address (keep verbatim). Must say it signals even while working and that work in flight is cut; the plain stop's prompt promises the opposite."
+  },
+  "wire.runtime_memory.enabled.choice.false.description": {
+    "role": "choice description",
+    "tone": "terse"
+  },
+  "wire.runtime_memory.enabled.choice.true.description": {
+    "role": "choice description",
+    "tone": "terse"
+  },
+  "wire.runtime_memory.enabled.help": {
+    "role": "setting help",
+    "tone": "plain",
+    "note": "'dormant' matches the sessions tool's stop vocabulary (wakes/monitors kept, not firing until reopened)."
+  },
+  "wire.runtime_memory.enabled.label": {
+    "role": "setting label",
+    "tone": "terse"
+  },
+  "wire.runtime_memory.limit_mb.help": {
+    "role": "setting help",
+    "tone": "plain",
+    "note": "Keep 1024 and 0 as digits."
+  },
+  "wire.runtime_memory.limit_mb.label": {
+    "role": "setting label",
+    "tone": "terse",
+    "note": "MB as in the existing 'Manual ceiling (MB)' label."
+  },
+  "wire.runtime_memory.section.description": {
+    "role": "settings section description",
+    "tone": "plain"
+  },
+  "wire.runtime_memory.section.title": {
+    "role": "settings section title",
+    "tone": "terse",
+    "width": "short section header",
+    "note": "The per-session-runtime memory ceiling; distinct from 'Command memory limit' (per bash command)."
+  },
+  "wire.runtime_memory.stop_force_hint": {
+    "role": "tool-result line appended under a stop refusal",
+    "tone": "calm, exact",
+    "note": "Model-and-operator-facing. Keep stop and force=true verbatim (a tool argument), and SIGTERM/SIGKILL verbatim. Safety facts that must survive: the escalation is only for an operator request or a memory runaway, and it cuts the work in flight."
+  }
+}

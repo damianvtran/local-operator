@@ -2026,6 +2026,25 @@ async def stop_session(
     # stop the user had asked for. The write is immediately before the signal
     # and names sigkill, so the next reader learns which rung killed it, that
     # it was deliberate, and who did it.
+    #
+    # BIRTH RE-PROVED FIRST. Identity was confirmed before SIGTERM, and the grace
+    # since is minutes long: a runtime that exited between two liveness polls
+    # could have had its pid handed on, and SIGKILL to that stranger is the one
+    # act no marker repairs. Only a POSITIVE mismatch withholds (``False``); a
+    # host that cannot answer (``None``) keeps the ladder's earlier proof, so the
+    # operator's stop still ends a runaway it already identified.
+    from local_operator.session.runtime.runtime_memory import birth_matches
+
+    if await asyncio.to_thread(birth_matches, record) is False:
+        _recover_record(record, root)
+        return StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name=name,
+            method="gone",
+            line=f'"{name}" exited during the SIGTERM grace; its pid now belongs to '
+            "another process, so no SIGKILL was sent",
+        )
     _write_stop_marker(record, root, "sigkill", command=_command, sweep_id=_sweep_id)
     # ``hard_kill_signal()`` is SIGKILL on POSIX — the identical value this rung
     # has always sent there — and None on Windows, where it selects the

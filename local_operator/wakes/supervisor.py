@@ -1830,6 +1830,12 @@ class _MachineMemorySweep:
         #: same reason.
         self.last_key: tuple[str, int | None] | None = None
         self._task: "asyncio.Task[Any] | None" = None
+        #: The per-runtime guard's streaks (``runtime_memory.RuntimeGuardTracker``),
+        #: built lazily so this module still starts without the runtime stack.
+        self._runtime_tracker: Any = None
+        #: The per-runtime guard's last structural key, for the same INFO/DEBUG
+        #: split as :attr:`last_key`.
+        self.last_runtime_key: tuple[str, tuple[int, ...]] | None = None
 
     def seconds_until(self, now: float | None = None) -> float:
         """How long the loop may sleep before this pass is due again."""
@@ -1916,6 +1922,13 @@ class _MachineMemorySweep:
             park_idle_sessions_sync,
         )
 
+        # THE PER-RUNTIME GUARD RUNS FIRST, on the same cadence and thread: it is
+        # the one bound on a runtime's OWN memory (the machine pass below never
+        # ends a runtime), it reads only syscalls, and a runaway it ends is memory
+        # the fleet sum below no longer has to account for. Its failure is logged
+        # and never costs the machine pass (see :mod:`runtime_memory`).
+        self.sweep_runtimes(apply=apply)
+
         def _relieve(reason: str) -> int:
             # The fleet guard's first rung: park idle sessions before ending a
             # fragment (see ``park_pressure``). Runs on this worker thread.
@@ -1939,6 +1952,25 @@ class _MachineMemorySweep:
             self._ended.append(
                 (time.monotonic(), frozenset(getattr(report, "killed_lineage", frozenset())))
             )
+        return report
+
+    def sweep_runtimes(self, *, apply: bool = True) -> Any:
+        """One per-runtime guard pass; never raises (a guard must not add a crash path)."""
+        try:
+            from local_operator.session.runtime import runtime_memory
+
+            if self._runtime_tracker is None:
+                self._runtime_tracker = runtime_memory.RuntimeGuardTracker()
+            report = runtime_memory.runtime_memory_pass(
+                self.config_dir, self._runtime_tracker, apply=apply
+            )
+        except Exception:  # noqa: BLE001 — the machine pass still runs
+            logger.warning("the runtime memory guard failed; runtimes are unbounded", exc_info=True)
+            return None
+        key = (report.state, tuple(sorted(pid for pid, _mb, _n in report.over)))
+        changed = key != self.last_runtime_key
+        self.last_runtime_key = key
+        (logger.info if changed or report.acts else logger.debug)("%s", report.summary())
         return report
 
     def in_cooldown(self, lineage: "frozenset[tuple[str, int]]", now: float | None = None) -> bool:

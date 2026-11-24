@@ -1,0 +1,12 @@
+{
+  "wire.runtime_memory.approval_stop_local_force": "强制停止{address}：即使它正在工作也会发送信号（SIGTERM、限时收尾，然后 SIGKILL），正在进行的工作会被中断",
+  "wire.runtime_memory.enabled.choice.false.description": "无上限",
+  "wire.runtime_memory.enabled.choice.true.description": "结束失控的会话",
+  "wire.runtime_memory.enabled.help": "当会话运行时自身的内存连续多次检查（约三分钟）都高于下面的上限时，将其结束。它的唤醒和监控会进入休眠而不会被删除，会话下次打开时会得知原因。",
+  "wire.runtime_memory.enabled.label": "会话内存限制",
+  "wire.runtime_memory.limit_mb.help": "单个会话运行时在被保护机制结束前可占用的内存。默认值远高于正常使用中测得的最大会话；低于 1024 的值会被提高到 1024，0 表示使用默认值。",
+  "wire.runtime_memory.limit_mb.label": "每个会话的上限（MB）",
+  "wire.runtime_memory.section.description": "为每个会话运行时自身的内存设置上限，让失控的会话被结束，而不是把整台设备拖入交换。",
+  "wire.runtime_memory.section.title": "会话内存限制",
+  "wire.runtime_memory.stop_force_hint": "如果操作员要求结束这个会话，或它的内存失控，请用 force=true 再次调用 stop：这会在核实身份后发送 SIGTERM，等它在限定时间内收尾，然后向这个确切的进程发送 SIGKILL，正在进行的工作会被中断。否则，这次拒绝就是答复。"
+}
