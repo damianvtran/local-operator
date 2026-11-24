@@ -210,7 +210,16 @@ def test_wire_bytes_are_unchanged_for_the_same_projection() -> None:
 #: from the new frame reproduces ``cd56998b...`` byte for byte. Additive by
 #: design: an older client reads a missing key as "not latched", which the
 #: owner backs by re-checking every grant press itself.
-_EXPECTED_DEGRADED_FRAME_DIGEST = "8b7563a443620b5d0b0f9691977dcce25b10a0106032401224b823234425bcbd"
+#: Re-pinned again, for ``transcript_has_older`` (PR #4521 QA Q3): the frame
+#: cap's transcript-tail tier cuts this fixture's 500 rows to 40, so it now
+#: tells the client older rows exist — exactly one top-level
+#: ``"transcript_has_older": true`` key, +30 bytes. Verified the same way:
+#: dropping that key from the new frame reproduces ``8b7563a4...`` byte for
+#: byte. Not a path divergence (``cap_projection_frame`` is one pure function
+#: on both the loop and off-loop paths) but an intended, sparse, additive
+#: field: an older client ignores it, and a missing key means "no older rows",
+#: what an older daemon meant.
+_EXPECTED_DEGRADED_FRAME_DIGEST = "af4431cc4a8817122f9821158a68e39cc86fa1498c797a8d65df4109d94b747b"
 
 
 # ---------------------------------------------------------------------------
