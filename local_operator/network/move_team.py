@@ -34,6 +34,14 @@ _UNREADABLE_STAMP = object()
 logger = logging.getLogger(__name__)
 
 
+#: Record ``kind`` of a roster member that names no registered profile,
+#: specialist or packaged seed. See ``_role_authority``.
+PLAIN_ROLE = "plain"
+#: Record of a ``team:`` slot naming no team. Empty strings never equal a real
+#: id or digest, so an absent record can never pass for a present one.
+_ABSENT_TEAM: dict[str, str] = {"id": "", "digest": "", "structure": ""}
+
+
 class TeamIdentityRefused(ValueError):
     code = CODE
 
@@ -287,6 +295,12 @@ def _ceiling(name: str, allowed: Any, actual: dict[str, Any]) -> None:
         or type(allowed.get("may_delegate")) is not bool
     ):
         raise TeamIdentityRefused(name)
+    if actual["kind"] == PLAIN_ROLE and allowed.get("kind") != PLAIN_ROLE:
+        # The record attests a real definition that this device does not hold
+        # (yet): a definitions-sync WAIT, not a widening to a full child. This
+        # must run before the tool checks below, which would otherwise read the
+        # missing row as "would grant unrestricted tools" and refuse for good.
+        raise _DefinitionNotLoaded(name, f"delegated role definition {actual['name']!r}")
     if allowed["readonly_shell"] and not actual["readonly_shell"]:
         raise TeamIdentityRefused(name, "would grant an unrestricted shell")
     if allowed["name"] != actual["name"]:
@@ -318,9 +332,33 @@ def _role_authority(
         )
     except (OSError, ValueError, KeyError) as error:
         raise TeamIdentityRefused(team_name) from error
+    if kind is None and delegated:
+        # A roster may name a member that never had a profile: the teams guide
+        # says such a team "still launches", hub sync reports it as a
+        # ``missing-role`` warning, and ``_resolve_role`` launches it as a full
+        # (unprofiled) child. Refusing it here refused real teams. Record it as
+        # a PLAIN role instead, so the ceiling is exactly that full child, and
+        # let ``_ceiling`` tell "the record attested a definition this device
+        # lacks" (a wait) apart from "it never had one" (this record).
+        return (
+            {
+                "name": role,
+                "kind": PLAIN_ROLE,
+                "id": "",
+                "digest": "",
+                "pins": [],
+                "unrestricted_tools": True,
+                # Without a profile the launch inherits delegation from the
+                # parent's own tools (``may_delegate`` in run_subagent), so the
+                # honest ceiling is "may".
+                "may_delegate": True,
+                "readonly_shell": is_readonly_shell_role(role, None),
+            },
+            None,
+            "",
+        )
     if kind is None:
-        subject = "delegated role" if delegated else "manager"
-        raise _DefinitionNotLoaded(team_name, f"{subject} definition {role!r}")
+        raise _DefinitionNotLoaded(team_name, f"manager definition {role!r}")
     # A seed's identity is its packaged name; a specialist/role's identity
     # comes from the very lookup that produced its applied prompt or pins.
     # Hash the authored profile, not any machine-local delivery pointer.
@@ -357,6 +395,12 @@ class TeamAuthority:
     roles: dict[str, tuple[dict[str, Any], AgentProfile | None, str]]
     manager: tuple[dict[str, Any], AgentProfile | None, str]
     max_depth: int
+    #: Casefolded ``team:`` slots that named no team when the roster was
+    #: snapshotted. Recorded (not refused) because a roster may legitimately
+    #: name a team that does not exist -- the org chart draws it as an
+    #: unresolved ghost and a launch of it is a ``TeamLaunchError`` -- while a
+    #: record that attested a REAL team keeps the definitions-sync wait.
+    absent_teams: frozenset[str] = frozenset()
 
     def record(self) -> dict[str, Any]:
         return {
@@ -372,7 +416,8 @@ class TeamAuthority:
                         "structure": _digest(team, structure_only=True),
                     }
                     for name, team in self.teams.items()
-                },
+                }
+                | {name: dict(_ABSENT_TEAM) for name in self.absent_teams},
                 "roles": {name: data[0] for name, data in self.roles.items()},
                 "max_depth": self.max_depth,
             },
@@ -397,6 +442,7 @@ def _snapshot(
     team = team.model_copy(deep=True)
     resolved = {team.name.casefold(): team}
     roles: dict[str, tuple[dict[str, Any], AgentProfile | None, str]] = {}
+    absent: set[str] = set()
     heights: dict[str, int] = {}
 
     def check_size(size: int) -> None:
@@ -410,7 +456,7 @@ def _snapshot(
 
     def record_role(role: str) -> None:
         if role not in roles:
-            check_size(len(resolved) + len(roles))  # +new role, -root team
+            check_size(len(resolved) + len(roles) + len(absent))  # +new role, -root team
             roles[role] = _role_authority(team.name, role, agents, delegated=True)
 
     def visit(current: Team, ancestors: tuple[str, ...]) -> int:
@@ -439,18 +485,22 @@ def _snapshot(
                     record_role(slot.role)
                 continue
             child_key = slot.role.casefold()
+            if child_key in absent:
+                continue
             if child_key not in resolved:
-                check_size(len(resolved) + len(roles))  # +new team, -root team
+                check_size(len(resolved) + len(roles) + len(absent))  # +new team, -root
                 nested = _resolve(teams, slot.role) if teams is not None else None
                 if nested is None:
-                    raise _DefinitionNotLoaded(team.name, f"delegated team {slot.role!r}")
+                    # Nothing to descend into: no roles or depth to grant.
+                    absent.add(child_key)
+                    continue
                 resolved[child_key] = nested.model_copy(deep=True)
             height = max(height, 1 + visit(resolved[child_key], (*ancestors, key)))
         heights[key] = height
         return height
 
     visit(team, ())
-    return TeamAuthority(team, resolved, roles, manager, max_depth)
+    return TeamAuthority(team, resolved, roles, manager, max_depth, frozenset(absent))
 
 
 def _compare(
@@ -476,6 +526,15 @@ def _compare(
             )
         for slot, candidate in new[key].items():
             entry = allowed[slot]
+            if (
+                key == "teams"
+                and candidate == _ABSENT_TEAM
+                and isinstance(entry, dict)
+                and entry != _ABSENT_TEAM
+            ):
+                # Same split as a plain role: the record attested a real team
+                # this device does not hold yet, so wait for definitions sync.
+                raise _DefinitionNotLoaded(name, f"delegated team {slot!r}")
             if not isinstance(entry, dict) or (local and entry.get("id") != candidate["id"]):
                 raise TeamIdentityRefused(name)
             if key == "roles":

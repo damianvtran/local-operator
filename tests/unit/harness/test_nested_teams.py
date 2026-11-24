@@ -391,6 +391,85 @@ def test_a_cycle_is_refused_before_recording_authority(tmp_path, teams):
 
 
 @pytest.mark.asyncio
+async def test_a_roster_naming_unprofiled_members_still_attaches_and_launches(tmp_path, teams):
+    """A plain role name and a ``team:`` slot naming no team are legitimate
+    roster entries (teams guide: such a team "still launches"; the org chart
+    draws a missing team as an unresolved node). Attach must record them, not
+    refuse the whole team; the member launches as a full child and the missing
+    team stays the launch error it always was."""
+    teams.create_team(
+        TeamEditFields(
+            name="plain",
+            manager="manager",
+            members=[TeamMember(role="worker"), TeamMember(role="ghost", kind="team")],
+        )
+    )
+    root = make_root(tmp_path, teams, team="plain")
+    authority = root._team_authority
+    assert authority is not None
+    record, profile, prompt = authority.roles["worker"]
+    assert (record["kind"], profile, prompt) == ("plain", None, "")
+    assert authority.absent_teams == frozenset({"ghost"})
+    child, target, _ = await build(root, "worker", "job-1")
+    assert target.role == "worker" and target.depth == 1
+    with pytest.raises(TeamLaunchError):
+        resolve_launch_target("team:ghost", root)
+    for session in (child, root):
+        await session.dispose()
+
+
+def _record_on(teams: TeamRegistry, agents_root: Path) -> dict[str, Any]:
+    from local_operator.network.move_team import _snapshot
+
+    team = teams.get_team_by_name("plain")
+    assert team is not None
+    return _snapshot(team, teams, AgentRegistry(agents_root), max_depth=3).record()
+
+
+def test_a_missing_definition_waits_only_when_the_record_attested_one(tmp_path, config):
+    """The fail-closed split the plain-role record exists for: a record that
+    attested a REAL role or team which this device lacks is a definitions-sync
+    wait (``is_pending_definition``); a record that attested NO definition
+    matches a device that has none; and a definition appearing where the record
+    attested none is a refusal, never a wait."""
+    from local_operator.network.move_team import _compare, is_pending_definition
+
+    teams = TeamRegistry(config)
+    teams.create_team(
+        TeamEditFields(
+            name="plain",
+            manager="manager",
+            members=[TeamMember(role="worker"), TeamMember(role="pod", kind="team")],
+        )
+    )
+    bare = tmp_path / "bare-agents"
+    without = _record_on(teams, bare)  # neither ``worker`` nor ``pod`` exists
+    _compare(without, _record_on(teams, bare), local=False, exact_revision=True)
+
+    defined = tmp_path / "defined-agents"
+    AgentRegistry(defined).create_agent(
+        _agent_fields(name="worker", description="w", tags=["role"])
+    )
+    with_role = _record_on(teams, defined)
+    assert with_role["delegation"]["roles"]["worker"]["kind"] == "role"
+    with pytest.raises(TeamIdentityRefused) as waiting:
+        _compare(with_role, without, local=False, exact_revision=True)
+    assert is_pending_definition(waiting.value), waiting.value
+    with pytest.raises(TeamIdentityRefused) as widened:
+        _compare(without, with_role, local=False, exact_revision=True)
+    assert not is_pending_definition(widened.value), widened.value
+
+    teams.create_team(TeamEditFields(name="pod", manager="manager"))
+    with_team = _record_on(teams, bare)
+    with pytest.raises(TeamIdentityRefused) as team_waiting:
+        _compare(with_team, without, local=False, exact_revision=False)
+    assert is_pending_definition(team_waiting.value), team_waiting.value
+    with pytest.raises(TeamIdentityRefused) as team_widened:
+        _compare(without, with_team, local=False, exact_revision=False)
+    assert not is_pending_definition(team_widened.value), team_widened.value
+
+
+@pytest.mark.asyncio
 async def test_a_launch_past_the_cap_is_an_error(tmp_path, teams, config):
     (config / "config.yml").write_text("values:\n  subagents:\n    max_team_depth: 2\n")
     add_agent_slots(teams, "org", "manager")
