@@ -232,9 +232,8 @@ def test_a_deleted_conversations_ask_stays_listed_flagged_until_settled(
         assert [(r["session_id"], r["ask_id"]) for r in rows] == [(GONE, ASK)]
     assert ask_store.read_index(tmp_path) == {}, "other readers still skip it"
     assert ask_store.entry_path(tmp_path, GONE).exists()
-    listed = inbox.waiting_items(
-        tmp_path, notes, inbox.SessionFacts(tmp_path), SimpleNamespace(get=lambda s: [])
-    )
+    projects: Any = SimpleNamespace(get=lambda s: [])
+    listed = inbox.waiting_items(tmp_path, notes, inbox.SessionFacts(tmp_path), projects)
     assert listed[0]["conversation_deleted"] is True
     shown = inbox.detail(tmp_path, ask_ref(GONE, ASK))
     assert shown is not None and shown["item"]["conversation_deleted"] is True
