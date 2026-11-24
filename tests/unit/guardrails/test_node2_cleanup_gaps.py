@@ -101,7 +101,7 @@ def repo(home: Path) -> Path:
     seed = home / "seed"
     seed.mkdir()
     _git("init", "-q", "-b", "main", cwd=seed)
-    (seed / ".gitignore").write_text(".worktrees/\ndist-ssr/\nnode_modules\n")
+    (seed / ".gitignore").write_text(".worktrees/\ndist-ssr/\nlocal-data/\nnode_modules\n")
     (seed / "a.py").write_text("a = 1\n")
     _git("add", ".", cwd=seed)
     _git("commit", "-qm", "init", cwd=seed)
@@ -515,10 +515,13 @@ def test_1_github_default_repos_field_shape_end_to_end(
 # -- 3: copy-overhaul, a merged tree with and without ignored SSR output ----
 
 
-@pytest.mark.parametrize("ignored", [False, True], ids=["clean", "unwitnessed-dist-ssr"])
-def test_3_merged_plain_cleanup_requires_preserved_payload(
-    home: Path, repo: Path, ignored: bool
+@pytest.mark.parametrize("ignored", [False, True], ids=["clean", "ignored-dist-ssr"])
+def test_3_merged_plain_cleanup_sheds_build_output(
+    home: Path, repo: Path, ignored: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The module stub takes no ``strict``; the finished-tree proof needs the
+    # strict signature (no running owner: S2 is not running).
+    monkeypatch.setattr(prov, "_running_owners", lambda real, sid, **_: ())
     _merged_branch(repo, "feat/site-copy-overhaul")
     # Created by an unrelated session (58de2f8ff79b in the field), not running.
     _run_recorded(
@@ -530,21 +533,20 @@ def test_3_merged_plain_cleanup_requires_preserved_payload(
     if ignored:
         (wt / "dist-ssr").mkdir()
         (wt / "dist-ssr" / "entry-server.js").write_text("export {}\n")
-    # Legacy state and merged history do not witness the ignored bytes.
+    # 2026-11-24 (fleet census, operator directive): a FINISHED tree (merged
+    # on origin, clean, no open PR or running owner) sheds regenerable-named
+    # build output whoever made it, so plain removal is LOW either way.
     assert prov.worktree_state(str(wt)) == "clean"
     command = "git -C ~/local-operator worktree remove .worktrees/copy-overhaul"
     verdict = classify_bash(command, cwd=str(home), env=_env(home), scratchpad=None, session_id=S)
+    assert verdict.risk is Risk.LOW, verdict.reasons
+    # ``--force`` and ``rm -rf`` over another session's ignored payload still
+    # go to the judge (the name rule is plain-only). A clean, finished tree's
+    # ``--force``/``rm -rf`` is LOW by operator decision a-891c.
     if ignored:
-        assert verdict.risk is Risk.HIGH and verdict.targets[0].cleanup_hold, verdict.reasons
-        assert "1 ignored entry the guard cannot prove regenerable" in verdict.targets[0].reason
-    else:
-        assert verdict.risk is Risk.LOW, verdict.reasons
-    # ``--force`` and ``rm -rf`` of another session's tree still go to the judge.
-    assert (
-        _rank(home, "git -C ~/local-operator worktree remove --force .worktrees/copy-overhaul")[0]
-        is Risk.HIGH
-    )
-    assert _rank(home, f"rm -rf {wt}")[0] is Risk.HIGH
+        forced = "git -C ~/local-operator worktree remove --force .worktrees/copy-overhaul"
+        assert _rank(home, forced)[0] is Risk.HIGH
+        assert _rank(home, f"rm -rf {wt}")[0] is Risk.HIGH
 
 
 @pytest.mark.asyncio
@@ -624,14 +626,14 @@ async def test_ignored_cleanup_approval_at_real_checkpoint(
         _run_recorded(home, f"git -C {repo} worktree add -qb consent {wt}")
     else:
         _git("worktree", "add", "-qb", "consent", ".worktrees/consent", cwd=repo)
-    (wt / "dist-ssr").mkdir()
-    (wt / "dist-ssr" / "payload").write_text("preserve")
+    (wt / "local-data").mkdir()
+    (wt / "local-data" / "payload").write_text("preserve")
     if mode == "dirty":
         (wt / "untracked").write_text("work")
     if mode.startswith("compound") or mode in ("field-brace", "mixed-question"):
         _git("worktree", "add", "-qb", "other", ".worktrees/other", cwd=repo)
-        (wt.parent / "other" / "dist-ssr").mkdir()
-        (wt.parent / "other" / "dist-ssr" / "payload").write_text("preserve")
+        (wt.parent / "other" / "local-data").mkdir()
+        (wt.parent / "other" / "local-data" / "payload").write_text("preserve")
     if mode == "busy":
         monkeypatch.setattr(prov, "_live_cwd_inside", lambda *a, **kw: True)
     if mode in ("unknown-forge", "git-fallback", "open-forge", "owner"):
@@ -948,13 +950,13 @@ async def test_ignored_cleanup_approval_at_real_checkpoint(
     else:
         assert preview.builtin_effect in ("hold-cleanup", "refuse-critical"), preview.render()
         assert result is not None and result.blocked and not calls
-    assert (wt / "dist-ssr" / "payload").read_text() == "preserve"
+    assert (wt / "local-data" / "payload").read_text() == "preserve"
 
 
 def test_3_nested_repo_inside_dist_ssr_is_not_regenerable(home: Path, repo: Path) -> None:
     _run_recorded(home, "cd ~/local-operator && git worktree add -b x .worktrees/x", sid=S2)
     wt = repo / ".worktrees" / "x"
-    nested = wt / "dist-ssr" / "keep"
+    nested = wt / "local-data" / "keep"
     nested.mkdir(parents=True)
     _git("init", "-q", cwd=nested)
     assert prov.worktree_state(str(wt)) == "dirty"
