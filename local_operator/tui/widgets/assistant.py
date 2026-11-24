@@ -1551,11 +1551,22 @@ class AssistantBlock(TranscriptBlock):
             # painted columns — so the clamp is the rail plus the construct's
             # own furniture, which is what keeps the gutter off the clipboard
             # when the reader's drag began on it.
+            # BARE rows, not painted ones (QA round 3, Q6). ``without_marks``
+            # asks what a cell IS, and on a railed row column 0 is the ``▎``,
+            # so its orphan branch — "the row opens with a mark" — read the rail
+            # and let a drag that began on a wrapped pair's mark carry the glyph
+            # (the shipped default has the rail on; the rail-off path only
+            # passed because the pair reassembles and ``strip_marks`` catches
+            # it). The rail is a fixed prefix, so subtracting it from the
+            # painted columns is exact and the surviving cells keep the
+            # offsets the drag used.
             glyphs = [
                 without_marks(
-                    rows[index],
-                    start=max(start, rail_cols + self._furniture_width(bare, mapping, index)),
-                    end=end,
+                    bare[index],
+                    start=max(start - rail_cols, self._furniture_width(bare, mapping, index)),
+                    # ``-1`` is the caller's end-of-row; any OTHER column inside
+                    # the rail is a zero-length take, not an end-of-row one.
+                    end=(-1 if end < 0 else max(0, end - rail_cols)),
                     previous_row=(bare[index - 1] if index else None),
                 )
                 for index, (start, end) in content

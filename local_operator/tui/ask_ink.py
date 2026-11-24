@@ -163,71 +163,13 @@ def mark_for_status(status: str) -> str:
     return MARKS[state_for_status(status)]
 
 
-def _scan_label(text: str, open_at: int) -> int | None:
-    """Index just past the ``]`` that closes the label opened at ``open_at``.
-
-    BRACKET-BALANCED and escape-aware, which the regex it replaces was not
-    (review round 4): ``[nested [a-745e]](url)`` and ``[abc \\] a-745e](url)``
-    both put a cited id inside link text, and a pattern stopping at the first
-    ``]`` read the first as ``[nested [a-745e]`` — a construct that ends before
-    the id is even closed — and decorated it, so a click ran the ask action AND
-    the URL opener on the same cell.
-
-    A blank line ends the search: a label may hold at most one newline in
-    CommonMark, and no construct may reach across a paragraph break.
-    """
-    depth = 1
-    index = open_at + 1
-    length = len(text)
-    while index < length:
-        char = text[index]
-        if char == "\\":
-            index += 2
-            continue
-        if char == "\n" and text.startswith("\n\n", index):
-            return None
-        if char == "[":
-            depth += 1
-        elif char == "]":
-            depth -= 1
-            if depth == 0:
-                return index + 1
-        index += 1
-    return None
-
-
-def _scan_destination(text: str, open_at: int) -> int | None:
-    """Index just past the ``)`` closing the destination opened at ``open_at``.
-
-    Parentheses are balanced (CommonMark's one-level allowance, and deeper
-    balance costs nothing here) and backslash escapes are skipped; a blank line
-    ends it, for the same reason as :func:`_scan_label`.
-    """
-    depth = 1
-    index = open_at + 1
-    length = len(text)
-    while index < length:
-        char = text[index]
-        if char == "\\":
-            index += 2
-            continue
-        if char == "\n" and text.startswith("\n\n", index):
-            return None
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return index + 1
-        index += 1
-    return None
-
-
 def _scan_autolink(text: str, open_at: int) -> int | None:
     """Index just past ``>`` when ``<…>`` is an autolink, else ``None``.
 
     CommonMark's shape: no whitespace and no ``<`` inside, and either a scheme
-    (``<https://x>``) or an address (``<me@x.test>``).
+    (``<https://x>``) or an address (``<me@x.test>``). The scan stops at the
+    first ``<``, ``>`` or newline, so a run of unterminated ``<`` costs one
+    character each.
     """
     index = open_at + 1
     length = len(text)
@@ -243,56 +185,120 @@ def _scan_autolink(text: str, open_at: int) -> int | None:
     return index + 1
 
 
-def _link_constructs(text: str) -> list[tuple[int, int]]:
-    """Every Markdown link/autolink range that starts outside a fence.
+#: A paragraph break: a line that is empty or holds only whitespace. CommonMark
+#: ends a block at one, and no inline construct may reach across it.
+_BLANK_LINE_RE = re.compile(r"^\s*$")
 
-    ONE left-to-right pass (review round 4's perf constraint): each construct
-    consumes the text it covers, and a ``[`` that never closes costs one
-    character of advance, so the walk is linear in the text. This is what the
-    masking needs to be Markdown-aware rather than pattern-shaped — the shapes
-    that matter are the ones a *reader* sees as a link, and those are the ones
-    a regex over ``[^]]*`` cannot see.
+
+def _segments(text: str) -> list[tuple[int, int]]:
+    """Ranges of ``text`` an inline construct may live in.
+
+    SEGMENTED FIRST, SCANNED PER SEGMENT (review R5-2). A construct cannot
+    cross a fence line or a paragraph break, so the scanner is handed one
+    paragraph at a time and the boundary is structural rather than a check the
+    walk could forget: ``[start`` / a fence / ``a-745e](url)`` used to read as
+    one link that swallowed the whole block and left the id undecorated, and a
+    whitespace-only line was read as ordinary text.
+
+    Fence lines and fenced content are excluded whole — a code sample is not a
+    paragraph.
+    """
+    fences = _fenced_spans(text)
+    segments: list[tuple[int, int]] = []
+    start: int | None = None
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        inside_fence = any(low <= offset < high for low, high in fences)
+        blank = _BLANK_LINE_RE.match(line) is not None
+        if inside_fence or blank:
+            if start is not None:
+                segments.append((start, offset))
+                start = None
+        elif start is None:
+            start = offset
+        offset += len(line)
+    if start is not None:
+        segments.append((start, len(text)))
+    return segments
+
+
+def _constructs_in(segment: str) -> list[tuple[int, int]]:
+    """Every link/autolink range in ONE paragraph, in a single left-to-right pass.
+
+    A STACK MACHINE, not a lookahead scanner (review R5-1). Each character is
+    visited once: ``[`` pushes a label frame, ``]`` pops it into a one-character
+    *pending* state that only the next character can settle (``(`` opens a
+    destination frame, ``[`` a reference frame, anything else drops the open),
+    and the destination/reference frames consume their own span. An unmatched
+    ``[`` therefore costs one push, never a rescan of the suffix — the previous
+    form re-walked the remainder from every unmatched bracket, which is
+    quadratic (10k brackets measured 2.5 s).
     """
     spans: list[tuple[int, int]] = []
-    fences = _fenced_spans(text)
-
-    def in_fence(position: int) -> bool:
-        return any(low <= position < high for low, high in fences)
-
+    #: ``("label", open_at, 1)`` while a label is open; ``("dest"|"ref",
+    #: construct_start, depth)`` while a target is being consumed.
+    stack: list[tuple[str, int, int]] = []
+    pending: int | None = None
     index = 0
-    length = len(text)
+    length = len(segment)
     while index < length:
-        char = text[index]
+        char = segment[index]
         if char == "\\":
             index += 2
             continue
+        if pending is not None:
+            if char == "(":
+                stack.append(("dest", pending, 1))
+                pending = None
+                index += 1
+                continue
+            if char == "[":
+                stack.append(("ref", pending, 1))
+                pending = None
+                index += 1
+                continue
+            # Not a link: the label's text is ordinary text again.
+            pending = None
+        if stack and stack[-1][0] != "label":
+            kind, open_at, depth = stack[-1]
+            if kind == "dest":
+                if char == "(":
+                    stack[-1] = (kind, open_at, depth + 1)
+                elif char == ")":
+                    if depth == 1:
+                        stack.pop()
+                        spans.append((open_at, index + 1))
+                    else:
+                        stack[-1] = (kind, open_at, depth - 1)
+            elif char == "]":
+                stack.pop()
+                spans.append((open_at, index + 1))
+            index += 1
+            continue
         if char == "<":
-            end = _scan_autolink(text, index)
-            if end is not None and not in_fence(index):
+            end = _scan_autolink(segment, index)
+            if end is not None:
                 spans.append((index, end))
                 index = end
                 continue
-            index += 1
-            continue
-        if char == "[" and not in_fence(index):
-            label_end = _scan_label(text, index)
-            if label_end is not None and label_end < length:
-                if text[label_end] == "(":
-                    end = _scan_destination(text, label_end)
-                    if end is not None:
-                        spans.append((index, end))
-                        index = end
-                        continue
-                elif text[label_end] == "[":
-                    ref_end = _scan_label(text, label_end)
-                    if ref_end is not None:
-                        spans.append((index, ref_end))
-                        index = ref_end
-                        continue
+        elif char == "[":
+            stack.append(("label", index, 1))
+        elif char == "]" and stack:
+            pending = stack.pop()[1]
         index += 1
-    for match in _REF_DEF_RE.finditer(text):
-        if not in_fence(match.start()):
-            spans.append((match.start(), match.end()))
+    return spans
+
+
+def _link_constructs(text: str) -> list[tuple[int, int]]:
+    """Every Markdown link/autolink range in ``text``, fences and breaks respected."""
+    spans: list[tuple[int, int]] = []
+    for start, end in _segments(text):
+        segment = text[start:end]
+        spans.extend((start + low, start + high) for low, high in _constructs_in(segment))
+        # Reference definitions are lines of their own; a segment is a
+        # paragraph, so the lookup runs over the segment's own lines.
+        for match in _REF_DEF_RE.finditer(segment):
+            spans.append((start + match.start(), start + match.end()))
     return spans
 
 
