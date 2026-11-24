@@ -318,7 +318,11 @@ async def test_a_failed_restart_sweep_is_logged_and_runs_again(
         # The done-callback runs on the loop's next turn.
         await asyncio.sleep(0)
     failures = [r for r in caplog.records if "detached scan work failed" in r.getMessage()]
-    assert len(failures) == 1 and isinstance(failures[0].exc_info[1], OSError)
+    assert len(failures) == 1
+    # ``LogRecord.exc_info`` is Optional; the done-callback logs with the
+    # exception attached, so its absence is itself a failure worth naming.
+    assert failures[0].exc_info is not None, "the failure must carry its traceback"
+    assert isinstance(failures[0].exc_info[1], OSError)
     assert daemon._attention_bootstrapped is False, "a failed sweep must be re-armed"
 
     await daemon._scan_once()

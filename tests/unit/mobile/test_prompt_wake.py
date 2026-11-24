@@ -26,11 +26,7 @@ from typing import Any
 import pytest
 from starlette.testclient import TestClient
 
-from local_operator.mobile.daemon import (
-    PROMPT_WAKE_DEADLINE_S,
-    MobileDaemon,
-    build_app,
-)
+from local_operator.mobile.daemon import PROMPT_WAKE_DEADLINE_S, MobileDaemon, build_app
 
 SESSION = "cold-wake"
 COMMAND_ID = "12345678-1234-4678-9234-567812345678"
@@ -223,7 +219,8 @@ def test_a_client_that_did_not_opt_in_never_gets_waking(
     memory. The one change such a client sees is the better one: the wake keeps
     running past the 504 and its same-id retry JOINS it (delivered once).
     """
-    from local_operator.mobile import attach_client, daemon as daemon_module
+    from local_operator.mobile import attach_client
+    from local_operator.mobile import daemon as daemon_module
 
     _durable_session(tmp_path, monkeypatch)
     # The window is the pre-change 15 s ack; shortened so the suite does not
@@ -273,7 +270,8 @@ def test_an_opted_in_client_gets_504_when_nothing_is_constructing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """R1-4: ``waking`` promises a boot underway; with none, the old 504 stands."""
-    from local_operator.mobile import attach_client, daemon as daemon_module
+    from local_operator.mobile import attach_client
+    from local_operator.mobile import daemon as daemon_module
 
     _durable_session(tmp_path, monkeypatch)
     monkeypatch.setattr(daemon_module, "PROMPT_WAKE_ACK_WINDOW_S", 0.3)

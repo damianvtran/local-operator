@@ -68,11 +68,15 @@ describe("submitContinuation", () => {
 		await submitContinuation("root", "prompt", "Edited draft", [
 			{ data_b64: "edited-image", mime_type: "image/png" },
 		]);
+		/* A fresh prompt's wire body is its envelope plus the transport-only
+		   `accept_waking` opt-in (the relay pops it before validation); the
+		   replayed steer above stays byte-identical to its stored envelope. */
 		expect(mockedSendCommand.mock.calls[2]?.[1]).toEqual({
 			op: "prompt",
 			command_id: "12345678-1234-4678-9234-567812345678",
 			text: "Edited draft",
 			images: [{ data_b64: "edited-image", mime_type: "image/png" }],
+			accept_waking: true,
 		});
 		expect(mockedSendCommand.mock.calls[2]?.[1]).not.toBe(mockedSendCommand.mock.calls[1]?.[1]);
 		expect(localStorage.getItem("lo-mobile-command:root")).toBeNull();
@@ -302,17 +306,14 @@ describe("the input-mode annotation (input-mode-v1)", () => {
 		/* Exactly what the build before this change wrote: a v1 wrapper whose
 		   envelope has no annotation keys. It must stay valid (absent = legacy)
 		   and the retry must send those bytes. */
+		const stored = {
+			op: "prompt",
+			command_id: "12345678-1234-4678-9234-567812345678",
+			text: "stored before annotations",
+		};
 		localStorage.setItem(
 			"lo-mobile-command:root",
-			JSON.stringify({
-				version: 1,
-				saved_at: Date.now(),
-				envelope: {
-					op: "prompt",
-					command_id: "12345678-1234-4678-9234-567812345678",
-					text: "stored before annotations",
-				},
-			}),
+			JSON.stringify({ version: 1, saved_at: Date.now(), envelope: stored }),
 		);
 		mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
 
@@ -325,7 +326,13 @@ describe("the input-mode annotation (input-mode-v1)", () => {
 		expect(sent.text).toBe("stored before annotations");
 		expect(sent.input_mode).toBeUndefined();
 		expect(sent.input_path).toBeUndefined();
-		expect(retry.envelope).toEqual(sent);
+		/* The retained envelope is exactly the stored bytes (strict: no key
+		   invented, not even as `undefined`). The wire body adds only the
+		   transport-only `accept_waking` opt-in, which the relay pops before
+		   validating or forwarding, so what reaches the session is still the
+		   stored envelope byte for byte. */
+		expect(retry.envelope).toStrictEqual(stored);
+		expect(sent).toStrictEqual({ ...stored, accept_waking: true });
 	});
 
 	it("retires a stored envelope whose annotation is malformed", async () => {
