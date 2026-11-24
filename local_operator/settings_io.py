@@ -5261,6 +5261,24 @@ SETTINGS: tuple[Setting, ...] = (
             ),
         ),
     ),
+    # LIVE: ``mcp.manager.read_result_text_rendering`` reads it per MCP
+    # result. Path and default mirror
+    # ``tools.result_normalize.RESULT_TEXT_RENDERING_{PATH,DEFAULT}`` (not
+    # imported, same reason as the row above; pinned by the consumer-defaults
+    # test). Renders exactly two JSON shapes -- a search hit list and a single
+    # ``{url, content, ...}`` fetched page -- as lossless text (every field
+    # kept), only while ``mcp.result_normalization`` is not ``off``. A bool so
+    # a cost benchmark can A/B it, and an escape hatch for a consumer that
+    # wants the JSON.
+    Setting(
+        key="mcp.result_text_rendering",
+        path=("mcp", "result_text_rendering"),
+        section="tools",
+        label=_t(_ws.mcp_result_text_rendering_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.mcp_result_text_rendering_help()),
+    ),
     # LIVE: ``mcp.manager.read_search_snippet_chars`` reads it per MCP search
     # result. Path, default and maximum mirror
     # ``tools.result_normalize.SEARCH_SNIPPET_CHARS_{PATH,DEFAULT,MAX}`` (not

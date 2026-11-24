@@ -21,7 +21,8 @@ en catalogue.
 The ``mcp.result_normalization`` row (PR #4514) adds eight slots (label, help
 and three choices' label + description), copied byte-for-byte from the en
 catalogue; no existing slot changes. The ``mcp.search_snippet_chars`` row
-(PR #4525) adds two more (label and help), copied the same way.
+(PR #4525) adds two more (label and help), copied the same way, and so does
+the ``mcp.result_text_rendering`` row.
 
 The second test pins the resolution PATH: the registry's strings must come
 through the `wire.settings` catalogue (not from leftovers), and an unknown

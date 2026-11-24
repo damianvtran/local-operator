@@ -88,6 +88,7 @@ from local_operator.mcp.config import (
 )
 from local_operator.mcp.secret_refs import resolve_config_secrets
 from local_operator.mcp.tool_bridge import (
+    SeenUrlLedger,
     build_agent_tool,
     capture_producer_scope,
     clean_outbound_args,
@@ -102,6 +103,8 @@ from local_operator.tools.result_normalize import (
     RESULT_NORMALIZATION_DEFAULT,
     RESULT_NORMALIZATION_MODES,
     RESULT_NORMALIZATION_PATH,
+    RESULT_TEXT_RENDERING_DEFAULT,
+    RESULT_TEXT_RENDERING_PATH,
     SEARCH_SNIPPET_CHARS_DEFAULT,
     SEARCH_SNIPPET_CHARS_MAX,
     SEARCH_SNIPPET_CHARS_PATH,
@@ -1024,6 +1027,30 @@ def read_search_snippet_chars() -> int:
     return min(value, SEARCH_SNIPPET_CHARS_MAX)
 
 
+def read_result_text_rendering() -> bool:
+    """Read ``mcp.result_text_rendering`` at CALL time; the default on any trouble.
+
+    Same contract as :func:`read_result_normalization_mode` (live per call,
+    never renames a broken config, never fails a result). Only a real YAML
+    boolean counts: a hand-typed ``off``/``no`` is already ``False`` in YAML
+    1.1, and anything else (a string, a number) keeps the default rather
+    than guessing.
+    """
+    try:
+        from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+        from local_operator.paths import config_dir
+        from local_operator.tools.shell_env import _config_file_is_unreadable
+
+        if _config_file_is_unreadable(config_dir() / CONFIG_FILE_NAME):
+            return RESULT_TEXT_RENDERING_DEFAULT
+        value = ConfigManager(config_dir()).get_nested_value(
+            RESULT_TEXT_RENDERING_PATH, RESULT_TEXT_RENDERING_DEFAULT
+        )
+    except Exception:  # noqa: BLE001 — config trouble must never fail a result
+        return RESULT_TEXT_RENDERING_DEFAULT
+    return value if isinstance(value, bool) else RESULT_TEXT_RENDERING_DEFAULT
+
+
 def _format_with_normalization_setting(
     result: Any,
     tool_call_id: str,
@@ -1033,6 +1060,7 @@ def _format_with_normalization_setting(
     producer_scope: str | None,
     machine_read: bool,
     mcp_tool_name: str = "",
+    seen_urls: SeenUrlLedger | None = None,
 ) -> ToolResult:
     """``format_mcp_result`` under the live ``mcp.result_normalization`` mode.
 
@@ -1050,6 +1078,10 @@ def _format_with_normalization_setting(
     snippet_chars = 0
     if normalization != "off" and is_search_tool(mcp_tool_name):
         snippet_chars = read_search_snippet_chars()
+    # Read only under a normalizing mode: ``off`` stays one config read and
+    # byte-identical, and a machine-read result never reaches the model, so
+    # it neither renders nor records URLs in the session's ledger.
+    text_rendering = normalization != "off" and read_result_text_rendering()
     return format_mcp_result(
         result,
         tool_call_id,
@@ -1059,6 +1091,8 @@ def _format_with_normalization_setting(
         normalization=normalization,
         mcp_tool_name=mcp_tool_name,
         search_snippet_chars=snippet_chars,
+        seen_urls=None if machine_read else seen_urls,
+        text_rendering=text_rendering,
     )
 
 
@@ -2113,6 +2147,9 @@ class McpManager:
         # rotation this process performed does not read as movement, while the
         # witness is what covers the same-chain sibling heal a stamp cannot see.
         self._auth_grant_marker: dict[str, GrantMarker | None] = {}
+        # Per-session URLs already shown to the model through MCP results
+        # (seen-URL snippet elision); see ``_seen_url_ledger``.
+        self._seen_urls: dict[str, SeenUrlLedger] = {}
         # There is deliberately NO per-server field holding "the marker for the
         # attempt in flight". A connect attempt's marker lives in the
         # :class:`_AttemptRecord` its (blocking) caller created and handed to
@@ -2835,6 +2872,9 @@ class McpManager:
             continuation.cancel()
             gate_task.cancel()
         self._pending_continuations.clear()
+        # The ledgers describe what models of this manager's sessions were
+        # shown; a disposed manager serves none of them any more (review m5).
+        self._seen_urls.clear()
         for name, future in self._connect_futures.items():
             # Settle with an error (never cancel): a cancelled future would
             # surface as CancelledError in waiters; deferred executes need a
@@ -4851,8 +4891,40 @@ class McpManager:
                 producer_scope=producer_scope,
                 machine_read=machine_read,
                 mcp_tool_name=mcp_tool_name,
+                seen_urls=None if machine_read else self._seen_url_ledger(context.session_id),
             )
         )
+
+    def _seen_url_ledger(self, session_id: str) -> SeenUrlLedger | None:
+        """The session's ``SeenUrlLedger``, created on first use; ``None`` with no id.
+
+        Keyed by session id because one manager can serve several sessions (a
+        borrowing subagent, the server host). A caller without a session id
+        (an SDK probe, a test host) gets no ledger at all and so no elision:
+        keyed on ``""`` every such caller would share one, and one of them
+        would lose snippets because another saw the URL (review m4; the same
+        rule as ``capture_producer_scope``). A ledger is dropped when its
+        session compacts or is disposed (``forget_seen_urls``) and is bounded
+        (``SeenUrlLedger.MAX_URLS_DEFAULT``). ``dict.setdefault`` is atomic
+        under the GIL, and this runs on the event loop, so two calls cannot
+        create two ledgers.
+        """
+        if not session_id:
+            return None
+        return self._seen_urls.setdefault(session_id, SeenUrlLedger())
+
+    def forget_seen_urls(self, session_id: str) -> None:
+        """Drop ``session_id``'s seen-URL ledger.
+
+        Called by the session when a compaction commits (the earlier results
+        and their snippets have left the model's context, so a repeat hit must
+        carry its snippet again: review M1) and when it is disposed (review
+        m5). A result formatting concurrently keeps recording into the ledger
+        it already holds, which is then unreachable: the next result starts
+        from an empty ledger, which can only show a snippet again, never hide
+        one. Idempotent; an unknown or empty id is a no-op.
+        """
+        self._seen_urls.pop(session_id, None)
 
     async def _race_abort(
         self, coro: Coroutine[Any, Any, _RaceT], signal: AbortSignal | None

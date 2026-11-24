@@ -1027,3 +1027,200 @@ class TestResultNormalizationSetting:
             ConfigManager(tmp_path / "cfg"), settings_io.BY_KEY["mcp.result_normalization"], "off"
         )
         assert read_result_normalization_mode() == "off"
+
+
+class TestSeenUrlLedger:
+    """Seen-URL snippet elision through the real formatter (structural-economy §2)."""
+
+    _SNIPPET = "Olivia Chow is the 66th mayor of Toronto, elected in 2023. " * 3
+
+    def _search(self, *urls: str) -> dict[str, Any]:
+        hits = [{"title": f"Hit {u}", "url": u, "snippet": self._SNIPPET} for u in urls]
+        return _text_result(json.dumps({"query": "Olivia Chow", "results": hits}))
+
+    def _fmt(self, result: dict[str, Any], ledger: Any, **kw: Any) -> Any:
+        kw.setdefault("mcp_tool_name", "search")
+        return format_mcp_result(
+            result, "c", "mcp__forge_search", search_snippet_chars=400, seen_urls=ledger, **kw
+        )
+
+    def test_later_search_drops_the_snippet_of_a_url_already_shown(self) -> None:
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        ledger = SeenUrlLedger()
+        first = json.loads(
+            self._fmt(self._search("https://a.example/1", "https://a.example/2"), ledger).text
+        )
+        assert all("snippet" in h for h in first["results"])  # nothing seen yet
+        second = json.loads(
+            self._fmt(self._search("https://a.example/2/#bio", "https://a.example/3"), ledger).text
+        )
+        # Seen (fragment/slash variant): title + url kept byte-equal, snippet gone.
+        assert second["results"][0] == {
+            "title": "Hit https://a.example/2/#bio",
+            "url": "https://a.example/2/#bio",
+        }
+        assert "snippet" in second["results"][1]
+
+    def test_a_fetched_page_url_counts_as_shown(self) -> None:
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        ledger = SeenUrlLedger()
+        page = _text_result(json.dumps({"url": "https://a.example/p", "content": "Body."}))
+        self._fmt(page, ledger, mcp_tool_name="fetch")
+        later = json.loads(self._fmt(self._search("https://a.example/p"), ledger).text)
+        assert later["results"][0] == {
+            "title": "Hit https://a.example/p",
+            "url": "https://a.example/p",
+        }
+
+    def test_off_errors_and_no_ledger_record_nothing(self) -> None:
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        ledger = SeenUrlLedger()
+        raw = self._search("https://a.example/1")
+        off = self._fmt(raw, ledger, normalization="off")
+        assert off.text == raw["content"][0]["text"]  # ``off`` stays byte-identical
+        self._fmt(_text_result(raw["content"][0]["text"], is_error=True), ledger)
+        assert ledger.snapshot() == frozenset()
+        # Control: a normalizing, successful call does record.
+        self._fmt(raw, ledger)
+        assert ledger.snapshot() == frozenset({"https://a.example/1"})
+
+    def test_a_url_the_spill_cut_off_is_not_recorded(self, tmp_path, monkeypatch) -> None:
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        ledger = SeenUrlLedger()
+        urls = [f"https://a.example/{i}" for i in range(60)]
+        formatted = format_mcp_result(
+            self._search(*urls),
+            "c",
+            "mcp__forge_search",
+            ToolContext(session_id="seen-spill"),
+            mcp_tool_name="search",
+            seen_urls=ledger,
+        )
+        assert formatted.details is not None and "spill" in formatted.details  # control: it spilled
+        recorded = ledger.snapshot()
+        assert "https://a.example/0" in recorded and "https://a.example/59" not in recorded
+        assert all(u in formatted.text for u in recorded)
+
+    def test_parallel_siblings_never_both_keep_a_shared_snippet(self) -> None:
+        """The ledger lock orders same-turn siblings: exactly one shows the snippet."""
+        import threading
+
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        for _ in range(20):
+            ledger = SeenUrlLedger()
+            out: list[Any] = []
+            barrier = threading.Barrier(2)
+
+            def run() -> None:
+                barrier.wait()
+                out.append(
+                    json.loads(self._fmt(self._search("https://a.example/shared"), ledger).text)
+                )
+
+            threads = [threading.Thread(target=run) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            assert sorted("snippet" in r["results"][0] for r in out) == [False, True]
+
+    def test_persisted_result_is_byte_stable_without_the_ledger(self) -> None:
+        """Resume/replay re-send the persisted bytes; nothing re-derives them."""
+        from local_operator.harness.types import ToolResult
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        ledger = SeenUrlLedger()
+        self._fmt(self._search("https://a.example/1"), ledger)
+        elided = self._fmt(self._search("https://a.example/1"), ledger, text_rendering=True)
+        restored = ToolResult.model_validate_json(elided.model_dump_json())
+        assert restored.text == elided.text
+        assert (
+            "Olivia Chow is the 66th" not in restored.text
+            and "https://a.example/1" in restored.text
+        )
+
+    def test_the_ledger_is_bounded_and_evicts_the_least_recently_shown(self) -> None:
+        """PR #4540 review m5: a ledger never grows past ``max_urls``; the
+        evicted URL is the one shown longest ago, and its snippet comes back."""
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        assert SeenUrlLedger.MAX_URLS_DEFAULT == 5_000
+        ledger = SeenUrlLedger(max_urls=2)
+        self._fmt(self._search("https://a.example/1"), ledger)
+        self._fmt(self._search("https://a.example/2"), ledger)
+        self._fmt(self._search("https://a.example/1"), ledger)  # re-shown: now most recent
+        self._fmt(self._search("https://a.example/3"), ledger)  # evicts /2, not /1
+        assert len(ledger) == 2
+        assert ledger.snapshot() == frozenset({"https://a.example/1", "https://a.example/3"})
+        again = json.loads(
+            self._fmt(self._search("https://a.example/1", "https://a.example/2"), ledger).text
+        )
+        assert ["snippet" in h for h in again["results"]] == [False, True]
+
+
+class TestFormatMcpResultTextRendering:
+    """``mcp.result_text_rendering`` through the real formatter."""
+
+    def test_search_and_fetch_render_as_text_with_urls_byte_equal(self) -> None:
+        hits = {
+            "query": "q",
+            "results": [{"title": "T", "url": "https://a.example/x?y=1", "snippet": "s"}],
+        }
+        search = format_mcp_result(
+            _text_result(json.dumps(hits)), mcp_tool_name="search", text_rendering=True
+        )
+        assert search.text == "query: q\nresults:\n1. T\n   https://a.example/x?y=1\n   s"
+        page = {"url": "https://a.example/p", "content": "# P\n\nBody.", "offset": 0}
+        fetch = format_mcp_result(
+            _text_result(json.dumps(page)), mcp_tool_name="fetch", text_rendering=True
+        )
+        assert fetch.text == "url: https://a.example/p\noffset: 0\n\n# P\n\nBody."
+        # The raw server payload is still kept for non-model readers.
+        assert fetch.details is not None
+        assert fetch.details["server_result"]["content"][0]["text"] == json.dumps(page)
+
+    def test_off_never_renders(self) -> None:
+        raw = json.dumps({"url": "https://a.example/p", "content": "Body."})
+        off = format_mcp_result(_text_result(raw), normalization="off", text_rendering=True)
+        assert off.text == raw
+
+
+class TestResultTextRenderingSetting:
+    """``read_result_text_rendering`` reads the key per call and never raises."""
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (None, True),
+            ("values:\n  mcp:\n    result_text_rendering: false\n", False),
+            ("values:\n  mcp:\n    result_text_rendering: off\n", False),
+            ("values:\n  mcp:\n    result_text_rendering: true\n", True),
+            ("values:\n  mcp:\n    result_text_rendering: sometimes\n", True),
+            ("values:\n  mcp:\n    result_text_rendering: 0\n", True),
+        ],
+        ids=["absent", "false", "yaml-off", "true", "text", "zero"],
+    )
+    def test_configured_value_is_read(
+        self, tmp_path, monkeypatch, body: str | None, expected: bool
+    ) -> None:
+        from local_operator.mcp.manager import read_result_text_rendering
+
+        TestResultNormalizationSetting._write_config(tmp_path, monkeypatch, body)
+        assert read_result_text_rendering() is expected
+
+    def test_settings_registry_write_is_what_the_reader_sees(self, tmp_path, monkeypatch) -> None:
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.mcp.manager import read_result_text_rendering
+
+        TestResultNormalizationSetting._write_config(tmp_path, monkeypatch, None)
+        settings_io.write_setting(
+            ConfigManager(tmp_path / "cfg"), settings_io.BY_KEY["mcp.result_text_rendering"], False
+        )
+        assert read_result_text_rendering() is False

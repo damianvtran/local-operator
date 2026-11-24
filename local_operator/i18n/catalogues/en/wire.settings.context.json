@@ -233,6 +233,18 @@
     "tone": "concise, neutral",
     "note": "Setting that removes markup (images, navigation links, citation markers, link URLs) from text returned by MCP tools before the AI agent reads it, to save tokens. 'MCP' is a protocol name: keep it. Keep within 29 cells: the settings label column is 30 cells. No ICU arguments."
   },
+  "wire.settings.mcp_result_text_rendering.help": {
+    "maxCells": 188,
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "Help for an on/off toggle. Claims to preserve: (1) MCP search results and fetched web pages are given to the AI agent as plain text rather than JSON; (2) no field or value is lost (only the JSON syntax goes); (3) when the toggle is off the results stay JSON. 'MCP' is a protocol name and 'JSON' a format name: keep both. 'Off' is the toggle's off state; use this locale's established word for it. Shown in a two-row band 74 cells wide at 80 columns and 94 at 100 columns. No ICU arguments, no numbers."
+  },
+  "wire.settings.mcp_result_text_rendering.label": {
+    "maxCells": 29,
+    "role": "Settings row label (toggle)",
+    "tone": "concise, neutral",
+    "note": "On/off setting that renders MCP search results and fetched pages as plain text instead of JSON for the AI agent, to save tokens. 'MCP' is a protocol name: keep it. Keep within 29 cells: the settings label column is 30 cells. No ICU arguments."
+  },
   "wire.settings.mcp_search_snippet_chars.help": {
     "maxCells": 188,
     "role": "Settings row help",

@@ -528,3 +528,49 @@ async def test_a_declared_grant_then_an_over_cap_read_keeps_one_copy(tmp_path, m
     await session.prompt("first " + "detail " * 30)
     assert _last_sent(stream) == [BIG_NAME]
     await session.dispose()
+
+
+class _LedgerRecorder:
+    """Stands in for ``McpManager.forget_seen_urls`` (PR #4540 review M1/m5)."""
+
+    def __init__(self) -> None:
+        self.forgotten: list[str] = []
+
+    def forget_seen_urls(self, session_id: str) -> None:
+        self.forgotten.append(session_id)
+
+
+@pytest.mark.asyncio
+async def test_compaction_commit_and_dispose_drop_the_sessions_seen_url_ledger(
+    tmp_path, monkeypatch
+) -> None:
+    """The earlier MCP results leave the model's context at a compaction commit
+    (same session id), so the session's seen-URL ledger must go with them; a
+    dispose drops it too so a long-lived manager does not keep it."""
+    stream = ScriptedStream([])
+    session = _session(
+        tmp_path, stream, [], compaction_settings=CompactionSettings(keep_recent_tokens=40)
+    )
+    recorder = _LedgerRecorder()
+    session.mcp_manager = recorder  # type: ignore[assignment]
+    await session.prompt("first " + "detail " * 30)
+    await session.prompt("second " + "detail " * 30)
+    assert recorder.forgotten == []  # control: an ordinary turn keeps the ledger
+    assert (await session.compact_now()).ran is True
+    assert recorder.forgotten == [session.session_id]
+    await session.dispose()
+    assert recorder.forgotten == [session.session_id, session.session_id]
+
+
+@pytest.mark.asyncio
+async def test_a_manager_without_a_ledger_never_fails_compaction(tmp_path, monkeypatch) -> None:
+    """Hosts install managers with no ledger (``SnapshotMcpManager``, fakes)."""
+    stream = ScriptedStream([])
+    session = _session(
+        tmp_path, stream, [], compaction_settings=CompactionSettings(keep_recent_tokens=40)
+    )
+    session.mcp_manager = object()  # type: ignore[assignment]
+    await session.prompt("first " + "detail " * 30)
+    await session.prompt("second " + "detail " * 30)
+    assert (await session.compact_now()).ran is True
+    await session.dispose()

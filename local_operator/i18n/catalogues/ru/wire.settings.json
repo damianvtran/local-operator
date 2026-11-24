@@ -368,6 +368,8 @@
   "wire.settings.mcp_result_normalization.choice.strip_links.label": "strip-links",
   "wire.settings.mcp_result_normalization.help": "Убирает изображения, навигационные ссылки и сноски из результатов инструментов MCP до того, как их увидит агент. Отключено: результаты передаются без изменений.",
   "wire.settings.mcp_result_normalization.label": "Сокращать разметку MCP",
+  "wire.settings.mcp_result_text_rendering.help": "Передаёт агенту результаты поиска и загруженные страницы MCP простым текстом вместо JSON; все поля сохраняются. Отключено: остаются в JSON.",
+  "wire.settings.mcp_result_text_rendering.label": "Результаты MCP как текст",
   "wire.settings.mcp_search_snippet_chars.help": "Сколько символов оставлять от каждого фрагмента, который возвращает инструмент поиска MCP; заголовки и URL не обрезаются. 0 — фрагменты целиком.",
   "wire.settings.mcp_search_snippet_chars.label": "Длина фрагментов поиска MCP",
   "wire.settings.memory_guard.description": "Потолок ОЗУ на каждую команду: одна слишком большая команда убивается, а не роняет всё устройство.",

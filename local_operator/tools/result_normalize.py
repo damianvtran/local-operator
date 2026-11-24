@@ -84,8 +84,16 @@ Constraints
 * **Never worse than off.** Any output that cannot be encoded as UTF-8 falls
   back to the exact input.
 * **No evidence removed.** Nothing here selects passages, deduplicates or
-  truncates: those levers measurably dropped cited support. The raw server
-  payload is kept in ``details["server_result"]`` (never sent to a model).
+  truncates page text: those levers measurably dropped cited support. The
+  two narrow exceptions are each replayed against every cited fact (41/41
+  kept on run 2): search-hit snippets are clipped (below) and dropped for a
+  URL the session already showed (``elide_seen_snippets``) -- discovery text,
+  never a source. Page text itself is never cut: a heading-based "drop the
+  References / See also / Notes sections" lever was tried and removed (PR
+  #4540 review M2/M3, QA Q1) because a ``# Notes`` comment in fetched code, a
+  README's ``## Notes`` or a setext heading made it delete author content,
+  for a measured -0.0016x. The raw server payload is kept in
+  ``details["server_result"]`` (never sent to a model).
 * **Errors are not normalized.** An error body is diagnostics, often small,
   and its exact text matters more than its size.
 
@@ -123,7 +131,15 @@ How to disable
 (default), ``strip-links``, or ``off``. ``off`` is byte-identical to the
 behaviour before this module. Read per result, so an edit lands on the next
 MCP call. ``mcp.search_snippet_chars`` (default 400; ``0`` = keep snippets
-whole) sets the hit-snippet clip on its own.
+whole) sets the hit-snippet clip on its own. ``mcp.result_text_rendering``
+(default on) switches the lossless JSON -> text rendering of hit lists and
+fetched pages (``render_result_text``) on its own.
+
+Result shaping v2 (seen-URL elision, text rendering and the glued/cut link
+fix) re-priced POC run 2 from 0.658x to 0.627x Claude Code
+(``strip-links``, the run's mode) with 41/41 cited facts, 233/233 ``url``
+fields byte-equal and 39/39 cited search discoveries still naming their
+subject (structural-economy replay, PR description).
 """
 
 from __future__ import annotations
@@ -249,13 +265,37 @@ _ANCHOR = r"([^\[\]\n]{0,1000})"
 # UNLESS that ``)`` closed a link the same scan just matched: converters emit
 # adjacent ``<a>`` tags with no space (``[a](/x)[b](/y)``). A lookbehind
 # cannot tell the two apart, so ``_sub_links`` makes that call.
-_NOT_GLUED = r"(?<![\w\]])"
+#
+# EXCEPT when the destination is absolute (``http(s)://`` or ``//``): code
+# indexing never takes an absolute URL as its argument, while infobox cells
+# glue a label to its link (``Preceded by[Carolyn Parrish](https://...)``,
+# ``p[Canada](https://...)``) -- 3 of the 8 ``](http`` leaks left in the
+# run-2 fetches (structural-economy §6). The lookahead re-reads the anchor
+# with the same bound, so it adds no unbounded scan.
+_GLUED_ABSOLUTE = r"(?=\[[^\[\]\n]{0,1000}\]\(\s*(?i:https?:)?//)"
+_NOT_GLUED = r"(?:(?<![\w\]])|" + _GLUED_ABSOLUTE + ")"
 _IMAGE = re.compile(r"!\[" + _ANCHOR + r"\]\(\s*" + _DEST + _TITLE + r"\s*\)")
 _LINK = re.compile(_NOT_GLUED + r"\[" + _ANCHOR + r"\]\(\s*(" + _DEST + ")" + _TITLE + r"\s*\)")
 _CITE = re.compile(r"\[\[[^\]\s]{1,12}\]\]\(#cite_note[^)\s]*\)")
 _LIST_MARKER = re.compile(r"^\s*(?:[*+-]|\d{1,9}[.)])(?:\s+|$)")
 _ONE_LINK_ITEM = re.compile(r"^\s*(?:[*+-]|\d{1,9}[.)])\s+" + _LINK.pattern + r"\s*$")
 _MARKER_ONLY = re.compile(r"^\s*(?:[*+-]|\d{1,9}[.)])\s*$")
+# A link or image whose target was cut by a server's chunk boundary: an
+# absolute target with no closing ``)`` running to the end of the text (an
+# unclosed ``(`` inside it is the ``Foo_(bar`` Wikipedia title being cut).
+# 5 of the 8 ``](http`` leaks on run 2 were these (structural-economy §6);
+# one of them was cut inside the scheme itself (``[Pierre Poilievre](http``),
+# so a scheme cut at ``http`` or later (``https``, ``http:``, ``https:/``)
+# counts too -- but never a shorter one: ``handlers[key](h`` or
+# ``cfg[name](ht`` at a chunk cut is code (PR #4540 review m2, QA Q2), and
+# ``http`` is the shortest prefix that is a URL rather than an identifier.
+# Any other short target (``handlers[name](arg``) keeps its bytes. Only text
+# that already passed ``_MARKDOWN_SIGNAL`` reaches it (``normalize_markdown``).
+_TRUNCATED_LINK = re.compile(
+    r"!?\[([^\[\]\n]{0,1000})\]\(\s*"
+    r"(?:(?i:https?:)?//(?:[^()\s]|\([^()\s]*\))*(?:\([^()\s]*)?"
+    r"|(?i:https?(?::/?)?))\Z"
+)
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _BACKTICKS = re.compile(r"`+")
 # Absolute: ``http(s)://`` or protocol-relative ``//host/...`` (another host
@@ -447,7 +487,14 @@ def _sub_links(seg: str, repl: Callable[[re.Match[str]], str]) -> str:
     def guarded(match: re.Match[str]) -> str:
         nonlocal last_end
         start = match.start()
-        if start and seg[start - 1] == ")" and start != last_end:
+        if (
+            start
+            and seg[start - 1] == ")"
+            and start != last_end
+            # ``(1957)[Hong Kong](https://...)``: an absolute target is a
+            # link even after a ``)``, for the reason given at ``_NOT_GLUED``.
+            and not _ABSOLUTE.match(match.group(2))
+        ):
             return match.group(0)
         if _is_link_target(match.group(2)):
             last_end = match.end()
@@ -461,6 +508,25 @@ def _strip_media(line: str) -> str:
     return _outside_inline_code(
         line, lambda seg: _CITE.sub("", _IMAGE.sub(lambda m: m.group(1).strip(), seg))
     )
+
+
+def _strip_truncated_tail(line: str) -> str:
+    """Cut a final ``[anchor](http...`` with no ``)`` to its anchor.
+
+    Called only on the LAST line of a text block, and only outside code: the
+    target was cut by the server's chunk boundary, so it is a broken URL the
+    model can neither fetch nor cite, while the anchor is content. A
+    completed link, a non-absolute target (``handlers[name](arg``) or a tail
+    inside an inline code span keeps its bytes.
+    """
+    if "](" not in line:
+        return line
+    match = _TRUNCATED_LINK.search(line)
+    if match is None:
+        return line
+    if any(start <= match.start() < end for start, end in _inline_code_spans(line)):
+        return line
+    return line[: match.start()] + match.group(1)
 
 
 def _nav_item(line: str) -> bool:
@@ -546,6 +612,9 @@ def normalize_markdown(text: str, *, keep_prose_links: bool = True) -> str:
     unchanged. Pure and deterministic; ``normalize_tool_text`` adds the
     fixed-point loop that makes it idempotent. See the module docstring.
     """
+    # The web-markdown gate (PR #4514) covers the cut-tail fix too: a text
+    # with no absolute link, image or cite marker is code, a log or a table,
+    # and its last line keeps its bytes even when it ends ``[x](http``.
     if not text or not _MARKDOWN_SIGNAL.search(text):
         return text
     # A trailing newline is a terminator, not a blank line: keep it exactly.
@@ -554,6 +623,11 @@ def normalize_markdown(text: str, *, keep_prose_links: bool = True) -> str:
         (is_code, run, run if is_code else [_strip_media(line) for line in run])
         for is_code, run in _split_code(body.split("\n"))
     ]
+    if runs and not runs[-1][0]:
+        # The text's final line (not code) may end in a link the server's
+        # chunk boundary cut; see ``_strip_truncated_tail``.
+        last_staged = runs[-1][2]
+        last_staged[-1] = _strip_truncated_tail(last_staged[-1])
     # On-site nav bullets are chrome around content; when they ARE most of the
     # result (a docs index, a sitemap tool) they are the content and stay.
     nonblank = sum(1 for _, run, _ in runs for line in run if not _is_blank(line))
@@ -707,7 +781,303 @@ def clip_search_hits(value: Any, max_chars: int, changed: list[bool]) -> Any:
     return value
 
 
-def _normalize_once(text: str, keep_prose_links: bool, search_snippet_chars: int = 0) -> str:
+# --- seen-URL snippet elision --------------------------------------------
+
+
+def seen_url_key(url: str) -> str:
+    """The key under which a URL counts as "already shown" in a session.
+
+    Deliberately trivial -- the fragment and trailing slashes go, nothing
+    else -- because two URLs that differ in scheme, host case, ``www.`` or a
+    query are not provably the same page, and a false match would hide a
+    snippet the model never saw. Used only to compare; the emitted ``url``
+    field is never rewritten.
+    """
+    return url.split("#", 1)[0].rstrip("/")
+
+
+def _hit_url(item: dict[str, Any]) -> str | None:
+    """A hit's URL: its ``url`` field, else its first URL-shaped string field."""
+    url = item.get("url")
+    if isinstance(url, str):
+        return url
+    for key, value in item.items():
+        if isinstance(key, str) and _URLISH_KEY.search(key) and isinstance(value, str):
+            return value
+    return None
+
+
+def elide_seen_snippets(value: Any, seen: frozenset[str], changed: list[bool]) -> Any:
+    """Drop the snippet fields of every hit whose URL the session already showed.
+
+    Why: on POC run 2, 32 of 184 search hits repeated a URL the model had
+    already been shown (24 by a sibling search in the same turn, the rest by
+    an earlier search or a fetch), and each repeat re-sent its snippet into
+    the cache, to be re-read on every later turn. The repeat keeps its title
+    and URL -- so ranking, discovery and the citation key are unchanged --
+    and loses only the discovery text the model already has (a snippet is a
+    lead, never a source). Replay: -0.015x Claude Code.
+
+    ``seen`` holds ``seen_url_key`` keys; the caller (the MCP bridge's
+    per-session ``SeenUrlLedger``) passes a snapshot, so this stays pure and
+    a second pass over its own output with the same snapshot changes
+    nothing. Only hit lists (``_is_hit_list``) are touched, under the same
+    search-tool gate as ``clip_search_hits``.
+    """
+    if not seen:
+        return value
+    if isinstance(value, dict):
+        return {k: elide_seen_snippets(v, seen, changed) for k, v in value.items()}
+    if isinstance(value, list):
+        if not _is_hit_list(value):
+            return [elide_seen_snippets(v, seen, changed) for v in value]
+        out: list[Any] = []
+        for item in value:
+            url = _hit_url(item)
+            if url is not None and seen_url_key(url) in seen and SNIPPET_KEYS & item.keys():
+                item = {k: v for k, v in item.items() if k not in SNIPPET_KEYS}
+                changed.append(True)
+            out.append(item)
+        return out
+    return value
+
+
+def _strict_json(text: str) -> Any:
+    """``text`` parsed the way ``_normalize_once`` parses it, or ``None``."""
+    if text.lstrip()[:1] not in ("{", "["):
+        return None
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_pairs_without_duplicates,
+            parse_float=_exact_float,
+            parse_constant=_reject_constant,
+        )
+    except (_DuplicateKey, _LossyNumber, ValueError, RecursionError):
+        return None
+
+
+def _is_page_payload(value: Any) -> bool:
+    """A single fetched web page: ``{"url": <absolute http(s)>, "content": str, ...}``."""
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("content"), str)
+        and isinstance(value.get("url"), str)
+        and _ABSOLUTE.match(value["url"]) is not None
+    )
+
+
+def shown_urls(text: str, *, tool_name: str = "") -> list[str]:
+    """The URLs a result shows the model, in order: hit URLs and a page's URL.
+
+    Read from the server's text (before normalization). Hit lists count only
+    from a search tool (``is_search_tool``), matching where elision applies;
+    a fetched page's ``url`` counts from any tool. The bridge records only the
+    ones that survive into the text the model actually receives (a spill can
+    cut a tail off).
+    """
+    parsed = _strict_json(text)
+    if parsed is None:
+        return []
+    urls: list[str] = []
+    if _is_page_payload(parsed):
+        urls.append(parsed["url"])
+    if is_search_tool(tool_name):
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                if _is_hit_list(value):
+                    urls.extend(u for item in value if (u := _hit_url(item)) is not None)
+                else:
+                    for child in value:
+                        visit(child)
+
+        visit(parsed)
+    return urls
+
+
+# --- JSON -> text rendering -------------------------------------------------
+#
+# Why: a JSON result spends tokens on keys, quotes and escapes -- the run-2
+# fetched pages alone carried 3,827 escaped ``\n`` -- and every one is
+# written to the cache and re-read each later turn. Rendering the two
+# dominant shapes as text saved 6.0% (fetch) / 3.2% (search) of their tokens
+# on the replay (-0.017x Claude Code) with every field kept.
+#
+# Grammar (the inverse is mechanical; ``tests/unit/test_tool_result_normalize.py``
+# carries a reference decoder that round-trips every case):
+#
+# * SCALAR ``enc(v)``: a string is written raw when it is non-empty, has no
+#   leading/trailing whitespace, no ``\n``/``\r``, no lone surrogate, and does
+#   NOT parse as JSON (so ``"0"``, ``"true"``, ``"null"``, ``"[1]"`` are not
+#   raw). Everything else -- other strings, numbers, booleans, null, nested
+#   lists and objects -- is compact single-line JSON. Decode: ``json.loads``
+#   it; if that fails it is the raw string.
+# * SLOT ``slot(v)``: ``enc(v)``, but a raw string that looks like a field
+#   line (``key: ...``) is JSON-encoded instead, so slots and fields cannot
+#   be confused.
+# * Search hit list (search tools only; ``_is_rendered_hit_list``: every item
+#   a hit, with or without a snippet left, and every hit carrying ``title``
+#   and ``url``):
+#       <key>: enc(value)        each top-level field, in order
+#       <hit-key>:               the ONE top-level hit list, at its position
+#       N. enc(title)            hit N (1-based)
+#          slot(url)             3-space indent, always present
+#          slot(snippet)         only when the hit has a ``snippet`` key
+#          <key>: enc(value)     every other hit field, in order
+#   A top-level hit list (no wrapping object) is just the ``N.`` blocks.
+#   Decode: a column-0 ``key: v`` is a field, a bare ``key:`` opens the hit
+#   list; ``N. `` opens a hit; its first indented line is the url, a second
+#   one that is not ``key: v`` is the snippet, the rest are fields.
+# * Fetched page (``{"url": <absolute http(s)>, "content": str, ...}``, any
+#   tool; ``_is_page_payload``):
+#       <key>: enc(value)        every field except ``content``, in order
+#       (blank line)
+#       <content, raw>           to the end of the text
+#   Decode: split at the first blank line (header values are single-line and
+#   never empty).
+#
+# Losslessness is JSON-value equality: object key ORDER may differ (a hit's
+# ``title``/``url``/``snippet`` come first, a page's ``content`` last), which
+# RFC 8259 objects do not carry as data. Keys must look like identifiers
+# (``_FIELD_KEY``); any other shape -- nested hit lists (Brave's
+# ``web.results``), two hit lists, non-search lists such as GitHub issues,
+# arbitrary JSON -- stays JSON.
+#
+# Constraints: ``url`` values appear byte-equal (a URL is always raw unless
+# it would be ambiguous). A rendering that the markdown pass would itself
+# rewrite (a short title still holding image markup) is not used, so
+# ``normalize_tool_text`` stays idempotent by construction. Gated by
+# ``mcp.result_text_rendering`` (A/B switch) and never under ``off``.
+
+#: ``config.yml`` path and registry default of ``mcp.result_text_rendering``;
+#: read by ``mcp.manager.read_result_text_rendering``.
+RESULT_TEXT_RENDERING_PATH: Final = ("mcp", "result_text_rendering")
+RESULT_TEXT_RENDERING_DEFAULT: Final = True
+
+_FIELD_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
+_FIELD_LINE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*:(?: |\Z)")
+_HIT_INDENT: Final = "   "
+
+
+def _is_plain(value: str) -> bool:
+    if not value or value != value.strip() or "\n" in value or "\r" in value:
+        return False
+    if _LONE_SURROGATE.search(value):
+        return False
+    try:
+        json.loads(value)
+    except ValueError:
+        return True
+    except RecursionError:
+        return False
+    return False
+
+
+def _json_scalar(value: Any) -> str:
+    out = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return _LONE_SURROGATE.sub(_escape_surrogate, out)
+
+
+def _enc(value: Any) -> str:
+    if isinstance(value, str) and _is_plain(value):
+        return value
+    return _json_scalar(value)
+
+
+def _slot(value: Any) -> str:
+    out = _enc(value)
+    return _json_scalar(value) if _FIELD_LINE.match(out) else out
+
+
+def _render_hits(hits: list[dict[str, Any]]) -> list[str] | None:
+    lines: list[str] = []
+    for number, hit in enumerate(hits, 1):
+        if "title" not in hit or "url" not in hit:
+            return None
+        extras = [k for k in hit if k not in ("title", "url", "snippet")]
+        if not all(_FIELD_KEY.match(k) for k in extras):
+            return None
+        lines.append(f"{number}. {_enc(hit['title'])}")
+        lines.append(_HIT_INDENT + _slot(hit["url"]))
+        if "snippet" in hit:
+            lines.append(_HIT_INDENT + _slot(hit["snippet"]))
+        lines.extend(f"{_HIT_INDENT}{key}: {_enc(hit[key])}" for key in extras)
+    return lines
+
+
+def _is_rendered_hit_list(value: Any) -> bool:
+    # ``_is_hit_list`` minus its "some hit carries a snippet" clause: once
+    # seen-URL elision has dropped every snippet (a repeated search), the list
+    # is still the search's ranked hits and renders the same way (found on the
+    # real-path run: an all-seen repeat search fell back to JSON).
+    return isinstance(value, list) and bool(value) and all(_is_hit(item) for item in value)
+
+
+def _render_search(parsed: Any) -> str | None:
+    if isinstance(parsed, list):
+        hits = _render_hits(parsed) if _is_rendered_hit_list(parsed) else None
+        return None if hits is None else "\n".join(hits)
+    if not isinstance(parsed, dict) or not all(_FIELD_KEY.match(k) for k in parsed):
+        return None
+    hit_keys = [k for k, v in parsed.items() if _is_rendered_hit_list(v)]
+    if len(hit_keys) != 1:
+        return None
+    lines: list[str] = []
+    for key, value in parsed.items():
+        if key == hit_keys[0]:
+            hits = _render_hits(value)
+            if hits is None:
+                return None
+            lines.append(f"{key}:")
+            lines.extend(hits)
+        else:
+            lines.append(f"{key}: {_enc(value)}")
+    return "\n".join(lines)
+
+
+def _render_page(parsed: Any) -> str | None:
+    # ``_is_page_payload``: the ``url`` must be an absolute web URL. A
+    # repository file tool's ``{"url": "src/app.py", "content": ...}`` is
+    # not a fetched page and keeps its JSON (PR #4540 review m3).
+    if not (_is_page_payload(parsed) and all(_FIELD_KEY.match(k) for k in parsed)):
+        return None
+    content = parsed["content"]
+    if _LONE_SURROGATE.search(content):
+        return None  # raw, it could not be sent as UTF-8; JSON keeps the escape
+    header = [f"{k}: {_enc(v)}" for k, v in parsed.items() if k != "content"]
+    return "\n".join(header) + "\n\n" + content
+
+
+def render_result_text(text: str, *, tool_name: str = "", keep_prose_links: bool = True) -> str:
+    """Render a hit-list or fetched-page JSON result as text; else ``text``.
+
+    See the grammar above. ``text`` is the already-normalized JSON; the
+    result is used only when it is a fixed point of the markdown pass, so a
+    second ``normalize_tool_text`` over it changes nothing.
+    """
+    parsed = _strict_json(text)
+    if parsed is None:
+        return text
+    rendered = _render_search(parsed) if is_search_tool(tool_name) else None
+    if rendered is None:
+        rendered = _render_page(parsed)
+    if rendered is None or rendered.lstrip()[:1] in ("{", "["):
+        return text
+    if normalize_markdown(rendered, keep_prose_links=keep_prose_links) != rendered:
+        return text
+    return rendered
+
+
+def _normalize_once(
+    text: str,
+    keep_prose_links: bool,
+    search_snippet_chars: int = 0,
+    seen: frozenset[str] = frozenset(),
+) -> str:
     head = text.lstrip()[:1]
     if head in ("{", "["):
         try:
@@ -728,6 +1098,8 @@ def _normalize_once(text: str, keep_prose_links: bool, search_snippet_chars: int
                 # After the markup walk, as the replay measured it: links and
                 # images leave a snippet first, so the cap keeps more words.
                 walked = clip_search_hits(walked, search_snippet_chars, changed)
+            # ``seen`` is empty unless the tool is a search (the caller gates).
+            walked = elide_seen_snippets(walked, seen, changed)
             if not changed:
                 return text  # nothing to remove: keep the server's exact bytes
             out = json.dumps(walked, ensure_ascii=False, separators=(",", ":"))
@@ -741,6 +1113,8 @@ def normalize_tool_text(
     *,
     tool_name: str = "",
     search_snippet_chars: int = 0,
+    seen_urls: frozenset[str] = frozenset(),
+    text_rendering: bool = False,
 ) -> str:
     """Normalize one tool result's flattened text under ``mode``.
 
@@ -756,21 +1130,39 @@ def normalize_tool_text(
     (``is_search_tool``) and ``search_snippet_chars`` is positive, the JSON
     hit lists it returns are clipped by ``clip_search_hits`` in the same pass.
     ``off`` skips that too: it is the byte-identical escape hatch.
+
+    ``seen_urls`` (``seen_url_key`` keys, a snapshot of the session's
+    ``SeenUrlLedger``) drops the snippets of a search's hits the model was
+    already shown (``elide_seen_snippets``). ``text_rendering``
+    (``mcp.result_text_rendering``) renders a hit list or a fetched page as
+    text after the fixed point (``render_result_text``). Both are pure
+    given their inputs, so the result is still deterministic and
+    ``f(f(x)) == f(x)`` for the same ``seen_urls``. The defaults here are the
+    PR #4525 behaviour; the MCP manager passes the live settings.
     """
     if mode == "off" or not text:
         return text
     if mode not in RESULT_NORMALIZATION_MODES:
         raise ValueError(f"unknown result normalization mode: {mode!r}")
     keep_prose_links = mode == "prose-links"
-    snippet_chars = search_snippet_chars if is_search_tool(tool_name) else 0
+    search = is_search_tool(tool_name)
+    snippet_chars = search_snippet_chars if search else 0
+    seen = seen_urls if search else frozenset()
     current = text
     for _ in range(MAX_PASSES):
-        following = _normalize_once(current, keep_prose_links, snippet_chars)
+        following = _normalize_once(current, keep_prose_links, snippet_chars, seen)
         if following == current:
             break
         current = following
     else:
         return text
+    if text_rendering:
+        # After the fixed point, never inside it: the rendered text is not
+        # JSON, so a later pass takes the markdown path, and
+        # ``render_result_text`` only returns a text that path leaves alone.
+        current = render_result_text(
+            current, tool_name=tool_name, keep_prose_links=keep_prose_links
+        )
     if current is not text:
         try:
             current.encode("utf-8")
