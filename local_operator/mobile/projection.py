@@ -57,6 +57,7 @@ from local_operator.harness.message_types import (
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
+    SESSION_BINDING_NOTICE_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
 )
 
@@ -1796,6 +1797,18 @@ def fold_messages_to_entries(
             # since users and peers can legitimately quote its marker.
             if message.custom_type == "session_state":
                 continue
+            if message.custom_type == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
+                # The account-change notice ("[session credential] This session
+                # is now using …") is NOT a phone row — operator ruling
+                # 2026-11-23: irrelevant on the device the tunnel reaches, and
+                # hidden on a remote session too. Dropped by its typed
+                # ``custom_type`` here, in the ONE phone fold, so the attach
+                # seed (``ProjectionFold.fold_history``, the live arm — the
+                # notice arrives as a context message, never as an event) and
+                # every history page agree. TUI and desktop are unchanged; the
+                # surface list on the type in ``harness/message_types.py``
+                # records the exclusion.
+                continue
             if message.custom_type == HUB_MESSAGE_TYPE:
                 # The parent's own words (``body``), never the model-facing
                 # envelope in ``details["text"]``. Reading the envelope here
@@ -3396,6 +3409,12 @@ class ProjectionFold:
         # Match the history fold: context snapshots must not become optimistic
         # delivery rows, consume the tail budget, or emit a changed frame.
         if custom_type == "session_state" or cross_session_hidden():
+            return
+        # The account-change notice is never a phone row (operator ruling
+        # 2026-11-23; see the history fold's arm). No producer delivers it as an
+        # event today, but this is the live fold's one custom-delivery entry, so
+        # it refuses the type here too rather than trusting that stays true.
+        if custom_type == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
             return
         if message_id and any(row.id == message_id for row in self.projection.transcript):
             return
