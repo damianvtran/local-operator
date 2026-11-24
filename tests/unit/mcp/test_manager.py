@@ -9,6 +9,7 @@ body and its attempt seam run (agent review round 2, major-1).
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -797,6 +798,39 @@ class TestDroppedArgumentNote:
     RECORD_ENVELOPE = (
         '{"messages":"=== Message from a ===\\nhello\\n\\n=== Message from b ===\\nhi"}'
     )
+
+    @pytest.mark.asyncio
+    async def test_search_tool_hits_are_clipped_on_the_model_call_only(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The manager threads the BARE tool name (``search``) and the live
+        ``mcp.search_snippet_chars`` default into the bridge; a machine-read
+        call of the same tool keeps the server's bytes."""
+        hit = {
+            "title": "Mark Sutcliffe",
+            "url": "https://example.com/m",
+            "snippet": "Mayor of Ottawa since 2022. " * 60,
+            "published_date": None,
+        }
+        raw = json.dumps({"query": "q", "results": [hit, hit]})
+        session = FakeSession(
+            call_result=CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False)
+        )
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        model_call = await tool.execute("c0", {"command": "q"}, None, None, ToolContext())
+        hits = json.loads(model_call.text)["results"]
+        assert all(len(h["snippet"]) <= 400 and "published_date" not in h for h in hits)
+        machine = await tool.execute(
+            "c1",
+            {"command": "q"},
+            None,
+            None,
+            ToolContext().model_copy(update={"monitor_check": True}),
+        )
+        assert machine.text == raw
+        await manager.disconnect_all()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

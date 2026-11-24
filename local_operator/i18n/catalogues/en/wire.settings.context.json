@@ -233,6 +233,18 @@
     "tone": "concise, neutral",
     "note": "Setting that removes markup (images, navigation links, citation markers, link URLs) from text returned by MCP tools before the AI agent reads it, to save tokens. 'MCP' is a protocol name: keep it. Keep within 29 cells: the settings label column is 30 cells. No ICU arguments."
   },
+  "wire.settings.mcp_search_snippet_chars.help": {
+    "maxCells": 188,
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "Help for a number setting. Claims to preserve: (1) it caps how many characters of each result snippet (the short summary text under a search hit) an MCP search tool returns are kept; (2) titles and URLs are never shortened; (3) 0 keeps snippets whole (no limit). 'MCP' is a protocol name: keep it. Shown in a two-row band 74 cells wide at 80 columns and 94 at 100 columns. No ICU arguments."
+  },
+  "wire.settings.mcp_search_snippet_chars.label": {
+    "maxCells": 29,
+    "role": "Settings row label (integer)",
+    "tone": "concise, neutral",
+    "note": "Setting that limits the length of each search-result snippet returned by MCP search tools, to save tokens. 'MCP' is a protocol name: keep it. Keep within 29 cells: the settings label column is 30 cells. No ICU arguments."
+  },
   "wire.settings.network_credentials_github_repositories.help": {
     "role": "settings help for the GitHub repository list",
     "tone": "plain, precise about authorization",

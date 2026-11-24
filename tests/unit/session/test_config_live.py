@@ -18,6 +18,7 @@ Nothing here waits on the clock: ``poll_now()`` is the tick.
 from __future__ import annotations
 
 import inspect
+import json
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -431,6 +432,38 @@ def _mcp_result_normalization_applied(_watcher: ConfigWatcher) -> str:
     matches = [mode for mode, text in rendered.items() if text == result.text]
     assert len(matches) == 1, (result.text, rendered)
     return matches[0]
+
+
+def _mcp_search_snippet_chars_applied(_watcher: ConfigWatcher) -> int:
+    """The length a search hit's snippet is clipped to on a model-facing MCP call.
+
+    Observed through ``_format_with_normalization_setting`` -- the formatter every
+    model-facing MCP call runs through, which reads ``mcp.search_snippet_chars``
+    via ``read_search_snippet_chars`` (a fresh ``ConfigManager`` on
+    ``paths.config_dir()``) per search result. The probe formats a real Tavily-shaped
+    ``CallToolResult`` from the bare tool name ``search`` under the default
+    ``prose-links`` normalization (the clip is off under ``off``) and returns the
+    clipped snippet's length, so it fails if the read is live but the clip ignores
+    it. The snippet has no whitespace, so ``clip_snippet`` cuts it to exactly the
+    limit (no trailing ``rstrip`` shortening) and is far longer than either value.
+    """
+    from mcp.types import CallToolResult, TextContent
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.mcp.manager import _format_with_normalization_setting
+
+    hit = {"title": "Probe", "url": "https://example.com/probe", "snippet": "x" * 5000}
+    raw = json.dumps({"query": "probe", "results": [hit]})
+    result = _format_with_normalization_setting(
+        CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False),
+        "probe-call",
+        "mcp__probe_search",
+        ToolContext(),
+        producer_scope=None,
+        machine_read=False,
+        mcp_tool_name="search",
+    )
+    return len(json.loads(result.text)["results"][0]["snippet"])
 
 
 def _guardrails(_watcher: ConfigWatcher, *, authorised: bool = True) -> Any:
@@ -955,6 +988,10 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # to a formatted result; ``strip-links`` because ``off`` would also match a
     # reader that never ran the normalizer at all.
     "mcp.result_normalization": ("strip-links", lambda s, w: _mcp_result_normalization_applied(w)),
+    # Read per MCP search result by ``mcp.manager.read_search_snippet_chars``.
+    # Observed as the clipped snippet's actual length (400 before, 120 after),
+    # not the reader's return value.
+    "mcp.search_snippet_chars": (120, lambda s, w: _mcp_search_snippet_chars_applied(w)),
     # ``bash.query_budget.*`` is the same shape: read per ``bash`` call through a
     # fresh ``ConfigManager`` (``builtin._query_budget_config``), so an edit lands
     # on the next command. Observed through that reader, not the raw mapping.

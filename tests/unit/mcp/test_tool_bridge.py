@@ -843,6 +843,136 @@ class TestFormatMcpResultNormalization:
         assert formatted.details["server_result"]["content"] == []  # text-only: dropped
 
 
+class TestFormatMcpResultSearchClip:
+    """``mcp.search_snippet_chars``: hit snippets of a SEARCH tool, keyed by its bare name."""
+
+    _SNIPPET = "Mark Sutcliffe is the 59th mayor of Ottawa, elected in 2022. " * 20
+
+    def _hits(self, n: int = 2) -> str:
+        return json.dumps(
+            {
+                "query": "Mark Sutcliffe",
+                "results": [
+                    {
+                        "title": f"Mark Sutcliffe {i}",
+                        "url": f"https://example.com/{i}",
+                        "snippet": self._SNIPPET,
+                        "published_date": None,
+                    }
+                    for i in range(n)
+                ],
+            }
+        )
+
+    def test_bare_search_name_clips_hits(self) -> None:
+        formatted = format_mcp_result(
+            _text_result(self._hits()),
+            "c1",
+            "mcp__forge_tools_search",
+            mcp_tool_name="search",
+            search_snippet_chars=400,
+        )
+        hits = json.loads(formatted.text)["results"]
+        assert all(len(h["snippet"]) <= 400 and "published_date" not in h for h in hits)
+        assert [h["url"] for h in hits] == ["https://example.com/0", "https://example.com/1"]
+
+    def test_search_in_the_server_label_alone_does_not_clip(self) -> None:
+        """A server named ``research`` must not make its fetch tool a search."""
+        raw = self._hits()
+        formatted = format_mcp_result(
+            _text_result(raw),
+            "c1",
+            "mcp__research_fetch",
+            mcp_tool_name="fetch",
+            search_snippet_chars=400,
+        )
+        assert formatted.text == raw
+
+    def test_errors_and_resources_are_never_clipped(self) -> None:
+        raw = self._hits()
+        error = format_mcp_result(
+            _text_result(raw, is_error=True), mcp_tool_name="search", search_snippet_chars=400
+        )
+        assert error.text == f"Error: {raw}"
+        resource = {
+            "content": [{"type": "resource", "resource": {"uri": "mem://hits", "text": raw}}]
+        }
+        assert (
+            raw
+            in format_mcp_result(resource, mcp_tool_name="search", search_snippet_chars=400).text
+        )
+
+    def test_clip_runs_before_the_spill_cut(self, tmp_path, monkeypatch) -> None:
+        """Over the inline bound raw, under it clipped: the result stays inline."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        # 10 hits: ~12.6k chars raw (over the 8 KiB inline bound), ~4.7k clipped.
+        raw = self._hits(10)
+        context = ToolContext(session_id="clip-spill")
+        unclipped = format_mcp_result(_text_result(raw), "c", "mcp__s_search", context)
+        assert unclipped.details is not None and "spill" in unclipped.details  # control
+        clipped = format_mcp_result(
+            _text_result(raw),
+            "c",
+            "mcp__s_search",
+            context,
+            mcp_tool_name="search",
+            search_snippet_chars=400,
+        )
+        assert clipped.details is not None and "spill" not in clipped.details
+        assert len(json.loads(clipped.text)["results"]) == 10
+
+
+class TestSearchSnippetCharsSetting:
+    """``read_search_snippet_chars`` reads the key per call and never raises."""
+
+    def test_absent_key_is_the_default(self, tmp_path, monkeypatch) -> None:
+        from local_operator.mcp.manager import read_search_snippet_chars
+
+        TestResultNormalizationSetting._write_config(tmp_path, monkeypatch, None)
+        assert read_search_snippet_chars() == 400
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("0", 0),
+            ("320", 320),
+            ("off", 0),
+            ("-5", 400),
+            ("lots", 400),
+            ("true", 400),
+            ("100000", 100_000),
+            # Above the max: clamped to it, not reset to 400 (review R2).
+            ("250000", 100_000),
+        ],
+    )
+    def test_configured_value_is_read(self, tmp_path, monkeypatch, raw: str, expected: int) -> None:
+        from local_operator.mcp.manager import read_search_snippet_chars
+
+        TestResultNormalizationSetting._write_config(
+            tmp_path, monkeypatch, f"values:\n  mcp:\n    search_snippet_chars: {raw}\n"
+        )
+        assert read_search_snippet_chars() == expected
+
+    def test_settings_registry_write_is_what_the_reader_sees(self, tmp_path, monkeypatch) -> None:
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.mcp.manager import read_search_snippet_chars
+
+        TestResultNormalizationSetting._write_config(tmp_path, monkeypatch, None)
+        settings_io.write_setting(
+            ConfigManager(tmp_path / "cfg"), settings_io.BY_KEY["mcp.search_snippet_chars"], 0
+        )
+        assert read_search_snippet_chars() == 0
+
+    def test_registry_bounds_mirror_the_consumer(self) -> None:
+        """Pinned: the registry restates the bound instead of importing it."""
+        from local_operator import settings_io
+        from local_operator.tools.result_normalize import SEARCH_SNIPPET_CHARS_MAX
+
+        row = settings_io.BY_KEY["mcp.search_snippet_chars"]
+        assert (row.minimum, row.maximum) == (0, SEARCH_SNIPPET_CHARS_MAX)
+
+
 class TestResultNormalizationSetting:
     """``read_result_normalization_mode`` reads the key per call and never raises."""
 
