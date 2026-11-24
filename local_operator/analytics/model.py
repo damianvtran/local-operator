@@ -31,7 +31,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, NamedTuple
 
 logger = logging.getLogger("local_operator.analytics.model")
 
@@ -444,8 +444,139 @@ def request_fingerprint(request: Any) -> tuple[str, int]:
     )
 
 
-#: How many native replay items per message the fingerprint summarises.
-#:
+class PrefixSections(NamedTuple):
+    """One composed context as section digests, in the order a provider caches it.
+
+    ``kinds`` sits beside ``messages`` and never replaces it: a label is what a
+    human reads in a log line, a digest is what the comparison runs on. Both are
+    content-blind — a kind is the message's OWN role and harness name, never a
+    byte of what it says.
+    """
+
+    system: tuple[bytes, ...]
+    tools: bytes
+    messages: tuple[bytes, ...]
+    kinds: tuple[str, ...]
+
+
+#: One harness-shaped label: lowercase word characters, colon-separated, capped.
+#: A custom type is the harness's own vocabulary, but this label is written to a
+#: LOG, so it is normalised rather than trusted: nothing outside ``[a-z0-9_]``
+#: survives, and the result cannot carry punctuation a reader could mistake for
+#: a claim, or a length that makes a line unreadable.
+_KIND_SAFE = re.compile(r"[^a-z0-9_]+")
+_MAX_KIND_CHARS = 48
+
+
+def _prefix_digest(value: Any) -> bytes:
+    """Raw sha256 digest of the same canonical JSON the prompt hash uses.
+
+    Raw bytes, not hex: these are only ever compared for equality, so the
+    64-character form would double the memory of every kept snapshot.
+    """
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=_non_json_placeholder,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).digest()
+
+
+def message_kind(message: Any) -> str:
+    """A short, content-blind label for one rendered message: ``role[:name]``.
+
+    ``role`` is the model's own vocabulary (``user``/``assistant``/``tool``).
+    The name is the harness's: ``custom_type`` when the message still carries
+    it, else the custom type the renderer recorded on ``provider_payload``.
+    An unknown custom type adds nothing rather than a guess.
+    """
+    role = _text_or_empty(getattr(message, "role", "")) or "message"
+    custom = _text_or_empty(getattr(message, "custom_type", ""))
+    if not custom:
+        payload = getattr(message, "provider_payload", None)
+        details = payload.get("details") if isinstance(payload, dict) else None
+        if isinstance(details, dict):
+            custom = _text_or_empty(details.get("custom_type"))
+    # Lower-cased BEFORE the substitution: ``_KIND_SAFE`` only keeps
+    # ``[a-z0-9_]``, so an upper-case byte would otherwise survive as a
+    # separator and turn ``Wake`` into ``_ake``.
+    label = _KIND_SAFE.sub("_", (f"{role}_{custom}" if custom else role).lower()).strip("_")
+    return label[:_MAX_KIND_CHARS] or "message"
+
+
+def prefix_sections(request: Any) -> PrefixSections:
+    """``request`` as the sections a provider's prompt cache is keyed on.
+
+    DIAGNOSTIC ONLY, and only for requests that already opted into cache
+    diagnostics: it digests every message of a context that can exceed 300k
+    tokens, so a caller spends this once per conversation turn, never per helper
+    call or per retry.
+
+    The canonical parts are the prompt hash's own (``_fingerprint_message``), so
+    the two diagnostics cannot drift apart on what "the same message" means.
+    """
+    blocks = getattr(request, "system_blocks", None) or []
+    messages = getattr(request, "messages", None) or []
+    tools = getattr(request, "tools", None) or []
+    return PrefixSections(
+        system=tuple(
+            _prefix_digest(block if isinstance(block, str) else str(block)) for block in blocks
+        ),
+        tools=_prefix_digest(
+            [
+                [
+                    getattr(tool, "name", "") or "",
+                    getattr(tool, "description", "") or "",
+                    getattr(tool, "parameters", None) or {},
+                ]
+                for tool in tools
+            ]
+        ),
+        messages=tuple(_prefix_digest(_fingerprint_message(message)) for message in messages),
+        kinds=tuple(message_kind(message) for message in messages),
+    )
+
+
+def first_prefix_divergence(previous: PrefixSections | None, current: PrefixSections) -> str:
+    """Where ``current`` first departs from ``previous``, or ``""``.
+
+    THE ANSWER A CACHE-BREAK LINE CANNOT GET FROM THE PROVIDER. Anthropic names
+    the SECTION that broke a cached prefix (``system_changed``,
+    ``messages_changed``) and charges for the rewrite, but never says which
+    system block or which message moved. Without the index, an operator can only
+    guess between the causes that share a label, and two incidents on this fleet
+    were diagnosed by hand from transcripts for exactly that reason.
+
+    ``""`` means NO DIVERGENCE and also NO COMPARISON: a first request, a route
+    or credential change that started a fresh chain, and an ordinary appended
+    turn all answer the same way, because in all three the cached prefix is
+    intact. A message APPENDED at the tail is not a divergence and must not be
+    reported as one — the provider caches the longer prefix next time.
+
+    The label is ``system[i]``, ``tools``, or ``messages[i]:<kind>``; every part
+    is content-blind (see :func:`message_kind`).
+    """
+    if previous is None:
+        return ""
+    for index in range(min(len(previous.system), len(current.system))):
+        if previous.system[index] != current.system[index]:
+            return f"system[{index}]"
+    if len(previous.system) != len(current.system):
+        return f"system[{min(len(previous.system), len(current.system))}]"
+    if previous.tools != current.tools:
+        return "tools"
+    for index in range(min(len(previous.messages), len(current.messages))):
+        if previous.messages[index] != current.messages[index]:
+            kind = current.kinds[index] if index < len(current.kinds) else "message"
+            return f"messages[{index}]:{kind}"
+    if len(current.messages) < len(previous.messages):
+        return f"messages[{len(current.messages)}]"
+    return ""
+
+
+#: How many native replay items per message the fingerprint summarises.#:
 #: The items are the provider's own response bytes and a long transcript can
 #: replay thousands of them, so the marker list is capped. The TRUE count is
 #: recorded beside the markers, which is what stops a truncated list from
