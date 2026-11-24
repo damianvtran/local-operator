@@ -275,6 +275,21 @@ def never_auto_approved(tool_name: str) -> bool:
     return tool_name in _PERSON_ONLY_GATES
 
 
+#: The auto mode's EFFECT, as every receipt states it. One constant because the
+#: TUI's receipt and the runtime's notice are the same sentence word for word
+#: (one gesture, one sentence, whichever host answers it); a second copy inline
+#: is a second thing to forget.
+#:
+#: WHY IT NAMES THE EXEMPTION. "every tool runs without asking" was a false
+#: absolute on the line an operator reads to know what they just armed:
+#: :func:`never_auto_approved` keeps the account profile save and the community
+#: post in front of a person under every auto mode. This is copy only — no gate's
+#: behaviour changed, and the sentence must stay true if the set grows.
+AUTO_MODE_EFFECT = (
+    "every tool runs without asking, except account profile saves and community posts"
+)
+
+
 def loosening_is_authorised(*, source: str, gate_is_here: bool) -> bool:
     """Whether a write may LOOSEN a live approval gate (``ask`` -> ``auto``).
 
@@ -1800,6 +1815,7 @@ def report_operator_authority() -> str:
 __all__ = [
     "APPROVAL_UNAVAILABLE_NOTICE",
     "APPROVALS_LOOSENING_WORDS",
+    "AUTO_MODE_EFFECT",
     "AUTHORITY_OPS",
     "ApprovalGate",
     "ApprovalUnavailableError",

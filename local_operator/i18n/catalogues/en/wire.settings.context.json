@@ -541,6 +541,11 @@
     "tone": "concise, neutral, sentence case",
     "note": "Human-facing name for the automatic tool-approval mode. Translate naturally as a mode label, not as an untranslated machine token; use an idiomatic local abbreviation only if natural. Choice.value remains the machine value auto, while Choice.label is independently localized display copy. Automatic does not mean every action is allowed: existing guardrail risk checks and mandatory human-approval requirements still apply, including person-only gates for account profile saves and community posts. Do not imply a guardrail bypass, unconditional approval, authorization or permission to execute a tool. Keep it compact; no ICU arguments. See settings_io.py's tool_approval_mode choices, harness/approval.py and guardrails/check.py."
   },
+  "wire.settings.tool_approval_mode.choice.auto.description": {
+    "role": "approval mode dropdown choice description",
+    "tone": "concise, neutral, factual",
+    "note": "The gloss under the Automatic choice: what that mode actually does. It must state the RULE and the EXEMPTION together. Under every automatic mode the account profile save and the community post cards still reach a person, because they are not ordinary tool calls (harness/approval.py's never_auto_approved). Do not shorten it to a bare 'without asking' and do not drop either exempt gate: that absolute was the false claim this string corrects. The two exempt names are the gate names as the agent tools present them, not command tokens. No ICU arguments; the settings page wraps the sentence across its own rows, so keep it natural rather than abbreviated."
+  },
   "wire.settings.update_keep_generations.help": {
     "role": "settings row help",
     "tone": "plain",
