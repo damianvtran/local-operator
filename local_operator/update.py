@@ -72,6 +72,7 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 from local_operator import install_transaction, launchd
+from local_operator.atomic_files import atomic_symlink, atomic_write_bytes
 from local_operator.helpers import retention_label
 
 # Re-exported, not defined here: the CLI parser needs this one int to render
@@ -3671,24 +3672,20 @@ def flip_pointer(generation: Path) -> None:
         raise UpdateError(f"refusing to point current at a missing generation: {generation}")
     pointer = pointer_path()
     pointer.parent.mkdir(parents=True, exist_ok=True)
-    staged = pointer.with_name(f"{pointer.name}.tmp-{os.getpid()}")
-    try:
-        staged.unlink(missing_ok=True)
-        # ``target_is_directory=True`` is a NO-OP on POSIX (the parameter is
-        # accepted and ignored there) and decides the link's TYPE on Windows,
-        # where a symlink is created as a file link by default and a file link
-        # to a directory is not a directory: every read through it fails. The
-        # target is a generation root, so the flag is not optional there. It
-        # does not make the call privilege-free — see
-        # :func:`generation_layout_supported` — which is why the flip below is
-        # only reached on a platform where the link can be made at all.
-        os.symlink(generation, staged, target_is_directory=True)
-        os.rename(staged, pointer)
-    finally:
-        try:
-            staged.unlink(missing_ok=True)
-        except OSError:  # pragma: no cover — already renamed, or unreadable
-            pass
+    # ``target_is_directory=True`` is a NO-OP on POSIX (the parameter is
+    # accepted and ignored there) and decides the link's TYPE on Windows,
+    # where a symlink is created as a file link by default and a file link
+    # to a directory is not a directory: every read through it fails. The
+    # target is a generation root, so the flag is not optional there. It
+    # does not make the call privilege-free — see
+    # :func:`generation_layout_supported` — which is why the flip below is
+    # only reached on a platform where the link can be made at all.
+    #
+    # The staging link is ``current.tmp-<pid>.<thread>.<hex>``: per write, so two
+    # threads flipping at once never share it, and still the ``current.tmp-*``
+    # shape :func:`_sweep_staging_links` reclaims after a kill -9. The writer
+    # removes it itself on any failure.
+    atomic_symlink(pointer, generation, target_is_directory=True, marker="tmp")
 
 
 def _write_executable(path: Path, text: str) -> bool:
@@ -4173,10 +4170,7 @@ def _atomic_symlink(link: Path, target: Path) -> bool:
         link.parent.mkdir(parents=True, exist_ok=True)
         if link.is_symlink() and os.readlink(link) == str(target):
             return True
-        staged = link.with_name(f"{link.name}.tmp-{os.getpid()}")
-        staged.unlink(missing_ok=True)
-        os.symlink(target, staged)
-        os.rename(staged, link)
+        atomic_symlink(link, target, marker="tmp")
         return True
     except OSError:
         logger.debug("could not point %s at %s", link, target, exc_info=True)
@@ -4313,20 +4307,14 @@ def _rebind_scripts(install_root: Path, source_root: Path) -> tuple[list[Path], 
         patched = _repoint_paths(patched, source_root, install_root)
         if patched == data:
             continue
-        staged = entry.with_name(f"{entry.name}.rebind-{os.getpid()}")
         try:
             mode = entry.stat().st_mode
-            staged.write_bytes(patched)
-            os.chmod(staged, mode & 0o7777)
-            os.rename(staged, entry)
+            atomic_write_bytes(entry, patched, mode=mode & 0o7777, marker="rebind")
         except OSError:
-            # The temp goes with the failure: ``bin/`` is meant to be a closed
-            # set, and a ``.rebind-<pid>`` left inside a generation is litter in
-            # the one directory a future reader globs (review round 2, R2-5).
-            try:
-                staged.unlink(missing_ok=True)
-            except OSError:  # pragma: no cover — nothing further to do about it
-                pass
+            # The temp goes with the failure (the writer removes it): ``bin/`` is
+            # meant to be a closed set, and a ``.rebind-<token>`` left inside a
+            # generation is litter in the one directory a future reader globs
+            # (review round 2, R2-5).
             logger.warning("could not rebind %s to %s", entry, install_root, exc_info=True)
             failed.append(entry)
             continue
@@ -4773,7 +4761,7 @@ def clone_into_generation(
 def _sweep_staging_links(moment: float) -> list[Path]:
     """Remove ``current.tmp-*`` leaves an interrupted flip left in the stable root.
 
-    ``flip_pointer`` unlinks its own staging name in a ``finally``, which covers
+    ``flip_pointer``'s writer unlinks its own staging name on failure, which covers
     every failure INSIDE that call but not a ``kill -9`` between ``os.symlink``
     and ``os.rename``. Nothing else reclaims one: ``prune_generations`` walks
     ``generations/``, and the stable root is the one directory whose contents are

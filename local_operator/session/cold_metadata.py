@@ -55,12 +55,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.harness.types import Usage
 from local_operator.session.compression import transcript_source
 from local_operator.session.model_selection import (
@@ -328,12 +328,9 @@ def write_cold_metadata(path: Path, record: ColdMetadata) -> bool:
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(
-            json.dumps(record.to_payload(), separators=(",", ":"), sort_keys=True),
-            encoding="utf-8",
+        atomic_write_text(
+            path, json.dumps(record.to_payload(), separators=(",", ":"), sort_keys=True)
         )
-        tmp.replace(path)
         return True
     except (OSError, TypeError, ValueError):
         # TypeError/ValueError are reachable: ``json.dumps`` is being handed

@@ -59,6 +59,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from local_operator import procstate
 from local_operator.agent_shell import AGENT_SHELL_ENV
+from local_operator.atomic_files import atomic_write_text
 from local_operator.guardrails import spawned as guard_spawned
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_python as _scan_secret_cell
@@ -309,17 +310,13 @@ def _write_marker(session_dir: str, generation: str) -> bool:
     exchange retries.
     """
     path = _marker_path(session_dir)
-    tmp = f"{path}.{os.getpid()}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps({"generation": generation, "written_at_ms": int(time.time() * 1000)})
-            )
-        os.replace(tmp, path)
+        atomic_write_text(
+            path, json.dumps({"generation": generation, "written_at_ms": int(time.time() * 1000)})
+        )
         return True
     except OSError:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
+        # The writer has already removed its own temp.
         return False
 
 
