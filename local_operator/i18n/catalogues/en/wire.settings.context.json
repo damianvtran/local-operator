@@ -187,6 +187,52 @@
     "tone": "plain",
     "note": "Section heading for the machine-wide queue that limits how many heavy builds/tests run at once (one at a time on machines with 16 GB or less, up to four on larger ones). 'Heavy job' = a build, type check or test run that uses a lot of memory."
   },
+  "wire.settings.mcp_result_normalization.choice.off.description": {
+    "maxCells": 48,
+    "role": "Enum choice description",
+    "tone": "concise",
+    "note": "Results are passed to the agent exactly as the tool returned them."
+  },
+  "wire.settings.mcp_result_normalization.choice.off.label": {
+    "maxCells": 12,
+    "role": "Enum choice label",
+    "tone": "concise",
+    "note": "The 'off' choice: normalization disabled. Use this locale's established word for 'off' in settings."
+  },
+  "wire.settings.mcp_result_normalization.choice.prose_links.description": {
+    "maxCells": 48,
+    "role": "Enum choice description",
+    "tone": "concise",
+    "note": "Default mode: link URLs are kept only when the link sits inside a running sentence (a long prose line); navigation and image links are removed."
+  },
+  "wire.settings.mcp_result_normalization.choice.prose_links.label": {
+    "role": "Enum choice label, a config value",
+    "tone": "literal",
+    "note": "The literal config value 'prose-links'. Do not translate; keep it byte-identical."
+  },
+  "wire.settings.mcp_result_normalization.choice.strip_links.description": {
+    "maxCells": 48,
+    "role": "Enum choice description",
+    "tone": "concise",
+    "note": "Every link becomes its visible text; all link URLs are removed."
+  },
+  "wire.settings.mcp_result_normalization.choice.strip_links.label": {
+    "role": "Enum choice label, a config value",
+    "tone": "literal",
+    "note": "The literal config value 'strip-links'. Do not translate; keep it byte-identical."
+  },
+  "wire.settings.mcp_result_normalization.help": {
+    "maxCells": 188,
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "Claims to preserve: (1) only markup is removed (images, navigation links, citation markers), never the page's text; (2) it applies to results of MCP tools; (3) Off sends results byte-for-byte unchanged. 'Off' refers to the 'off' choice of this same row; use this locale's established word for it. The row shows help in a two-row band 74 cells wide at 80 columns and 94 at 100 columns. No ICU arguments, no numbers."
+  },
+  "wire.settings.mcp_result_normalization.label": {
+    "maxCells": 29,
+    "role": "Settings row label (enum)",
+    "tone": "concise, neutral",
+    "note": "Setting that removes markup (images, navigation links, citation markers, link URLs) from text returned by MCP tools before the AI agent reads it, to save tokens. 'MCP' is a protocol name: keep it. Keep within 29 cells: the settings label column is 30 cells. No ICU arguments."
+  },
   "wire.settings.network_credentials_github_repositories.help": {
     "role": "settings help for the GitHub repository list",
     "tone": "plain, precise about authorization",
@@ -540,6 +586,11 @@
     "role": "approval mode dropdown choice label",
     "tone": "concise, neutral, sentence case",
     "note": "Human-facing name for the automatic tool-approval mode. Translate naturally as a mode label, not as an untranslated machine token; use an idiomatic local abbreviation only if natural. Choice.value remains the machine value auto, while Choice.label is independently localized display copy. Automatic does not mean every action is allowed: existing guardrail risk checks and mandatory human-approval requirements still apply, including person-only gates for account profile saves and community posts. Do not imply a guardrail bypass, unconditional approval, authorization or permission to execute a tool. Keep it compact; no ICU arguments. See settings_io.py's tool_approval_mode choices, harness/approval.py and guardrails/check.py."
+  },
+  "wire.settings.tool_approval_mode.choice.auto.description": {
+    "role": "approval mode dropdown choice description",
+    "tone": "concise, neutral, factual",
+    "note": "The gloss under the Automatic choice: what that mode actually does. It must state the RULE and the EXEMPTION together. Under every automatic mode the account profile save and the community post cards still reach a person, because they are not ordinary tool calls (harness/approval.py's never_auto_approved). Do not shorten it to a bare 'without asking' and do not drop either exempt gate: that absolute was the false claim this string corrects. The two exempt names are the gate names as the agent tools present them, not command tokens. No ICU arguments; the settings page wraps the sentence across its own rows, so keep it natural rather than abbreviated."
   },
   "wire.settings.update_keep_generations.help": {
     "role": "settings row help",

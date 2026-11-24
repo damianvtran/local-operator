@@ -200,6 +200,7 @@ from local_operator.harness.types import (
     PeerMessageDeliveredEvent,
     ReasoningDeltaEvent,
     SteeringDeliveredEvent,
+    StreamEndEvent,
     StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -393,6 +394,7 @@ if TYPE_CHECKING:
     # (``exec_startup`` / ``sdk._build_session``), and the session holds the
     # object without ever constructing one.
     from local_operator.output_contract import OutputContract
+    from local_operator.research_evidence import AuxiliaryUsageReceipt
 
     # Type-only for the same reason ``resume`` is imported lazily at its two
     # call sites below: ``cli.py``'s startup path is guarded by a test that
@@ -4101,6 +4103,7 @@ class Session:
         #: "fall through" value, which is what every non-child session holds.
         self._saver_agent_pin_value: bool | None = None
         self._stream_fn = stream_fn
+        self._public_evidence: Any = None
         saver_bridge = getattr(self._stream_fn, "bind_saver_session", None)
         if callable(saver_bridge):
             saver_bridge(self)
@@ -5315,6 +5318,8 @@ class Session:
         #: not call it a broken attach invariant (review R1-6). One-shot, cleared
         #: on every write, so a later unexplained decrease still warns.
         self._spend_downward_correction = False
+        self._auxiliary_spend_ids: set[str] = set()
+        self._restored_auxiliary_receipts = self._restore_auxiliary_spend()
         # -- the channel-spend ledger (design: docs/design/spend-channels.md) --
         # Folded from the journal's ``session_channel_spend.v1`` rows in ONE
         # construction pass, keyed by ``record_id`` with the highest ``rev``
@@ -7765,6 +7770,19 @@ class Session:
         # normally (see the open-asks replay rule in ``_system_state_delta``).
         self._state_baseline_from_replay = False
         return list(self._frozen_system_blocks)
+
+    def _system_blocks_are_frozen(self) -> bool:
+        """Whether this session's system blocks are currently epoch-frozen.
+
+        True only when the system-blocks provider opted into append-only state
+        AND an epoch has been frozen (either persisted on turn 1 or replayed
+        from the transcript). Standalone / non-append-only providers keep
+        returning ``False`` so trailing volatile blocks remain unmarked.
+        """
+        return bool(
+            getattr(getattr(self, "_system_blocks_provider", None), "append_only_state", False)
+            and getattr(self, "_frozen_system_blocks", None) is not None
+        )
 
     def _system_state_delta(
         self, desired: list[str]
@@ -16906,6 +16924,73 @@ class Session:
         else:
             self._merge_capability_tools(("no_reply", "notify"))
 
+    def set_public_research(self, policy: Any) -> None:
+        from local_operator.model.configure import SessionStreamFn
+        from local_operator.research_evidence import (
+            PublicEvidenceConditioner,
+            PublicResearchPolicy,
+        )
+
+        if (
+            isinstance(policy, PublicResearchPolicy)
+            and policy.mode == "extract"
+            and policy.attest_public_source is not None
+            and isinstance(self._stream_fn, SessionStreamFn)
+        ):
+            self._public_evidence = PublicEvidenceConditioner(
+                policy, self._stream_fn, self._transcript, self._accrue_auxiliary_usage
+            )
+            self._context.condition_public_evidence = self._public_evidence
+
+    @staticmethod
+    def _book_auxiliary_usage(spend: SessionSpend, receipt: AuxiliaryUsageReceipt) -> None:
+        # Companion money does not advance assistant turns or context occupancy.
+        from local_operator.session.channel_spend import usd_to_micro
+
+        usage = receipt.usage
+        if usage is None:
+            spend.accrue(None)
+        else:
+            dollars = usage.usd_cost if usage.usd_cost is not None else usage.estimated_usd_cost
+            spend.accrue(usd_to_micro(dollars), serving_identity(usage), basis=usage.billing_basis)
+
+    def _restore_auxiliary_spend(self) -> list[AuxiliaryUsageReceipt]:
+        from local_operator.research_evidence import RECEIPT_TYPE, fold_receipts
+
+        transcript = self._transcript
+        if transcript.latest_custom_entry(RECEIPT_TYPE) is None:
+            return []
+        # Bind the applied IDs to the actual aggregate, not journal position:
+        # an async aggregate write can commit after a receipt it didn't see.
+        if self._spend_recorded:
+            details = transcript.latest_custom(SESSION_SPEND_CUSTOM_TYPE) or {}
+            ids = details.get("auxiliary_request_ids")
+            if isinstance(ids, list):
+                self._auxiliary_spend_ids.update(value for value in ids if isinstance(value, str))
+        receipts = fold_receipts(reversed(transcript.entries()), strict=False)
+        changed = False
+        for receipt in receipts:
+            if receipt.request_id not in self._auxiliary_spend_ids:
+                self._book_auxiliary_usage(self.spend, receipt)
+                self._auxiliary_spend_ids.add(receipt.request_id)
+                changed = True
+        if self._spend_recorded:
+            if changed:
+                self.schedule_spend_persist()
+            return []
+        # If a live call beats the historical rebuild, the recovered auxiliary
+        # money must survive in a floor, even without the older main calls.
+        if changed:
+            self.spend.floor = True
+        return receipts
+
+    def _accrue_auxiliary_usage(self, receipt: AuxiliaryUsageReceipt) -> None:
+        if receipt.request_id not in self._auxiliary_spend_ids:
+            self._book_auxiliary_usage(self.spend, receipt)
+            self._auxiliary_spend_ids.add(receipt.request_id)
+            self._spend_live_calls += 1
+            self.schedule_spend_persist()
+
     def set_first_turn_mcp_wait(self, timeout_s: float | None) -> None:
         """Hold the first turn for EVERY configured MCP server, bounded; ``None`` opts out.
 
@@ -18262,6 +18347,8 @@ class Session:
         where a per-turn fat checkpoint was not.
         """
         details = self.spend.to_details()
+        if self._auxiliary_spend_ids:
+            details["auxiliary_request_ids"] = sorted(self._auxiliary_spend_ids)
         previous = self._spend_persisted_micro
         if details["micro"] < previous:
             if self._spend_downward_correction:
@@ -18859,7 +18946,7 @@ class Session:
         except Exception:  # noqa: BLE001 — an unpriced rebuild is not an error
             logger.debug("session spend rebuild pricing failed", exc_info=True)
             return
-        if not rows:
+        if not rows and not self._restored_auxiliary_receipts:
             return
         # ``floor`` is earned by a POSITIVE report that a money row is gone, never
         # by a compaction or prune marker (review R1-4): every writer in
@@ -18878,6 +18965,8 @@ class Session:
                 rebuilt.accrue(micro, identity)
             elif has_reported_tokens(row):
                 rebuilt.accrue(None, identity)
+        for receipt in self._restored_auxiliary_receipts:
+            self._book_auxiliary_usage(rebuilt, receipt)
         if not rebuilt.calls:
             return
         # Bail if anything NEWER landed while this ran: a record that reached the
@@ -23933,6 +24022,18 @@ class Session:
                     )
                     request.validate_required_images()
                 request._codex_turn_state = codex_turn_state
+                evidence = self._public_evidence if request.purpose == "turn" else None
+                binding = None
+                if evidence is not None:
+                    evidence.main = None
+                    if not request.has_one_turn_secrets and request.model.provider == "bedrock":
+                        from local_operator.research_evidence import (
+                            BedrockEvidenceBinding,
+                        )
+
+                        # Bound before ``inner`` is built below (admitted or
+                        # not), so the provider client sees it on dispatch.
+                        binding = request._evidence_binding = BedrockEvidenceBinding()
 
                 def mark_dispatch() -> None:
                     self._attention_run_request_dispatched = True
@@ -23995,6 +24096,20 @@ class Session:
                         # witness and need not accept an extra argument.
                         mark_dispatch()
                     async for event in inner:
+                        if (
+                            binding is not None
+                            and evidence is not None
+                            and isinstance(event, StreamEndEvent)
+                        ):
+                            selected, usage = binding.selected, event.usage
+                            if (
+                                selected is not None
+                                and event.stop_reason in ("toolUse", "stop")
+                                and usage is not None
+                                and usage.provider == "bedrock"
+                                and usage.model_id == selected.model_id
+                            ):
+                                evidence.main = selected
                         yield event
 
                 return witness()
@@ -24049,6 +24164,10 @@ class Session:
                 # waiting for another user message. The loop keeps the turn-start
                 # snapshot as a fallback if this host resolver ever fails.
                 get_system_blocks=self._prepare_system_blocks,
+                # Explicit epoch-freeze signal for provider cache placement:
+                # evaluated per call after ``_prepare_system_blocks`` so turn 1
+                # already marks the single trailing frozen system block.
+                get_system_blocks_frozen=self._system_blocks_are_frozen,
                 # The tools array, re-read per provider step and latched to one
                 # publish per turn; see ``_wire_tools``. The loop's tool
                 # RESOLUTION deliberately keeps reading the live
@@ -33859,6 +33978,7 @@ class Session:
             model=self._model,
             purpose="aside",
             system_blocks=list(blocks),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
             messages=messages,
             # Live tools (not []): keep the aside on the SAME cache prefix the
             # working turn builds. See the docstring for why this is a cache
@@ -33995,6 +34115,7 @@ class Session:
             model=self._model,
             purpose="clearance",
             system_blocks=list(blocks),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
             messages=messages,
             # Live tools (not []): the same cache-prefix rule the aside states
             # at length — the tools block leads the prefix, so an empty array
@@ -34146,6 +34267,7 @@ class Session:
             model=self._model,
             purpose="compaction_advisor",
             system_blocks=list(blocks),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
             messages=messages,
             # Same array as the running turn (not []): the tools block is the
             # FRONT of the provider cache prefix, so sending [] would change

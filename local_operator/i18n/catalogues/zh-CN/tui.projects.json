@@ -94,6 +94,7 @@
   "tui.projects.start.filter_placeholder": "输入以筛选",
   "tui.projects.start.legend": "输入以筛选 · ↑↓移动 · ↵选择 · esc关闭",
   "tui.projects.start.more": "+{count}项",
+  "tui.projects.start.team_detail": "{manager} · {count, plural, other {{shown}个角色}}",
   "tui.projects.notice_read_only": "只读：此会话的运行时位于另一台设备，无法在此修改项目。",
   "tui.projects.refusal_done_gate": "这些里程碑尚未完成，无法标记为完成：{names}"
 }

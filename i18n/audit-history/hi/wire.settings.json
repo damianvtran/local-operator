@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.settings",
-  "history_sha256": "6ad0ab9841b9be01fe62792f871034d8c7e842dc1588477bdcb50bee56fd97c6",
+  "history_sha256": "b0d5fed2a3a01954e327342077976f5d253479dbc6602be397d939847d60eda3",
   "entries": [
     {
       "locale": "hi",
@@ -7458,6 +7458,106 @@
       },
       "status": "passed",
       "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings (origin/main: 30 keys added since the merge-base; branch: 10 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 10 added/changed keys; origin/main's 895 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "12fe830071ac6e8bdbc65e971e373c12a00f52d11f5f0336f07265ded94700c6",
+      "keys_audited": 1,
+      "round": "i18n-wave-A",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent 44965318ae11)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "12fe830071ac6e8bdbc65e971e373c12a00f52d11f5f0336f07265ded94700c6",
+      "keys_audited": 1,
+      "round": "i18n-wave-B",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent b321b3e2e06b)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits. Auditor B shares the translator model but is a different agent session."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "7eaf3e95c31cf444f26de59ba8c5c253de0c6b770c48a0588aee1692861e33c8",
+      "context_sha256": "1946205a2ef39fdff2704ce40007a6325bdfe2349eca4e483e0d6ec8c55e57be",
+      "target_sha256": "1c13a7718b923fd06c49981b809a9c9a6f8002465c0c2293f1b4184dc6352b20",
+      "keys_audited": 8,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4514 implementer, commit 3dc289d5a384)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session cd2d2ff84424 (independent of the translator; did not write PR #4514)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent semantic audit of PR #4514 (branch feat/mcp-result-normalization, head 3dc289d5a384 + this commit), 2026-11-23: the 8 NEW keys wire.settings.mcp_result_normalization.{label,help,choice.off.label,choice.off.description,choice.prose_links.label,choice.prose_links.description,choice.strip_links.label,choice.strip_links.description}, judged against en source + context sidecar, i18n/glossary.md and i18n/style-guides/hi.md (accuracy, glossary terms, neighbouring-key terminology, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; 'prose-links'/'strip-links' labels byte-identical to en per the sidecar; rich.cells.cell_len within every maxCells (label 29, help 188, descriptions 48, off label 12); key parity 8/8. Every other key in this namespace is byte-identical to merge-base 989351cd16c0's file, whose last receipt here passed against that base's en hash b3753dde0a01… (scripted diff: 8 added, 0 changed, 0 removed; context sidecar 8 added, 0 changed). 1 finding, fixed by the auditor in this commit (MAJOR, accuracy): help rendered 'citation markers' as 'उद्धरण चिह्न', the fixed Hindi grammar term for quotation marks (“ ”). That told users the setting strips quote marks from the text, contradicting the context note's claim (1) that only markup is removed, never the page's text. Now 'फ़ुटनोट चिह्न' (footnote markers — the [1]-style wiki references the normalizer removes; parallels ru 'сноски'). 'संदर्भ' was rejected: this catalogue uses it for 'context' (wire.settings.compaction_enabled.help)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "4ce6048a2a6fdda1a7e6623d0ffef3202ca684628739a3877d200e48c917d756",
+      "context_sha256": "b0c1332306474a5293f2c69e438208e229f81501806321b15d5512d4558e0873",
+      "target_sha256": "8ab14ae21458862b99852c2a6fe6ec9fad9fc4f61616622ea97b08a71f07ec24",
+      "keys_audited": 9,
+      "round": "convergence-r1",
+      "translator": {
+        "agent": "not re-translated here: the 8 wire.settings.mcp_result_normalization.* keys from PR #4514 (row above, source 7eaf3e95c31c), wire.settings.tool_approval_mode.choice.auto.description from origin/main (rows above, source 2ffdcc0c9444)",
+        "model": "see the rows above",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 09b1208daf93 (independent of both translators; did not write PR #4514 or the origin/main change)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Convergence audit of PR #4514 merge commit 724de4b1dae8 (parents f246cbc6 PR head + 0fa001da origin/main; merge-base 989351cd16c0), 2026-11-24. Scripted merge proof (flattened JSON, every key): en and this locale's wire.settings.json == merge-base + origin/main's only change (wire.settings.tool_approval_mode.choice.auto.description) + the PR's 8 added mcp_result_normalization keys, values byte-identical to their audited sides; 913 keys, 0 overlap, 0 lost, 0 other changes; en context sidecar likewise (origin/main's note/role/tone for the auto description + the PR's 8 entries). Semantic re-read of the 9 changed keys against the en source, context sidecar, i18n/glossary.md and i18n/style-guides/hi.md: auto description keeps both the rule and both exempt gates (profile save, community post); 'prose-links'/'strip-links' byte-identical; rich.cells.cell_len within every maxCells; no ICU arguments. Audit-history merge: origin/main's rows are a byte-identical prefix and every PR row is present, 0 extra rows. 0 findings."
     }
   ]
 }

@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tui.projects",
+  "history_sha256": "53b435f8b65cf5fad1d0aab18de5cc7dbfa63398341d904bf62442288a444592",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.projects",
+      "source_sha256": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2",
+      "context_sha256": "411f134fa0a8defb711623ab65ec90946fd5d92612d23c941ba3149a3dd529b0",
+      "target_sha256": "f47adf13c519bbd7198392aa70ffc0854ca122184ec7b663ede055d2d32b9654",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "session": "17b81fee8ed1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "provenance": "translator's own files (translations/<locale>.json + notes.md in session 17b81fee8ed1 scratchpad, notes.md states no fallback); values applied byte-exact by the integrating coder"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team, audit-es), not the translator; did not edit values",
+        "session": "77131db44fa7",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own record (auditor.model field)"
+      },
+      "status": "passed",
+      "note": "tr1: independent i18n-auditor 77131db44fa7 (anthropic/claude-opus-5-5, no fallback observed) of translator 17b81fee8ed1 input sha256 5ea25f5af3b484af0025d7968e95ded02c673570575a86f11a3e2fdfe6477122: clean for tui.projects (0 blocker, 0 major, 0 minor, 0 nit). Keys: settings team facts / start-picker team detail added at c3ba6a516c6a. Record i18n/audits/evidence/es/tui.projects/tr1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/tui.projects/tr1/record.json",
+      "round": "tr1"
+    }
+  ]
+}

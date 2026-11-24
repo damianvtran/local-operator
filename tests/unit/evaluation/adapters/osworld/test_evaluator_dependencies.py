@@ -21,6 +21,8 @@ import pytest
 from lop_osworld_v2_adapter import evaluator_dependencies as deps
 from lop_osworld_v2_adapter.provisioning import ProvisioningError
 
+from tests import fd_readiness
+
 _SOURCE = b"# synthetic stand-in for the pinned task_025 bytes\n"
 _RELEASE = b'{"release": "synthetic-v2.1"}'
 
@@ -397,7 +399,7 @@ def test_hard_reset_cancellation_ends_exact_probe_and_helper(
             identities: dict[str, tuple[int, int]] = {}
             try:
                 for _ in range(2):
-                    assert select.select([reader], [], [], 10)[0], "fake OCR did not start"
+                    assert fd_readiness.is_readable(reader, 10), "fake OCR did not start"
                     role, pid, group = reader.readline().decode().split()
                     identities[role] = (int(pid), int(group))
                 assert set(identities) == {"probe", "helper"}
@@ -410,9 +412,7 @@ def test_hard_reset_cancellation_ends_exact_probe_and_helper(
                 # The worker cannot run Python finally blocks after SIGKILL.
                 os.killpg(worker.pid, signal.SIGKILL)
                 assert worker.wait(timeout=5) == -signal.SIGKILL
-                assert select.select([reader], [], [], 5)[
-                    0
-                ], f"OCR processes survived: {identities}"
+                assert fd_readiness.is_readable(reader, 5), f"OCR processes survived: {identities}"
                 assert os.read(reader.fileno(), 1) == b""
             finally:
                 if worker.poll() is None:
@@ -421,7 +421,7 @@ def test_hard_reset_cancellation_ends_exact_probe_and_helper(
                 # On the negative control the old probe escaped the worker
                 # group. Never leave it on the test host, even on failure.
                 placeholder.close()
-                if not select.select([reader], [], [], 0)[0]:
+                if not fd_readiness.is_readable(reader, 0):
                     for pid, group in identities.values():
                         try:
                             if os.getpgid(pid) == group:
@@ -429,7 +429,7 @@ def test_hard_reset_cancellation_ends_exact_probe_and_helper(
                         except ProcessLookupError:
                             pass
                     if identities:
-                        assert select.select([reader], [], [], 5)[0], "fake OCR cleanup failed"
+                        assert fd_readiness.is_readable(reader, 5), "fake OCR cleanup failed"
 
 
 def test_child_diagnostics_are_never_reported(pinned: Path, tmp_path: Path) -> None:

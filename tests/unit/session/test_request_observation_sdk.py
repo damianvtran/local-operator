@@ -410,6 +410,32 @@ async def test_typed_admission_follows_preforked_isolated_requests(
             await child.close()
 
 
+@pytest.mark.asyncio
+async def test_admission_reuses_a_companion_preassigned_request_id(
+    scratch: Any, wire: Wire
+) -> None:
+    """Convergence of #4319's admission with #4429's evidence companion.
+
+    The companion writes its durable receipt under ``_auxiliary_request_id``
+    BEFORE dispatch; an installed admission policy must gate and the ledger
+    must record that same id, or reconciliation sees two requests.
+    """
+    wire.script("helper", text_turn("admitted companion"))
+    async with _opened(scratch) as session:
+        request = session._errand_request(session._lowest_effort(session._model), "sys", "name")
+        request._auxiliary_request_id = "aux-preassigned-id"
+        admitted: list[str] = []
+        seen: list[RequestFinalObservation] = []
+        session.subscribe_requests(seen.append)
+        uninstall = session.install_request_admission(lambda rid: admitted.append(rid))
+        try:
+            assert await session._drain_errand(request) == "admitted companion"
+        finally:
+            uninstall()
+        assert admitted == ["aux-preassigned-id"]
+        assert [row.request_id for row in seen] == ["aux-preassigned-id"]
+
+
 # ---------------------------------------------------------------------------
 # Single native tool loop -- one row per request, duplicate frames once
 # ---------------------------------------------------------------------------

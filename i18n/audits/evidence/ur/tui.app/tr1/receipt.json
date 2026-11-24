@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "audit_id": "tr1",
+  "locale": "ur",
+  "namespace": "tui.app",
+  "record": "i18n/audits/evidence/ur/tui.app/tr1/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable record, copied byte-for-byte from ~/.local-operator/sessions/e1ac85590ece/scratchpad/i18n-settings-residual/audit/ur/record.json. One record covers both namespaces it audited.",
+  "record_sha256": "021a4eeb81b4deba7450e0bde527abf9bb67d7e25024ecdf52f4cafd52f2c4f9",
+  "source_sha256": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+  "context_sha256": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+  "target_sha256": "1bd6b83a17dafe3c9d1f6066c8c4dc5ebd70755041f07a2d61d0ad22b756b9b0",
+  "verdict": "changes_requested",
+  "commit_audited": "c3ba6a516c6a (worktree head; values audited from translator files before apply)",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team)",
+    "session": "e1ac85590ece",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "ledger_receipt": {
+    "locale": "ur",
+    "namespace": "tui.app",
+    "source_sha256": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+    "context_sha256": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+    "target_sha256": "1bd6b83a17dafe3c9d1f6066c8c4dc5ebd70755041f07a2d61d0ad22b756b9b0",
+    "translator": {
+      "agent": "i18n-translator (lopdev team)",
+      "session": "17b81fee8ed1",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-23",
+      "provenance": "translator's own files (translations/<locale>.json + notes.md in session 17b81fee8ed1 scratchpad, notes.md states no fallback); values applied byte-exact by the integrating coder"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (lopdev team), not the translator; did not edit values",
+      "session": "e1ac85590ece",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-23",
+      "result": "findings",
+      "findings": 1,
+      "unresolved_blocker_major": 1,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 1,
+        "minor": 0,
+        "nit": 0
+      },
+      "finding_ids": [
+        "U1"
+      ],
+      "fallback_used": false,
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own record (auditor.model field)"
+    },
+    "status": "changes_requested",
+    "note": "tr1: independent i18n-auditor e1ac85590ece (anthropic/claude-opus-5-5, no fallback observed) of translator 17b81fee8ed1 input sha256 bb64fafbde0bd7e8b993b91547d3473791a9f80803c5f31dd92c595290a35bd9: findings for tui.app (0 blocker, 1 major, 0 minor, 0 nit; U1). Keys: settings team facts / start-picker team detail added at c3ba6a516c6a. Value later changed per the finding and re-audited in tr2; this row is kept as history. Record i18n/audits/evidence/ur/tui.app/tr1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/ur/tui.app/tr1/record.json",
+    "round": "tr1"
+  }
+}

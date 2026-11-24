@@ -109,6 +109,11 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   exception to ``body: null`` is a message THIS account authored: the hub never
   delivers it back for admission, so history and thread fetch its text per read
   (hash-verified, never stored) so a sender can read what it wrote.
+  The timeline is ROOTS only: thread replies are excluded and read with
+  ``channel_thread``. A root with replies carries the hub's ``reply_count`` and
+  ``last_reply_at``, and the model copy carries a one-line thread note (after
+  the head, before the page) naming those roots, so a gap in the timeline is
+  not mistaken for a lost message.
 
 - **react** — set an emoji on an admitted conversation message (or remove it
   with ``remove=true``). ``emoji`` is a Unicode emoji or a Slack/GitHub
@@ -344,6 +349,80 @@ def _model_page_json(result: Any) -> str:
         if isinstance(page.get("root"), dict):
             page["root"] = _row(page["root"])
     return json.dumps(bound_inline_data_payload(page), ensure_ascii=False, separators=(",", ":"))
+
+
+#: The hub's ``last_reply_at`` is an RFC 3339 instant (Go ``time.Time``). It is
+#: echoed into the thread note only when it has exactly that shape, so the note
+#: can never carry free text from the payload.
+_THREAD_NOTE_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})"
+)
+
+#: Marker that opens the thread note, so the model can tell a line Local Operator
+#: wrote from the hub page it follows.
+_THREAD_NOTE_MARKER = "[bridge thread note — from Local Operator, not message content]"
+
+
+def _thread_replies_note(result: Any, channel_id: str) -> str | None:
+    """One line telling the model which roots on a ``channel_history`` page have
+    thread replies, or None when none do.
+
+    WHY. The hub's channel timeline lists ROOT messages only; replies live under
+    their root and are read with ``channel_thread``. On 2026-11-24 an agent read
+    qa-coordination's history, saw it stop at seq 3384, and concluded seq 3385
+    was lost — it was a reply under root 3383, whose row carried ``reply_count:
+    1`` that nothing pointed the agent at. This note makes the rollup the hub
+    already returns actionable.
+
+    CONSTRAINTS. Built only from closed-grammar metadata of the page the hub just
+    served — a minted message id, an integer seq and count, an RFC 3339 instant —
+    so it never echoes a body, a display label or ``reply_participants`` (those
+    are sender-controlled text and stay inside the untrusted JSON). No extra hub
+    call per root. The latest REPLY's seq is not named: the hub's message view
+    (agent-server ``BridgeConversationMessageView``) carries only ``reply_count``,
+    ``last_reply_at`` and ``reply_participants`` on a root, and a seq guessed
+    from those would be invented. A row missing or mistyping those fields is
+    simply not listed.
+    """
+
+    rows = result.get("messages") if isinstance(result, dict) else None
+    if not isinstance(rows, list):
+        return None
+    entries: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("thread_root_id"):
+            continue
+        count = row.get("reply_count")
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            continue
+        root_id = row.get("id")
+        if not isinstance(root_id, str) or _CONVERSATION_MESSAGE_ID.fullmatch(root_id) is None:
+            continue
+        seq = row.get("seq")
+        where = (
+            f"seq {seq} " if isinstance(seq, int) and not isinstance(seq, bool) else ""
+        ) + f"(id {root_id})"
+        detail = f"{count} {'reply' if count == 1 else 'replies'}"
+        last = row.get("last_reply_at")
+        if isinstance(last, str) and _THREAD_NOTE_TIMESTAMP.fullmatch(last):
+            detail += f", last {last}"
+        entries.append(f"{where}: {detail}")
+    if not entries:
+        return None
+    # The resolved id came back from the hub (a name lookup) or the model; only
+    # the minted grammar is echoed, as with the root ids above.
+    conversation = channel_id if _CONVERSATION_ID.fullmatch(channel_id) else "<channel id>"
+    roots = (
+        "1 root on this page has"
+        if len(entries) == 1
+        else f"{len(entries)} roots on this page have"
+    )
+    return (
+        f"{_THREAD_NOTE_MARKER} This timeline excludes thread replies; {roots} "
+        f"replies — {'; '.join(entries)}. Read them with channel_thread "
+        f"(channel_id={conversation}, thread_root_id=<root id>); reply to a thread on its "
+        "ROOT id (threads are one level)."
+    )
 
 
 #: Display label for the auto-added creator member. The label is display-only
@@ -3883,7 +3962,15 @@ async def execute_bridge(
             # "bytes never ride details" is the rule the raw page has to keep.
             "content": f"{BRIDGE_BODY_READ_HEAD}\n\n{json.dumps(result, ensure_ascii=False)}",
             _INLINE_DATA_KEY: _with_files(
-                f"{BRIDGE_BODY_READ_HEAD}\n\n{_model_page_json(result)}",
+                # The thread note is one line between the head and the blank
+                # line, MODEL copy only: every reader of these strings (the row
+                # renderers on ``content``, tests on this copy) splits on the
+                # first blank line and parses the rest as the page, so the note
+                # must sit before it, and the page stays byte-identical. The note
+                # is addressed to the model (see _thread_replies_note).
+                f"{BRIDGE_BODY_READ_HEAD}"
+                + (f"\n{note}" if (note := _thread_replies_note(result, channel_id)) else "")
+                + f"\n\n{_model_page_json(result)}",
                 files,
             ),
             _IMAGES_KEY: images,

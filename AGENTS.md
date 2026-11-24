@@ -82,7 +82,8 @@ fast `guards` slice, not the unit matrix: select with `make test-affected`
 (`scripts/affected_tests.py`), record `## Targeted test evidence` on the PR, and
 let `.github/workflows/full-suite.yml` be the whole-tree run — it runs **once at
 the merge gate** (a `labeled` pull request, see "Who may merge: two tiers") and
-on `main`'s tip plus nightly.
+on `main`'s tip hourly (ordinary merges are batched; release commits run on
+their exact SHA) plus nightly — docs/ci-merge-gate.md.
 
 **Every pytest invocation in this file is isolated, and that is not decoration.**
 Each block also carries its own `ISO=$(mktemp -d)`, because the variable lives in
@@ -664,7 +665,7 @@ narrowest scope that could hold the answer, and widen only when it shows nothing
 
 ### Running the suite locally: what it costs, and how to read a stall
 
-**`full-suite.yml` on main (post-merge + nightly) is the whole-tree gate; PRs carry
+**`full-suite.yml` on main (hourly batch + release commits + nightly) is the whole-tree gate; PRs carry
 targeted evidence instead. A local whole-tree run is not one, and no session
 should block on it.** Measured 2026-09-24 at load average 140-200, the
 whole tree is **~84 minutes projected at the four workers this host's hook resolved**
@@ -1837,6 +1838,16 @@ $EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # publ
 # substitution in the release command: see "Branch-moving commands".
 git -C ~/local-operator fetch --tags origin main
 git -C ~/local-operator rev-parse origin/main          # copy this SHA after checking it
+# Pre-cut gate (GH #4074): ordinary main pushes are batched hourly, so only the
+# bump commit's OWN full-suite push run proves this SHA. Exit 0 only when a run
+# on exactly this SHA is green with the full matrix (both Python legs, linux +
+# macOS tui-e2e, coverage). Non-zero: do NOT cut — wait for that run
+# (gh run list --workflow full-suite.yml --commit <SHA>); red: fix forward.
+# Runs origin/main's helper (what `make release-check SHA=` runs in a clean
+# checkout), so the shared checkout's branch or dirty state cannot change it.
+git -C ~/local-operator show origin/main:scripts/fast_gate_check.py | python3 - --local \
+  --event release-check --release-check --repo damianvtran/local-operator \
+  --sha <the SHA you just checked>
 gh release create vX.Y.Z --target <the SHA you just checked> \
   --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
@@ -2961,7 +2972,13 @@ green. A red gate blocks the merge, and that is the point: no red pipeline
 reaches `main`. A push **after** the gate revokes that green — the check belongs
 to the SHA it ran on, so the new head sits in "Expected" — and
 `make merge-gate PR=<n>` re-arms it (remove + re-add the label, then print the
-triggered run and `gh run watch`/`gh pr checks`). Before changing labels, the
+triggered run and `gh run watch`/`gh pr checks`). A **red** gate on the
+**unchanged** head is cheaper: the same command runs `gh run rerun <id> --failed`
+on that run (failed and fail-fast-cancelled shards, coverage and the aggregate
+re-run; passing shards are kept; same head, same gate base), prints
+`path: RERUN-FAILED`, and goes green only when every shard of that run is green.
+A new head, a green/active run, a refused rerun, or `MERGE_GATE_FRESH=1` takes
+the fresh label arm (`path: FRESH`). Before either, the
 ritual refuses an existing live gate on that head; see
 [gate ownership, duplicate-arm override, and stale-failure semantics](docs/ci-merge-gate.md).
 Never test the label's NAME in

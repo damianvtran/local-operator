@@ -147,6 +147,13 @@ SINCE_EXTRACTION = {
     "tui.app.temporary_hold_unread_mail": "kept while a message is unread",
     "tui.app.temporary_hold_unsaved_files": "kept while files are unsaved",
     "tui.app.temporary_hold_unseen_result": "kept until you see the result",
+    # Settings team facts, keyed 2026-11-23: these are the exact bytes the
+    # former literals in OperatorApp painted (hand-rolled member plural, the
+    # `alias:` label, the empty-summary and fallback-facts words).
+    "tui.app.skills.member_count": "{count, plural, one {{shown} member} other {{shown} members}}",
+    "tui.app.skills.team_aliases": "alias: {aliases}",
+    "tui.app.skills.team_no_description": "no description",
+    "tui.app.skills.team_fallback_facts": "team",
 }
 
 

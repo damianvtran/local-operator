@@ -732,6 +732,9 @@ _CLONE_GUARD_FIELDS = frozenset(
         # Marker placement for one-shot auxiliary calls (``cache_markers``):
         # where cache_control goes, never which bytes the model reads.
         "cache_markers",
+        # Frozen-system marker policy (``system_blocks_frozen``): controls only
+        # where cache_control lands on system blocks, never prompt bytes.
+        "system_blocks_frozen",
         # Same policy input, same stamper: "this conversation already had a
         # long-streaming turn" picks the marker TTL and nothing else.
         "cache_after_long_call",
@@ -4225,6 +4228,13 @@ class LoopConfig(BaseModel):
         Field(default=None, exclude=True)
     )
 
+    # Whether the system blocks resolved by ``get_system_blocks`` are frozen
+    # for the current prefix epoch (trailing blocks stay byte-stable and live
+    # state changes travel as append-only messages). Checked after
+    # ``get_system_blocks`` runs so turn 1 reports ``True`` as soon as the
+    # epoch freezes; ``None`` defaults to ``False`` for standalone callers.
+    get_system_blocks_frozen: Callable[[], bool] | None = Field(default=None, exclude=True)
+
     # The tools array to send NOW, re-read immediately before every provider
     # call. Supplying this does NOT re-read ``LoopContext.tools`` per call — it
     # supersedes it, and the host is what decides how often the array may move.
@@ -5164,6 +5174,16 @@ class ChatRequest(BaseModel):
     cache_markers: Literal["auto", "system", "none"] = Field(
         default="auto", exclude=True, repr=False
     )
+    #: Whether every entry in ``system_blocks`` is frozen for the epoch.
+    #:
+    #: ``Session._prepare_system_blocks`` freezes all system blocks for the
+    #: epoch (including ``env``, ``<skills/>``, and any ``OutputContract``) and
+    #: ships later state changes as append-only messages, whereas standalone
+    #: callers pass dynamic trailing blocks. Making the guarantee explicit lets
+    #: ``AnthropicClient._system_blocks`` place one trailing breakpoint on
+    #: ``system[-1]`` instead of guessing from block count. Transport metadata,
+    #: never wire content.
+    system_blocks_frozen: bool = Field(default=False, exclude=True, repr=False)
     #: This conversation has already had a turn that ran at least
     #: ``anthropic_cache_ttl.SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` from request
     #: start to stream end. Stamped by ``SessionStreamFn`` from its own
@@ -5439,6 +5459,9 @@ class ChatRequest(BaseModel):
     # Shared only by the main turn's request clones; never serialized to a
     # transcript, telemetry row, helper call or independent conversation.
     _codex_turn_state: Any = PrivateAttr(default=None)
+    # Shallow request clones must carry the same wire proof and receipt ID.
+    _evidence_binding: Any = PrivateAttr(default=None)
+    _auxiliary_request_id: str | None = PrivateAttr(default=None)
 
     _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
 

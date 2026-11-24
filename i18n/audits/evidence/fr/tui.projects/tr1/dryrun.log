@@ -1,0 +1,4 @@
+$ ledger.py append --dry-run (expected history 493325c32d3b6e3a3a92002d3a2260c8529651a624a9a61237af34bf9b948564)
+i18n/audit-history/fr/tui.projects.json
+
+exit 0

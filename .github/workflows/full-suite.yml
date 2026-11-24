@@ -52,20 +52,37 @@ run-name: >-
 # What this run catches that targeted PR runs cannot, and why each needs a FULL
 # run rather than a bigger selection: matrix-version bugs (3.13 only), cross-test
 # state leaks that only show under sharded `-n auto` worksteal ordering, and any
-# test the diff-to-test mapping did not reach. On `main` it does NOT block a
-# PR: a red run opens no issue (red main is checked on a cadence by the
+# test the diff-to-test mapping did not reach. On `main` it is BATCHED (GH #4074
+# cut 1): an ordinary merge no longer starts the matrix (it cost ~7.5k
+# runner-min/day, 129 full runs/week, 2026-11-17..23); the hourly schedule
+# tests the newest main tip instead, release commits keep their own full run on
+# their exact SHA, and a red batch names its merge range. On `main` it does NOT
+# block a PR: a red run opens no issue (red main is checked on a cadence by the
 # operator's sweep, not filed here). On a PR it DOES block, through the
 # `merge-gate` aggregate below.
 
 on:
+  # Kept, but CHEAP for an ordinary merge: the precondition marks it BATCHED
+  # (two small jobs, every heavy job skipped, the aggregate grey) and the hourly
+  # batch below tests the tip. It stays a trigger because a RELEASE commit
+  # (`chore(release)`, squash or merge commit) still needs a full run on its
+  # exact SHA, automatically, before `make release-check` lets the tag be cut.
   push:
     branches:
       - main
   schedule:
     # 07:17 UTC daily: off-peak for this repo's merge traffic (late evening US
     # Pacific), and off the top of the hour, where GitHub's scheduler is most
-    # congested and drops or delays `schedule` events.
+    # congested and drops or delays `schedule` events. The NIGHTLY: ungated,
+    # always full, its own concurrency group (the coverage backstop).
     - cron: "17 7 * * *"
+    # THE HOURLY BATCH (GH #4074 cut 1): the full matrix on the newest main
+    # tip, skipped by the precondition when that exact SHA already has a full
+    # verdict or a run in flight (quiet hours cost two tiny jobs). :41 is off
+    # the top of the hour and away from :17. MUST equal HOURLY_CRON in
+    # scripts/fast_gate_check.py: `github.event.schedule` is the only field
+    # that tells it from the nightly (test_ci_hygiene pins the pair).
+    - cron: "41 * * * *"
   workflow_dispatch:
   # THE MERGE GATE TRIGGER. ONLY `labeled`. `opened`/`synchronize`/`reopened`
   # would put the full suite back on every push and every review round — the
@@ -75,13 +92,19 @@ on:
   pull_request:
     types: [labeled]
 
-# ONE running plus the NEWEST pending, never a queue. GitHub keeps a single
-# pending run per group and a newer arrival replaces it, so with
-# `cancel-in-progress: false` a burst of merges costs at most two full runs and
-# the pending one always tests the tip of `main`. That is the intent: this run
-# answers "is main green?", and an intermediate commit's answer is subsumed by
-# its successor's (the post-merge blame window is the commits between the last
-# green and the first red SHA, which the issue names).
+# `full-suite-main` (the hourly batch and main dispatches): ONE running plus
+# the NEWEST pending, never a queue. GitHub keeps a single pending run per group
+# and a newer arrival replaces it, so with `cancel-in-progress: false` the
+# pending one always tests the tip of `main`. That is the intent: this run
+# answers "is main green?", and a red one names the merge range since the last
+# green full main run (the `merge-gate` red-range step) so owners fix forward.
+#
+# MAIN PUSHES ARE ISOLATED PER SHA (`full-suite-main-push-<sha>`). An ordinary
+# push is two tiny jobs, so isolating it costs nothing; a RELEASE push is the
+# full run `make release-check` requires on that exact SHA, and in the shared
+# group a later merge or the next hourly could replace it while pending, leaving
+# the release with no verdict. Same shape as ci.yml's per-SHA release group,
+# without reading the commit message (cheap pushes make it unnecessary).
 #
 # `workflow_dispatch` runs on ANY ref: an agent whose PR touches test infra
 # (conftest, run_bounded, ci_scope, pytest plugins — `scripts/affected_tests.py`
@@ -96,7 +119,9 @@ on:
 # nightly schedule or by a later merge onto main — an evicted run reports no
 # verdict, and the PR's required check would sit "Expected".
 #
-# THE NIGHTLY HAS ITS OWN GROUP (GH #4074). It runs on refs/heads/main, so it
+# THE NIGHTLY HAS ITS OWN GROUP (GH #4074), keyed by its cron, not by
+# `schedule`: the hourly batch is also a schedule and DOES belong in the main
+# group. The nightly runs on refs/heads/main, so it
 # used to share `full-suite-main` with push runs, where a newer push could
 # replace it while pending (5 of 8 nightly runs in 2026-11-08..15 ended
 # cancelled; the canceller is not named in run metadata, so this is the
@@ -105,7 +130,8 @@ on:
 # coalesced. Cost: at most one extra concurrent run per day.
 concurrency:
   group: >-
-    ${{ github.event_name == 'schedule' && 'full-suite-nightly'
+    ${{ github.event_name == 'schedule' && github.event.schedule == '17 7 * * *' && 'full-suite-nightly'
+    || github.event_name == 'push' && github.ref == 'refs/heads/main' && format('full-suite-main-push-{0}', github.sha)
     || github.ref == 'refs/heads/main' && 'full-suite-main'
     || format('full-suite-{0}', github.ref) }}
   cancel-in-progress: false
@@ -118,9 +144,10 @@ jobs:
   # event, whether the full suite may spend ~380 runner-minutes. Logic and the
   # fail-closed rules live in scripts/fast_gate_check.py; read its docstring.
   # In short: a labeled PR head or a dispatched ref needs a GREEN fast `CI Gate`
-  # on that exact head, and a push to main yields to a newer tested main tip.
-  # schedule is never gated: the nightly and every un-superseded main push
-  # still run EVERY test, so skipped work here is only ever a redundant run.
+  # on that exact head; an ordinary push to main is BATCHED (no heavy jobs);
+  # the hourly batch skips a tip that already has a full verdict or a run in
+  # flight. The nightly is never gated, and release commits and the hourly
+  # tip still run EVERY test, so skipped work is only ever a redundant run.
   #
   # The helper is downloaded from a TRUSTED tree rather than checked out from
   # the PR merge ref, so a PR cannot rewrite its own gate while holding the
@@ -146,8 +173,8 @@ jobs:
   precondition:
     needs: [changes]
     runs-on: ubuntu-latest
-    # Settle (300 s) plus bounded tag/API lookups (120 s tag budget) on a push;
-    # PR/dispatch paths finish in seconds.
+    # Bounded tag/API lookups (120 s tag budget) on a push; the hourly dedup,
+    # PR and dispatch paths finish in seconds.
     timeout-minutes: 10
     permissions:
       contents: read
@@ -196,11 +223,26 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          # Empty except on `schedule`; tells the hourly batch from the nightly.
+          SCHEDULE: ${{ github.event.schedule }}
+        # VERSION SKEW (PR #4527 QA Q1): on `pull_request` the helper above is
+        # the TRUSTED BASE copy (gate_base = main tip), which can be OLDER than
+        # this workflow — an old argparse rejects unknown flags with exit 2 and
+        # turns the required merge gate red. So the PR-path argv must stay
+        # byte-compatible with the base helper: flags added for push/schedule
+        # (`--schedule`, `--run-id`) are passed ONLY off pull_request, where the
+        # helper is fetched at this run's own SHA. Any future flag follows the
+        # same rule; test_pr_path_argv_parses_under_the_base_helper pins it.
         run: |
+          non_pr_flags=()
+          if [ "$EVENT" != "pull_request" ]; then
+            non_pr_flags=(--schedule "$SCHEDULE" --run-id "$GITHUB_RUN_ID")
+          fi
           python3 "$RUNNER_TEMP/fast_gate_check.py" \
             --event "$EVENT" --repo "$GITHUB_REPOSITORY" \
             --pr "${PR_NUMBER:-0}" --head-sha "$PR_HEAD_SHA" --head-repo "$PR_HEAD_REPO" \
             --ref "$GITHUB_REF" --ref-name "$GITHUB_REF_NAME" --sha "$GITHUB_SHA" \
+            "${non_pr_flags[@]}" \
             --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
   # Same classifier job as ci.yml (kept identical; a hygiene test compares the
@@ -845,6 +887,18 @@ jobs:
         run: |
           python -m tests.shard_stall_watchdog "${TMPDIR:-/tmp}/lo-shard-stall"
 
+      # FAILED-ONLY RERUNS (`make merge-gate` -> `gh run rerun --failed`, GH
+      # #4074): artifacts belong to the RUN, not the attempt, so a re-run shard
+      # uploads beside every earlier attempt's artifacts and coverage-report's
+      # `coverage-data-<py>-*` pattern must still find the carried (passing)
+      # shards' attempt-1 uploads; that is why this name has NO attempt suffix
+      # (measured: run 45325871121 attempt 2 combined attempt-1 data for shards
+      # 1 and 5). A failing step skips this upload, so a red shard normally
+      # leaves nothing behind; `overwrite: true` covers the race where a shard
+      # is cancelled or fails AFTER this upload: v4+ artifacts are immutable
+      # and a second upload under the same name is a 409 that would turn every
+      # rerun of that shard red. The rerun's data replaces the stale copy, so
+      # the combine still sees exactly one file per shard.
       - name: Upload shard coverage data
         if: env.LEG_IDLE != 'true'
         uses: actions/upload-artifact@v7
@@ -853,6 +907,7 @@ jobs:
           path: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
           retention-days: 1
           include-hidden-files: true
+          overwrite: true
 
   # `coverage-report` is deliberately left with `needs: test` and NO `if:`, and
   # that is the whole disposition — do not add `always()` for symmetry with the
@@ -920,6 +975,10 @@ jobs:
           name: coverage-report-${{ matrix.python-version }}
           path: htmlcov
           retention-days: 7
+          # `always()` upload under a run-scoped name: a failed-only rerun
+          # (`make merge-gate`, GH #4074) re-runs this job, and without
+          # overwrite a report left by the earlier attempt is a 409 red.
+          overwrite: true
 
   tui-e2e:
     # Moved from ci.yml with `needs: [changes, lint, type-check]`; lint and
@@ -1232,7 +1291,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: junit-timings-e2e-${{ matrix.os }}-${{ matrix.shard }}
+          # Attempt in the name, like the unit shards' junit: this upload is
+          # `always()`, so a FAILED e2e shard already uploaded under this name,
+          # and its failed-only rerun (GH #4074) would hit the run-scoped 409
+          # "artifact with this name already exists" and go red on the upload
+          # instead of on its tests.
+          name: junit-timings-e2e-${{ matrix.os }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           # Signal cases run in this job, not `test`: jobs have separate working
           # trees, so a unit-job allowlist cannot collect their shutdown witnesses.
           # Preserve only diagnostic JSON, bounded stderr and the owned child's
@@ -1307,12 +1371,14 @@ jobs:
   # go red, and still passes the gate.
   merge-gate:
     name: Merge gate (full suite)
-    # `always()` so a red precondition still REPORTS red. The one exception is a
-    # push to main that a newer tip superseded (`superseded` is only ever true
-    # there): that SHA gets NO verdict, shown grey/skipped with the summary
-    # `SUPERSEDED by <tip>` from the precondition, rather than a green nobody
-    # earned. A main push SHA is not a PR required-check subject, so grey cannot
-    # satisfy a PR's gate. Data-gated, not event-gated (see the hygiene test).
+    # `always()` so a red precondition still REPORTS red. The one exception is
+    # `superseded`, only ever true for an ordinary main push (BATCHED) or an
+    # hourly batch whose tip is already covered (HOURLY SKIP): that SHA gets NO
+    # verdict, shown grey/skipped with the precondition's summary line, rather
+    # than a green nobody earned. Neither is a PR required-check subject (a PR
+    # run never sets it), so grey cannot satisfy a PR's gate, and
+    # `make release-check` reads the jobs, so grey cannot pass a release either.
+    # Data-gated, not event-gated (see the hygiene test).
     if: always() && needs.precondition.outputs.superseded != 'true'
     needs:
       - precondition
@@ -1322,6 +1388,11 @@ jobs:
       - tui-e2e
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # `actions: read` is for the red-range step only (it lists earlier
+    # full-suite runs to find the last green one). Still read-only.
+    permissions:
+      contents: read
+      actions: read
     steps:
       # AFFECTED LANE (#4074): say which lane produced this verdict, and refuse
       # a green `affected` verdict that is not backed by the work it names. The
@@ -1402,3 +1473,38 @@ jobs:
             echo "::error title=Merge gate (full suite)::needed jobs not success or skipped: $(echo "$bad" | tr '\n' ' ')"
             exit 1
           fi
+
+      # RED BATCH RANGE (GH #4074 cut 1). A batched main run tests many merges
+      # at once, so "main is red" alone does not tell anyone what to fix. On a
+      # red MAIN run (hourly, release push, main dispatch) this names
+      # `<last green full main SHA>..<this SHA>` and the merged PRs in it
+      # (first-parent), in the step summary and the log.
+      #
+      # FAIL-SOFT, by three independent locks: `if: failure()` (a green run
+      # never reaches it, so it cannot turn green red), `continue-on-error`
+      # (its own failure cannot change the job's verdict either way), and the
+      # helper's `--red-range` mode always exits 0. The gate step above has
+      # ALREADY failed the job, so nothing here can hide a red. The ref test
+      # is a STEP condition, never a job `if:` (see the hygiene pin): a PR gate
+      # names its own head, so on a PR this step is simply skipped.
+      #
+      # The helper comes from this run's own SHA, which on `main` is merged,
+      # reviewed code -- the same trust rule as the precondition's non-PR path.
+      - name: Name the merge range of a red main run
+        if: failure() && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          curl -fsS --retry 3 --max-time 30 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.raw" \
+            -o "$RUNNER_TEMP/fast_gate_check.py" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/scripts/fast_gate_check.py?ref=$GITHUB_SHA" \
+            || { echo "red range unavailable: helper not fetched"; exit 0; }
+          python3 "$RUNNER_TEMP/fast_gate_check.py" --red-range \
+            --event "$EVENT" --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" \
+            --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
+            --summary "$GITHUB_STEP_SUMMARY" || true

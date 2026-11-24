@@ -956,6 +956,12 @@ ALLOW_ASK_CONSEQUENCE = "run this call and ask again next time"
 #: The same consequence once the gate is auto: telling the reader to expect a
 #: prompt that will not come is the stale-copy defect this pair removes.
 ALLOW_AUTO_CONSEQUENCE = "run this call; later calls are auto"
+#: The Allow consequence on a PERSON-ONLY card, which no auto mode may answer.
+#: "ask again next time" is the wrong promise there, and the card carries no mode
+#: line at all (its policy chrome is off), so nothing else would say why only
+#: Allow/Deny are offered. Shorter than ALLOW_ASK_CONSEQUENCE, so no authored row
+#: width moves.
+PERSON_ONLY_CONSEQUENCE = "only you can approve this"
 
 APPROVAL_CHOICES: tuple[tuple[str, str, str], ...] = (
     ("Allow", "y", ALLOW_ASK_CONSEQUENCE),
@@ -1961,11 +1967,14 @@ class ApprovalPrompt(AskPickerScreen):
         A parked card can outlive the mode it was raised under: pressing `S`/`G`
         makes the NEXT gate auto while this one still asks, and leaving "ask
         again next time" under Allow states the opposite of the saved policy the
-        callout above just announced (UX/design round 1, U3/D3). Only the Allow
-        row changes; its replacement is shorter at every authored width, so no
-        row moves and no budget changes.
+        callout above just announced (UX/design round 1, U3/D3). A person-only
+        card inverts it: no auto answers it, ever, so the Allow row says so
+        instead. Only the Allow row changes; its replacement is shorter at every
+        authored width, so no row moves and no budget changes.
         """
         text = super()._row_description(index)
+        if self._person_only and text == ALLOW_ASK_CONSEQUENCE:
+            return PERSON_ONLY_CONSEQUENCE
         if not self._person_only and self._policy.mode == "auto" and text == ALLOW_ASK_CONSEQUENCE:
             return ALLOW_AUTO_CONSEQUENCE
         return text

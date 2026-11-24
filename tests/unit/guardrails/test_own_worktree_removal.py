@@ -238,13 +238,44 @@ async def test_own_finished_worktrees_settle_without_the_judge(
 
 
 @pytest.mark.asyncio
-async def test_own_plain_compound_cleanup_holds_unwitnessed_ignored_payload(
+async def test_own_plain_compound_cleanup_sheds_regenerable_ignored_output(
     home: Path, mobile: Path
 ) -> None:
-    judge = _Judge("ALLOW ledger")
+    """The operator's 2026-11-11 escalation, restored (PR #4493).
+
+    #4240 held these own, finished trees for their ignored ``.expo`` /
+    ``.pnpm-store`` / ``node_modules`` "regardless of creator", reversing the
+    OWN FIRST settlement. Regenerable output in a tree this session made is
+    the creator's own build product: no ask, no judge.
+    """
+    judge = _Judge("BLOCK: should not be asked")
     outcome = await _check(home, COMMAND_1, judge)
-    assert outcome is not None and outcome.blocked
-    assert "3 ignored entries the guard cannot prove regenerable" in outcome.text
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_own_plain_cleanup_sheds_hand_made_ignored_data(home: Path, mobile: Path) -> None:
+    """Operator directive 2026-11-23 (PR #4493): agents clean up after
+    themselves with no approval, so an OWN tree's ignored ``.env`` goes with
+    it. (Before: held as possibly the only copy of local data.)"""
+    tree = mobile / ".worktrees" / "refused-connect"
+    # Ignore it via the repository's info/exclude: editing the tracked
+    # .gitignore would itself be a change Git refuses.
+    exclude = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(exclude).parent.mkdir(parents=True, exist_ok=True)
+    with open(exclude, "a") as fh:
+        fh.write(".env\n")
+    (tree / ".env").write_text("LOCAL_ONLY=1\n")
+    judge = _Judge("BLOCK: should not be asked")
+    outcome = await _check(home, COMMAND_1, judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
     assert judge.prompts == []
 
 
@@ -270,7 +301,9 @@ def test_exact_remove_preserves_unregenerable_ignored_output(home: Path, mobile:
     v = classify_bash(
         f"git worktree remove {wt}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S
     )
-    assert v.risk is Risk.HIGH and v.targets[0].cleanup_hold, v.targets[0].reason
+    # Operator directive 2026-11-23 (PR #4493): the OWNER sheds its own
+    # ignored notes; another session still may not.
+    assert not v.targets[0].cleanup_hold, v.targets[0].reason
     foreign = classify_bash(
         f"git worktree remove {wt}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S2
     )
@@ -577,6 +610,153 @@ async def test_allow_ledger_for_a_link_checks_the_link_row_not_the_pointee(
     assert "ledger: no row for this session" in judge.prompts[0]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "names",
+    [(".DS_Store", "sub/.DS_Store"), ("._App.tsx",), ("Thumbs.db", "desktop.ini")],
+    ids=["finder", "appledouble", "windows"],
+)
+async def test_own_plain_cleanup_sheds_os_folder_metadata(
+    home: Path, mobile: Path, names: tuple[str, ...]
+) -> None:
+    """PR #4493 field case: Finder recreates an ignored ``.DS_Store`` in any
+    worktree opened in it, so an own clean tree must not be held for it."""
+    tree = mobile / ".worktrees" / "refused-connect"
+    exclude = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(exclude).parent.mkdir(parents=True, exist_ok=True)
+    with open(exclude, "a") as fh:
+        fh.write("".join(f"{os.path.basename(n)}\n" for n in names))
+    for name in names:
+        (tree / name).parent.mkdir(parents=True, exist_ok=True)
+        (tree / name).write_bytes(b"\0meta")
+    judge = _Judge("BLOCK: should not be asked")
+    outcome = await _check(home, COMMAND_1, judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force", ["", "--force "], ids=["plain", "force"])
+async def test_own_ui_qa_worktree_sheds_out_symlink_and_finder_metadata(
+    home: Path, mobile: Path, force: str
+) -> None:
+    """PR #4493 field case (local-operator-ui ``qa2069-head``/``-base``): an
+    own finished tree holding electron-vite ``out/``, a ``node_modules``
+    SYMLINK to somewhere other than the shared ``../../node_modules``, and
+    ``.DS_Store`` files. The link's target must survive."""
+    tree = mobile / ".worktrees" / "refused-connect"
+    exclude = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(exclude).parent.mkdir(parents=True, exist_ok=True)
+    with open(exclude, "a") as fh:
+        fh.write("out/\n.DS_Store\n")
+    (tree / "out" / "main").mkdir(parents=True)
+    (tree / "out" / "main" / "index.js").write_text("module.exports = {}\n")
+    (tree / ".DS_Store").write_bytes(b"\0meta")
+    (tree / "out" / ".DS_Store").write_bytes(b"\0meta")
+    elsewhere = home / "shared-deps" / "node_modules"
+    (elsewhere / "pkg").mkdir(parents=True)
+    (elsewhere / "pkg" / "index.js").write_text("module.exports = 1\n")
+    link = tree / "node_modules"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(elsewhere)
+    judge = _Judge("BLOCK: should not be asked")
+    # The field's bare spelling: nothing unlinks node_modules first.
+    command = f"cd ~/local-operator-mobile && git worktree remove {force}.worktrees/refused-connect"
+    outcome = await _check(home, command, judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+    # Review SEC-R4-n1: run the allowed removal for real, then prove the
+    # link's target outlived it.
+    subprocess.run(
+        ["git", "-C", str(mobile), "worktree", "remove", *force.split(), str(tree)],
+        check=True,
+        capture_output=True,
+    )
+    assert not tree.exists()
+    assert (elsewhere / "pkg" / "index.js").is_file()
+
+
+@pytest.mark.asyncio
+async def test_sibling_tree_still_holds_a_foreign_symlink(home: Path, mobile: Path) -> None:
+    """The symlink rule is own-tree only: in a tree this session did not make,
+    a link's existence proves nothing about what the creator relies on."""
+    from local_operator.guardrails.provenance import plain_cleanup_ignored_inventory
+
+    tree = mobile / ".worktrees" / "refused-connect"
+    elsewhere = home / "elsewhere-deps"
+    elsewhere.mkdir()
+    link = tree / "node_modules"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(elsewhere)
+    real = os.path.realpath(tree)
+    foreign = plain_cleanup_ignored_inventory(real)
+    own = plain_cleanup_ignored_inventory(real, own_regenerable=True)
+    assert foreign is not None and foreign.unverified_ignored >= 1
+    assert own is not None and own.unverified_ignored == 0
+
+
+@pytest.mark.parametrize("payload", ["ui-qa", "dotenv", "ds-store-dir"])
+def test_exact_force_route_sheds_own_regenerable_payload(
+    home: Path, mobile: Path, payload: str
+) -> None:
+    """QA Q-R4-1 (PR #4493): the canonical ``git -C <repo> worktree remove
+    --force -- <tree>`` spelling reads ``_interrupted_cleanup_state``, which
+    accepted only the shared ``../../node_modules`` link, so an own tree whose
+    ignored payload was ``out/``, a ``node_modules`` link elsewhere and
+    ``.DS_Store`` read dirty there while the plain route allowed it. Tested at
+    this boundary because the route's later origin/identity proof needs a
+    forge remote the fixture does not have (QA round 4 ran it end to end).
+    An ignored ``.env`` stays dirty; a foreign caller (``own=False``) too."""
+    tree = mobile / ".worktrees" / "refused-connect"
+    exclude = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    Path(exclude).parent.mkdir(parents=True, exist_ok=True)
+    with open(exclude, "a") as fh:
+        fh.write("out/\n.DS_Store\nnode_modules\n.env\n")
+    (tree / "out" / "main").mkdir(parents=True)
+    (tree / "out" / "main" / "index.js").write_text("x\n")
+    (tree / ".DS_Store").write_bytes(b"\0")
+    elsewhere = home / "deps-elsewhere"
+    elsewhere.mkdir()
+    link = tree / "node_modules"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(elsewhere)
+    if payload == "dotenv":
+        (tree / ".env").write_text("TOKEN=hand-made\n")
+    elif payload == "ds-store-dir":
+        # #4503: a DIRECTORY named .DS_Store is not Finder's; it stays held.
+        (tree / ".DS_Store").unlink()
+        (tree / ".DS_Store").mkdir()
+        (tree / ".DS_Store" / "payload").write_text("not Finder's\n")
+    real = os.path.realpath(tree)
+    own = prov._interrupted_cleanup_state(real, None, own_regenerable=True)
+    foreign = prov._interrupted_cleanup_state(real, None)
+    assert foreign == "dirty"
+    # Operator directive 2026-11-23: an own tree sheds every ignored entry
+    # (``.env``, a ``.DS_Store`` directory); only a nested repository holds.
+    assert own == "clean"
+
+
 # --- Finder ``.DS_Store`` metadata (operator request 2026-11-23) -------------
 #
 # Field case, guard 0.112.5: ``git worktree remove`` of an own, clean, merged
@@ -655,7 +835,19 @@ def test_non_finder_ds_store_or_other_ignored_entry_still_holds(
     else:
         (wt / ".env").write_text("TOKEN=synthetic\n")
     _record(home, wt)
-    _held_one(home, wt)
+    # Operator directive 2026-11-23 (PR #4493): an OWN tree sheds all of it;
+    # the hold below is what any OTHER tree (no ownership) still gets.
+    own = prov.plain_cleanup_ignored_inventory(str(wt), own_regenerable=True)
+    assert own is not None and own.unverified_ignored == 0, own
+    if kind == "symlink":
+        # PR #4493: an OWN tree sheds any ignored link (Git removes the link,
+        # never its target), whatever its name; the target is untouched.
+        inventory = prov.plain_cleanup_ignored_inventory(str(wt), own_regenerable=True)
+        assert inventory is not None and inventory.unverified_ignored == 0, inventory
+        assert (mobile / "App.tsx").is_file()
+        return
+    inventory = prov.plain_cleanup_ignored_inventory(str(wt))
+    assert inventory is not None and inventory.unverified_ignored == 1, inventory
     assert prov.worktree_state(str(wt), own=True) == "clean"
 
 
@@ -683,3 +875,18 @@ def test_force_and_rm_rf_ranking_ignores_the_finder_witness(
     with_witness = rank()
     monkeypatch.setattr(prov, "_finder_metadata_file", lambda real, entry: False)
     assert rank() == with_witness
+
+
+def test_own_tree_still_holds_an_ignored_nested_repository(home: Path, mobile: Path) -> None:
+    """The one hold left in an own tree (PR #4493 operator directive): an
+    ignored entry holding a Git repository, whose commits may exist nowhere
+    else and cannot be regenerated."""
+    tree = mobile / ".worktrees" / "refused-connect"
+    nested = tree / "vendor-checkout"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    real = os.path.realpath(tree)
+    assert prov._own_tree_sheds(str(nested)) is False
+    assert prov._own_tree_sheds(os.path.join(real, ".env")) is False  # unreadable/missing
+    (tree / ".env").write_text("A=1\n")
+    assert prov._own_tree_sheds(os.path.join(real, ".env")) is True
