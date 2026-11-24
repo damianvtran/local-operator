@@ -76,6 +76,16 @@ export type MessageParams = {
   "relay.asks.card.timed_out_badge": undefined;
   "relay.asks.card.unskip": undefined;
   "relay.asks.card.urgent": undefined;
+  "relay.asks.chip.answered": undefined;
+  "relay.asks.chip.declined": undefined;
+  "relay.asks.chip.dismissed": undefined;
+  "relay.asks.chip.expired": undefined;
+  "relay.asks.chip.label": { "id": string; "state": string; "question": string };
+  "relay.asks.chip.label_bare": { "id": string; "state": string };
+  "relay.asks.chip.late": undefined;
+  "relay.asks.chip.open": undefined;
+  "relay.asks.chip.timed_out": undefined;
+  "relay.asks.chip.withdrawn": undefined;
   "relay.asks.disclosure.answer_first": undefined;
   "relay.asks.disclosure.held_shut": undefined;
   "relay.asks.dock.timed_out": { "count": number };

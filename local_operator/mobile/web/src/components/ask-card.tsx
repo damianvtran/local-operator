@@ -1421,6 +1421,11 @@ export function AskCard({
 				data-testid="ask-card"
 				data-ask-id={row.ask_id}
 				data-ask-status={String(row.status || "open")}
+				/* Programmatic focus target ONLY (a chip's jump into a settled
+				   receipt, which has no question element of its own): -1 keeps the card
+				   out of the tab order while letting the sheet land the reader's place
+				   on the thing the tap promised. */
+				tabIndex={-1}
 				className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
 			>
 				{body}

@@ -53,7 +53,7 @@ import {
 	orderedForDisplay,
 	questionTally,
 } from "../lib/asks";
-import { messageRuntime, useAsksRevision, useProjection, useSessions } from "../store";
+import { messageRuntime, rememberAskChipSettled, useAsksRevision, useProjection, useSessions } from "../store";
 import type { PendingAsk } from "../types";
 
 /** How often the open sheet re-reads the aggregate as a deadline backstop. */
@@ -125,6 +125,7 @@ export function AsksSheet({
 	open,
 	onClose,
 	currentSessionId,
+	jumpAsk = null,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -132,6 +133,12 @@ export function AsksSheet({
 	    cross-conversation view the navigation drawer's Questions destination
 	    opens (UX review round 1, U1). */
 	currentSessionId: string;
+	/** The ask a chip in the transcript named: the sheet opens with THAT ask's
+	    card expanded (a settled row expands in place), scrolled to it, and with
+	    focus moved onto it — the reader pressed a control that promised this
+	    question, so landing anywhere else would make the tap a lie. `null` is
+	    every other door (the dock, the policy, the drawer). */
+	jumpAsk?: string | null;
 }) {
 	/* EMPTY MEANS ALL CONVERSATIONS, and that is a real mode rather than a
 	   missing argument: the drawer's destination is machine-wide. Passing "" into
@@ -186,6 +193,9 @@ export function AsksSheet({
 			const answer = await getAsks(signal);
 			setRows(Array.isArray(answer.asks) ? answer.asks : []);
 			setError("");
+			/* The transcript's chips read the same list for the one state no live
+			   frame and no receipt can name (a withdrawn ask). */
+			rememberAskChipSettled(answer.asks);
 		} catch (failure) {
 			if (failure instanceof DOMException && failure.name === "TimeoutError") {
 				setError(messageRuntime.t("relay.asks.error.read_timeout"));
@@ -298,6 +308,17 @@ export function AsksSheet({
 		if (choice !== undefined && !choiceLive) setChoice(undefined);
 		else if (choice === undefined && defaultOpen) setChoice(defaultOpen.ask_id);
 	}, [open, loaded, choice, choiceLive, defaultOpen]);
+	/* A CHIP'S JUMP IS A PENDING INTENT, applied once the row is here. The sheet
+	   reads the aggregate asynchronously, so the id exists in `listed` a frame or
+	   two after the open; the effect waits for it rather than dropping the tap.
+	   The latch above never overwrites it: this writes a real `choice`. */
+	const jumpTarget = typeof jumpAsk === "string" && jumpAsk !== "" ? jumpAsk : null;
+	useEffect(() => {
+		if (!open || jumpTarget === null) return;
+		if (!listed.some((row) => row.ask_id === jumpTarget)) return;
+		setChoice(jumpTarget);
+		setFocusAsk(jumpTarget);
+	}, [open, jumpTarget, listed]);
 	/* THE PINNED BAR'S ELEMENT. The open card portals its answering controls into
 	   it (`AskCard`'s `footerSlot`); a state rather than a ref so the card is
 	   re-rendered with the element once the bar mounts. */
@@ -317,7 +338,16 @@ export function AsksSheet({
 		if (!region || !card) return;
 		region.scrollTop +=
 			card.getBoundingClientRect().top - region.getBoundingClientRect().top - BODY_PAD_PX;
-	}, [open, openId]);
+		/* FOCUS FOLLOWS A CHIP'S JUMP, and only a jump: moving the reader's place
+		   on every open would steal focus from the control they pressed (U2's
+		   rule for the close control is the same). The question text is the first
+		   thing the card says; a settled receipt has no question element of its
+		   own, so the card itself takes focus there (`tabIndex={-1}`). */
+		if (jumpTarget !== null && jumpTarget === openId) {
+			const target = card.querySelector<HTMLElement>('[data-testid="ask-question-text"]') ?? card;
+			target.focus({ preventScroll: true });
+		}
+	}, [open, openId, jumpTarget]);
 	const sessionOf = (row: PendingAsk) =>
 		crossConversation ? String(row.session_id) : currentSessionId;
 	const nameOf = (row: PendingAsk) => {

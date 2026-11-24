@@ -89,5 +89,15 @@
   "relay.asks.id.copy_label": "Copy ask id {id}",
   "relay.asks.id.copied": "Copied",
   "relay.asks.id.copied_named": "Copied {id}",
-  "relay.asks.id.copy_failed": "Couldn't copy — the id is selected; copy it from there"
+  "relay.asks.id.copy_failed": "Couldn't copy — the id is selected; copy it from there",
+  "relay.asks.chip.open": "open",
+  "relay.asks.chip.answered": "answered",
+  "relay.asks.chip.declined": "declined",
+  "relay.asks.chip.timed_out": "timed out",
+  "relay.asks.chip.late": "late",
+  "relay.asks.chip.dismissed": "dismissed",
+  "relay.asks.chip.withdrawn": "withdrawn",
+  "relay.asks.chip.expired": "expired",
+  "relay.asks.chip.label": "Ask {id}, {state}: {question}. Activate to show.",
+  "relay.asks.chip.label_bare": "Ask {id}, {state}. Activate to show."
 }

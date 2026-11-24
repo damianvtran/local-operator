@@ -18,6 +18,8 @@ import { cn } from "../lib/cn";
 import { isolateTechnicalRuns } from "../lib/bidi";
 import { diagramKey, shouldDrawDiagram } from "../lib/diagram-fence";
 import { DiagramBlock } from "./diagram-block";
+import { AskIdChip } from "./ask-id";
+import { askIdSegments, isAskId } from "../lib/ask-chip";
 import { allowsReveal, revealText, settleReveals } from "../lib/stream-reveal";
 
 /* ------------------------------------------------------------------ */
@@ -125,14 +127,37 @@ const Prose = memo(function Prose({ text, from }: { text: string; from?: number 
 	</SelectionGuard>;
 });
 
-function renderInline(text: string, from?: number): ReactNode[] {
+function renderInline(text: string, from?: number, askChips = false): ReactNode[] {
 	const out: ReactNode[] = [];
 	let last = 0;
 	const prose = (start: number, end: number, isolate: boolean) => {
 		const raw = text.slice(start, end);
 		const value = isolate ? isolateTechnicalRuns(raw) : raw;
-		return <Prose key={`p${start}`} text={value}
-			from={value === raw && from !== undefined && from < end ? Math.max(0, from - start) : undefined} />;
+		const fromHere =
+			value === raw && from !== undefined && from < end ? Math.max(0, from - start) : undefined;
+		/* THE CHIP SITS IN THE PROSE, not beside it (spec §2): an id the agent
+		   wrote stays in its sentence, so the sentence still reads when copied. The
+		   run is split BEFORE isolation — an isolate wrapped around the token would
+		   put a control character between `a-` and its hex and the token would stop
+		   being one — and every plain piece keeps its own reveal offset so a
+		   streaming answer still fades from the right place. */
+		if (!askChips) return <Prose key={`p${start}`} text={value} from={fromHere} />;
+		const segments = askIdSegments(raw);
+		if (segments.length === 1 && segments[0].kind === "text") {
+			return <Prose key={`p${start}`} text={value} from={fromHere} />;
+		}
+		let cursor = 0;
+		return segments.map((segment) => {
+			const at = cursor;
+			cursor += segment.kind === "text" ? segment.text.length : segment.id.length;
+			if (segment.kind === "ask") return <AskIdChip key={`a${start + at}`} id={segment.id} />;
+			const piece = isolate ? isolateTechnicalRuns(segment.text) : segment.text;
+			const local =
+				piece === segment.text && fromHere !== undefined && fromHere >= at && fromHere < cursor
+					? fromHere - at
+					: undefined;
+			return <Prose key={`p${start + at}`} text={piece} from={local} />;
+		});
 	};
 	for (const m of text.matchAll(INLINE_RE)) {
 		const idx = m.index ?? 0;
@@ -144,13 +169,17 @@ function renderInline(text: string, from?: number): ReactNode[] {
 		const [full, code, linkText, href, bold1, bold2, strike, italic1, italic2] = m;
 		const ref = from !== undefined && idx >= from ? revealText : undefined;
 		if (code !== undefined) {
-			out.push(
+			const inner = code.slice(1, -1);
+			/* ONE ID AND NOTHING ELSE, the desktop's rule: a span that also holds a
+			   command stays a code span, because the reader was shown a command. */
+			if (askChips && isAskId(inner)) out.push(<AskIdChip key={idx} id={inner} />);
+			else out.push(
 				<code
 					key={idx} ref={ref}
 					dir="ltr"
 					className="rounded-xs bg-sunken px-0.5 font-mono text-mono-sm"
 				>
-					{code.slice(1, -1)}
+					{inner}
 				</code>,
 			);
 		} else if (linkText !== undefined && href !== undefined) {
@@ -174,7 +203,7 @@ function renderInline(text: string, from?: number): ReactNode[] {
 		} else if (bold1 !== undefined || bold2 !== undefined) {
 			out.push(
 				<strong key={idx} ref={ref} className="font-semibold">
-					{renderInline(bold1 ?? bold2 ?? "")}
+					{renderInline(bold1 ?? bold2 ?? "", undefined, askChips)}
 				</strong>,
 			);
 		} else if (strike !== undefined) {
@@ -184,7 +213,7 @@ function renderInline(text: string, from?: number): ReactNode[] {
 				</s>,
 			);
 		} else if (italic1 !== undefined || italic2 !== undefined) {
-			out.push(<em key={idx} ref={ref}>{italic1 ?? italic2}</em>);
+			out.push(<em key={idx} ref={ref}>{renderInline(italic1 ?? italic2 ?? "", undefined, askChips)}</em>);
 		} else {
 			out.push(full);
 		}
@@ -660,15 +689,15 @@ function parseMarkdown(text: string, previous: ParsedMarkdown | null): Block[] {
 	}));
 }
 
-const MarkdownBlock = memo(function MarkdownBlock({ block: b, from }: {
-	block: Block; from?: number;
+const MarkdownBlock = memo(function MarkdownBlock({ block: b, from, askChips = false }: {
+	block: Block; from?: number; askChips?: boolean;
 }) {
 	const line = (index: number) => renderInline(b.lines[index], from === undefined || index !== b.lines.length - 1
-		? undefined : Math.max(0, from - b.lineStarts[index]));
+		? undefined : Math.max(0, from - b.lineStarts[index]), askChips);
 	const ref = from !== undefined && b.start >= from ? revealText : undefined;
 	// A new block already fades as a unit; only append inside old blocks needs
 	// an inline effect. A diagram keys itself by source, not its fence position.
-	const inline = (index: number) => ref ? renderInline(b.lines[index]) : line(index);
+	const inline = (index: number) => ref ? renderInline(b.lines[index], undefined, askChips) : line(index);
 	switch (b.kind) {
 		case "code": {
 			const source = b.lines.join("\n");
@@ -756,7 +785,7 @@ function diagramOwner(block: Block) {
 	return owner;
 }
 
-export const Markdown = memo(function Markdown({ text, live = false }: { text: string; live?: boolean }) {
+export const Markdown = memo(function Markdown({ text, live = false, askChips = false }: { text: string; live?: boolean; askChips?: boolean }) {
 	const root = useRef<HTMLDivElement>(null);
 	const committed = useRef<ParsedMarkdown | null>(null);
 	const previous = committed.current;
@@ -783,7 +812,7 @@ export const Markdown = memo(function Markdown({ text, live = false }: { text: s
 					diagramSeen.set(owner.source, occurrence + 1);
 					key = owner.keys[occurrence] ??= diagramKey(owner.source, occurrence);
 				}
-				return <MarkdownBlock key={key} block={block}
+				return <MarkdownBlock key={key} block={block} askChips={askChips}
 					from={i === blocks.length - 1 && block !== previous?.blocks[i] ? from : undefined} />;
 			})}
 		</SelectionGuard>

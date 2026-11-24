@@ -113,6 +113,46 @@ def card_urgent() -> Msg:
     return Msg("relay.asks.card.urgent", {})
 
 
+def chip_answered() -> Msg:
+    return Msg("relay.asks.chip.answered", {})
+
+
+def chip_declined() -> Msg:
+    return Msg("relay.asks.chip.declined", {})
+
+
+def chip_dismissed() -> Msg:
+    return Msg("relay.asks.chip.dismissed", {})
+
+
+def chip_expired() -> Msg:
+    return Msg("relay.asks.chip.expired", {})
+
+
+def chip_label(*, id: str, state: str, question: str) -> Msg:
+    return Msg("relay.asks.chip.label", {"id": id, "state": state, "question": question})
+
+
+def chip_label_bare(*, id: str, state: str) -> Msg:
+    return Msg("relay.asks.chip.label_bare", {"id": id, "state": state})
+
+
+def chip_late() -> Msg:
+    return Msg("relay.asks.chip.late", {})
+
+
+def chip_open() -> Msg:
+    return Msg("relay.asks.chip.open", {})
+
+
+def chip_timed_out() -> Msg:
+    return Msg("relay.asks.chip.timed_out", {})
+
+
+def chip_withdrawn() -> Msg:
+    return Msg("relay.asks.chip.withdrawn", {})
+
+
 def disclosure_answer_first() -> Msg:
     return Msg("relay.asks.disclosure.answer_first", {})
 
