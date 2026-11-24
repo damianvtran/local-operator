@@ -5246,6 +5246,25 @@ SETTINGS: tuple[Setting, ...] = (
             ),
         ),
     ),
+    # LIVE: ``mcp.manager.read_search_snippet_chars`` reads it per MCP search
+    # result. Path, default and maximum mirror
+    # ``tools.result_normalize.SEARCH_SNIPPET_CHARS_{PATH,DEFAULT,MAX}`` (not
+    # imported, same reason as the row above; pinned by the consumer-defaults
+    # test). It clips only the snippet fields of a search tool's JSON hit list
+    # (titles and URLs never), and only while ``mcp.result_normalization`` is
+    # not ``off``. 0 keeps snippets whole. 400, not web_search's 320: 320 hid
+    # the subject of one of 43 cited search discoveries on the replayed run.
+    Setting(
+        key="mcp.search_snippet_chars",
+        path=("mcp", "search_snippet_chars"),
+        section="tools",
+        label=_t(_ws.mcp_search_snippet_chars_label()),
+        kind=Kind.INT,
+        default=400,
+        help=_t(_ws.mcp_search_snippet_chars_help()),
+        minimum=0,
+        maximum=100_000,
+    ),
     # -- memory_guard -------------------------------------------------------
     # ``path`` mirrors ``memory_guard.BASH_MEMORY_*_PATH``; the four are pinned
     # together by ``test_memory_guard_rows_share_the_consumer_paths`` rather than

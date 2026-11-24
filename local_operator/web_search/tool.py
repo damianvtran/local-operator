@@ -24,6 +24,10 @@ from local_operator.harness.types import (
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import validation_error_result
 from local_operator.tools.confinement import confinement_of
+
+# Shared with the MCP search-hit clip (``mcp.search_snippet_chars``) so a
+# snippet is cut the same way whichever search path returned it.
+from local_operator.tools.result_normalize import clip_snippet as _clip
 from local_operator.web_search.models import (
     SearchProviderId,
     SearchResponse,
@@ -84,13 +88,6 @@ def _result(
         details=details,
         is_error=error,
     )
-
-
-def _clip(text: str, limit: int) -> str:
-    compact = " ".join(text.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 1].rstrip() + "…"
 
 
 def _hard_clip(text: str, limit: int) -> str:

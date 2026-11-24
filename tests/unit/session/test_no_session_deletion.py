@@ -2646,7 +2646,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "temp FILE -> inbox.jsonl inside the same session directory",
     ),
     (
-        "local_operator/session/session.py::_write_roster_sidecar",
+        "local_operator/session/session.py::_replace_roster_sidecar",
         "os.replace",
         "temp FILE -> roster sidecar inside the same session directory",
     ),
@@ -5295,7 +5295,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/transcript_index.py::_publish_store",  # tmp -> snapshot FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/temporary.py::_write_mark_file",  # tmp -> temporary.json FILE
-        "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
+        "local_operator/session/session.py::_replace_roster_sidecar",  # tmp -> roster FILE
         # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int
         # pid and nothing else (see the allow-list rows above): no session id, no
         # caller input, so neither can name a path under sessions/.

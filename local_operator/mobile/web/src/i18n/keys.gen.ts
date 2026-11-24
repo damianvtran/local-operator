@@ -1738,6 +1738,8 @@ export type MessageParams = {
   "wire.settings.mcp_result_normalization.choice.strip_links.label": undefined;
   "wire.settings.mcp_result_normalization.help": undefined;
   "wire.settings.mcp_result_normalization.label": undefined;
+  "wire.settings.mcp_search_snippet_chars.help": undefined;
+  "wire.settings.mcp_search_snippet_chars.label": undefined;
   "wire.settings.memory_guard.description": undefined;
   "wire.settings.memory_guard.title": undefined;
   "wire.settings.mesh_move_working_set_max_bytes.help": undefined;

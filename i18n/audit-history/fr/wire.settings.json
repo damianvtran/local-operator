@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings",
-  "history_sha256": "fd8e964df0006d79244b6f8aa9bcab5da06df7b6c4f1df079cf6ff209f9ce588",
+  "history_sha256": "d87a252236978417e1cbfecabcd5a0b337cf9fe44e8f30b2605bc0023c54ac85",
   "entries": [
     {
       "locale": "fr",
@@ -7474,6 +7474,31 @@
       },
       "status": "passed",
       "note": "Convergence audit of PR #4514 merge commit 724de4b1dae8 (parents f246cbc6 PR head + 0fa001da origin/main; merge-base 989351cd16c0), 2026-11-24. Scripted merge proof (flattened JSON, every key): en and this locale's wire.settings.json == merge-base + origin/main's only change (wire.settings.tool_approval_mode.choice.auto.description) + the PR's 8 added mcp_result_normalization keys, values byte-identical to their audited sides; 913 keys, 0 overlap, 0 lost, 0 other changes; en context sidecar likewise (origin/main's note/role/tone for the auto description + the PR's 8 entries). Semantic re-read of the 9 changed keys against the en source, context sidecar, i18n/glossary.md and i18n/style-guides/fr.md: auto description keeps both the rule and both exempt gates (profile save, community post); 'prose-links'/'strip-links' byte-identical; rich.cells.cell_len within every maxCells; no ICU arguments. Audit-history merge: origin/main's rows are a byte-identical prefix and every PR row is present, 0 extra rows. 0 findings."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "f5c6f8cc389af42fdfccfa5ad6cd2bdadbd06181d7d954d60cbede1a9f83483d",
+      "context_sha256": "83926b0cacb43c28cc1cba831e08651b374942b310ba9e581ba761305d3bb832",
+      "target_sha256": "6ee6c1597f2549e741526f51780393246f52db228b7336704cc396c9ab704d44",
+      "keys_audited": 2,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4525 implementer, commit 903751aca151)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 22e1dfd5a736 (independent of the translator; did not write PR #4525)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #4525 (branch feat/mcp-search-snippet-clip, stacked on #4514), 2026-11-24: the 2 NEW keys wire.settings.mcp_search_snippet_chars.{label,help}, judged against the en source + context sidecar (claims: per-snippet character cap for MCP search tools; titles and URLs never cut; 0 = whole), i18n/glossary.md, i18n/style-guides/fr.md and neighbouring wire.settings keys (accuracy, glossary terms, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; rich.cells.cell_len label 25/29, help 157/188; key parity 2/2. Merge proof: this branch was merged with origin/feat/mcp-result-normalization 197d442a8214; scripted flattened-JSON diff shows this locale's file (and en, and the en context sidecar) == 197d442a's file + exactly the 2 new keys, 0 removed, 0 changed, new values byte-identical to PR head 903751aca151; 197d442a's file matches its last passed receipt (target and source hashes verified). 1 finding, MINOR, deferred in the PR thread (not fixed here; the auditor does not translate): the label 'Extraits de recherche MCP' drops the measured dimension (en '... snippet length'); on an integer row it reads as a count of extracts. Neighbouring length labels use 'Longueur ...' (conversation_length, detail_length). Suggested: 'Longueur des extraits MCP' (25 cells). Help is accurate, carries all three claims; ' ;' spacing matches the namespace."
     }
   ]
 }

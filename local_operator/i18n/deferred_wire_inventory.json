@@ -7,11 +7,11 @@
         {
           "path": "local_operator/settings_io.py",
           "symbol": "settings_io._t",
-          "note": "registry label/help copy rendered into plain strings; /v1/settings carries the strings, never a code. Heavy-job section title/description and setting label/help/two choice descriptions add six calls at this same _t render point, not envelope identities. The mcp.result_normalization row (label/help, three choice labels and descriptions) adds eight more _t calls at this render point, likewise plain strings."
+          "note": "registry label/help copy rendered into plain strings; /v1/settings carries the strings, never a code. Heavy-job section title/description and setting label/help/two choice descriptions add six calls at this same _t render point, not envelope identities. The mcp.result_normalization row (label/help, three choice labels and descriptions) adds eight more _t calls at this render point, likewise plain strings. The mcp.search_snippet_chars row (label/help) adds two more, likewise plain strings."
         }
       ],
       "references": {
-        "settings_io.py": 902,
+        "settings_io.py": 904,
         "tui/app.py": 1
       }
     },
