@@ -313,6 +313,11 @@ ASK_ID_COLUMN = ASK_ID_CELLS + ASK_ID_GAP
 #: on, so its id is the one worth spending the cells on.
 ASK_QUESTION_MIN_CELLS = 16
 
+#: The cue the header puts in front of the cursor row's id when the id column
+#: has collapsed (design round 1, D-2): the list's own selection marker, so the
+#: header id reads as "the row you are on" rather than as a further key hint.
+COLLAPSED_ID_CUE = "❯ "
+
 #: The hint that names the copy key. A token rather than the painted copy: this
 #: is the string the live set carries and ``HEADER_HINTS`` orders, and the
 #: catalogue holds the words a locale reads (see :func:`_hint_label`).
@@ -2024,6 +2029,16 @@ class AskQueueList(Widget):
         # dock prints the same sentence in full one line away, so the clause is
         # the thing that goes; the hints are what the ladder exists to keep.
         hints = self.header_hints()
+        if not self.choosing and not self._ids_fit(self.visible_rows, width):
+            # THE COLLAPSED COLUMN'S ID GOES IN THE HEADER (design round 1,
+            # D-2). When the eight cells cannot be paid on every row, the column
+            # comes off the whole list — and the cursor row's id is then the one
+            # id on screen, so the header carries it AHEAD of every hint: the
+            # ladder keeps it longest, which is the same rule that makes the
+            # copy hint give way first.
+            current = self.current()
+            if current is not None:
+                hints = (f"{COLLAPSED_ID_CUE}{current.ask_id}", *hints)
         # THE COPY HINT IS WEIGHED OUT of the clause's own bargain (§3): it is the
         # hint that gives way first, so it must not be what pushes the drawer's
         # sentence off a header that could carry it plus every key a reader
@@ -2112,6 +2127,66 @@ class AskQueueList(Widget):
 
     def header_text(self, width: int) -> str:
         return _atoms_text(self.header_atoms(width))
+
+    def _row_tail(self, row: AskRow) -> tuple[str, tuple[str, str] | None]:
+        """The row's right-hand field and its status chip, exactly as painted.
+
+        ONE composition, because TWO readers measure it: the painter, and the
+        list-wide decision about whether the id column can fit
+        (:meth:`_ids_fit`). A second copy of this arithmetic is how a row keeps
+        its id on a measurement the painter does not agree with (design round 1,
+        D-2).
+
+        A SETTLED row spends its tail on the STATUS CHIP instead of a countdown
+        (design §4): it has no deadline left to count, and the chip is the row's
+        whole meaning now. Neither the chip nor the tail on a settled row is
+        padded by ``expiry_room`` — nothing about a settled row can move, which is
+        the one place the tick's "a repaint changes nothing else" promise is free
+        to be exact.
+        """
+        chip = settled_chip(row) if row.settled else delivering_chip(row)
+        expiry = "" if chip is not None else expiry_text(row, self._now_ms)
+        room = expiry_room(row, expiry) if expiry else 0
+        # A FLEET row names its conversation (design §4: the index row carries
+        # ``session_id``/``cwd`` precisely because a row for ANOTHER session has
+        # to say whose it is). The cwd's own last segment is the most
+        # recognisable handle the index holds — a row addressed to another
+        # conversation, with nothing naming that conversation, is a question the
+        # reader cannot place.
+        label = self._session_label(row) if chip is None else ""
+        tail = ""
+        if expiry or label:
+            tail = f"  {f'{label} · ' if label else ''}{expiry}"
+            if expiry:
+                # Padded to the widest countdown this row can paint, so the cut
+                # in the question stays put as the clock moves.
+                tail += " " * max(0, room - 2 - cell_len(expiry))
+        if chip is not None:
+            # A SEPARATOR, not just a gap (design round 2, D6): the muted
+            # statuses (`declined`/`dismissed`/`expired`) share the question's own
+            # ink, so with two spaces between them the row read as one sentence —
+            # `Should the retry budget double?  declined` — and the word the
+            # reader has to classify was the one that did not look like a field.
+            # `·` is the separator this row's tail already uses for
+            # `handle · deadline`, so the status lands in the register the row
+            # already has.
+            tail = f"  · {chip[0]}"
+        return tail, chip
+
+    def _ids_fit(self, visible: Sequence[AskRow], width: int) -> bool:
+        """Whether the id column fits EVERY painted row at ``width``.
+
+        ONE decision per list (QA round 1, Q4). The per-row form left a column
+        with holes at 50-54 cells — the row with the longest tail lost its id
+        while its neighbours kept theirs, and the reserved cells were never given
+        back, so the question did not get the floor the rule exists to protect.
+        Either every row paints an id, or none does and the question takes the
+        column back; the header then names the cursor row's id.
+        """
+        return all(
+            width - (4 + ASK_ID_COLUMN + cell_len(self._row_tail(row)[0])) >= ASK_QUESTION_MIN_CELLS
+            for row in visible
+        )
 
     def _session_label(self, row: AskRow) -> str:
         """The conversation a FLEET row belongs to, as a short handle.
@@ -2208,6 +2283,7 @@ class AskQueueList(Widget):
             # this line is a SENTENCE telling the reader where their asks went
             # (design round 2, D1).
             text.append(sentence, style=muted)
+        show_ids = self._ids_fit(visible, width)
         for index, row in enumerate(visible):
             if index:
                 start_line()
@@ -2218,7 +2294,6 @@ class AskQueueList(Widget):
             selected = index == self._index and not self.passive
             line = Text(no_wrap=True, overflow="ellipsis")
             line.append("❯ " if selected else "  ", style=bold if selected else muted)
-            chip = settled_chip(row) if row.settled else delivering_chip(row)
             if row.ask_id in self._in_flight:
                 # In flight through the engage seam (A7): the row says it is
                 # being sent and refuses a second gesture. A WORD, not a
@@ -2262,32 +2337,7 @@ class AskQueueList(Widget):
             # on a settled row is padded by `expiry_room` — nothing about a
             # settled row can move, which is the one place the tick's "a repaint
             # changes nothing else" promise is free to be exact.
-            expiry = "" if chip is not None else expiry_text(row, self._now_ms)
-            room = expiry_room(row, expiry) if expiry else 0
-            # A FLEET row names its conversation (design §4: the index row
-            # carries ``session_id``/``cwd`` precisely because a row for ANOTHER
-            # session has to say whose it is). The cwd's own last segment is the
-            # most recognisable handle the index holds — a row addressed to
-            # another conversation, with nothing naming that conversation, is a
-            # question the reader cannot place.
-            label = self._session_label(row) if chip is None else ""
-            tail = ""
-            if expiry or label:
-                tail = f"  {f'{label} · ' if label else ''}{expiry}"
-                if expiry:
-                    # Padded to the widest countdown this row can paint, so the
-                    # cut in the question stays put as the clock moves.
-                    tail += " " * max(0, room - 2 - cell_len(expiry))
-            if chip is not None:
-                # A SEPARATOR, not just a gap (design round 2, D6): the muted
-                # statuses (`declined`/`dismissed`/`expired`) share the question's
-                # own ink, so with two spaces between them the row read as one
-                # sentence — `Should the retry budget double?  declined` — and the
-                # word the reader has to classify was the one that did not look
-                # like a field. `·` is the separator this row's tail already uses
-                # for `handle · deadline`, so the status lands in the register the
-                # row already has.
-                tail = f"  · {chip[0]}"
+            tail, chip = self._row_tail(row)
             # THE ID COLUMN, right after the state glyph and before the question
             # (T-1/design §3): an agent's prose names an ask BY ID, and a row
             # that carried no id made "a-745e is withdrawn" unmatchable — two
@@ -2295,22 +2345,18 @@ class AskQueueList(Widget):
             # two of gap, at the SAME position at every width, so the column is a
             # field rather than the question's first word.
             #
-            # The QUESTION gives way first. Below `ASK_QUESTION_MIN_CELLS` the id
-            # is painted on the cursor row only: the list is a scan surface, and
-            # the row the reader is on is the one whose id they are after. The
-            # cells stay reserved on the other rows so the questions keep one
-            # column and a moved cursor does not re-cut them.
-            question_room = width - (4 + ASK_ID_COLUMN + cell_len(tail))
-            show_id = selected or question_room >= ASK_QUESTION_MIN_CELLS
-            if show_id:
+            # The QUESTION gives way first, and the id column is decided ONCE
+            # for the whole list (`_ids_fit`): either every row paints its id,
+            # or the column collapses everywhere and the eight cells go back to
+            # the questions. A per-row test left a column with holes whose
+            # reserved cells never paid for themselves (design round 1, D-2).
+            if show_ids:
                 # `muted`, never `dim` and never bold: the panel's ground is
                 # `overlay`, where `dim` measures 3.43:1 dark / 2.72:1 light —
                 # under the 4.5 this surface owes a LEGIBLE field (design §3).
                 painted_id = _clip_cells(row.ask_id, ASK_ID_CELLS)
                 line.append(painted_id + " " * (ASK_ID_COLUMN - cell_len(painted_id)), style=muted)
-            else:
-                line.append(" " * ASK_ID_COLUMN, style=muted)
-            fixed = 4 + ASK_ID_COLUMN + cell_len(tail)  # marker, glyph, id column, tail
+            fixed = 4 + (ASK_ID_COLUMN if show_ids else 0) + cell_len(tail)
             question = _clip_cells(
                 row.head_question or f"(ask {row.ask_id})",
                 max(1, width - fixed),

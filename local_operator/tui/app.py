@@ -24892,14 +24892,20 @@ class OperatorApp(App[None]):
         unique per conversation only, so a fleet-wide search would open a
         stranger's question from a cited token — and the not-found sentence says
         "in this conversation" for exactly that reason.
+
+        The NOT-FOUND sentence quotes what was TYPED (`/ask zzz` says "No ask
+        zzz …", not an `a-` prefix the user never wrote): the prefix is accepted
+        as a convenience, and inventing it back in the refusal would point at an
+        id nobody asked for. The lookup uses the normalised id either way.
         """
-        token = arg.strip().lower()
+        typed = arg.strip()
+        token = typed.lower()
         if not token:
             self._expand_asks()
             return
         if not token.startswith("a-"):
             token = f"a-{token}"
-        self._reveal_ask(token)
+        self._reveal_ask(token, shown=typed)
 
     def _cmd_links(self, notice: NoticeFn) -> None:
         """``/links`` — pick a URL out of the conversation and open it.
@@ -31113,7 +31119,7 @@ class OperatorApp(App[None]):
             return None
         return next((item for item in self._ask_fleet_rows if item.ask_id == ask_id), None)
 
-    def _reveal_ask(self, ask_id: str) -> None:
+    def _reveal_ask(self, ask_id: str, *, shown: str | None = None) -> None:
         """Open the ask list with the cursor on ``ask_id`` — the ONE reveal.
 
         ``/ask <id>`` and a click on a cited id in prose are the same gesture:
@@ -31127,11 +31133,24 @@ class OperatorApp(App[None]):
         opens on All, but a reader arriving from prose has no reason to know the
         row they asked for is a finished one, and a bare highlight on a chip row
         reads as "still open" unless it says otherwise.
+
+        THE REVEAL RETURNS THE LIST TO THIS CONVERSATION (QA round 1, Q3), with
+        ``_expand_asks``' own shape. A FLEET list already on screen would
+        otherwise re-point INSIDE fleet scope, where the highlight is the first
+        row with that id — another conversation's, because ids are unique per
+        session only — and the cursor would land on a question this user was
+        never asked, one ``enter`` away from answering it. The rows the reveal
+        resolved are this conversation's, so the surface it lands on has to be
+        that same queue.
         """
         row = next((item for item in self._ask_rows if item.ask_id == ask_id), None)
         if row is None:
-            self._notice(_t_asks(_ask_keys.list_no_such_ask(ask_id=ask_id)), "warning")
+            self._notice(_t_asks(_ask_keys.list_no_such_ask(ask_id=shown or ask_id)), "warning")
             return
+        if self._ask_scope == SCOPE_FLEET or self._ask_fleet_rows:
+            self._ask_scope = SCOPE_SESSION
+            self._ask_fleet_rows = []
+            self._sync_ask_tick()
         self._mount_ask_list(highlight=ask_id)
         listing = self._ask_list
         if row.settled and listing is not None:

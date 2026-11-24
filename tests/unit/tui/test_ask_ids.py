@@ -445,3 +445,274 @@ async def test_help_lists_the_ask_command(enabled):
         assert "/ask" in text, text[:2000]
         description = tr("wire.slash")(wire_slash.ask())
         assert description in text, (description, text[:2000])
+
+
+# -- round 1 remediation: the PAINTED cells, not the built Text ---------------
+
+
+async def test_the_painted_cells_carry_the_intended_ink(enabled):
+    """D-1/Q1: Textual used to repaint our spans body-coloured and underlined.
+
+    Textual overlays its link style on any span whose meta carries ``@click``
+    (``textual/widget.py``'s ``_Styled``), which replaced the ink
+    ``style_marks`` set — the id and all three marks painted body ink with an
+    underline, so the state colour was gone. The unit tests read the ``Text``
+    before that overlay, so they passed while the screen differed. This reads
+    the COMPOSITOR: the cells the terminal is handed.
+    """
+    from local_operator.tui import theme as theme_mod
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a-e53b", "Ship it?"),
+                    _row("a-745e", "Ship 0.71.2?", status="withdrawn"),
+                    _row("a-1c09", "Smoke first?", status="answered"),
+                ]
+            )
+        )
+        await pilot.pause()
+        prose = AssistantBlock()
+        prose.update_text(
+            "The old one, a-745e, is withdrawn; the new one is a-e53b. "
+            "The relay smoke, a-1c09, ran. See https://example.test/x for the log."
+        )
+        app._append_block(prose)
+        await pilot.pause()
+        rendered = prose._render()
+        assert isinstance(rendered, Content)
+        plain = rendered.plain
+
+        def painted(needle: str):
+            at = plain.index(needle)
+            line_no = plain[:at].count("\n")
+            col = at - (plain.rfind("\n", 0, at) + 1)
+            return app.screen.get_style_at(prose.region.x + col, prose.region.y + line_no)
+
+        def hexed(value: str) -> str:
+            return value.lower()
+
+        signal = hexed(theme_mod.semantic_color("signal"))
+        id_style = painted("a-745e")
+        assert id_style.color is not None
+        assert hexed(id_style.color.get_truecolor().hex) == signal, id_style
+        assert id_style.underline, "the id lost its link underline"
+        assert id_style.meta.get("@click") == "app.open_ask_id('a-745e')"
+        # Each mark keeps its STATE ink, and none of them is underlined: the
+        # underline is the link cue and belongs to the id alone.
+        for mark, token in (("○", "muted"), ("●", "warning"), ("✓", "success")):
+            style = painted(mark)
+            assert style.color is not None
+            assert hexed(style.color.get_truecolor().hex) == hexed(
+                theme_mod.semantic_color(token)
+            ), (mark, style, token)
+            assert not style.underline, (mark, style)
+            assert style.meta.get("@click"), mark
+        # A real URL in the same paragraph is untouched: link ink, underlined,
+        # and no click action (the transcript's own handler owns it).
+        url_style = painted("https://example.test/x")
+        assert url_style.color is not None
+        assert hexed(url_style.color.get_truecolor().hex) == signal
+        assert url_style.underline
+        assert "@click" not in url_style.meta
+
+
+# -- partial selections (M-1/Q2) ---------------------------------------------
+
+
+async def test_a_partial_drag_never_copies_the_painted_mark(enabled):
+    """M-1/Q2: the glyph path copied the NBSP and the mark.
+
+    The decoration is cells the reader never typed. Three drags over one
+    paragraph, at the exact columns QA reproduced them at, and a select-all.
+    """
+    from textual.geometry import Offset
+
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a-745e", "Ship it?", status="withdrawn"), _row("a-e53b", "x")])
+        )
+        await pilot.pause()
+        prose = AssistantBlock()
+        prose.update_text("The old one, a-745e, is withdrawn; the new one is a-e53b.")
+        app._append_block(prose)
+        await pilot.pause()
+        rendered = prose._render()
+        assert isinstance(rendered, Content)
+        plain = rendered.plain.split("\n")[0]
+        at = plain.index("a-745e")
+        nbsp = plain.index(NBSP)
+        mark = nbsp + 1
+        end = plain.index(";")
+
+        def take(a: int, b: int) -> str:
+            got = prose.get_selection(Selection.from_offsets(Offset(a, 0), Offset(b, 0)))
+            assert got is not None
+            return got[0]
+
+        # id + mark + what follows: the id and the prose survive, the pair does not.
+        assert take(at, mark + 3) == "a-745e,"
+        # a drag starting inside the id and ending ON the mark.
+        assert take(at + 2, mark + 1) == "745e"
+        # a drag starting ON the mark: the orphan glyph goes too.
+        assert take(mark, end) == ", is withdrawn"
+        for fragment in ("a-745e,", "745e", ", is withdrawn"):
+            assert NBSP not in fragment and not any(glyph in fragment for glyph in "●✓○")
+        # Select-all is already clean (the markdown source path).
+        whole = prose.get_selection(Selection(None, None))
+        assert whole is not None and NBSP not in whole[0] and "○" not in whole[0]
+        # `/copy` reads the message source, which never carried a mark.
+        assert prose.text() == "The old one, a-745e, is withdrawn; the new one is a-e53b."
+
+
+# -- the reveal returns to this conversation (M-2/Q3) ------------------------
+
+
+async def test_a_reveal_with_the_fleet_list_open_lands_on_this_conversation(enabled):
+    """M-2/Q3: the highlight was resolved inside FLEET scope.
+
+    Ids are unique per session only, so the first fleet row with the id can be
+    another conversation's question — one ``enter`` away from answering it.
+    """
+    from local_operator.tui.widgets.ask_queue import (
+        SCOPE_FLEET,
+        SCOPE_SESSION,
+        AskQueueList,
+    )
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._ask_fleet_rows = ask_rows(
+            [_row("a-745e", "OTHER conversation: rotate keys?", session_id="sess-OTHER")]
+        )
+        app._ask_scope = SCOPE_FLEET
+        app._sync_ask_surface(
+            ask_rows([_row("a-745e", "This one is withdrawn?", status="withdrawn")])
+        )
+        await pilot.pause()
+        app._reveal_ask("a-745e")
+        await pilot.pause()
+        listing = app.query_one(AskQueueList)
+        current = listing.current()
+        assert current is not None
+        assert current.ask_id == "a-745e"
+        # The row it landed on is THIS conversation's: the fleet copy carries a
+        # session id, the session-scope rows do not.
+        assert current.session_id == "", current
+        assert current.head_question == "This one is withdrawn?", current
+        assert app._ask_scope == SCOPE_SESSION
+        assert app._ask_fleet_rows == []
+
+
+async def test_an_id_missing_here_is_not_found_even_with_the_fleet_list_open(enabled):
+    """The narrow half of Q3: the fleet rows must not answer for this one."""
+    from local_operator.i18n.keys import tui_asks as ask_keys
+    from local_operator.i18n.text import tr
+    from local_operator.tui.widgets.ask_queue import SCOPE_FLEET, AskQueueList
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._ask_fleet_rows = ask_rows([_row("a-beef", "Another conversation's?")])
+        app._ask_scope = SCOPE_FLEET
+        app._sync_ask_surface(ask_rows([_row("a-e53b", "Ship it?"), _row("a-9f20", "x")]))
+        await pilot.pause()
+        app._reveal_ask("a-beef")
+        await pilot.pause()
+        assert len(app.query(AskQueueList)) == 0
+        assert app.query(NoticeBlock)[-1].text() == tr("tui.asks")(
+            ask_keys.list_no_such_ask(ask_id="a-beef")
+        )
+
+
+# -- the perf pre-check (review minor) ---------------------------------------
+
+
+async def test_a_state_change_repaints_only_blocks_that_cite_an_id():
+    """Review minor: 0.47 s on 300 blocks, most of them unable to draw a mark."""
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    citing = AssistantBlock()
+    citing.update_text("the old one, a-745e, is withdrawn")
+    citing.set_ask_states({"a-745e": "open"})
+    citing._flat_whole(80)
+
+    silent = AssistantBlock()
+    silent.update_text("nothing here is an ask id")
+    silent.set_ask_states({"a-745e": "open"})
+    silent._flat_whole(80)
+
+    flattens = {"citing": 0, "silent": 0}
+
+    def counting(name, block):
+        real = block._flat_whole
+
+        def wrapper(width=None):
+            flattens[name] += 1
+            return real(width)
+
+        block._flat_whole = wrapper  # type: ignore[method-assign]
+
+    counting("citing", citing)
+    counting("silent", silent)
+    citing.set_ask_states({"a-745e": "answered"})
+    silent.set_ask_states({"a-745e": "answered"})
+    assert flattens == {"citing": 1, "silent": 0}, flattens
+    # The citing block really did repaint in place.
+    assert f"a-745e{NBSP}✓" in citing._flat_whole(80).plain
+    # ...and the silent one still took the map, so a later text change renders
+    # the right state rather than a stale one.
+    assert silent._ask_states == {"a-745e": "answered"}
+
+
+# -- decorate/strip agreement (review minor) ---------------------------------
+
+
+def test_a_backticked_id_round_trips_and_never_collects_two_marks():
+    from local_operator.tui.ask_ink import strip_marks
+
+    source = "ask `a-745e` or a-e53b, not `a-dead`"
+    states = {"a-745e": "withdrawn", "a-e53b": "open"}
+    once = decorate_source(source, states)
+    assert once == f"ask `a-745e`{NBSP}○ or a-e53b{NBSP}●, not `a-dead`"
+    # The second flush must find the mark AFTER the closing backtick.
+    assert decorate_source(once, states) == once
+    # ...and stripping the SOURCE shape gives the model's words back exactly.
+    assert strip_marks(once) == source
+    # The painted shape (no backticks) still strips.
+    assert strip_marks(f"a-745e{NBSP}○") == "a-745e"
+
+
+# -- the refusal echoes what was typed (nit) ---------------------------------
+
+
+async def test_ask_zzz_reports_the_id_as_typed(enabled):
+    from local_operator.i18n.keys import tui_asks as ask_keys
+    from local_operator.i18n.text import tr
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(ask_rows([_row("a-e53b", "Ship it?"), _row("a-9f20", "x")]))
+        await pilot.pause()
+        await _submit(pilot, app, "/ask zzz")
+        # No invented `a-` prefix in the sentence: the user never typed one.
+        assert app.query(NoticeBlock)[-1].text() == tr("tui.asks")(
+            ask_keys.list_no_such_ask(ask_id="zzz")
+        )

@@ -2249,31 +2249,72 @@ async def test_the_id_keeps_its_cells_and_the_question_gives_way():
         assert "expir" in first, first
 
 
-async def test_a_narrow_list_paints_the_id_on_the_cursor_row_only():
-    """§3's floor: below ~16 cells of question, only the row the reader is on.
+async def test_a_narrow_list_collapses_the_id_column_on_every_row():
+    """Design round 1, D-2 / QA Q4: ONE decision per list, not per row.
 
-    The cells stay RESERVED on the other rows, so the questions keep one column
-    and moving the cursor does not re-cut the list.
+    The per-row rule left the column with holes — the row with the longest tail
+    lost its id while its neighbours kept theirs — and the reserved cells were
+    never handed back to the questions, so the floor the rule exists to protect
+    was not met by the rows that dropped their id. A list that cannot afford the
+    column on EVERY row gives it up on all of them, and the question takes the
+    eight cells back.
     """
-    from local_operator.tui.widgets.ask_queue import ASK_ID_COLUMN
+    from local_operator.tui.widgets.ask_queue import ASK_ID_COLUMN, COLLAPSED_ID_CUE
 
     session = _AskSession()
     app = _app(session)
-    async with app.run_test(size=(44, 20)) as pilot:
+    async with app.run_test(size=(52, 20)) as pilot:
         await await_booted(app, pilot)
         app._sync_ask_surface(
-            ask_rows([_row("a-e53b", _TWIN_QUESTIONS[0]), _row("a-9f20", "Rotate it?")])
+            ask_rows(
+                [
+                    _row("a-e53b", _TWIN_QUESTIONS[0]),
+                    _row("a-9f20", "Rotate the relay token now?"),
+                    _row("a-1c09", "Run the relay smoke first?", status="answered"),
+                ]
+            )
         )
         await _settle(pilot)
         app._expand_asks()
         await _settle(pilot)
         listing = app.query_one(AskQueueList)
-        # The list is narrow enough that the rule is live: without the reserved
-        # column these questions would each keep more than the floor.
         assert listing.content_size.width - (4 + ASK_ID_COLUMN) < 40
-        painted = listing.render().plain.splitlines()[1:]
-        assert painted[0][4:10] == "a-e53b", painted[0]
-        assert painted[1][4 : 4 + ASK_ID_COLUMN] == " " * ASK_ID_COLUMN, painted[1]
+        painted = listing.render().plain.splitlines()
+        header, rows = painted[0], painted[1:]
+        # No row paints an id, and none of them reserves the column either: the
+        # question starts where the marker and glyph end.
+        for line in rows:
+            assert line[4:10] != "a-", line
+        # The cursor row's id is still ON SCREEN — in the header, ahead of the
+        # hints, which is the affordance the per-row rule lost.
+        assert f"{COLLAPSED_ID_CUE}a-e53b" in header, header
+
+
+async def test_the_id_column_comes_back_when_every_row_can_afford_it():
+    """The other half of D-2: at 60 cols every id paints and the header does not."""
+    from local_operator.tui.widgets.ask_queue import COLLAPSED_ID_CUE
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(60, 20)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a-e53b", "Ship the relay fix as 0.71.2?"),
+                    _row("a-745e", "Ship the relay fix tonight?", status="withdrawn"),
+                    _row("a-9f20", "Rotate the relay token now?"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        painted = listing.render().plain.splitlines()
+        assert painted[1][4:10] == "a-e53b", painted[1]
+        assert painted[2][4:10] == "a-745e", painted[2]
+        assert f"{COLLAPSED_ID_CUE}a-" not in painted[0], painted[0]
 
 
 async def test_the_id_paints_muted_and_never_dim_or_bold():
@@ -2362,18 +2403,21 @@ async def test_y_copies_the_cursor_rows_id_with_a_receipt(enabled):
         await _settle(pilot)
         listing = app.query_one(AskQueueList)
         # The cursor opens on the first ANSWERABLE row (U3) — a-e53b here.
-        assert listing.current() is not None
-        expected = listing.current().ask_id
+        current = listing.current()
+        assert current is not None
         await pilot.press("down")
         await _settle(pilot)
-        expected = listing.current().ask_id
+        current = listing.current()
+        assert current is not None
+        expected = current.ask_id
         await pilot.press("y")
         await _settle(pilot)
         assert app._clipboard == expected, (app._clipboard, expected)
         receipt = tr("tui.asks")(ask_keys.list_copied_id(ask_id=expected))
         assert str(app.query_one(Toast)._message) == receipt
         # Copying is a read: it moves nothing and dismisses nothing.
-        assert listing.current().ask_id == expected
+        current = listing.current()
+        assert current is not None and current.ask_id == expected
         assert session.dismissed == [] and session.declined == []
 
 

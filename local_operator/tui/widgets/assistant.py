@@ -42,9 +42,11 @@ from rich.markdown import Markdown
 from rich.style import Style
 from rich.text import Text
 from textual.content import Content
+from textual.reactive import Reactive
 from textual.selection import Selection
 
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.ask_ink import without_marks
 from local_operator.tui.link_markup import autolink_bare_urls
 from local_operator.tui.markdown_theme import brand_markdown_theme
 from local_operator.tui.settings import settings_get
@@ -452,6 +454,23 @@ class AssistantBlock(TranscriptBlock):
     """
 
     SPACING_KIND = "assistant"
+
+    #: NO TEXTUAL LINK OVERLAY on this block (design round 1, D-1). Textual
+    #: paints its own link style OVER any span carrying ``@click`` meta
+    #: (``textual/widget.py``'s ``_Styled``: ``style + link_style if "@click" in
+    #: style.meta``), which replaced the ink ``ask_ink.style_marks`` had just
+    #: set — the cited id and all three state marks painted body-coloured and
+    #: underlined, so the state colour was gone and an unresolved id looked no
+    #: different from a linked one.
+    #:
+    #: Off, and MEASURED rather than assumed: rich's own ``link=`` styles are
+    #: untouched by this flag (Textual applies its link style only to ``@click``
+    #: spans; URL spans keep the markdown theme's ink, the OSC-8 they already
+    #: carried and the transcript's own click handler), so the ONLY thing given
+    #: up is a hover recolour of the id and its mark — which, on, was a hover
+    #: that turned them body-coloured. The ``@click`` meta stays on every cell,
+    #: so the broker still runs the action.
+    auto_links: Reactive[bool] = Reactive(False)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1107,12 +1126,24 @@ class AssistantBlock(TranscriptBlock):
         changing. The marks are baked into the flattened rows, so the caches
         that hold them go — the same invalidation :meth:`retheme` performs —
         and the message re-renders from source.
+
+        ONLY THE BLOCKS THAT CITE AN ID REPAINT (review minor). A state change
+        in a long conversation used to re-flatten every assistant block (0.47 s
+        on 300 blocks) to reproduce rows the block cannot possibly have drawn a
+        mark on. The id is matched as a plain substring: a superset of what the
+        decorator resolves, which is exactly what a SKIP pre-check needs — a
+        false positive costs one rebuild, a false negative would paint a stale
+        mark.
         """
         states = dict(states)
         if states == self._ask_states:
             return
         self._ask_states = states
         if not self._full_text:
+            return
+        if not any(ask_id in self._full_text for ask_id in states):
+            # Nothing this block can cite: the caches hold no mark, so there is
+            # nothing to invalidate and nothing to repaint.
             return
         self._frozen_rendered = None
         self._frozen_flat = None
@@ -1514,11 +1545,12 @@ class AssistantBlock(TranscriptBlock):
             # own furniture, which is what keeps the gutter off the clipboard
             # when the reader's drag began on it.
             glyphs = [
-                rows[index][
-                    max(start, rail_cols + self._furniture_width(bare, mapping, index)) : (
-                        None if end == -1 else end
-                    )
-                ]
+                without_marks(
+                    rows[index],
+                    start=max(start, rail_cols + self._furniture_width(bare, mapping, index)),
+                    end=end,
+                    previous_row=(bare[index - 1] if index else None),
+                )
                 for index, (start, end) in content
             ]
             trimmed = [row.rstrip() for row in glyphs]

@@ -45,9 +45,11 @@ from __future__ import annotations
 import re
 from typing import Callable, Mapping
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
+from local_operator.asks import store
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.link_markup import _fenced_spans
 from local_operator.tui.link_targets import _URL_START_RE, _body_end
@@ -60,6 +62,7 @@ __all__ = [
     "state_for_status",
     "strip_marks",
     "style_marks",
+    "without_marks",
 ]
 
 #: An ask id as :mod:`local_operator.asks.store` mints it: ``a-`` and four hex.
@@ -102,14 +105,27 @@ _TICKS_RE = re.compile(r"`+")
 #: ``id`` + no-break space + mark, as it appears in the flattened rows.
 _MARKED_RE = re.compile(rf"({ASK_ID_PATTERN}){NBSP}([●✓○])")
 
+#: The decoration as SOURCE carries it: a backticked id takes its mark
+#: after the closing backtick run, so the run is part of the match. Used by
+#: :func:`strip_marks`, which must remove the pair in either shape.
+_DECORATED_RE = re.compile(rf"({ASK_ID_PATTERN})(`*){NBSP}[●✓○]")
+
 #: The state a queue status folds to. The list's own vocabulary is the source
 #: (``asks/store``): an answered ask is DONE once its answer is delivered, but
 #: "delivering" is the same fact mid-flight, and a lapsed or withdrawn ask is
 #: closed with no answer — which is a different thing from "answered", and the
 #: one distinction a reader came to the prose to settle.
-_WAITING = frozenset({"open"})
-_ANSWERED = frozenset({"answered", "late"})
-_CLOSED = frozenset({"declined", "dismissed", "expired", "timed_out", "withdrawn"})
+_WAITING = frozenset({store.STATUS_OPEN})
+_ANSWERED = frozenset({store.STATUS_ANSWERED, store.STATUS_LATE})
+_CLOSED = frozenset(
+    {
+        store.STATUS_DECLINED,
+        store.STATUS_DISMISSED,
+        store.STATUS_EXPIRED,
+        store.STATUS_TIMED_OUT,
+        store.STATUS_WITHDRAWN,
+    }
+)
 
 
 def state_for_status(status: str) -> str:
@@ -158,7 +174,10 @@ def decorate_source(text: str, states: Mapping[str, str]) -> str:
 
     Idempotent: an id that already carries a mark is matched by its own
     ``NBSP + mark`` suffix, so a re-render — which the streaming path performs
-    on every flush and the resize path per width — cannot stack marks.
+    on every flush and the resize path per width — cannot stack marks. For a
+    BACKTICKED id the suffix sits after the closing backtick, so that is where
+    the check looks: reading it directly after the id let a backticked id
+    collect a second mark on every flush (review minor).
     """
     if not states or "a-" not in text:
         return text
@@ -172,10 +191,6 @@ def decorate_source(text: str, states: Mapping[str, str]) -> str:
         status = states.get(match.group(1))
         if status is None:
             continue
-        following = text[end:]
-        if following.startswith(NBSP) and len(following) > 1:
-            # Already decorated by an earlier pass.
-            continue
         # A BACKTICKED id takes its mark OUTSIDE the code span. Inserted inside,
         # the mark would be painted in the code ink and copied as part of the
         # sample — the id is what the model cited, the state is this surface's.
@@ -183,6 +198,9 @@ def decorate_source(text: str, states: Mapping[str, str]) -> str:
         close = _TICKS_RE.match(text, end)
         if close is not None and text[:start].endswith(close.group(0)):
             insert_at = close.end()
+        if text[insert_at:].startswith(NBSP):
+            # Already decorated by an earlier pass.
+            continue
         out.append(text[cursor:insert_at])
         out.append(NBSP + mark_for_status(status))
         cursor = insert_at
@@ -193,13 +211,18 @@ def decorate_source(text: str, states: Mapping[str, str]) -> str:
 
 
 def strip_marks(text: str) -> str:
-    """``text`` with the painted ``NBSP + mark`` suffix removed from each id.
+    """``text`` with the ``NBSP + mark`` decoration removed from each id.
 
-    The clipboard is the model's words, not this surface's state glyph.
+    The clipboard is the model's words, not this surface's state glyph. Two
+    shapes have to go: the PAINTED form (``a-745e`` + NBSP + mark) and the
+    SOURCE form, where a backticked id carries the mark after its closing
+    backtick (`` `a-745e` `` + NBSP + mark). One pattern covers both — the
+    backtick run is optional and kept — so a round trip through
+    :func:`decorate_source` returns the original text exactly (review minor).
     """
     if NBSP not in text:
         return text
-    return re.sub(rf"({ASK_ID_PATTERN}){NBSP}[●✓○]", r"\1", text)
+    return _DECORATED_RE.sub(r"\1\2", text)
 
 
 def style_marks(text: Text, *, action: Callable[[str], str | None]) -> None:
@@ -234,3 +257,53 @@ def style_marks(text: Text, *, action: Callable[[str], str | None]) -> None:
                 match.start(2),
                 match.end(2),
             )
+
+
+def without_marks(row: str, *, start: int, end: int, previous_row: str | None = None) -> str:
+    """``row[start:end]`` (CELL columns) with every decoration cell removed.
+
+    The glyph copy path in ``AssistantBlock.get_selection`` hands the clipboard
+    the cells a drag covered, and the decoration is cells the reader never typed
+    — a drag that begins, ends or passes through one must not carry it (QA
+    round 1, Q2): ``a-745e○, i``, ``745e○`` and ``○, is withdrawn;`` all came
+    out of the same paragraph.
+
+    Two shapes are removed, both derived from how the line was BUILT rather than
+    from a pattern over the result:
+
+    * the pair itself — the no-break space and the mark that follows it. The
+      no-break space exists only in a decoration, so the pair is unambiguous
+      even when the drag starts inside the id.
+    * the ORPHAN at a row's first cell: rich may fold between the no-break
+      space and the mark, leaving the mark at column 0 of the next row with no
+      pair to match. It is recognised by the previous row ending in the
+      no-break space, which is the only way that cell is ever produced.
+
+    ``end`` follows the caller's convention: ``-1`` means end of row.
+    """
+    limit = len(row) if end < 0 else end
+    removed: list[tuple[int, int]] = []
+    for match in _MARKED_RE.finditer(row):
+        # The pair starts at the NO-BREAK SPACE, one cell before the mark the
+        # pattern's second group names. Removing only the mark left the space
+        # inside a drag that crossed it (``a-745e\xa0,``).
+        mark_cell = cell_len(row[: match.start(2)])
+        removed.append((mark_cell - 1, mark_cell + cell_len(row[match.start(2) : match.end(2)])))
+    if (
+        previous_row is not None
+        and row[:1] in MARKS.values()
+        and previous_row.rstrip().endswith(NBSP)
+    ):
+        removed.append((0, 1))
+    if not removed:
+        return row[start:limit]
+    out: list[str] = []
+    cell = 0
+    for char in row:
+        width = cell_len(char)
+        if start <= cell < limit and not any(low <= cell < high for low, high in removed):
+            out.append(char)
+        cell += width
+        if cell >= limit:
+            break
+    return "".join(out)
