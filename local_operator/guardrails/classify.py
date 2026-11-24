@@ -1484,6 +1484,28 @@ def _rank(
                 inventory = plain_cleanup_ignored_inventory(
                     path, own_regenerable=own is not None and relation != "kin"
                 )
+                if (
+                    inventory is not None
+                    and inventory.unverified_ignored
+                    and not inventory.changes
+                    and (own is None or relation == "kin")
+                ):
+                    # FINISHED tree, any creator (operator directive and fleet
+                    # census 2026-11-24): regenerable-named build output goes
+                    # with a tree proven clean, merged on origin, with no open
+                    # PR, running owner or live cwd. Anything off the list
+                    # (``.env*``, keys, logs) keeps the hold below.
+                    from local_operator.guardrails import provenance as prov
+
+                    merged = plain_cleanup_ignored_inventory(path, merged_regenerable=True)
+                    if (
+                        merged is not None
+                        and merged.unverified_ignored == 0
+                        and prov.finished_foreign_worktree(
+                            path, session_id, activity=activity, ignored_verified=True
+                        ).safe
+                    ):
+                        inventory = merged
                 if inventory is None:
                     return RankedTarget(
                         target,

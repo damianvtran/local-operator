@@ -28,6 +28,7 @@
   "wire.errors.desktop.claim_origin_outside_configured": "认领不能添加已配置桌面来源范围以外的来源。",
   "wire.errors.desktop.claim_origin_wildcard": "不能认领通配符来源。",
   "wire.errors.desktop.claim_origins_not_list": "认领请求体的'origins'必须为列表。",
+  "wire.errors.desktop.conversation_deleted": "此对话已删除，无法再回答这个问题。请改为清除或拒绝它。",
   "wire.errors.desktop.conversations_unreadable": "暂时无法读取会话。此问题会自行恢复；稍后重试。",
   "wire.errors.desktop.credential_operation_failed": "凭据操作未完成",
   "wire.errors.desktop.cwd_marker_read_failed": "无法读取会话的工作目录标记：{error}",

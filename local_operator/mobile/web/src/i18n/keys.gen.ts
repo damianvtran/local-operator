@@ -765,6 +765,7 @@ export type MessageParams = {
   "wire.errors.desktop.claim_origin_outside_configured": undefined;
   "wire.errors.desktop.claim_origin_wildcard": undefined;
   "wire.errors.desktop.claim_origins_not_list": undefined;
+  "wire.errors.desktop.conversation_deleted": undefined;
   "wire.errors.desktop.conversations_unreadable": undefined;
   "wire.errors.desktop.credential_operation_failed": undefined;
   "wire.errors.desktop.cwd_marker_read_failed": { "error": string };
@@ -1729,6 +1730,14 @@ export type MessageParams = {
   "wire.settings.local_providers.title": undefined;
   "wire.settings.max_learnings_history.help": undefined;
   "wire.settings.max_learnings_history.label": undefined;
+  "wire.settings.mcp_result_normalization.choice.off.description": undefined;
+  "wire.settings.mcp_result_normalization.choice.off.label": undefined;
+  "wire.settings.mcp_result_normalization.choice.prose_links.description": undefined;
+  "wire.settings.mcp_result_normalization.choice.prose_links.label": undefined;
+  "wire.settings.mcp_result_normalization.choice.strip_links.description": undefined;
+  "wire.settings.mcp_result_normalization.choice.strip_links.label": undefined;
+  "wire.settings.mcp_result_normalization.help": undefined;
+  "wire.settings.mcp_result_normalization.label": undefined;
   "wire.settings.memory_guard.description": undefined;
   "wire.settings.memory_guard.title": undefined;
   "wire.settings.mesh_move_working_set_max_bytes.help": undefined;

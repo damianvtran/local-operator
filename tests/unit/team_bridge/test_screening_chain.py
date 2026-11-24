@@ -1839,3 +1839,92 @@ def test_a_sender_pinned_breaker_never_yields_an_unscreened_deliver(tmp_path, mo
     for index in (1, 2, 3):
         decision = store.work_scope_decision(owner, f"bmsg_p{index}")
         assert decision is not None and decision["hold_code"] == "screening_failed"
+
+
+# -- write-once fix PR-2 (2026-11-24): failover + moved revision, end to end -----
+
+
+def _request_item_cycle(tmp_path: Path, owner: Any) -> Any:
+    raw = _consent_status(owner, {"version": "bridge_consent_v1", "text": "v1 consent"})
+    verified = _scheduler.VerifiedStatus(_scheduler._VERIFIED_TOKEN, raw)
+    item = _item(message_id="bmsg_1")
+    item["message"]["type"] = "request"
+    item["message"]["request"] = {"state": "pending"}
+
+    async def fetch() -> Any:
+        return verified
+
+    return asyncio.run(
+        _scheduler.run_screening_cycle(
+            config_dir=tmp_path,
+            owner=owner,
+            items=[item],
+            auth_store=None,
+            status_fetcher=fetch,
+        )
+    )
+
+
+def test_a_failover_allow_under_a_moved_revision_is_superseded_and_delivers(
+    tmp_path, monkeypatch
+) -> None:
+    """The 27 stuck holds, reproduced through the real chain: hop 1 allowed
+    under the chained policy's revision; the chain then changed (revision moved)
+    and the re-screen is served by the default model. Before PR-2 the commit
+    refused ``write_once_conflict`` (served model differs) and every later fence
+    refused the stale revision; now the live allow supersedes the stale one and
+    the request-delivery stamp and envelope re-validation both pass."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    _install_wire(
+        monkeypatch, _Wire({"gpt-5.4": ("fail", 503), "deepseek-flash": ("reply", DELIVER)})
+    )
+    first = _request_item_cycle(tmp_path, owner)
+    assert first.disposition == "deliver" and first.receipt.model == "deepseek-flash"
+    _policy, prior = _policy_and_receipt(tmp_path, owner)
+
+    _config(tmp_path, chain=None)  # the chain edit moves the admission revision
+    wire = _Wire({"gpt-5.4": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+    second = _request_item_cycle(tmp_path, owner)
+    assert wire.guard_entries == ["gpt-5.4"]  # a real re-screen, one send
+    assert second.disposition == "deliver" and second.receipt.model == "gpt-5.4"
+
+    policy, head = _policy_and_receipt(tmp_path, owner)
+    assert head["model"] == "gpt-5.4" and head["admission_revision"] == policy["revision"]
+    assert prior["admission_revision"] != policy["revision"]
+    history = _rows(
+        tmp_path,
+        "SELECT model, admission_revision, created_at, reason FROM screening_receipt_history",
+    )
+    assert history == [
+        (
+            "deepseek-flash",
+            prior["admission_revision"],
+            prior["created_at"],
+            "live_allow_supersedes_stale_allow",
+        )
+    ]
+    store.update_designated_session(owner, "sess_1")
+    store.claim(owner, "bmsg_1", "sess_1", "tok-1", time.time() + 300)
+    envelope = store.write_screened_request_delivery(
+        owner,
+        delivery_ref="dref_1",
+        message_id="bmsg_1",
+        designated_session="sess_1",
+        display_digest="d" * 64,
+        body_sha256=head["body_sha256"],
+        claim_token="tok-1",
+        request={
+            "thread_id": "bth_1",
+            "message_kind": "request",
+            "request_state": "pending",
+            "sender_account_id": "acc_sender1",
+            "sender_endpoint_id": "bep_s",
+            "recipient_account_id": owner.account_id,
+            "recipient_endpoint_id": owner.endpoint_id,
+        },
+    )
+    assert envelope["model"] == "gpt-5.4"
+    assert store.verify_original_envelope_current(owner, envelope) == ("", "")

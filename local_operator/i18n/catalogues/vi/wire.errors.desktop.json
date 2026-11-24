@@ -28,6 +28,7 @@
   "wire.errors.desktop.claim_origin_outside_configured": "Yêu cầu nhận không thể cài một nguồn nằm ngoài các nguồn máy tính đã cấu hình.",
   "wire.errors.desktop.claim_origin_wildcard": "Không thể nhận một nguồn ký tự đại diện.",
   "wire.errors.desktop.claim_origins_not_list": "Trường 'origins' trong thân yêu cầu nhận phải là một danh sách.",
+  "wire.errors.desktop.conversation_deleted": "Cuộc trò chuyện này đã bị xóa nên không thể trả lời câu hỏi này nữa. Hãy ẩn hoặc từ chối câu hỏi.",
   "wire.errors.desktop.conversations_unreadable": "Hiện không thể đọc các cuộc trò chuyện. Lỗi này tự khỏi; hãy thử lại sau giây lát.",
   "wire.errors.desktop.credential_operation_failed": "Thao tác với thông tin xác thực chưa hoàn tất",
   "wire.errors.desktop.cwd_marker_read_failed": "không thể đọc dấu thư mục làm việc của phiên: {error}",

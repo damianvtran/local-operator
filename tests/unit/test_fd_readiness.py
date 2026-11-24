@@ -3,7 +3,7 @@
 Regression for PR #4472's CI run 45338434283 (job 138256298160): deep in an
 xdist worker a fresh socketpair lands above fd 1024 and ``select.select`` raises
 ``ValueError: filedescriptor out of range in select()``. Each test here moves
-its socket above that ceiling with ``fcntl.F_DUPFD`` and proves the raw call still
+its socket above that ceiling with ``F_DUPFD`` and proves the raw call still
 fails there (the control: without it a low-fd run would pass vacuously) while
 the replacements give the same answers ``select.select`` gives at a low fd.
 """
@@ -37,9 +37,23 @@ def _require_low(fd: int) -> None:
         pytest.skip(f"no descriptor below 1024 available (got {fd})")
 
 
+def _dup_high(fd: int) -> int:
+    """Duplicate ``fd`` onto the lowest FREE descriptor at or above ``_HIGH_FD``.
+
+    Why ``F_DUPFD`` and not ``os.dup2(fd, _HIGH_FD)``: ``dup2`` silently closes
+    whatever already occupies its target. Deep in an xdist worker fd 1500 is
+    often live (PR #4519's merge-gate run 45368594814 saw fresh sockets at
+    fd 1801), so a fixed ``dup2`` stole another object's descriptor: that owner
+    and the test then fought over one fd (EINVAL/EBADF here, BrokenPipe in
+    whoever owned it). ``F_DUPFD`` never closes anything; the caller must use
+    the fd it returns, which may be above ``_HIGH_FD``.
+    """
+    return fcntl.fcntl(fd, fcntl.F_DUPFD, _HIGH_FD)
+
+
 @pytest.fixture
 def high_socketpair() -> Iterator[tuple[socket.socket, socket.socket]]:
-    """A connected pair whose first end sits at fd ``_HIGH_FD``."""
+    """A connected pair whose first end sits at a free fd >= ``_HIGH_FD``."""
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     needed = _HIGH_FD + 16
     if hard != resource.RLIM_INFINITY and hard < needed:
@@ -48,10 +62,7 @@ def high_socketpair() -> Iterator[tuple[socket.socket, socket.socket]]:
         resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
     low, peer = socket.socketpair()
     try:
-        # F_DUPFD, not dup2: dup2 would silently CLOSE whatever already sits at
-        # fd 1500 in a worker deep enough to have one (an unrelated test's
-        # socket or sqlite file). F_DUPFD takes the lowest FREE fd >= 1500.
-        high = socket.socket(fileno=fcntl.fcntl(low.fileno(), fcntl.F_DUPFD, _HIGH_FD))
+        high = socket.socket(fileno=_dup_high(low.fileno()))
         assert high.fileno() >= _HIGH_FD
         low.close()
         try:
@@ -133,6 +144,53 @@ def test_host_theme_low_fd_path_is_unchanged() -> None:
         assert host_theme._readable_within(reader.fileno(), 5)
 
 
+def test_high_fd_dup_leaves_a_live_descriptor_at_the_target_intact() -> None:
+    """Regression for run 45368594814: another owner already holds ``_HIGH_FD``.
+
+    The pipe stands in for that owner. The old fixed ``dup2`` is the negative
+    control: it closes the owner's read end, so the owner's write breaks. The
+    helper the fixture uses must land elsewhere and leave the owner working.
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    needed = _HIGH_FD + 16
+    if hard != resource.RLIM_INFINITY and hard < needed:
+        pytest.skip(f"RLIMIT_NOFILE hard limit {hard} cannot reach fd {_HIGH_FD}")
+    if soft != resource.RLIM_INFINITY and soft < needed:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
+    try:
+        for clobber in (True, False):
+            reader, writer = os.pipe()
+            try:
+                held = _dup_high(reader)  # the "other owner", at or above _HIGH_FD
+                os.close(reader)
+                low, peer = socket.socketpair()
+                try:
+                    if clobber:
+                        os.dup2(low.fileno(), held)
+                        mine = held
+                    else:
+                        mine = _dup_high(low.fileno())
+                    try:
+                        if clobber:
+                            with pytest.raises(BrokenPipeError):
+                                os.write(writer, b"owner")
+                        else:
+                            assert mine != held and mine >= _HIGH_FD
+                            os.write(writer, b"owner")
+                            assert os.read(held, 5) == b"owner"
+                    finally:
+                        os.close(mine)
+                finally:
+                    low.close()
+                    peer.close()
+                    if not clobber:
+                        os.close(held)
+            finally:
+                os.close(writer)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
 def test_host_theme_high_fd_tty_uses_poll_not_kqueue(monkeypatch: pytest.MonkeyPatch) -> None:
     """Above the ceiling the probe waits with ``poll``, on a real character device.
 
@@ -148,7 +206,7 @@ def test_host_theme_high_fd_tty_uses_poll_not_kqueue(monkeypatch: pytest.MonkeyP
     if soft != resource.RLIM_INFINITY and soft < needed:
         resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
     master, slave = pty.openpty()
-    high = fcntl.fcntl(slave, fcntl.F_DUPFD, _HIGH_FD)
+    high = _dup_high(slave)
     polls: list[int] = []
     real_poll = select.poll
 

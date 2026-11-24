@@ -117,5 +117,11 @@
     "role": "API refusal sentence (422)",
     "tone": "plain",
     "note": "Temporary chats are only available on this device for now."
+  },
+  "wire.errors.desktop.conversation_deleted": {
+    "role": "API refusal text when the operator tries to ANSWER a waiting question (Notifications page or a stale ask card) whose conversation has been deleted",
+    "tone": "plain, calm, tells the user what they can do instead",
+    "width": "one or two sentences; shown inline in the ask card or a toast",
+    "note": "409 refusal, code conversation_deleted. Dismiss and Decline still work on the same row (they settle it locally), which is why the sentence names them; keep them recognisable as the two button actions. No placeholders."
   }
 }

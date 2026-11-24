@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.errors.desktop",
-  "history_sha256": "105366f8810cca6378cfdbaf955100dcfdf2b84a8a3f104878c40b60a1423dc3",
+  "history_sha256": "7b1f7113c98798197bff1bc14954c67e22ff59251c10957ffa93ba3ef5452ce6",
   "entries": [
     {
       "locale": "zh-CN",
@@ -196,6 +196,47 @@
         "evidence": "i18n/audits/evidence/zh-CN/wire.errors.desktop/merged-compat-187b766ab67d-84892ed59/record.json"
       },
       "note": "Genuine independent merged-source semantic/context compatibility audit, 2026-11-13, 187b766ab67d, openai/gpt-6.1-sol, no fallback in this audit. Exact disjoint parent key/value composition; 9 feature + 7 upstream keys semantically read; unchanged keys carried by current-byte parent evidence. Historical provenance preserved as reported, not relabelled. Evidence: i18n/audits/evidence/zh-CN/wire.errors.desktop/merged-compat-187b766ab67d-84892ed59/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "4401bf9c25d5d40f29c43d9cc2f8428db5e569f5823846df1c50068e2e96cb70",
+      "context_sha256": "4513d68b7f3708d83f3525b6ce3b1f59a36f1ee2acd79668d36d1e4e18bf338c",
+      "target_sha256": "1715403aca6573820d4a3d6a28b8e399515572104a0de176d739dffa9056e08f",
+      "changed_keys": [
+        "wire.errors.desktop.conversation_deleted"
+      ],
+      "keys_audited": 1,
+      "round": "r1",
+      "translator": {
+        "agent": "coder (lopdev core-orphan-asks, PR #4529 implementer, job 9c21e6464214)",
+        "session": "54019b353683",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none observed",
+        "provenance_source": "manager 6c40250c9a97 subagent-roster.v1.json record 9c21e6464214 (model_label) and that session's transcript model field",
+        "note": "Final value is the auditor's correction (I1 (Dismiss = 清除, the desktop button label)); the translator's original is in PR #4529 head 3f2f33a3555b."
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev coder role, task i18n-audit-orphan, job a978d8140d96)",
+        "session": "596d597e4ef5",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none observed",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "references": {
+        "glossary_sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+        "style_guide_sha256": "6d9b370681d5d7fa19659240c4286a0617b303c44965b5804f4a763a2df17b52",
+        "pr": "damianvtran/local-operator#4529",
+        "head": "3f2f33a3555b",
+        "base": "5bb7d2454aea"
+      },
+      "note": "1-key delta audit of wire.errors.desktop.conversation_deleted against en + context, glossary and style guide; the other keys are byte-identical to the 2026-11-13 passed row (base 5bb7d2454aea en and target hashes match it) and were carried, not re-read. Value corrected by this auditor: I1 (Dismiss = 清除, the desktop button label); that correction is the auditor's own wording, not independently re-audited. Translator and auditor ran the same model (anthropic/claude-opus-5-5): session independence only, single-model audit disclosed. 0 blocker/major."
     }
   ]
 }
