@@ -9,7 +9,8 @@ for a bounded number of attempts.
 
 The tests are host-agnostic: both branches are exercised on every host by
 swapping the session module's ``os`` binding for a forwarding stand-in that
-reports the platform under test (``_pretend_posix`` / ``_pretend_non_posix``).
+reports the platform under test (``_pretend_posix`` / ``_pretend_non_posix``),
+and no test forwards a directory ``os.open`` to the host (Windows refuses it).
 No test reads the real ``os.name`` except to capture it as ``host`` and assert
 the swap did not leak into the interpreter. Earlier revisions asserted
 ``os.name == "posix"`` and relied on the host for the POSIX cases, so all six
@@ -125,10 +126,15 @@ def test_posix_directory_fsync_oserror_propagates(
     directory_fds: set[int] = set()
 
     def open_spy(path, flags, *args, **kwargs):
-        fd = real_open(path, flags, *args, **kwargs)
         if os.path.isdir(path):
+            # Never forward the directory open to the host: Windows refuses
+            # ``os.open(<dir>, O_RDONLY)`` with PermissionError before the
+            # fsync spy runs (PR #4544 R1). os.devnull opens on every host and
+            # gives a real fd for the product's ``finally: os.close`` to close.
+            fd = real_open(os.devnull, os.O_RDONLY)
             directory_fds.add(fd)
-        return fd
+            return fd
+        return real_open(path, flags, *args, **kwargs)
 
     def fsync(fd: int) -> None:
         if fd in directory_fds:
