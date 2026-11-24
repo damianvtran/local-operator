@@ -1780,9 +1780,21 @@ class AuditLog:
         Durable events/rotation pay this cost; ordinary batched telemetry does
         not. Keep failed ancestors pending so a later sync cannot hide a hole.
         """
+        # Windows has no ``os.O_DIRECTORY`` and cannot open a directory for
+        # ``fsync`` at all; NTFS makes a new name durable through the file's own
+        # flush, which the caller has already done. Referencing the attribute
+        # unguarded raised AttributeError there (observed on a windows-latest
+        # runner), which escapes sync()'s OSError handling and loses the row's
+        # durability ack. Clear the pending set too: nothing will ever be
+        # retryable on such a platform, so keeping entries would only grow it.
+        # POSIX keeps the exact open/fsync/close sequence below.
+        directory_flag = getattr(os, "O_DIRECTORY", None)
+        if directory_flag is None:
+            self._pending_directory_syncs.clear()
+            return
         directories = self._pending_directory_syncs | {self._path.parent}
         for path in sorted(directories, key=lambda item: len(item.parts), reverse=True):
-            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            descriptor = os.open(path, os.O_RDONLY | directory_flag)
             try:
                 os.fsync(descriptor)
             finally:

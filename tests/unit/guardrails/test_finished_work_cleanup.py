@@ -72,7 +72,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # gh unavailable on the node (the field condition): every lookup fails.
     monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: None)
     monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: None)
-    monkeypatch.setattr(prov, "_running_owners", lambda real, sid, strict=False: ())
+    monkeypatch.setattr(prov, "_running_owners", lambda real, sid, strict=False, **_: ())
     # raising=False only so the fail-before run on the base measures behaviour.
     monkeypatch.setattr(prov, "_running_session_ids", lambda: {LIVE}, raising=False)
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
@@ -1781,3 +1781,167 @@ def test_m1_a_hidden_pid_keeps_force_and_rm_rf_of_a_finished_tree_with_the_judge
     assert _rank(home, f"rm -rf {wt}").risk is not Risk.LOW
     plain = _rank(home, f"git -C {repo} worktree remove {wt}")
     assert plain.risk is Risk.LOW, plain.reasons
+
+
+_CACHEDIR_SIG = b"Signature: 8a477f597d28d172789f06886806bc55"
+
+
+def _cache_payload(wt: Path, payload: str) -> None:
+    """Lay one ignored cache shape into ``wt`` (field case 2026-11-24)."""
+    pyc = wt / "pkg" / "__pycache__"
+    if payload in {"pycache", "pycache-with-source", "pycache-link"}:
+        pyc.mkdir(parents=True)
+        (pyc / "mod.cpython-313.pyc").write_bytes(b"\x00bytecode")
+    if payload == "pycache-with-source":
+        (pyc / "notes.py").write_text("hand-written\n")
+    if payload == "pycache-link":
+        (pyc / "evil.pyc").symlink_to(wt / "a.txt")
+    tagged = wt / ".pytest_cache"
+    if payload in {"pytest-cache", "bad-tag", "tagged-repo", "tagged-venv", "tagged-unreadable"}:
+        (tagged / "v" / "cache").mkdir(parents=True)
+        (tagged / "v" / "cache" / "nodeids").write_text("[]\n")
+        sig = b"Signature: not-a-cache" if payload == "bad-tag" else _CACHEDIR_SIG
+        (tagged / "CACHEDIR.TAG").write_bytes(sig + b"\n# pytest\n")
+    if payload == "tagged-repo":
+        subprocess.run(["git", "init", "-q", str(tagged / "v")], check=True)
+    if payload == "tagged-venv":
+        # uv tags every venv it creates (#4528 R1-M1): still held.
+        (tagged / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    if payload == "tagged-unreadable":
+        # A repository behind an unlistable directory (#4528 R1-B1): held.
+        subprocess.run(["git", "init", "-q", str(tagged / "v" / "hidden")], check=True)
+        (tagged / "v" / "hidden").chmod(0)
+
+
+@pytest.mark.parametrize(
+    ("payload", "shed"),
+    [
+        ("pycache", True),
+        ("pytest-cache", True),
+        ("pycache-with-source", False),
+        ("pycache-link", False),
+        ("bad-tag", False),
+        ("tagged-repo", False),
+        ("tagged-venv", False),
+        ("tagged-unreadable", False),
+    ],
+)
+def test_content_verified_caches_shed_from_a_foreign_merged_tree(
+    home: Path, repo: Path, payload: str, shed: bool, request: pytest.FixtureRequest
+) -> None:
+    """Field case 2026-11-24 (disk recovery, guard 0.112.7): another session's
+    merged, clean worktree was held for ``__pycache__``/``.pytest_cache`` alone.
+
+    A NAME is no witness for someone else's bytes (#4240), but CONTENTS are:
+    a ``__pycache__`` holding only regular ``*.pyc`` files, or a directory
+    carrying the cachedir.org ``CACHEDIR.TAG`` signature with no nested
+    repository, is regenerable cache whoever made it. Anything else stays held.
+    """
+    wt = _branch_tree(home, repo, f"cache-{payload}")
+    _git("merge", "--ff-only", f"fix/cache-{payload}", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("__pycache__/\n.pytest_cache/\n")
+    _cache_payload(wt, payload)
+    _record(home, wt, creator=DONE)
+    if payload == "tagged-unreadable":
+        hidden = wt / ".pytest_cache" / "v" / "hidden"
+        request.addfinalizer(lambda: hidden.chmod(0o755))
+        if os.access(hidden, os.R_OK):  # root ignores modes: nothing to prove
+            pytest.skip("directory modes are not enforced for this user")
+    inventory = prov.plain_cleanup_ignored_inventory(str(wt))
+    assert inventory is not None
+    assert (inventory.unverified_ignored == 0) is shed, inventory
+    plain = _rank(home, f"git -C {repo} worktree remove -- {wt}")
+    # The CONTENT witness is the inventory assertion above (no merge proof
+    # used). This tree is also merged and finished, so the 2026-11-24 rule
+    # sheds the regenerable NAMES too; only an unreadable walk still holds.
+    # Held: an unreadable walk or a nested repository (fail closed), and a
+    # source file inside ``__pycache__`` (``worktree_state`` reads it dirty).
+    if payload in {"tagged-unreadable", "tagged-repo", "pycache-with-source"}:
+        assert plain.risk is not Risk.LOW, plain.reasons
+    else:
+        assert plain.risk is Risk.LOW, plain.reasons
+
+
+def _build_output(wt: Path, payload: str) -> None:
+    """One ignored payload shape from the 2026-11-24 fleet census."""
+    if payload in {
+        "node-modules",
+        "node-modules-with-env",
+        "node-modules-repo",
+        "node-modules-unreadable",
+    }:
+        (wt / "node_modules" / "pkg").mkdir(parents=True)
+        (wt / "node_modules" / "pkg" / "index.js").write_text("module.exports = 1\n")
+    if payload == "cache-typecheck":
+        (wt / ".cache" / "typecheck").mkdir(parents=True)
+        (wt / ".cache" / "typecheck" / "app.tsbuildinfo").write_text("{}\n")
+    if payload == "egg-info-venv":
+        (wt / "pkg.egg-info").mkdir()
+        (wt / "pkg.egg-info" / "PKG-INFO").write_text("Name: pkg\n")
+        (wt / ".venv" / "bin").mkdir(parents=True)
+        (wt / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (wt / "tsconfig.app.tsbuildinfo").write_text("{}\n")
+    if payload == "node-modules-with-env":
+        (wt / ".env").write_text("SYNTHETIC=1\n")
+    if payload == "node-modules-repo":
+        subprocess.run(["git", "init", "-q", str(wt / "node_modules" / "pkg")], check=True)
+    if payload == "node-modules-unreadable":
+        # A repository behind an unlistable directory: held (fail closed).
+        subprocess.run(["git", "init", "-q", str(wt / "node_modules" / "pkg" / "deep")], check=True)
+        (wt / "node_modules" / "pkg" / "deep").chmod(0)
+    if payload == "test-output":
+        (wt / "test-artifacts").mkdir()
+        (wt / "test-artifacts" / "run.log").write_text("hand-collected\n")
+
+
+@pytest.mark.parametrize("merged", [True, False], ids=["merged", "unmerged"])
+@pytest.mark.parametrize(
+    ("payload", "shed"),
+    [
+        ("node-modules", True),
+        ("cache-typecheck", True),
+        ("egg-info-venv", True),
+        ("node-modules-with-env", False),
+        ("node-modules-repo", False),
+        ("node-modules-unreadable", False),
+        ("test-output", False),
+    ],
+)
+def test_finished_foreign_tree_sheds_regenerable_build_output(
+    home: Path, repo: Path, payload: str, shed: bool, merged: bool, request: pytest.FixtureRequest
+) -> None:
+    """Fleet census 2026-11-24 (guard 0.112.7, disk-full crashes): 62 finished
+    trees other sessions made were held only for ``node_modules``,
+    ``.cache/typecheck``, ``*.egg-info``, ``.venv``, ``*.tsbuildinfo``.
+
+    Plain removal sheds regenerable-named build output from another session's
+    tree ONLY with the finished-tree proof (merged on origin, clean, no open
+    PR, no running owner). ``.env``, a nested repository and anything off the
+    list keep the hold; an unmerged tree keeps it whatever it holds.
+    """
+    name = f"build-{payload}-{merged}"
+    wt = _branch_tree(home, repo, name)
+    if merged:
+        _git("merge", "--ff-only", f"fix/{name}", cwd=repo)
+        _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write(
+            "node_modules/\n.cache/\n*.egg-info/\n.venv/\n*.tsbuildinfo\n.env\ntest-artifacts/\n"
+        )
+    _build_output(wt, payload)
+    if payload == "node-modules-unreadable":
+        deep = wt / "node_modules" / "pkg" / "deep"
+        request.addfinalizer(lambda: deep.chmod(0o755))
+        if os.access(deep, os.R_OK):  # root ignores modes: nothing to prove
+            pytest.skip("directory modes are not enforced for this user")
+    _record(home, wt, creator=DONE)
+    plain = _rank(home, f"git -C {repo} worktree remove -- {wt}")
+    if shed and merged:
+        assert plain.risk is Risk.LOW, plain.reasons
+    else:
+        assert plain.risk is not Risk.LOW, plain.reasons
+        assert plain.targets[0].cleanup_hold, plain.reasons

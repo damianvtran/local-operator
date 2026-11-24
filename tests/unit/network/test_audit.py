@@ -386,6 +386,28 @@ def test_durable_events_are_written_through_immediately(root: Path) -> None:
     assert len(_lines(root)) == 2
 
 
+def test_a_durable_event_syncs_where_os_has_no_o_directory(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows has no ``os.O_DIRECTORY``; the directory fsync must be skipped there.
+
+    Referencing the flag unguarded raised AttributeError on a windows-latest
+    runner, which escapes ``sync``'s OSError handling, so callers waiting on the
+    durable row timed out. The nested, not-yet-created root makes the writer queue
+    ancestor directory syncs, so the test also proves those are drained rather than
+    left to grow on a platform where they can never be retried.
+    """
+    monkeypatch.delattr(audit_mod.os, "O_DIRECTORY", raising=False)
+    fresh = root / "not" / "yet" / "created"
+    log = AuditLog(fresh)
+    log.record(AuditEvent(event="panic_raised", network_id=NETWORK, detail={"epoch_after": 9}))
+    assert [line["event"] for line in _lines(fresh)] == ["panic_raised"]
+    assert log.syncs >= 1
+    assert log.degraded is False
+    assert log._pending_directory_syncs == set()
+    log.close()
+
+
 def test_the_log_is_0600_and_its_directory_0700(root: Path) -> None:
     log = AuditLog(root)
     log.record(AuditEvent(event="panic_raised", network_id=NETWORK))

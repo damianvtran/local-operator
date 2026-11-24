@@ -223,6 +223,7 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
         CHANNEL_SPEND_CUSTOM_TYPE,
+        "auxiliary_usage_v1",
         SESSION_BINDING_CUSTOM_TYPE,
         "frontend_state_checkpoint_v1",
         # Idle / pre-wake compaction's anti-thrash receipts
@@ -1759,6 +1760,7 @@ def read_custom_entries(
     max_rows: int | None = None,
     custom_messages: bool = False,
     min_ts: float | None = None,
+    strict: bool = False,
 ) -> list[TranscriptEntry]:
     """Every custom row of ``custom_type``, NEWEST first, without parsing the journal.
 
@@ -1798,7 +1800,8 @@ def read_custom_entries(
     which makes the cost proportional to the window the caller cares about,
     not to the journal's lifetime. A clock step backwards could hide a row
     written in that gap; callers pass a window, not an exact cut, so that is
-    the accepted trade.
+    the accepted trade. ``strict`` distinguishes an unreadable journal from an
+    empty result for consumers that must not mistake missing records for zero.
     """
     encoded = json.dumps(custom_type)
     if encoded != f'"{custom_type}"':
@@ -1806,12 +1809,16 @@ def read_custom_entries(
     if max_rows is not None and max_rows <= 0:
         return []
     needle = b'"custom_type":' + encoded.encode("utf-8")
-    path = _resolved_transcript_path(directory)
+    path = _resolved_transcript_path(directory, read_only=strict)
     if path is None:
+        if strict:
+            raise FileNotFoundError("Cannot read the session journal")
         return []
     try:
         handle = path.open("rb")
     except OSError:
+        if strict:
+            raise
         return []
     entries: list[TranscriptEntry] = []
     seen_offsets: set[int] = set()
@@ -1840,6 +1847,8 @@ def read_custom_entries(
             while index != -1:
                 offset = read_start + index
                 located = _row_at_offset(handle, offset)
+                if located is None and strict:
+                    raise ValueError("Cannot decode a candidate session journal record")
                 if located is not None:
                     row_offset, entry = located
                     if row_offset not in seen_offsets and _matches(entry):

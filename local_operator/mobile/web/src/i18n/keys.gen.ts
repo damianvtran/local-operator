@@ -765,6 +765,7 @@ export type MessageParams = {
   "wire.errors.desktop.claim_origin_outside_configured": undefined;
   "wire.errors.desktop.claim_origin_wildcard": undefined;
   "wire.errors.desktop.claim_origins_not_list": undefined;
+  "wire.errors.desktop.conversation_deleted": undefined;
   "wire.errors.desktop.conversations_unreadable": undefined;
   "wire.errors.desktop.credential_operation_failed": undefined;
   "wire.errors.desktop.cwd_marker_read_failed": { "error": string };

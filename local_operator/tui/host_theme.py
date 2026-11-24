@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import select
+import selectors
 import sys
 import time
 
@@ -64,6 +65,41 @@ def parse_replies(data: bytes) -> tuple[RGB | None, RGB | None, dict[int, RGB]]:
     return fg, bg, ansi
 
 
+# ``select()`` takes an fd_set bitmap of FD_SETSIZE bits (1024 on Linux and
+# macOS); CPython raises ValueError for any fd at or above it.
+_SELECT_FD_LIMIT = 1024
+
+
+def _readable_within(fd: int, wait_s: float) -> bool:
+    """Whether the terminal ``fd`` has a byte to read within ``wait_s`` seconds.
+
+    Why not plain ``select.select``: it raises ``ValueError`` for an fd at or
+    above FD_SETSIZE, and ``probe`` opens ``/dev/tty`` fresh, so a process that
+    already holds ~1k descriptors (a long session, the test suite) is handed one
+    up there and the probe would crash instead of degrading to "no theme".
+
+    Why not ``selectors`` for every fd: this is a character device, and select
+    is the readiness call that has always worked on ttys everywhere (older
+    macOS kqueue and macOS ``poll()`` both mishandled character devices), so the
+    common low-fd path keeps exactly the behaviour it shipped with. Same split
+    as ``providers.auth_cli._readable_within``. A failure reads as "nothing to
+    read", which ends the probe early: the safe outcome for a cosmetic query.
+    """
+    if fd < _SELECT_FD_LIMIT:
+        try:
+            return bool(select.select([fd], [], [], wait_s)[0])
+        except ValueError:
+            pass  # a platform with a smaller FD_SETSIZE: use a selector below
+        except OSError:
+            return False
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(fd, selectors.EVENT_READ)
+            return bool(selector.select(wait_s))
+    except (OSError, ValueError):
+        return False
+
+
 def probe(timeout: float = 1.0) -> bytes:
     """Query the controlling terminal; return its raw replies (b"" if none).
 
@@ -95,7 +131,7 @@ def probe(timeout: float = 1.0) -> bytes:
             deadline = time.monotonic() + timeout
             while not _DA1_RE.search(data):
                 left = deadline - time.monotonic()
-                if left <= 0 or not select.select([fd], [], [], left)[0]:
+                if left <= 0 or not _readable_within(fd, left):
                     break
                 data += os.read(fd, 4096)
             return data

@@ -28,6 +28,7 @@
   "wire.errors.desktop.claim_origin_outside_configured": "Una solicitud de reclamo no puede fijar un origen fuera de los orígenes configurados para el escritorio.",
   "wire.errors.desktop.claim_origin_wildcard": "No se puede reclamar un origen comodín.",
   "wire.errors.desktop.claim_origins_not_list": "El campo 'origins' del cuerpo de la solicitud debe ser una lista.",
+  "wire.errors.desktop.conversation_deleted": "Esta conversación se eliminó, así que ya no se puede responder a esta pregunta. Descártala o recházala.",
   "wire.errors.desktop.conversations_unreadable": "Ahora mismo no se pudieron leer las conversaciones. Se recupera sola; reinténtalo en un momento.",
   "wire.errors.desktop.credential_operation_failed": "La operación de credenciales no se completó",
   "wire.errors.desktop.cwd_marker_read_failed": "no se pudo leer el marcador de directorio de trabajo de la sesión: {error}",

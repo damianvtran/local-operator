@@ -416,6 +416,47 @@ def test_system_md_teaches_when_to_research_without_making_it_reflexive() -> Non
     assert "not answers or limits on your options" in text
 
 
+@pytest.mark.parametrize(
+    "flags",
+    [
+        {},
+        {"no_workspace": True, "has_workspace": False, "no_web": True, "has_web": False},
+    ],
+    ids=["workspace", "mcp-only"],
+)
+def test_system_md_stops_research_at_sufficiency_and_fans_out_only_needed_calls(
+    flags: dict[str, bool],
+) -> None:
+    """Research economy: a stopping rule and a fan-out criterion, in every arm.
+
+    A paired cost run against Claude Code on the same short research tasks
+    measured ~91 tool calls here against ~60 there, at equal accuracy: sibling
+    searches and fetches batched speculatively ("Parallelize independent work:
+    batch calls" read as "fire everything that might help") and claims
+    re-verified after a read source already supported them. Contract:
+    - parallelism survives, but only for calls needed whatever the others
+      return — the criterion that excludes speculative fan-out while keeping
+      independent file reads concurrent on long coding tasks;
+    - one read source settles a claim, with exactly three reopeners (conflict,
+      staleness, an explicit ask for corroboration) so dates and status are not
+      taken from one stale page;
+    - "cross-check other sources" is gone from the truncation rule, which keeps
+      its paging instruction (PR #4375 B1).
+    The savings are unproven until a live paired run; this pins the wording.
+    """
+    text = " ".join(render_template("system.md", dict(flags)).split())
+    assert "**Parallelize only calls needed whatever the others return**" in text
+    assert "batch calls" not in text
+    assert (
+        "Start shallow, deepen on signals; stop at one read source per claim unless "
+        "sources conflict, look stale or corroboration is requested."
+    ) in text
+    assert (
+        "Page through a capped or truncated result before calling a list or count complete."
+    ) in text
+    assert "cross-check other sources" not in text
+
+
 def test_system_md_makes_deciding_the_default_and_asking_the_exception() -> None:
     """The ask paragraph used to open on the capability and never state a brake.
 

@@ -118,6 +118,83 @@ def test_attempt_interval_excludes_other_attempt_artifacts(
     )
 
 
+def test_failed_only_rerun_admits_carried_shard_artifacts_by_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `gh run rerun --failed` attempt lists carried shards with their ORIGINAL
+    interval and attempt-1 artifact (measured: run 45325871121 attempt 2). Before
+    the fix only `-attempt-<this attempt>` names matched, so every such attempt
+    was refused as "ambiguous/missing"; the job interval still picks the upload.
+    """
+    monkeypatch.setattr(generator, "_source_matrix", lambda *_: ([0, 1], {}))
+    jobs = [
+        # Shard 0 passed in attempt 1 and was carried into attempt 2.
+        {
+            "id": 100,
+            "name": "test (3.12, 0)",
+            "conclusion": "success",
+            "started_at": "2026-11-01T01:00:00Z",
+            "completed_at": "2026-11-01T02:00:00Z",
+        },
+        # Shard 1 failed in attempt 1 and re-ran in attempt 2.
+        {
+            "id": 101,
+            "name": "test (3.12, 1)",
+            "conclusion": "success",
+            "started_at": "2026-11-01T03:00:00Z",
+            "completed_at": "2026-11-01T04:00:00Z",
+        },
+    ]
+    artifacts = [
+        {
+            "id": 10,
+            "name": "junit-timings-3.12-0-attempt-1",
+            "created_at": "2026-11-01T01:50:00Z",
+            "expired": False,
+        },
+        {
+            "id": 11,
+            "name": "junit-timings-3.12-1-attempt-1",
+            "created_at": "2026-11-01T01:55:00Z",
+            "expired": False,
+        },
+        {
+            "id": 21,
+            "name": "junit-timings-3.12-1-attempt-2",
+            "created_at": "2026-11-01T03:50:00Z",
+            "expired": False,
+        },
+    ]
+    responses = iter(
+        [
+            {
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": "abc",
+                "path": ".github/workflows/full-suite.yml",
+            },
+            {"jobs": jobs},
+            {"total_count": len(artifacts), "artifacts": artifacts},
+        ]
+    )
+    monkeypatch.setattr(generator, "_gh_json", lambda _: next(responses))
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        for filename in [
+            "junit-3.12-0.xml",
+            "junit-3.12-1.xml",
+            "junit-serial-controls-3.12-0.xml",
+        ]:
+            zipped.writestr(
+                filename,
+                '<testsuite><testcase classname="tests.unit.test_paths" '
+                'name="t" time="2"/></testsuite>',
+            )
+    monkeypatch.setattr(generator.subprocess, "check_output", Mock(return_value=archive.getvalue()))
+    _, provenance = generator.ci_run(123, 2, tmp_path)
+    assert [s["artifact_id"] for s in provenance["shards"]] == [10, 21]
+
+
 @pytest.mark.parametrize(
     "identities",
     [
