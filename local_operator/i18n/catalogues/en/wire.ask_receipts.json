@@ -1,0 +1,9 @@
+{
+  "wire.ask_receipts.name.secret_question": "secret question",
+  "wire.ask_receipts.response.answered": "Answered, delivering",
+  "wire.ask_receipts.response.declined": "Declined, the agent was told",
+  "wire.ask_receipts.response.dismissed": "{surface, select, remote{Dismissed by you (phone)} tui{Dismissed by you (terminal)} chat{Dismissed by you (chat)} desktop{Dismissed by you (desktop app)} other{Dismissed by you}}, {reason, select, answered_in_chat{settled in chat} other{no longer needed}}",
+  "wire.ask_receipts.response.late": "Answered late, the agent was told",
+  "wire.ask_receipts.timeout.timed_out": "Timed out after {waited}, the agent goes ahead without your answer",
+  "wire.ask_receipts.withdrawn.by_agent": "Withdrawn by the agent"
+}

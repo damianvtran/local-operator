@@ -1162,6 +1162,9 @@ def project_settled_rows(
         ASK_TIMEOUT_MESSAGE_TYPE as ASK_TIMEOUT_CUSTOM_TYPE,
     )
     from local_operator.harness.message_types import (
+        ASK_WITHDRAWN_MESSAGE_TYPE as ASK_WITHDRAWN_CUSTOM_TYPE,
+    )
+    from local_operator.harness.message_types import (
         DIVERGENCE_NOTICE_MESSAGE_TYPE as DIVERGENCE_CUSTOM_TYPE,
     )
     from local_operator.harness.message_types import (
@@ -1588,12 +1591,19 @@ def project_settled_rows(
             if getattr(message, "custom_type", None) in (
                 ASK_TIMEOUT_CUSTOM_TYPE,
                 ASK_RESPONSE_CUSTOM_TYPE,
+                ASK_WITHDRAWN_CUSTOM_TYPE,
             ):
                 # A queued ask settling (design docs/design/ask-nonblocking.md
-                # §2.3/§2.5, §5.1). Both rows render, for the reason the gate
-                # row below exists: a custom message with no branch falls
+                # §2.3/§2.5, §5.1). All three rows render, for the reason the
+                # gate row below exists: a custom message with no branch falls
                 # through every branch and past the role handling, so the row
                 # renders NOWHERE.
+                #
+                # The WITHDRAWN row joins them rather than a NoticeBlock because
+                # it is the same object seen from the other side: an ask the
+                # agent took back, on the row the answer and the deadline already
+                # own. A separate arm would have been a second author of "what
+                # happened to ask a-745e", and the two would drift.
                 #
                 # Rendered as a TOOL-LEDGER CARD rather than the notice line
                 # this branch used to append, because the two rows answer a
@@ -1612,11 +1622,17 @@ def project_settled_rows(
                 # one layer down, and the two rows differ by ink as well as by
                 # wording.
                 details = getattr(message, "details", None) or {}
-                is_timeout = getattr(message, "custom_type", None) == ASK_TIMEOUT_CUSTOM_TYPE
+                custom_type = getattr(message, "custom_type", None)
+                if custom_type == ASK_TIMEOUT_CUSTOM_TYPE:
+                    kind = "timeout"
+                elif custom_type == ASK_WITHDRAWN_CUSTOM_TYPE:
+                    kind = "withdrawn"
+                else:
+                    kind = "response"
                 self._append_block(
                     AskResponseBlock(
                         details,
-                        kind="timeout" if is_timeout else "response",
+                        kind=kind,
                         fold_width=fold_width,
                     )
                 )

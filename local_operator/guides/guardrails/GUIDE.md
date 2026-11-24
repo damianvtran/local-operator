@@ -54,8 +54,10 @@ answer record, not built yet — fetched or file content, an `ask_withdraw` with
 
 **Order, first refusal wins:** (1) the **built-in dangerous-delete** (bash only):
 CRITICAL is refused with no model call, HIGH goes to a forked judge, LOW runs with
-zero model calls; then (2) **your rules** — `<config_dir>/rules/*.md` (default
-`~/.local-operator/rules`), plus `guardrails.rules_dir` when configured.
+zero model calls; then (2) the **built-in guard-policy-write** review (every other
+tool): a call that edits the guard's own policy goes to a judge — see "Edits to the
+guard's own policy" below; then (3) **your rules** — `<config_dir>/rules/*.md`
+(default `~/.local-operator/rules`), plus `guardrails.rules_dir` when configured.
 
 Matching sees a bash call's command string, and the JSON of every other tool's
 arguments — which is why `tool:*` reaches them all.
@@ -64,6 +66,24 @@ Neither layer can be loosened. `guardrails.enabled` switches user rules only; th
 built-in is not switchable, because a config file the model can write must not lift
 the guard protecting that same file. `guardrails.critical_override` turns CRITICAL
 into HIGH — a judge decision, never a pass. Rules only ADD restriction.
+
+## Edits to the guard's own policy
+
+A `write`/`edit` (and `browser`/`evidence` path arguments) onto a rule file
+(`<config_dir>/rules/*.md`, and a configured `guardrails.rules_dir`), the native
+`hooks.json`, or `config.yml`; a `setting` `set` of a `hooks.*` or `guardrails.*`
+key; and an `eval` cell that names one of those paths literally and is not provably
+read-only, go to a judge — not to a refusal. It sees the operator's words (typed or
+an approved `ask` answer) and what the loader would read from the new content, and it
+allows only a change the operator asked for: adding or tightening a rule at their word
+passes; deleting, emptying, narrowing or switching off a rule, hook or setting, or
+adding a hook command they did not describe, does not. A session with **no** trusted
+operator words (a subagent, an agent-opened lane, a wake) is refused with no model call:
+`ask` the operator, and the approved answer unlocks the judge. The paths are resolved
+as the tool resolves them (`~`, `..` after a link, symlinks, hardlinks, case, the
+`LOCAL_OPERATOR_CONFIG_DIR` override). Risk is reported as `high`, rule
+`guard-policy-write`. A CRITICAL evidence refusal still comes first, and your own
+`block` rules still apply after an allow.
 
 ## What the built-in ranks
 
@@ -701,12 +721,22 @@ not verified — it lands at HIGH and goes to the judge. Measured on this build:
 `python -c "shutil.rmtree('~/.local-operator')"` and `rm -rf ~/local-operator` (a
 repo root) → HIGH.
 
+The policy-write review (above) is best-effort in the same way, and does **not**
+cover: a path composed in code (`Path.home() / ".local-operator"`, an env var, a
+glob or a directory loop in `eval`), another interpreter, the `skill`, `agent` and
+`team` stores, forwarded Claude/Codex hook files (`~/.claude/settings.json`,
+`.claude/settings*.json`, plugin hooks, `~/.codex/hooks.json`), the installed
+package and shipped `defaults/`, an in-process janitor, or a symlink a concurrent
+sibling call plants between the check and the write.
+
 ## When the user asks for a rule
 
 1. **Propose it first** — path, frontmatter, body, and what it will and will not
    catch — before it exists.
 2. **Write it to the real rules directory**, never a scratch or sample copy: a rule
-   outside `<config_dir>/rules/` (or `rules_dir`) does nothing. Never edit or delete a
+   outside `<config_dir>/rules/` (or `rules_dir`) does nothing. That write is judged
+   against the user's request (above), so do it in the turn they asked in; a session
+   with no operator words must `ask` first. Never edit or delete a
    rule the user did not ask about to make your own fire — a file cannot loosen
    another, so that is the only way an agent can weaken protection.
 3. **Verify it loads and fires** — `parse_rule` on its text and `preview_tool_call`

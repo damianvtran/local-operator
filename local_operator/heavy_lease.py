@@ -107,6 +107,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
 
 from local_operator import heavy_audit
+from local_operator.atomic_files import atomic_write_text
 
 try:  # POSIX only; Windows has no flock and runs without the lease.
     import fcntl
@@ -1658,16 +1659,12 @@ def nested_line(inherited: InheritedLease) -> str:
 
 
 def _write_record(path: Path, record: dict[str, Any]) -> None:
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{id(record)}.tmp")
     try:
-        tmp.write_text(json.dumps(record), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_text(path, json.dumps(record))
     except OSError:
         # The record is advisory; a failed write only costs a waiter the name.
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        # The writer has already removed its own temp.
+        pass
 
 
 def try_acquire(

@@ -1,0 +1,9 @@
+{
+  "wire.ask_receipts.name.secret_question": "机密问题",
+  "wire.ask_receipts.response.answered": "已回答，正在发送",
+  "wire.ask_receipts.response.declined": "已拒绝，已告知智能体",
+  "wire.ask_receipts.response.dismissed": "{surface, select, remote{你已忽略（手机）} tui{你已忽略（终端）} chat{你已忽略（聊天）} desktop{你已忽略（桌面应用）} other{你已忽略}}，{reason, select, answered_in_chat{已在聊天中回答} other{不再需要}}",
+  "wire.ask_receipts.response.late": "延迟回答，已告知智能体",
+  "wire.ask_receipts.timeout.timed_out": "{waited}后已超时，智能体不再等待，继续执行",
+  "wire.ask_receipts.withdrawn.by_agent": "已由智能体撤回"
+}

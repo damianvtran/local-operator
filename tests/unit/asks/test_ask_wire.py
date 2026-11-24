@@ -1341,13 +1341,120 @@ def test_the_yield_measures_the_real_payload_not_a_rebuilt_envelope() -> None:
     assert snapshot.get("asks"), "an under-line frame keeps its asks"
 
     # ...then push it over, by less than the envelope delta the old measurement
-    # got wrong: the asks must give way (the old shape would have kept them).
+    # got wrong: the row must give way (the old shape would have kept it). The
+    # overage is smaller than the row, so the yield stops at step 2 and the
+    # tally — the capability signal — rides (it used to be dropped with the
+    # rows even when the row alone paid for the overage).
     snapshot = payload["snapshot"]
     snapshot["cwd"] += "x" * 200
     assert fs._frame_line_bytes(payload) > limit
     fs._yield_asks_when_the_frame_has_no_room(snapshot, payload)
-    assert "asks" not in snapshot and "asks_open" not in snapshot
+    assert "asks" not in snapshot and snapshot.get("asks_open") == 1
     assert "asks_truncated" not in snapshot, "the flag goes with the rows it describes"
+    assert fs._frame_line_bytes(payload) <= limit
+
+
+def test_the_tally_yields_only_when_the_rows_alone_cannot_pay() -> None:
+    """Step 3, the documented residual: a frame still over once every row is
+    gone drops ``asks_open`` too, and still never claims a clip."""
+    from local_operator.session import frontend_state as fs
+
+    state = FrontendSessionState(
+        session_id="s1",
+        epoch="e",
+        asks=[PendingAskState(**_ask_row(0))],  # type: ignore[arg-type]
+        asks_open=1,
+    )
+    payload = fs.sync_wire_payload(fs.FrontendStateStore(state).subscribe(lambda _u: None).sync)
+    snapshot = payload["snapshot"]
+    limit = fs._MODEL_CATALOGUE_LINE_LIMIT
+    # Over by more than the row AND the tally together.
+    snapshot["cwd"] = "x" * (limit - fs._frame_line_bytes(payload) + 4_000)
+    fs._yield_asks_when_the_frame_has_no_room(snapshot, payload)
+    assert not {"asks", "asks_open", "asks_truncated"} & set(snapshot)
+
+
+def test_the_head_ask_outlives_the_tail_when_the_frame_is_full() -> None:
+    """Step 1: an overage the tail can pay for keeps the HEAD row whole, flags
+    the prefix, and keeps the tally — rather than dropping every ask at once."""
+    from local_operator.session import frontend_state as fs
+
+    rows = [_ask_row(i, questions=2, text="q" * 300) for i in range(3)]
+    state = FrontendSessionState(
+        session_id="s1",
+        epoch="e",
+        asks=[PendingAskState(**row) for row in rows],  # type: ignore[arg-type]
+        asks_open=3,
+    )
+    payload = fs.sync_wire_payload(fs.FrontendStateStore(state).subscribe(lambda _u: None).sync)
+    snapshot = payload["snapshot"]
+    assert len(snapshot["asks"]) == 3
+    limit = fs._MODEL_CATALOGUE_LINE_LIMIT
+    snapshot["cwd"] = "x" * (limit - fs._frame_line_bytes(payload) + 200)
+    fs._yield_asks_when_the_frame_has_no_room(snapshot, payload)
+    assert [row["ask_id"] for row in snapshot["asks"]] == ["a-0000"]
+    assert len(snapshot["asks"][0]["questions"]) == 2, "the head row is never cut inside"
+    assert snapshot["asks_truncated"] is True and snapshot["asks_open"] == 3
+    assert fs._frame_line_bytes(payload) <= limit
+
+
+def _crowded_mirror_state(*, receipts: int, cwd: int = 0) -> FrontendSessionState:
+    """One open ask, its legacy ``pending_gate`` mirror, and a receipt tail."""
+    from local_operator.asks.render import mirror_card
+    from local_operator.session.frontend_state import FrontendUsage, PendingGateState
+
+    row = _ask_row(0, text="Ship the release?")
+    card = mirror_card([row])
+    assert card is not None
+    return FrontendSessionState(
+        session_id="s1",
+        epoch="e",
+        cwd="x" * cwd,
+        asks=[PendingAskState(**row)],  # type: ignore[arg-type]
+        asks_open=1,
+        pending_gate=PendingGateState(
+            kind="ask",
+            request_id=card["request_id"],
+            title=card["title"],
+            options=card["options"],
+        ),
+        usage_components=[FrontendUsage(input_tokens=index + 1) for index in range(receipts)],
+    )
+
+
+def test_the_receipt_tail_gives_way_before_the_ask_the_user_must_answer() -> None:
+    """The remote-ask regression: a busy owner's frame over the line by less
+    than its diagnostic receipt tail shipped with ``asks``/``asks_open``
+    yielded beside the ask-kind ``pending_gate`` mirror, so the desktop drew
+    the legacy dock for a remote ask instead of the Asks panel. The receipt
+    trim ran AFTER the ask yield (#3251), so the ask was dropped to save bytes
+    the tail then gave up anyway. The invariant: while a frame carries an
+    ask-kind mirror and the receipts can still pay, the ask rows ride."""
+    from local_operator.session import frontend_state as fs
+
+    limit = fs._MODEL_CATALOGUE_LINE_LIMIT
+    probe = fs.sync_wire_payload(
+        fs.FrontendStateStore(_crowded_mirror_state(receipts=150)).subscribe(lambda _u: None).sync
+    )
+    receipt_bytes = len(json.dumps(probe["snapshot"]["usage_components"]))
+    # Over the line by ~4 KB: far less than the 150-receipt tail, more than
+    # the one ask row.
+    filler = limit - fs._frame_line_bytes(probe) + 4_000
+    assert 4_000 < receipt_bytes // 2
+    payload = fs.sync_wire_payload(
+        fs.FrontendStateStore(_crowded_mirror_state(receipts=150, cwd=filler))
+        .subscribe(lambda _u: None)
+        .sync
+    )
+    snapshot = payload["snapshot"]
+    assert fs._frame_line_bytes(payload) <= limit
+    assert snapshot["pending_gate"]["kind"] == "ask"
+    assert [row["ask_id"] for row in snapshot["asks"]] == ["a-0000"]
+    assert snapshot["asks_open"] == 1
+    assert "asks_truncated" not in snapshot
+    # The receipts paid instead, oldest first.
+    assert 0 < len(snapshot["usage_components"]) < 150
+    assert snapshot["usage_components"][-1]["input_tokens"] == 150
 
 
 # ---------------------------------------------------------------------------

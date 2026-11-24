@@ -2733,7 +2733,7 @@ class WakeBlock(ExpandableActionBlock):
         # final line so truncation cannot orphan a bidi delimiter. No provenance
         # (`None`) means this identity is not catalogue copy: external tool and
         # model prose passes through untouched even under an Urdu preference.
-        summary = truncate_cells(identity, budget)
+        summary = self._fit_summary(identity, budget)
         if self._summary_source_locale is not None:
             summary = localized_display(summary, source_locale=self._summary_source_locale).plain
 
@@ -2753,6 +2753,18 @@ class WakeBlock(ExpandableActionBlock):
             row.append(" " * pad, style=dim)
             row.append(slot, style=dim)
         return row
+
+    def _fit_summary(self, identity: str, budget: int) -> str:
+        """The summary as it fits ``budget`` cells — the row's LAST cut.
+
+        A row whose summary is ONE sentence fits by losing its end, which is
+        what this does. A row whose summary is COMPOSED — an ask receipt is an
+        id, a name and a state — overrides this instead, so the part that can
+        give way shrinks and the part that carries the fact does not.
+        """
+        from local_operator.tui.widgets.tool_card import truncate_cells
+
+        return truncate_cells(identity, budget)
 
     def _build_content(self, width: int) -> Text:
         """The card: the one-row summary, plus the delivered prompt expanded."""
@@ -7501,12 +7513,49 @@ class AskResponseBlock(WakeBlock):
         kind: str,
         fold_width: int = 0,
     ) -> None:
-        #: ``"response"`` or ``"timeout"``. A string rather than a bool because
-        #: both branches read it and a third (a late answer is a response) would
-        #: otherwise arrive as a second boolean.
+        #: ``"response"``, ``"timeout"`` or ``"withdrawn"``. A string rather
+        #: than a bool because all three branches read it: an answer and a late
+        #: answer are responses, a deadline is its own receipt, and an ask the
+        #: AGENT took back is a third fact (nobody answered and nothing is owed).
         self._kind = kind
         self._details: dict[str, Any] = dict(details or {})
         super().__init__(str(self._details.get("text") or ""), fold_width=fold_width)
+
+    def _notice_fn(self) -> Callable[[Mapping[str, Any] | None], Any]:
+        """The shared ``(text, ink)`` author for this row's KIND.
+
+        One lookup rather than a ternary per caller: the summary, the fit and
+        the ink all resolve the same receipt, and three copies of the kind->
+        function mapping is how one of them ends up on the wrong words.
+        """
+        from local_operator.harness.rows import (
+            ask_response_notice,
+            ask_timeout_notice,
+            ask_withdrawn_notice,
+        )
+
+        return {
+            "timeout": ask_timeout_notice,
+            "withdrawn": ask_withdrawn_notice,
+        }.get(self._kind, ask_response_notice)
+
+    def _parts_fn(self) -> Callable[[Mapping[str, Any] | None], Any]:
+        """The shared ``(ask_id, name, state, ink)`` author for this KIND.
+
+        The parts form is what lets :meth:`_fit_summary` shrink the NAME and keep
+        the state whole; it is resolved beside :meth:`_notice_fn` so the two can
+        never name different receipts for one row.
+        """
+        from local_operator.harness.rows import (
+            ask_response_parts,
+            ask_timeout_parts,
+            ask_withdrawn_parts,
+        )
+
+        return {
+            "timeout": ask_timeout_parts,
+            "withdrawn": ask_withdrawn_parts,
+        }.get(self._kind, ask_response_parts)
 
     def _summary(self) -> tuple[str, str]:  # type: ignore[override]
         """``(identity, body)`` — the shared one-liner, and the envelope.
@@ -7516,13 +7565,38 @@ class AskResponseBlock(WakeBlock):
         a timeout carries no answers, and an older runtime's row may carry no
         ``questions`` at all, so the card would otherwise expand to nothing.
         """
-        from local_operator.harness.rows import ask_response_notice, ask_timeout_notice
-
-        if self._kind == "timeout":
-            identity, _ = ask_timeout_notice(self._details)
-        else:
-            identity, _ = ask_response_notice(self._details)
+        identity, _ = self._notice_fn()(self._details)
         return identity, str(self._details.get("text") or "")
+
+    def _fit_summary(self, identity: str, budget: int) -> str:
+        """Fit the receipt by shrinking the NAME; the STATE is never cut for it.
+
+        The whole-sentence fit (``WakeBlock._fit_summary``) trims the tail, and
+        on this row the tail IS the state — so at 80 columns a reader saw
+        ``Answered, d…`` and a timeout lost "the agent goes ahead without your
+        answer" entirely (review round 1, M1). The state is the audit content of
+        the row; the name is a handle that the id beside it already disambiguates.
+
+        So the parts are composed here instead: id, then the name fitted to the
+        room left at the END of the row, then the state whole. When the room is
+        too small for the name to be words at all (:data:`ASK_NAME_MIN_CELLS`),
+        the name is dropped rather than stubbed. ``identity`` is not read — the
+        parts carry the same words, and reading them is what lets the shrinking
+        land on one field.
+        """
+        from local_operator.harness.rows import ASK_NAME_MIN_CELLS, fit_name_cells
+        from local_operator.tui.widgets.tool_card import truncate_cells
+
+        ask_id, name, state, _ = self._parts_fn()(self._details)
+        id_only = f"{ask_id} — {state}"
+        if not name:
+            return truncate_cells(id_only, budget)
+        lead = f'{ask_id} · "'
+        tail = f'" — {state}'
+        room = budget - cell_len(lead) - cell_len(tail)
+        if room < ASK_NAME_MIN_CELLS:
+            return truncate_cells(id_only, budget)
+        return f"{lead}{fit_name_cells(name, room)}{tail}"
 
     def _summary_ink(self) -> str:
         """The receipt's ink is the SEVERITY the shared row computed, not the kind.
@@ -7542,10 +7616,7 @@ class AskResponseBlock(WakeBlock):
         one here rather than passed through, because ``_build_row`` hands this
         name to ``theme_mod.semantic_color``, which raises on a non-token.
         """
-        from local_operator.harness.rows import ask_response_notice, ask_timeout_notice
-
-        notice = ask_timeout_notice if self._kind == "timeout" else ask_response_notice
-        _, severity = notice(self._details)
+        _, severity = self._notice_fn()(self._details)
         return "warning" if severity == "warning" else super()._summary_ink()
 
     def _build_content(self, width: int) -> Text:  # type: ignore[override]

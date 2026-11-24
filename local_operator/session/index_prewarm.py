@@ -71,6 +71,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.session.cold_metadata import safe_metadata_path
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.replay_cache import (
@@ -558,28 +559,25 @@ def _write_settled(directory: Path, pin: NoAnchorPin) -> bool:
     path = _settled_path(directory)
     if path is None:
         return False
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(
+        atomic_write_text(
+            path,
+            json.dumps(
                 {
                     "schema": _SETTLED_SCHEMA,
                     "inode": pin.inode,
                     "size": pin.size,
                     "tail_digest": pin.tail_digest,
                     "reason": pin.reason,
-                },
-                handle,
-            )
-        os.replace(temporary, path)
+                }
+            ),
+            hidden=True,
+        )
         return True
     except OSError:
+        # The writer has already removed its own temp.
         logger.debug("prewarm settlement not written for %s", directory, exc_info=True)
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
         return False
 
 

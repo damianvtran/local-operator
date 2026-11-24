@@ -690,6 +690,26 @@ ASK_TIMEOUT_MESSAGE_TYPE = "ask_timeout"
 #: reason the other two do — the shared renderer must name it.
 ASK_RELAY_MESSAGE_TYPE = "ask_relay"
 
+#: The custom-message type of the row recording that the AGENT withdrew a queued
+#: ask (``ask_withdraw``, reason ``moot``). DISPLAY ONLY: the operator reads
+#: ``a-745e · "Settings layout" — Withdrawn by the agent``, and the model is
+#: told nothing — it asked the question and retracted it, so a second account of
+#: its own decision is what it least needs (the ``divergence_notice`` argument,
+#: one type across).
+#:
+#: WHY NOT ``ask_response`` WITH ``status="withdrawn"``. That type is a CARRIER:
+#: it is in ``MODEL_VISIBLE_INJECTED_TYPES`` and rendered by ``harness/render.py``,
+#: and the reconcile that writes it hands the row to the session's ask delivery,
+#: which buys a model turn to carry it. A withdrawal is bookkeeping about a
+#: question the model itself retracted; spending a turn on it is paying twice for
+#: a decision already taken. A separate type keeps this row off all of those
+#: paths by CONSTRUCTION rather than by a status check each one must remember.
+#:
+#: Its id is ``ask-withdrawn-<ask_id>`` (``asks.store.withdrawn_row_id``): the row
+#: IS the marker, so a replay or a re-plan is a constant-time
+#: ``transcript.has_entry`` check rather than a second line in the transcript.
+ASK_WITHDRAWN_MESSAGE_TYPE = "ask_withdrawn"
+
 #: The custom-message type the completion-time project check injects at the
 #: yield boundary (``Session._project_continuation``). Defined here beside
 #: ``TODO_REMINDER_MESSAGE_TYPE`` for the identical reason — the renderer, the

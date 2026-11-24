@@ -4853,7 +4853,7 @@ async def _stream_with_failover_events(
                     # (the primary outranks every hop), so a tail written here
                     # could promise a hop that has since failed. The walk's
                     # end adds it once, from the final state.
-                    missing = _no_credential_error(auth, provider)
+                    missing = _no_credential_error(auth, provider, model_id=spec.model_id)
                     waiter = owner_waits.get(route_key)
                     if (
                         waiter is not None
@@ -6360,7 +6360,9 @@ def _owner_wait_expired_error(waiter: Any, waited_s: float) -> ProviderError | N
     return _mark_prewire_refusal(ProviderError(None, reason, retryable=True, kind="unknown"))
 
 
-def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:
+def _no_credential_error(
+    auth: FailoverAuthStore, provider: str, *, model_id: str | None = None
+) -> ProviderError:
     """Say WHY no bearer could be resolved, distinguishing two opposite causes.
 
     Resolution returns ``None`` both when a provider has never been configured
@@ -6446,6 +6448,20 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
     # Retryable: the credential comes back on its own once the block expires,
     # which is materially different from a missing configuration.
     #
+    # WHY THE CAUSE IS NOW NAMED WHEN IT IS PROVEN (2026-11-23): all six Anthropic
+    # accounts had spent their weekly quota and this sentence still offered "rate
+    # limited, a token refresh failed, or the stored credential could not be read",
+    # which sent the diagnosis toward a routing defect. ``quota_eligibility`` reads
+    # the SAME two gates the selection applied (the persisted block and
+    # ``_reset_candidates``' usage verdict), so what it proves about the pool is
+    # what made the pick come back empty; see :func:`_pool_cause_clause`. Message
+    # text only: kind, retryability and ``request_sent`` are untouched.
+    facts = _quota_facts(auth, provider, model_id)
+    cause = _pool_cause_clause(facts, subject)
+    if cause is not None:
+        return _mark_prewire_refusal(
+            ProviderError(None, cause, retryable=True, kind="quota", request_sent=False)
+        )
     # The wording hedges on WHY deliberately. A row can also be present and
     # permanently unreadable -- a login flow storing a shape no cascade tier
     # resolves, which is what R21 was -- and for that user "temporarily
@@ -6460,13 +6476,148 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
                 f"{subject} not usable right now (rate limited, a token refresh "
                 "failed, or the stored credential could not be read). The "
                 "credentials are still configured; retry once the limit resets, or "
-                "sign in again to replace them."
+                "sign in again to replace them." + _uncertain_pool_note(facts)
             ),
             retryable=True,
             kind="quota",
             request_sent=False,
         )
     )
+
+
+def _wait_phrase(wait_ms: int) -> str:
+    """A coarse, always-true-as-minutes-pass duration: ``~48 min``, ``~3h 5m``.
+
+    Coarse on purpose, like ``quota_notice._reset_phrase`` (kept separate: that
+    one is private to the notice and phrased for a banner): the message is built
+    once and read later, and a second-accurate figure would be stale on arrival.
+    """
+    minutes = max(0, wait_ms) // 60_000
+    if minutes < 2:
+        return "under a minute"
+    if minutes < 90:
+        return f"~{minutes} min"
+    hours = wait_ms // 3_600_000
+    if hours < 48:
+        rest = (wait_ms % 3_600_000) // 60_000
+        return f"~{hours}h {rest}m" if rest else f"~{hours}h"
+    return f"~{wait_ms // 86_400_000} days"
+
+
+def _pool_cause_clause(facts: Any | None, subject: str) -> str | None:
+    """The pool-wide cause the SELECTOR proves, as a sentence; ``None`` = say nothing new.
+
+    Returns a sentence only for the two shapes ``AuthStore.quota_eligibility``
+    can PROVE -- every enabled row out of the selection on quota grounds:
+
+    * at least one row ``depleted`` -> the quota is spent. "Exhausted" is claimed
+      for the pool only when EVERY row is depleted: a row that is merely blocked
+      may be blocked by a failed token refresh (the same persisted block), which
+      is not spent quota, so a mix says how many are which.
+    * none ``depleted`` -> temporarily blocked, with no word about quota.
+
+    Anything else -- a row with ``unknown`` usage evidence (stale, missing or
+    unreadable), a store without the read, a read that raised, no ``model_id`` --
+    returns ``None`` and the caller keeps its hedge, extended by
+    :func:`_uncertain_pool_note`'s counts when the read did succeed. An empty pick with no proof of
+    exhaustion must never be reported as exhaustion.
+
+    The reopening time is stated ONLY when proven: ``retry_after_ms`` is non-zero
+    only when every row's own reopening is proven. Counts and durations only --
+    never an id, an email, an account or org name, or a provider error body.
+    """
+    if facts is None or not facts.all_quota_limited:
+        return None
+    rows = facts.rows
+    total = len(rows)
+    depleted = sum(1 for row in rows if row.usage_state == "depleted")
+    blocked = total - depleted
+    retry_after_ms = int(facts.retry_after_ms)
+    proven = retry_after_ms > 0 or all(row.wait_ms is not None for row in rows)
+    if depleted == 0:
+        # A live block with no spent usage: a rate limit or a failed refresh --
+        # the evidence does not say which, so neither is claimed.
+        sentence = (
+            f"{subject} not usable right now: temporarily blocked after a rate "
+            "limit or a failed token refresh"
+        )
+        tail = (
+            f" (retry in {_wait_phrase(retry_after_ms)})."
+            if retry_after_ms > 0
+            else ". When the block ends is not known."
+        )
+        return sentence + tail + " The credentials are still configured."
+    if blocked == 0:
+        sentence = f"{subject} not usable right now: their usage quota is exhausted"
+    else:
+        sentence = (
+            f"{subject} not usable right now: usage quota is exhausted on "
+            f"{depleted} of {total} and the other {blocked} are temporarily "
+            "blocked (a rate limit or a failed token refresh)"
+        )
+    if retry_after_ms > 0:
+        reopening = f"; earliest reopening in {_wait_phrase(retry_after_ms)}."
+    elif proven:
+        reopening = "; reopening is imminent."
+    else:
+        reopening = "; when the quota reopens is not known (no reset time is on record)."
+    return sentence + reopening + " The credentials are still configured."
+
+
+def _uncertain_pool_note(facts: Any | None) -> str:
+    """The honest count appended to the hedge when exhaustion is NOT established.
+
+    Says how many rows the selector proved out on quota grounds and how many it
+    could not (usage evidence missing, stale or unreadable), and states plainly
+    that spent quota is therefore not established. Empty when the read is
+    unavailable or the pool has no rows: nothing more is known than the hedge says.
+    """
+    if facts is None or not facts.rows:
+        return ""
+    total = len(facts.rows)
+    limited = sum(1 for row in facts.rows if row.quota_limited)
+    open_rows = total - limited
+    if open_rows == 0:
+        return ""
+    # An unblocked row is "open" whether its usage verdict is healthy or unknown
+    # (stale/missing data): the selector fails open on both, so neither proves a
+    # limit, and the empty pick then has another cause (a refresh that failed, or
+    # a row that cannot be read).
+    held = (
+        f"{limited} of {total} are out of quota or temporarily blocked, but the "
+        f"other {open_rows} show no spent quota or block"
+        if limited
+        else f"none of the {total} shows spent quota or a block"
+    )
+    return (
+        f" Spent quota is not established: {held} (usage data healthy, missing or "
+        "stale), so the cause may be a failed token refresh or an unreadable "
+        "credential."
+    )
+
+
+def _quota_facts(auth: Any, provider: str, model_id: str | None) -> Any | None:
+    """``AuthStore.quota_eligibility`` for this empty pick, or ``None`` when unavailable.
+
+    Duck-typed for the reason :func:`_no_credential_error` states (stores need not
+    expose it); the result is type-checked so a test double that answers anything
+    cannot be read as proof. Read-only and offline: it consults only the persisted
+    blocks and the cached usage evidence the selector already used -- no probe, no
+    network. Any failure is "not known", never an error: a diagnosis must not mask
+    the real failure.
+    """
+    if not model_id:
+        return None
+    read = getattr(auth, "quota_eligibility", None)
+    if not callable(read):
+        return None
+    from local_operator.providers.auth_store import QuotaEligibility
+
+    try:
+        facts = read(provider, model_id)
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return None
+    return facts if isinstance(facts, QuotaEligibility) else None
 
 
 def dead_grant_reason(auth: Any, provider: str) -> tuple[bool, str | None]:

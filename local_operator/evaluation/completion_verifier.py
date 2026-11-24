@@ -58,11 +58,12 @@ import re
 import shlex
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, NamedTuple
 
 from local_operator.harness.verifier import (
     CANCEL_JOIN_S,
     DEFAULT_LOCAL_TOOL_ALLOWANCE,
+    NOT_DISPATCHED_DETAIL,
     VerifierLimits,
 )
 from local_operator.harness.verifier_evidence import VerifierEvidence
@@ -322,6 +323,23 @@ class _NoTimeLeft(Exception):
     """A guest call that could not settle before the verification's deadline."""
 
 
+class InspectOutcome(NamedTuple):
+    """One ``inspect_command`` answer, and whether the command was sent.
+
+    ``dispatched`` is ``False`` when the inspector turned the call away
+    before the command reached the guest (outside a window, invalid
+    arguments, a write-pattern refusal, too long, no time left). The tool
+    marks such a result :data:`NOT_DISPATCHED_DETAIL` so the verifier's
+    command budget is not charged for it: two recorded checks lost a command
+    each to a write-pattern refusal that read nothing. A command that was
+    sent and FAILED is dispatched -- it may have run.
+    """
+
+    text: str
+    is_error: bool
+    dispatched: bool
+
+
 class VerifierInspector:
     """The verifier's guest reads, gated on the bridge's verification window.
 
@@ -476,11 +494,21 @@ class VerifierInspector:
         return fresh
 
     async def inspect(self, arguments: dict[str, Any]) -> tuple[str, bool]:
+        """``(text, is_error)`` of one inspection; see :meth:`inspect_outcome`."""
+
+        outcome = await self.inspect_outcome(arguments)
+        return outcome.text, outcome.is_error
+
+    async def inspect_outcome(self, arguments: dict[str, Any]) -> InspectOutcome:
         from local_operator.evaluation.adapters.api import MAX_COMMAND_LENGTH
 
         round_ = self._window()
         if round_ is None:
-            return "inspect_command is only available while a completion check is running.", True
+            return InspectOutcome(
+                "inspect_command is only available while a completion check is running.",
+                True,
+                False,
+            )
         command = arguments.get("command")
         timeout = arguments.get("timeout_s", INSPECT_DEFAULT_TIMEOUT_S)
         if (
@@ -490,10 +518,11 @@ class VerifierInspector:
             or type(timeout) is not int
             or not 1 <= timeout <= INSPECT_MAX_TIMEOUT_S
         ):
-            return (
+            return InspectOutcome(
                 "Invalid arguments: supply a command and an integer timeout_s "
                 f"between 1 and {INSPECT_MAX_TIMEOUT_S}.",
                 True,
+                False,
             )
         mode = await self.ensure_mode()
         row: dict[str, Any] = {
@@ -507,10 +536,11 @@ class VerifierInspector:
         if obvious_write(command):
             row.update(refused="write-pattern", exit_code=None, mutation_detected=None)
             self._emit(row)
-            return (
+            return InspectOutcome(
                 "Refused: that command looks like it writes or changes state. "
                 "Only read the deliverable.",
                 True,
+                False,
             )
         if mode == "audit":
             if round_ not in self._window_start:
@@ -523,21 +553,25 @@ class VerifierInspector:
         else:
             wire = sandboxed(command)
         if len(wire) > MAX_COMMAND_LENGTH:
-            return "Refused: the command is too long.", True
+            return InspectOutcome("Refused: the command is too long.", True, False)
         try:
             result = await self._guest(wire, float(timeout))
         except _NoTimeLeft:
             row.update(refused="deadline", exit_code=None, mutation_detected=None)
             self._emit(row)
-            return (
+            return InspectOutcome(
                 "No time left for another command: give your VERDICT now from what you "
                 "have already seen, ending with the VERDICT line.",
                 True,
+                False,
             )
         except Exception as error:  # noqa: BLE001 -- the verifier is told, the row records
             row.update(exit_code=None, error=f"{type(error).__name__}: {error}")
             self._emit(row)
-            return f"The target could not run the command ({type(error).__name__}).", True
+            # Sent, outcome unknown: it may have run, so it stays charged.
+            return InspectOutcome(
+                f"The target could not run the command ({type(error).__name__}).", True, True
+            )
         row.update(exit_code=result.exit_code, timed_out=result.timed_out)
         if mode == "audit":
             changed = await self._sweep(round_)
@@ -559,7 +593,7 @@ class VerifierInspector:
             if len(body) > INSPECT_OUTPUT_CHARS:
                 body = body[:INSPECT_OUTPUT_CHARS] + f"\n[TRUNCATED: {len(body)} chars]"
             text += f"{stream}:\n{body}\n"
-        return text, False
+        return InspectOutcome(text, False, True)
 
     def _emit(self, row: dict[str, Any]) -> None:
         if self._record is not None:
@@ -603,6 +637,8 @@ class VerifierInspector:
                             )
                         ],
                         is_error=True,
+                        # Nothing was inspected: not a spent command.
+                        details={NOT_DISPATCHED_DETAIL: True},
                     )
                 self._emit(
                     {
@@ -616,12 +652,15 @@ class VerifierInspector:
                     tool_name="inspect_command",
                     content=[TextContent(text=f"Evidence ID: {item.evidence_id}"), item.content],
                 )
-            text, is_error = await self.inspect(arguments)
+            outcome = await self.inspect_outcome(arguments)
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name="inspect_command",
-                content=[TextContent(text=text)],
-                is_error=is_error,
+                content=[TextContent(text=outcome.text)],
+                is_error=outcome.is_error,
+                # Only a call that never reached the guest is marked; the
+                # verifier's command budget refunds it (``counted_host_tools``).
+                details=None if outcome.dispatched else {NOT_DISPATCHED_DETAIL: True},
             )
 
         return AgentTool(

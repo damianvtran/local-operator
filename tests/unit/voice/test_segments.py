@@ -178,3 +178,37 @@ def test_speak_segments_passes_the_stand_in_words_through() -> None:
 
     reply = speak_segments("Mira https://example.com ya.", max_chars=500, link="enlace")
     assert "enlace" in reply.text and "link" not in reply.text
+
+
+def test_the_spoken_fields_are_unchanged_for_a_table_and_code_reply() -> None:
+    """Pins ``text``/``segments``/``truncated`` against the display-text work.
+
+    ``/voice/text``'s ``full_text`` is cleaned separately; these literals are what
+    ``speak_segments`` returned before it existed.
+    """
+    raw = (
+        "Status:\r\n\r\n| Hook | Fires | Fixes today? |\r\n|---|---|---|\r\n"
+        "| **Pre** | yes | no |\r\n\r\n- one\r\n- two\r\n\r\n```py\nx=1\n```\n"
+        "See [docs](https://a.com/x_y_z) or https://b.com/a_b_c now."
+    )
+    reply = speak_segments(raw, max_chars=800)
+    assert reply.text == (
+        "Status: Hook Fires Fixes today? Pre yes no one two (code block omitted) "
+        "See docs or link now."
+    )
+    assert reply.truncated is False
+    assert reply.segments == (
+        "Status: Hook Fires Fixes today? ",
+        "Pre yes no one two (code block omitted) See docs or link now.",
+    )
+    assert not hasattr(reply, "full_text")
+
+
+def test_speak_segments_reports_the_summary_source_and_segments_it() -> None:
+    reply = "Long report. " * 40 + "\n\nSpoken: Two short sentences. Heard once."
+    spoken = speak_segments(reply, max_chars=800)
+    assert spoken.source == "summary"
+    assert spoken.text == "Two short sentences. Heard once."
+    assert "".join(spoken.segments) == spoken.text
+    assert speak_segments("Long report. " * 40, max_chars=800).source == "reply"
+    assert speak_segments(reply, max_chars=800, summary=False).source == "reply"

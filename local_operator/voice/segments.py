@@ -55,6 +55,7 @@ class SpokenReply:
     text: str
     truncated: bool
     segments: tuple[str, ...]
+    source: voice_speakable.SpokenSource = "reply"
 
 
 _ZWJ = "\u200d"
@@ -160,6 +161,7 @@ def speak_segments(
     tail: str = voice_speakable.TRUNCATION_TAIL,
     code_omitted: str = voice_speakable.CODE_PLACEHOLDER,
     link: str = voice_speakable.LINK_WORD,
+    summary: bool = True,
 ) -> SpokenReply:
     """Clean, cap, then segment: the one call the voice routes make.
 
@@ -169,14 +171,18 @@ def speak_segments(
     its own final segment and never packs into a paid one. ``tail`` is that
     phrase in the caller's locale (the English sentence by default); so are
     ``code_omitted`` and ``link``, the words spoken for a skipped code block and
-    a web address.
+    a web address. ``source`` on the result says whether the agent's own
+    ``Spoken:`` paragraph was spoken or the whole reply; ``summary=False`` (a
+    gate card) never selects one.
     """
     spoken = voice_speakable.speakable(
-        raw, max_chars=max_chars, tail=tail, code_omitted=code_omitted, link=link
+        raw, max_chars=max_chars, tail=tail, code_omitted=code_omitted, link=link, summary=summary
     )
     text = spoken.text
     if spoken.truncated and text.endswith(tail):
         segments = [*segment(text[: -len(tail)]), tail]
     else:
         segments = segment(text)
-    return SpokenReply(text=text, truncated=spoken.truncated, segments=tuple(segments))
+    return SpokenReply(
+        text=text, truncated=spoken.truncated, segments=tuple(segments), source=spoken.source
+    )

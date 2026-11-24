@@ -51,6 +51,9 @@ from local_operator.harness.message_types import (
     ASK_TIMEOUT_MESSAGE_TYPE as ASK_TIMEOUT_CUSTOM_TYPE,
 )
 from local_operator.harness.message_types import (
+    ASK_WITHDRAWN_MESSAGE_TYPE as ASK_WITHDRAWN_CUSTOM_TYPE,
+)
+from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
@@ -64,6 +67,7 @@ from local_operator.harness.rows import (
     ask_gate_diverted_call_ids,
     ask_response_notice,
     ask_timeout_notice,
+    ask_withdrawn_notice,
     assistant_row_text,
     assistant_stop_notice,
     bridge_row,
@@ -2004,6 +2008,33 @@ def fold_messages_to_entries(
                                 str(key): [str(item) for item in (value or [])]
                                 for key, value in (details.get("answers") or {}).items()
                             },
+                            "at": int(details.get("at") or 0),
+                            "text": str(details.get("text") or ""),
+                            "severity": severity,
+                        },
+                    )
+                )
+                continue
+            if message.custom_type == ASK_WITHDRAWN_CUSTOM_TYPE:
+                # An ask the AGENT took back (display-only on this side too: the
+                # row never reaches the model). It is a ``notice`` rather than a
+                # new ``kind`` on purpose — a kind the client does not know yet
+                # is a row it cannot paint, and the typed facts a client would
+                # need to key it later ride ``details`` anyway. The text is the
+                # shared receipt, so the phone and the terminal state the same
+                # fact in the same words.
+                details = message.details or {}
+                text, severity = ask_withdrawn_notice(details)
+                entries.append(
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="notice",
+                        text=_compact(text, _NOTICE_CHARS),
+                        details={
+                            "ask_id": str(details.get("ask_id") or ""),
+                            "status": "withdrawn",
+                            "by": "agent",
+                            "questions": [dict(q) for q in (details.get("questions") or [])],
                             "at": int(details.get("at") or 0),
                             "text": str(details.get("text") or ""),
                             "severity": severity,

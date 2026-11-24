@@ -83,6 +83,7 @@ from rich.cells import cell_len
 
 from local_operator import heavy_lease, memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
+from local_operator.atomic_files import atomic_write_text, discard_temp, unique_temp
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.guardrails import interrupted_worktree_add
 from local_operator.guardrails import spawned as guard_spawned
@@ -670,19 +671,22 @@ def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
     NEVER A DIRECTORY: ``root`` is the session's scratchpad, which lives under
     ``sessions/<id>/`` — the tree the session-deletion guard
     (``tests/unit/session/test_no_session_deletion.py``) protects. The only
-    entries this function unlinks or replaces are the two fixed names
-    ``bin/<launcher-name>`` and ``bin/.<launcher-name>.<pid>.tmp``, and each is
-    ``lstat``-ed first: anything that is a real directory (not a symlink to one)
-    makes the shim give up, so a user's or another tool's directory at either
-    name is left byte-for-byte alone and the call falls back to no injection.
+    entry this function replaces is the fixed name ``bin/<launcher-name>``, and it
+    is ``lstat``-ed first: a real directory there (not a symlink to one) makes
+    the shim give up, so a user's or another tool's directory is left
+    byte-for-byte alone and the call falls back to no injection. The staging
+    entry is a per-write name (:func:`local_operator.atomic_files.unique_temp`):
+    two bash calls of one process building the shim at once each stage their
+    own, ``symlink_to``/``copyfile`` cannot land on anything pre-existing at a
+    name nobody else picks, and the only thing ever removed is this call's own
+    staging entry after a failure.
     """
     bin_dir = root / "bin"
     target = bin_dir / launcher.name
-    staged = bin_dir / f".{launcher.name}.{os.getpid()}.tmp"
     desired = _stable_launcher(launcher)
     try:
         bin_dir.mkdir(parents=True, exist_ok=True)
-        if _is_real_directory(target) or _is_real_directory(staged):
+        if _is_real_directory(target):
             return None
         if target.is_symlink():
             # ``exists()`` follows the link: a pruned generation reads as gone.
@@ -690,14 +694,17 @@ def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
                 return bin_dir
         elif target.is_file():
             return bin_dir
-        with contextlib.suppress(FileNotFoundError):
-            staged.unlink()
+        staged = unique_temp(target, hidden=True)
         try:
-            staged.symlink_to(desired)
-        except OSError:
-            shutil.copyfile(launcher, staged)
-            staged.chmod(0o755)
-        os.replace(staged, target)
+            try:
+                staged.symlink_to(desired)
+            except OSError:
+                shutil.copyfile(launcher, staged)
+                staged.chmod(0o755)
+            os.replace(staged, target)
+        except BaseException:
+            discard_temp(staged)
+            raise
         return bin_dir
     except OSError:
         logger.debug("could not build the lop shim directory under %s", root, exc_info=True)
@@ -2771,9 +2778,7 @@ def _rg_config_path() -> str | None:
         if not path.exists() or path.read_text(encoding="utf-8") != body:
             # Atomic replace: a concurrent `bash` call in another task must never
             # read a half-written config (review n2).
-            tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-            tmp.write_text(body, encoding="utf-8")
-            os.replace(tmp, path)
+            atomic_write_text(path, body)
         return str(path)
     except Exception:  # noqa: BLE001 — a missing nicety must never fail the command
         return None

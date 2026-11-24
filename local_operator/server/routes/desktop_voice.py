@@ -18,7 +18,8 @@ The frozen contract, which both repositories build against:
         rung failed); 422 invalid_voice_request | empty_transcript
     POST /v1/desktop/voice/text        body {session_id, source}
         source {kind: message, message_id} | {kind: gate, request_id}
-        200 {text, spoken_chars, truncated, segments}; 409 voice_not_enabled;
+        200 {text, spoken_chars, truncated, segments, full_text, spoken_source};
+        409 voice_not_enabled;
         404 unknown_source
     POST /v1/desktop/voice/speech      body {session_id, source, segment}
         source {kind: message, message_id} | {kind: gate, request_id} |
@@ -95,7 +96,10 @@ server resolves it (its title and description). That description is the tool's
 own approval summary, which can quote MODEL-WRITTEN arguments (a bash command, a
 path), so it is not host-authored prose; it is the same text the card shows on
 screen. Every source goes through ``voice/speakable.py`` (no code blocks, no
-URLs, a cap) and the cleaned text is RETURNED for the rig to speak verbatim.
+URLs, a cap) and the cleaned text is RETURNED for the rig to speak verbatim. A
+MESSAGE source is first narrowed to the agent's own ``Spoken:`` paragraph when
+it wrote one (``spoken_source``); a gate never is. Selection is a pure function
+of the message text, so ``/text`` and each ``/speech`` segment always agree.
 """
 
 from __future__ import annotations
@@ -1042,8 +1046,12 @@ async def voice_text(
         raw = await _gate_text(request, body.session_id, source.request_id, locale)
     if raw is None:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
+    words = _spoken_words(locale)
     spoken = voice_segments.speak_segments(
-        raw, max_chars=_max_spoken_chars(config_manager), **_spoken_words(locale)
+        raw,
+        max_chars=_max_spoken_chars(config_manager),
+        summary=source.kind == "message",
+        **words,
     )
     if not spoken.text:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
@@ -1053,6 +1061,8 @@ async def voice_text(
             spoken_chars=len(spoken.text),
             truncated=spoken.truncated,
             segments=list(spoken.segments),
+            full_text=voice_speakable.display_text(raw, code_omitted=words["code_omitted"]),
+            spoken_source=spoken.source,
         )
     )
 
@@ -1183,7 +1193,10 @@ async def voice_speech(
         words = _spoken_words(locale)
         tail = words["tail"]
         spoken = voice_segments.speak_segments(
-            raw, max_chars=_max_spoken_chars(config_manager), **words
+            raw,
+            max_chars=_max_spoken_chars(config_manager),
+            summary=source.kind == "message",
+            **words,
         )
         if not spoken.text:
             raise _refuse(404, "unknown_source", _wv.unknown_source())

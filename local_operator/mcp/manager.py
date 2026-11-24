@@ -90,10 +90,11 @@ from local_operator.mcp.secret_refs import resolve_config_secrets
 from local_operator.mcp.tool_bridge import (
     build_agent_tool,
     capture_producer_scope,
+    clean_outbound_args,
     create_mcp_tool_name,
     format_mcp_result,
     is_retriable_connection_error,
-    prepare_outbound_args,
+    outbound_args_note,
 )
 from local_operator.mcp.tool_cache import McpToolCache, config_digest
 from local_operator.optional import missing_extra_error
@@ -4660,7 +4661,37 @@ class McpManager:
             )
 
         properties, required, additional = self._schema_parts(conn, mcp_tool_name)
-        outbound = prepare_outbound_args(args, properties, required, additional)
+        prepared = clean_outbound_args(args, properties, required, additional)
+        outbound = prepared.cleaned
+        # Arguments a strict schema made us withhold are named in THIS call's
+        # result, whatever it turns out to be -- a success that ran on a
+        # default the model did not choose and a timeout the withheld
+        # ``timeout`` would have prevented are the two cases that otherwise
+        # look like the tool's own behaviour (see ``clean_outbound_args``).
+        #
+        # NOT on a call whose result text the harness parses itself: a monitor
+        # tick (``monitor_check``; ``is_record_log`` needs the WHOLE text to
+        # parse as JSON, and the tick's comparable text is this text, so the
+        # note would both lose the record view and register as one spurious
+        # change on every already-armed monitor) or a built-in's delegate
+        # (``result_parsed_by_harness``; ``web_search`` runs ``json.loads`` on
+        # it). No model reads those results raw, so the note could never be
+        # acted on there -- it could only corrupt what is parsed. The drop
+        # itself is unchanged on every path.
+        machine_read = context.monitor_check or context.result_parsed_by_harness
+        dropped_note = None if machine_read else outbound_args_note(prepared.rejected, properties)
+
+        def noted(result: ToolResult) -> ToolResult:
+            # Appended as its own block, after the tool's content: the
+            # server's text stays byte-identical for anything that reads it,
+            # and ``is_error`` is untouched -- the note explains a call, it
+            # never fails one. The leading newline keeps it on its own line
+            # where blocks are joined without a separator (``ToolResult.text``).
+            if dropped_note is None:
+                return result
+            return result.model_copy(
+                update={"content": [*result.content, TextContent(text="\n" + dropped_note)]}
+            )
 
         async def _call_once() -> CallToolResult:
             timeout_s = resolve_mcp_timeout_s(conn.config)
@@ -4685,11 +4716,11 @@ class McpManager:
                     except asyncio.CancelledError:
                         raise  # abort stays abort
                     except Exception as retry_exc:
-                        return self._error_result(tool_call_id, tool_label, retry_exc)
+                        return noted(self._error_result(tool_call_id, tool_label, retry_exc))
                 else:
-                    return self._error_result(tool_call_id, tool_label, exc)
+                    return noted(self._error_result(tool_call_id, tool_label, exc))
             else:
-                return self._error_result(tool_call_id, tool_label, exc)
+                return noted(self._error_result(tool_call_id, tool_label, exc))
         # Flattening can walk megabytes of MCP content and spilling performs
         # filesystem I/O. Keep both off the event loop so one verbose server
         # cannot starve streaming, cancellation, or sibling tool progress.
@@ -4699,13 +4730,15 @@ class McpManager:
         # never from anything the server sent; a block claiming an identity
         # of its own changes nothing downstream.
         producer_scope = capture_producer_scope(server_name, mcp_tool_name, context.session_id)
-        return await asyncio.to_thread(
-            format_mcp_result,
-            result,
-            tool_call_id,
-            tool_label,
-            context,
-            producer_scope=producer_scope,
+        return noted(
+            await asyncio.to_thread(
+                format_mcp_result,
+                result,
+                tool_call_id,
+                tool_label,
+                context,
+                producer_scope=producer_scope,
+            )
         )
 
     async def _race_abort(
