@@ -1073,6 +1073,71 @@ def test_a_construct_never_crosses_a_fence_or_a_blank_line():
     assert decorate_source(fenced, states) == fenced
 
 
+async def test_a_railed_block_still_drops_the_orphan_mark(monkeypatch, enabled):
+    """QA round 3, Q6: the shipped default paints the rail, and the orphan
+    check read column 0 as the ``▎``.
+
+    ``without_marks`` asks what a cell IS; on a railed row column 0 is the
+    gutter, so "the row opens with a mark" was never true and a drag that began
+    on a wrapped pair's mark copied it. The glyph path now hands it the BARE
+    row, with the painted columns shifted by the rail.
+    """
+    from textual.geometry import Offset
+
+    import local_operator.tui.widgets.assistant as assistant_mod
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    real = assistant_mod.settings_get
+    monkeypatch.setattr(
+        assistant_mod,
+        "settings_get",
+        lambda key, default=None: (True if key == "display.rail" else real(key, default)),
+    )
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(80, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a-745e", "Ship it?", status="withdrawn"), _row("a-e53b", "x")])
+        )
+        await pilot.pause()
+        prose = AssistantBlock()
+        prose.update_text(
+            "The old one, a-745e, is withdrawn and the relay smoke has already "
+            "run; the new question is a-e53b and it is still open."
+        )
+        app._append_block(prose)
+        await pilot.pause()
+        prose.finalize_text()
+        assert prose.copy_gutter(0) == 2, "the rail is not on; the case never ran"
+        folded = 0
+        for width in (40, 49, 50, 60):
+            prose.refit_width(width)
+            rendered = prose._render()
+            assert isinstance(rendered, Content)
+            rows = rendered.plain.split("\n")
+            for index in range(1, len(rows)):
+                opens_with_mark = rows[index].lstrip("\u258e ")[:1] in "●✓○"
+                prev_ends_with_id = (
+                    rows[index - 1].rstrip().rstrip("\u00a0").endswith(("a-745e", "a-e53b"))
+                )
+                if not (opens_with_mark and prev_ends_with_id):
+                    continue
+                folded += 1
+                for end in (1, 5):
+                    got = prose.get_selection(
+                        Selection.from_offsets(Offset(0, index), Offset(end, index))
+                    )
+                    assert got is not None
+                    assert "●" not in got[0] and "○" not in got[0] and NBSP not in got[0], (
+                        width,
+                        index,
+                        got,
+                    )
+        assert folded, "no width folded a pair with the rail on; the case never ran"
+
+
 def test_the_scan_is_linear_in_the_text():
     """R5-1/R6-1/R6-2: the scan must reach the scanner and stay linear.
 
