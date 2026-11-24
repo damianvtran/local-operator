@@ -49,6 +49,7 @@ import {
 } from "../lib/dictation";
 import {
 	markPendingEchoAccepted,
+	markPendingEchoWaking,
 	projectionCarriesCommand,
 	registerPendingEcho,
 	withdrawPendingEcho,
@@ -542,8 +543,11 @@ const RETRY_ACK_NOTICE = "Earlier instruction delivered. Your draft is ready to 
    (agent review round 2, R2-2): a new send replays the retained envelope first,
    and a `waking` answer means it is not delivered yet, so RETRY_ACK_NOTICE's
    "delivered" would be false. Without any line the tap looked like it did
-   nothing — the draft simply stayed. Same vocabulary ("earlier", "draft"). */
-const RETRY_WAKING_NOTICE = "Earlier instruction is still sending. Your draft is ready to send.";
+   nothing — the draft simply stayed. Same vocabulary ("earlier", "draft").
+   Design round 1, D1: "ready to send" invited exactly the send this line is
+   asking the user to hold, so it says when instead; the settle effect swaps it
+   for RETRY_ACK_NOTICE once the earlier instruction lands. */
+const RETRY_WAKING_NOTICE = "Earlier instruction is still sending. Send your draft once it's delivered.";
 /* U4: the reason the primary send is disabled while an uncertain envelope is
    pending — stated inline so the dead control reads as intentional. */
 const RETRY_DISABLED_HINT = "Resolve the earlier instruction first.";
@@ -1029,6 +1033,11 @@ export function Composer({
 	/* Success acknowledgement lives apart from `error` so it renders in the
 	   success token, not the danger alert (D11). */
 	const [notice, setNotice] = useState("");
+	/* Read by the waking settle effect (D1), which must not re-run per notice
+	   change: it swaps RETRY_WAKING_NOTICE for the delivered line only when that
+	   is still the line on screen, never over a notice that replaced it. */
+	const noticeRef = useRef(notice);
+	noticeRef.current = notice;
 	/* Deferred settings picks (model/effort sheets) and their late outcomes,
 	   per session in `lib/settings-defer`: the sheets close on the `queued` ack,
 	   so the refusal — which lands on a later repaint — is shown HERE, where it
@@ -1449,6 +1458,14 @@ export function Composer({
 		);
 		if (outcome === "delivered") {
 			wakingCommand.current = null;
+			if (waking) markPendingEchoWaking(pid, waking.commandId, false);
+			/* Design round 1, D1 (QA round 3, Q1): the "still sending" line told
+			   the user to wait for exactly this; leaving it up after the landing
+			   kept them waiting on nothing. Same success line as a plain retry. */
+			if (noticeRef.current === RETRY_WAKING_NOTICE) {
+				setNoticeTone("success");
+				setNotice(RETRY_ACK_NOTICE);
+			}
 			if (waking?.failed) {
 				const failedCopy = messageRuntime.t("relay.health.ended_send_failed");
 				setRetryEnvelope(null);
@@ -1472,6 +1489,9 @@ export function Composer({
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(messageRuntime.t("relay.health.ended_send_failed"));
 		} else if (outcome === null) {
+			/* Settled out from under the tracker (the envelope is gone): the row,
+			   if any is left, no longer knows a wake is running. */
+			if (waking) markPendingEchoWaking(pid, waking.commandId, false);
 			wakingCommand.current = null;
 		}
 	}, [pid, projection.transcript, projection.pid, projection.ended, projection.wake_failed]);
@@ -2020,6 +2040,8 @@ export function Composer({
 						sawLive: joined?.sawLive ?? false,
 						failed: false,
 					};
+					/* The row says the session is booting, not just "sending…" (D2). */
+					markPendingEchoWaking(pid, receipt.envelope.command_id, true);
 					/* A NEW draft that rode along (R2-2): the send replayed the retained
 					   earlier instruction, which is still waking, and the composer kept
 					   what the user just typed. Say so — the tap otherwise looked dead. */

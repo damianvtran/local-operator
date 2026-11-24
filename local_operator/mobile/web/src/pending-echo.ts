@@ -109,6 +109,16 @@ export interface PendingEcho {
 	    "we do not know yet" from "the session has it and has not written the row
 	    yet", and the two need different words (UX round 1, U2). */
 	accepted: boolean;
+	/** The relay answered this prompt `waking`: it is booting a runtime for a
+	    cold conversation and has not handed the command over yet (design round
+	    1, D2 on PR #4522). Still not accepted — nothing is admitted until the
+	    runtime is up — but the user is told WHY the row is taking a while, since
+	    a boot runs for seconds where an ordinary send takes a beat, and a bare
+	    `sending…` over that wait reads as stuck. Optional so every other
+	    producer (steers, warm prompts) stays as it was; set and cleared only by
+	    `markPendingEchoWaking`. The row itself leaves on land (the projection
+	    answers it) or on a failed wake (the composer withdraws it). */
+	waking?: boolean;
 }
 
 /** The kinds a row the USER authored can be written under, carrying the command
@@ -149,6 +159,10 @@ const COMMAND_ROW_KINDS: ReadonlySet<TranscriptEntry["kind"]> = new Set([
  * of them invites the user to send again:
  *
  *  - `sending…` — no receipt yet: nothing is known about what happened.
+ *  - `waking session…` — the receipt said the relay is still booting the
+ *    session's runtime: known to be underway, not yet admitted (design round
+ *    1, D2 on PR #4522). Plain English like its neighbours: these captions
+ *    are hardcoded here, not message-catalog keys.
  *  - `queued …` — the receipt named a STEER. The message was delivered and is
  *    waiting for a turn boundary, which is the state the composer's own footer
  *    prints as `N queued`; saying `sending…` there for the rest of a turn that
@@ -160,7 +174,7 @@ const COMMAND_ROW_KINDS: ReadonlySet<TranscriptEntry["kind"]> = new Set([
  *    imminent.
  */
 export function pendingEchoCaption(echo: PendingEcho, streaming: boolean): string {
-	if (!echo.accepted) return "sending…";
+	if (!echo.accepted) return echo.waking ? "waking session…" : "sending…";
 	if (echo.op !== "steer") return "sent";
 	return streaming ? "queued — sends when this step finishes" : "queued — sends with your next message";
 }
@@ -220,6 +234,25 @@ export function markPendingEchoAccepted(sessionId: string, commandId: string): v
 	if (index === -1 || held[index].accepted) return;
 	const next = [...held];
 	next[index] = { ...next[index], accepted: true };
+	echoes.set(sessionId, next);
+	emit();
+}
+
+/** Record whether the relay is still waking the session for this command, so
+ *  the row can say so instead of a bare `sending…` (design round 1, D2).
+ *
+ * Set by the composer on a `waking` receipt and cleared when that wake settles
+ * without the row having gone (an untracked settle). Silently a no-op when the
+ * echo is gone or the flag already reads that way: a landed row is retired by
+ * the projection and a failed wake withdraws it, so both may race this call.
+ */
+export function markPendingEchoWaking(sessionId: string, commandId: string, waking: boolean): void {
+	const held = echoes.get(sessionId);
+	if (!held) return;
+	const index = held.findIndex((item) => item.commandId === commandId);
+	if (index === -1 || (held[index].waking ?? false) === waking) return;
+	const next = [...held];
+	next[index] = { ...next[index], waking };
 	echoes.set(sessionId, next);
 	emit();
 }

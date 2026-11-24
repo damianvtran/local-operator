@@ -23,6 +23,12 @@
 // other-command marker and the no-marker fallback cells are guards that hold
 // on both heads.
 //
+// Design round 1 (D1, with QA round 3 Q1; D2) extends the last cells, RED on
+// 56486317: R2-2's notice now asks the user to wait and becomes the delivered
+// line on landing (red twice there — on the copy, and with the copy alone on
+// the swap), and the two D2 cells read `sending…` where the row should say
+// `waking session…`.
+//
 // Like `pending-echo.test.tsx`, the render site is the REAL `SessionScreen`
 // and `Composer` — the health that caused this is computed between them —
 // with only the projection slot and the network faked.
@@ -55,6 +61,10 @@ const STORAGE_KEY = ["lo-mobile-command", "s1"].join(":");
 const FAILED_COPY =
 	"This session has ended and couldn't be reopened just now. Try again, or tap “Ended” at the top and choose Resume.";
 const WAKING = { ok: true, detail: "session is waking", waking: true };
+/* The composer's R2-2 notice while the replayed earlier instruction is still
+   waking, and the success line it becomes once that instruction lands (D1). */
+const WAKING_NOTICE = "Earlier instruction is still sending. Send your draft once it's delivered.";
+const DELIVERED_NOTICE = "Earlier instruction delivered. Your draft is ready to send.";
 
 let slot: { projection: SessionProjection | null; connected: boolean } = {
 	projection: null,
@@ -281,10 +291,48 @@ describe("a cold prompt answered `waking`", () => {
 			text: SENT,
 		});
 
-		await waitFor(() =>
-			expect(screen.getByText("Earlier instruction is still sending. Your draft is ready to send.")).toBeTruthy(),
-		);
+		/* Design round 1, D1 (QA round 3, Q1): the line asks the user to WAIT —
+		   "ready to send" invited the very send it was holding back. */
+		await waitFor(() => expect(screen.getByText(WAKING_NOTICE)).toBeTruthy());
+		expect(screen.queryByText(DELIVERED_NOTICE)).toBeNull();
 		expect((await composer()).value).toBe("a second thought");
 		expect(screen.queryByRole("alert")).toBeNull();
+
+		/* The earlier instruction lands: the line it was waiting on is now
+		   true the other way, so it becomes the delivered acknowledgement and
+		   the new draft stays where it is. */
+		view.publish(
+			frame({ pid: 4242, kind: "tui", transcript: [userRow("existing", "an older message"), userRow(COMMAND_ID, SENT)] }),
+		);
+		await waitFor(() => expect(screen.getByText(DELIVERED_NOTICE)).toBeTruthy());
+		expect(screen.queryByText(WAKING_NOTICE)).toBeNull();
+		expect((await composer()).value).toBe("a second thought");
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
+	it("captions the row `waking session…` while the wake runs, until it fails (D2)", async () => {
+		const view = open();
+		await sendWaking(view);
+
+		/* The boot takes seconds; the row says why rather than a bare
+		   `sending…` that reads as stuck. */
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("waking session…"));
+		expect(pendingRows(view)[0]?.textContent).not.toContain("sending…");
+
+		view.publish(frame({ ended: true, wake_failed: COMMAND_ID }));
+		await waitFor(() => expect(pendingRows(view)).toHaveLength(0));
+		expect(screen.queryByText("waking session…")).toBeNull();
+	});
+
+	it("drops the waking caption with the row when the message lands (D2)", async () => {
+		const view = open();
+		await sendWaking(view);
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("waking session…"));
+
+		view.publish(
+			frame({ pid: 4242, kind: "tui", transcript: [userRow("existing", "an older message"), userRow(COMMAND_ID, SENT)] }),
+		);
+		await waitFor(() => expect(pendingRows(view)).toHaveLength(0));
+		expect(screen.queryByText("waking session…")).toBeNull();
 	});
 });
