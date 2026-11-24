@@ -1467,3 +1467,83 @@ def _replay_history(config: Path) -> list[AgentMessage]:
 
     history, _keep_start_id = _replay(_journal_entries(config / "sessions" / SESSION_ID))
     return history
+
+
+def test_a_short_compacted_seed_tells_clients_older_rows_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4521 QA Q3: a 3-turn kept window seeds a few rows and pins nothing.
+
+    With the carried copies shed, nothing pads a compacted render past the cap
+    any more, so neither the pin nor the 80-row length tells a client the seed
+    is partial — the relay SPA painted no load-earlier slot and made no fetch,
+    and every summarised turn was out of reach. ``transcript_has_older`` is the
+    wire fact; the pin must still be absent (QA Q1), and the walk from the
+    seed's own oldest row must reach the journal's first row.
+    """
+    config = tmp_path / "config"
+    _build_many_preserved(config, kept_turns=3)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    projection = _durable_projection(SESSION_ID)
+    assert projection is not None
+    seed = [row.id for row in projection.transcript]
+    assert len(seed) < PROJECTION_TRANSCRIPT_LIMIT, "the fixture must be a SHORT seed"
+    wire = projection.to_json()
+    assert wire.get("transcript_has_older") is True, f"short compacted seed {seed!r} says nothing"
+    assert "transcript_head_pinned" not in wire, "a short compacted seed pinned an opener"
+    assert "req-0" not in seed
+
+    walk = _walk(config, monkeypatch, page=50)
+    assert walk["exhausted"]
+    assert _observed(walk)[0] == "req-0"
+
+
+def test_has_older_is_absent_on_a_complete_transcript_and_reset_by_a_re_seed(
+    tmp_path: Path,
+) -> None:
+    """The field must not claim a past a transcript does not have: an
+    uncompacted short session is complete (absent, so an older-daemon reading
+    and this one agree), and because the fact is sticky across live appends,
+    ``fold_history`` is what clears it when the same fold is re-seeded."""
+    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.mobile.types import SessionProjection
+    from local_operator.mobile.types import TranscriptEntry as Row
+
+    config = tmp_path / "config"
+    _build_many_preserved(config, kept_turns=3)
+    compacted = _replay_history(config)
+
+    fold = ProjectionFold(SessionProjection(session_id=SESSION_ID, pid=0, kind="daemon"))
+    fold.fold_history(_uncompacted_history(turns=5))
+    assert "transcript_has_older" not in fold.projection.to_json()
+
+    fold.fold_history(compacted)
+    assert fold.projection.transcript_has_older is True
+    # Sticky through live appends, including past the cap where the trim drops
+    # the marker that first said so.
+    for index in range(PROJECTION_TRANSCRIPT_LIMIT + 5):
+        fold._append(Row(id=f"live-{index}", kind="assistant", text="body"))
+    assert fold.projection.transcript_has_older is True
+    assert fold.projection.transcript_head_pinned is False
+
+    fold.fold_history(_uncompacted_history(turns=5))
+    assert fold.projection.transcript_has_older is False, "a stale past outlived the re-seed"
+
+
+def test_the_frame_cap_says_older_rows_exist_when_it_cuts_a_short_head() -> None:
+    """``cap_projection_frame``'s tail tier trims below the fold's own length,
+    so it must state the fact itself: a 40-row fold says nothing (complete), and
+    the frame it halves to fit does."""
+    from local_operator.mobile.projection import ProjectionFold, cap_projection_frame
+    from local_operator.mobile.types import SessionProjection
+    from local_operator.mobile.types import TranscriptEntry as Row
+
+    fold = ProjectionFold(SessionProjection(session_id="short", pid=0, kind="daemon"))
+    for index in range(40):
+        fold._append(Row(id=f"row-{index}", kind="assistant", text="body " * 40))
+    assert fold.projection.transcript_has_older is False
+    frame, degraded = cap_projection_frame(fold.projection, cap_bytes=4_000)
+    assert degraded and len(frame["transcript"]) < 40
+    assert frame["transcript_has_older"] is True
+    roomy, roomy_degraded = cap_projection_frame(fold.projection)
+    assert not roomy_degraded and "transcript_has_older" not in roomy

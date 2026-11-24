@@ -1615,7 +1615,15 @@ def cap_projection_frame(
         )[0]
     )
     while len(entries) > FRAME_CAP_TRANSCRIPT_FLOOR:
-        entries = entries[-limit:]
+        trimmed = entries[-limit:]
+        # A head this tier actually trims means older rows exist, even when the
+        # fold's own transcript was short enough to say nothing
+        # (``SessionProjection.transcript_has_older``).
+        head_cut = len(trimmed) < len(entries)
+        entries = trimmed
+        if head_cut and not data.get("transcript_has_older"):
+            data["transcript_has_older"] = True
+            dirty.add("transcript_has_older")
         if first_user is not None and first_user not in entries:
             entries = [first_user, *entries[1:]]
             # THE PINNED-HEAD FACT reaches the client here, because the client
@@ -2644,8 +2652,10 @@ class ProjectionFold:
         # The rebuilt transcript IS journal order; a delivery slot recorded
         # against the replaced rows has nothing left to describe.
         self.projection.steer_journal_order = {}
-        # A wholesale rebuild re-decides the opener from the whole render.
+        # A wholesale rebuild re-decides the opener — and whether older rows
+        # exist (the only reset of that sticky fact) — from the whole render.
         self.projection.transcript_opener_absent = False
+        self.projection.transcript_has_older = False
         self.projection.transcript = self._cap_tail(entries)
         from local_operator.mobile.peer_cycles import retained_peer_graphs
 
@@ -4790,7 +4800,20 @@ class ProjectionFold:
         """
         if len(entries) <= PROJECTION_TRANSCRIPT_LIMIT:
             self.projection.transcript_head_pinned = False
+            # A SHORT render can still have a past: one that opens at a
+            # compaction marker is the kept window, and every turn the
+            # compaction summarised sits older in the journal (PR #4521 QA Q3:
+            # a 3-turn kept window seeded 14 rows, and the relay SPA offered no
+            # way to reach the 120 turns behind it). Sticky: once true it stays
+            # true until ``fold_history`` re-seeds.
+            if not self.projection.transcript_has_older:
+                self.projection.transcript_has_older = _opening_user_row(
+                    entries, lambda row: row.kind, lambda row: row.custom_type or ""
+                )[1]
             return entries
+        # Past the cap rows are trimmed off the head, so older rows exist
+        # whether or not an opener gets pinned above them.
+        self.projection.transcript_has_older = True
         tail = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
         first_user: TranscriptEntry | None = None
         if not self.projection.transcript_opener_absent:

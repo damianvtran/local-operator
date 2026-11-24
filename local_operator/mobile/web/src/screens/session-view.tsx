@@ -985,6 +985,7 @@ export function SessionScreen({
 					entries={projection.transcript}
 					peerCycles={projection.peer_cycles === 1}
 					headPinned={projection.transcript_head_pinned}
+					hasOlder={projection.transcript_has_older}
 					pending={pendingEchoes}
 					streaming={projection.streaming}
 					revealEpoch={projectionRevealEpoch(projection, connected)}

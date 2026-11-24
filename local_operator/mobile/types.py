@@ -1305,6 +1305,30 @@ class SessionProjection:
     #: ``cap_projection_frame`` (or a smaller daemon cap) breaks that and
     #: reopens R1-1; such a change must first get this decision to the daemon.
     transcript_opener_absent: bool = False
+    #: OLDER ROWS EXIST THAN THIS TRANSCRIPT HOLDS: the journal has rows older
+    #: than ``transcript``'s oldest (unpinned) row, so a client must offer "load
+    #: earlier" and may page from the tail's oldest row. True when the render
+    #: OPENS AT A COMPACTION MARKER (the durable seed and the live fold both
+    #: start at the newest marker) or when a cap trimmed rows off the head.
+    #:
+    #: WHY A SEPARATE FIELD (PR #4521 QA Q3): before #4521 the compaction's
+    #: carried user copies padded every compacted render past 80 rows, so the
+    #: 80-row cap pinned an opener and ``transcript_head_pinned`` doubled as
+    #: "capped". With the copies shed, a compacted session whose kept window
+    #: is short seeds e.g. 14 rows with no pin, and the relay SPA read that as
+    #: the WHOLE conversation: no load-earlier slot, no mount fetch, and nothing
+    #: to scroll, so every turn before the compaction was unreachable. The pin
+    #: cannot be reused to say this: both clients detach ``transcript[0]`` as
+    #: the opener when it is set (the RN app regardless of the row's kind), which
+    #: is exactly the false opener Q1 removed. So "older rows exist" and "row 0
+    #: is the pinned opener" are two facts on the wire.
+    #:
+    #: STICKY until a wholesale re-seed (``ProjectionFold.fold_history``): the
+    #: transcript's head only moves forward, so once older rows exist they keep
+    #: existing; the trim that drops the marker must not forget it.
+    #: SPARSE and ADDITIVE: absent means false, which is what an older daemon
+    #: meant; an older client ignores the key.
+    transcript_has_older: bool = False
     #: WHERE EACH DELIVERED PHONE STEER SITS IN THE JOURNAL: steer row id -> the
     #: id of the row it follows there. A phone steer is painted at SEND time
     #: (``ProjectionFold.note_user_message``) and upgraded in place when the
@@ -1436,6 +1460,8 @@ class SessionProjection:
         if not self.transcript_head_pinned:
             data.pop("transcript_head_pinned", None)
         data.pop("transcript_opener_absent", None)
+        if not self.transcript_has_older:
+            data.pop("transcript_has_older", None)
         if not self.steer_journal_order:
             data.pop("steer_journal_order", None)
         if self.peer_cycles is None:
