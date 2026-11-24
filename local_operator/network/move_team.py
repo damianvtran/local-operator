@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any
@@ -316,7 +316,15 @@ def _ceiling(name: str, allowed: Any, actual: dict[str, Any]) -> None:
         actual["kind"],
         actual["digest"],
     ):
-        raise TeamIdentityRefused(name, f"role definition {actual['name']!r} is unavailable")
+        # The definition IS here; it is just not the one the record attested
+        # (including one appearing where the record attested none). Saying
+        # "unavailable" sent readers looking for a missing file.
+        raise TeamIdentityRefused(
+            name,
+            # i18n: ignore technical diagnostic carried verbatim by the relay protocol
+            f"role definition {actual['name']!r} differs from the recorded one; "
+            "re-attach via /team",
+        )
 
 
 def _role_authority(
@@ -401,6 +409,12 @@ class TeamAuthority:
     #: unresolved ghost and a launch of it is a ``TeamLaunchError`` -- while a
     #: record that attested a REAL team keeps the definitions-sync wait.
     absent_teams: frozenset[str] = frozenset()
+    #: Whether THIS device's operator chose the binding with a local ``/team``
+    #: (directly, or by restoring a journal that one wrote). False for a mesh
+    #: arrival/replica and for any snapshot not made by
+    #: :func:`bind_runtime_authority`, so the default is the closed one: see
+    #: :func:`live_member_roster` for what it gates.
+    explicit_local: bool = False
 
     def record(self) -> dict[str, Any]:
         return {
@@ -726,6 +740,13 @@ def bind_runtime_authority(
     record = snapshot.record()
     if restoring:
         _compare(expected, record, local=True)
+    # ``isinstance``: a restore only reaches here after _compare accepted
+    # ``expected`` as a record; anything else must never read as an explicit
+    # local choice.
+    explicit_local = not restoring or (
+        isinstance(expected, dict) and expected.get("explicit_local") is True
+    )
+    snapshot = replace(snapshot, explicit_local=explicit_local)
     if directory is not None:
         # Tightening must survive reopen and the next hop. In particular, an
         # intermediate owner's reopened brief is not pinned to an old digest.
@@ -733,11 +754,136 @@ def bind_runtime_authority(
             directory,
             {
                 **record,
-                # ``isinstance``: a restore only reaches here after _compare
-                # accepted ``expected`` as a record; anything else must never
-                # read as an explicit local choice.
-                "explicit_local": not restoring
-                or (isinstance(expected, dict) and expected.get("explicit_local") is True),
+                "explicit_local": explicit_local,
             },
         )
     return snapshot
+
+
+# ---------------------------------------------------------------------------
+# The split: tool authority is snapshotted, the model tier is read live
+# ---------------------------------------------------------------------------
+#
+# WHY. A bound session resolves every roster read against the snapshot taken at
+# ``/team`` attach (``TeamAuthority.teams``), because that snapshot IS the
+# authority: which slots exist, which roles they run as, and what tools those
+# roles hold. Freezing the member ``tier``/``effort`` along with it broke the
+# documented promise (teams guide; ``_reread_roster``) that "edit the override,
+# then the next launch -- or resume -- uses it". So the two halves are split:
+#
+# * Tool authority (roster shape, manager, roles, pins, delegation, depth) stays
+#   the snapshot. Nothing below can add, remove or re-role a slot.
+# * ``tier``/``effort`` on an EXISTING slot are re-read from the registry.
+#
+# CONSTRAINTS that keep the live read from becoming a back door:
+#
+# 1. Whole-row gate. The live row is used only when it equals the snapshot in
+#    EVERY field once member ``tier``/``effort`` are set aside (id, name,
+#    manager, members and their order/kind/count/saver, briefs, labels...).
+#    Any other difference means the row was edited in ways that need a fresh
+#    ``/team``, so the snapshot is used whole -- a live read can never smuggle
+#    in a different authority alongside a tier change.
+# 2. Provider ceiling. A tier names a model, and a model names a PROVIDER (the
+#    selector's ``provider`` token, which is also the account it routes
+#    through), i.e. where the conversation's data goes. The binding authorized
+#    the provider the snapshotted tier resolved to. A live tier is taken only
+#    when it resolves to that same provider; otherwise the snapshotted tier (and
+#    effort) are kept for that slot and the reason is returned. "Cannot tell"
+#    (no tier on either side, the inherit sentinel, an unconfigured or malformed
+#    tier, an unreadable config) is treated as crossing: fail closed. An
+#    effort-only edit cannot change the provider and is always taken.
+# 3. Mesh replicas. A binding that no local ``/team`` produced (a mesh arrival,
+#    a synced replica: ``explicit_local`` False) keeps the snapshot's tiers
+#    until the operator attaches locally: a synced tier edit is somebody else's
+#    choice of provider, and therefore of where this device's data goes.
+#
+# Every gating decision is made against the snapshot; the live row only ever
+# supplies the two fields, and only after those checks admit them.
+
+#: The only member fields a live re-read may supply.
+_LIVE_MEMBER_FIELDS = frozenset({"tier", "effort"})
+
+
+def _authority_shape(team: Team) -> dict[str, Any]:
+    """Everything in a team row except the fields a live read may supply."""
+    data = team.model_dump(mode="json")
+    for member in data.get("members") or ():
+        for field in _LIVE_MEMBER_FIELDS:
+            member.pop(field, None)
+    return data
+
+
+def _tier_provider(tier: str | None, targets: Any) -> str | None:
+    """The provider token ``tier`` routes to, or ``None`` when it cannot be told."""
+    from local_operator.harness.subagent import is_inherit_tier_sentinel
+
+    if not tier:
+        return None
+    raw = targets.get(tier, (None, None))[0]
+    if not isinstance(raw, str) or is_inherit_tier_sentinel(raw):
+        return None
+    provider, _, model_id = raw.strip().partition("/")
+    return provider if provider and model_id else None
+
+
+def live_member_roster(
+    authority: TeamAuthority, snapshot: Team | None, live: Team | None
+) -> tuple[Team | None, list[str]]:
+    """The roster a bound launch reads member overrides from, plus why any
+    live edit was held back. See the section comment above for the rules.
+
+    Returns ``snapshot`` unchanged unless every rule admits a live field.
+    """
+    if snapshot is None or live is None:
+        return snapshot, []
+    if _authority_shape(live) != _authority_shape(snapshot):
+        # Not a tier-only edit: the row now says something the binding never
+        # authorized. Nothing is taken; the remedy is the usual re-attach.
+        return snapshot, []
+    edited = [
+        (old, new)
+        for old, new in zip(snapshot.members, live.members, strict=True)
+        if (old.tier, old.effort) != (new.tier, new.effort)
+    ]
+    if not edited:
+        return snapshot, []
+    if not authority.explicit_local:
+        return snapshot, [
+            f"team {snapshot.name!r} slot {new.role!r}: kept the attached tier "
+            f"{old.tier or 'none'!r}; a synced tier edit ({new.tier or 'none'!r}) on a "
+            "mesh replica is a choice of provider and waits for a local /team"
+            for old, new in edited
+        ]
+    from local_operator.harness.subagent import read_effort_tier_targets
+
+    targets: Any = None
+    reasons: list[str] = []
+    accepted: dict[int, Any] = {}
+    for index, (old, new) in enumerate(zip(snapshot.members, live.members, strict=True)):
+        if (old.tier, old.effort) == (new.tier, new.effort):
+            continue
+        if old.tier == new.tier:
+            accepted[index] = old.model_copy(update={"effort": new.effort})
+            continue
+        if targets is None:
+            try:
+                targets = read_effort_tier_targets()
+            except Exception as error:  # noqa: BLE001 — unreadable config fails closed
+                targets = {}
+                logger.debug("tier map unreadable for a live tier check: %s", error)
+        before = _tier_provider(old.tier, targets)
+        after = _tier_provider(new.tier, targets)
+        if before is not None and before == after:
+            accepted[index] = old.model_copy(update={"tier": new.tier, "effort": new.effort})
+            continue
+        reasons.append(
+            # i18n: ignore technical diagnostic logged for the operator, English-only
+            f"team {snapshot.name!r} slot {new.role!r}: kept the attached tier "
+            f"{old.tier or 'none'!r} (provider {before or 'unresolved'}); the edited tier "
+            f"{new.tier or 'none'!r} routes to provider {after or 'unresolved'}, which "
+            "this binding did not authorize; re-attach via /team to use it"
+        )
+    if not accepted:
+        return snapshot, reasons
+    members = [accepted.get(index, member) for index, member in enumerate(snapshot.members)]
+    return snapshot.model_copy(update={"members": members}), reasons

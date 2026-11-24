@@ -458,8 +458,12 @@ def test_a_missing_definition_waits_only_when_the_record_attested_one(tmp_path, 
     with pytest.raises(TeamIdentityRefused) as widened:
         _compare(without, with_role, local=False, exact_revision=True)
     assert not is_pending_definition(widened.value), widened.value
+    # The definition appeared; it is not "unavailable" (R2).
+    assert "differs from the recorded one" in str(widened.value), widened.value
 
-    teams.create_team(TeamEditFields(name="pod", manager="manager"))
+    # Manager ``worker`` (already a role key), so the roles set is unchanged and
+    # only the team comparison can decide the next two cases (R1).
+    teams.create_team(TeamEditFields(name="pod", manager="worker"))
     with_team = _record_on(teams, bare)
     with pytest.raises(TeamIdentityRefused) as team_waiting:
         _compare(with_team, without, local=False, exact_revision=False)
@@ -467,6 +471,7 @@ def test_a_missing_definition_waits_only_when_the_record_attested_one(tmp_path, 
     with pytest.raises(TeamIdentityRefused) as team_widened:
         _compare(without, with_team, local=False, exact_revision=False)
     assert not is_pending_definition(team_widened.value), team_widened.value
+    assert "team definition 'pod' does not match" in str(team_widened.value)
 
 
 @pytest.mark.asyncio

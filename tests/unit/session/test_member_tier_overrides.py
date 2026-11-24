@@ -605,6 +605,162 @@ async def test_a_resume_follows_an_override_edited_since_the_launch(tmp_path, mo
         await session.dispose()
 
 
+# ---------------------------------------------------------------------------
+# The split (branch fix/mobility-team-identity, decision A): a bound session
+# snapshots TOOL AUTHORITY at /team attach and reads only tier/effort live, and
+# only to a provider the binding already authorized
+# (``move_team.live_member_roster``).
+# ---------------------------------------------------------------------------
+
+
+def _tool_names(request: ChatRequest) -> set[str]:
+    return {tool.name for tool in request.tools}
+
+
+def _pin_tools(agents: AgentRegistry, tools: list[str], *, creating: bool) -> None:
+    write_profile(
+        agents,
+        AgentParams(
+            op="create" if creating else "update",
+            name="worker",
+            description="worker role",
+            instructions="You are worker.",
+            tools=tools,
+        ),
+        creating=creating,
+        scope="global",
+    )
+
+
+@pytest.mark.asyncio
+async def test_split_a_tier_edit_reaches_a_resumed_bound_child(tmp_path, monkeypatch):
+    """The documented resume rule on a BOUND session: the slot's tier is edited
+    after the launch (same provider), and the resumed child runs on the new
+    tier's model."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "hi": HI})
+    registry = TeamRegistry(config)
+    team = make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+
+    stream = RecordingStream()
+    session = make_session(tmp_path, registry, stream, team="teamwork")
+    try:
+        assert session._team_authority is not None and session._team_authority.explicit_local
+        row = await launch(session, stream, "do the work", agent="worker")
+        assert row.model_label == LO
+
+        registry.update_team(
+            team.id, TeamEditFields(members=[TeamMember(role="worker", tier="hi")])
+        )
+        text = await hub_resume(session, row.id)
+        await wait_for(lambda: completed(session, resumed_id(session, text)))
+        assert stream.model_for(RESUME_PROMPT) == HI
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_split_a_tool_authority_edit_does_not_reach_a_resumed_child(tmp_path, monkeypatch):
+    """The confinement half: the role gains a tool pin, and the roster gains a
+    slot alongside the tier edit. The resumed child keeps the attach-time tools,
+    and because the row is no longer a tier-only edit the tier is NOT taken
+    either -- a live read cannot ride in beside an authority change."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "hi": HI})
+    agents = AgentRegistry(tmp_path / "agents")
+    _pin_tools(agents, ["hub"], creating=True)
+    registry = TeamRegistry(config)
+    team = make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+
+    stream = RecordingStream()
+    session = make_session(tmp_path, registry, stream, team="teamwork", agents=agents)
+    try:
+        row = await launch(session, stream, "do the work", agent="worker")
+        (born,) = stream.requests_for("do the work")
+        assert "hub" in _tool_names(born) and "jobs" not in _tool_names(born)
+
+        _pin_tools(agents, ["hub", "jobs"], creating=False)
+        registry.update_team(
+            team.id,
+            TeamEditFields(
+                members=[TeamMember(role="worker", tier="hi"), TeamMember(role="intruder")]
+            ),
+        )
+        text = await hub_resume(session, row.id)
+        await wait_for(lambda: completed(session, resumed_id(session, text)))
+        (resumed,) = stream.requests_for(RESUME_PROMPT)
+        assert _tool_names(resumed) == _tool_names(born)
+        assert stream.model_for(RESUME_PROMPT) == LO
+        with pytest.raises(TeamLaunchError, match="outside the recorded roster"):
+            session._launch_subagent(label="x", prompt="sneak", agent="intruder")
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_split_a_tier_edit_that_crosses_providers_is_refused_with_a_reason(
+    tmp_path, monkeypatch, caplog
+):
+    """The provider ceiling: ``far`` routes to a provider the binding never
+    authorized, so the resumed child keeps the snapshotted tier and the reason
+    names both providers and the remedy."""
+    import logging
+
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    far = "elsewhere/far-model"
+    write_config(config, model_choice="model", models={"lo": LO, "hi": far})
+    registry = TeamRegistry(config)
+    team = make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+
+    stream = RecordingStream()
+    session = make_session(tmp_path, registry, stream, team="teamwork")
+    try:
+        row = await launch(session, stream, "do the work", agent="worker")
+        registry.update_team(
+            team.id, TeamEditFields(members=[TeamMember(role="worker", tier="hi")])
+        )
+        with caplog.at_level(logging.WARNING, logger="local_operator.harness.subagent"):
+            text = await hub_resume(session, row.id)
+            await wait_for(lambda: completed(session, resumed_id(session, text)))
+        assert stream.model_for(RESUME_PROMPT) == LO
+        messages = [r.getMessage() for r in caplog.records]
+        assert (
+            "live tier edit not applied: team 'teamwork' slot 'worker': kept the attached "
+            "tier 'lo' (provider test); the edited tier 'hi' routes to provider elsewhere, "
+            "which this binding did not authorize; re-attach via /team to use it"
+        ) in messages, messages
+    finally:
+        await session.dispose()
+
+
+def test_split_a_mesh_replica_keeps_the_snapshot_tier_until_a_local_team(tmp_path, monkeypatch):
+    """A synced tier edit is a choice of provider: a binding no local /team made
+    keeps the snapshot's tier even for a same-provider edit, and says why."""
+    from dataclasses import replace
+
+    from local_operator.network.move_team import _snapshot, live_member_roster
+
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "hi": HI})
+    registry = TeamRegistry(config)
+    team = make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+    authority = _snapshot(team, registry, AgentRegistry(tmp_path / "agents"), max_depth=3)
+    live = team.model_copy(update={"members": [TeamMember(role="worker", tier="hi")]})
+
+    roster, reasons = live_member_roster(authority, authority.team, live)
+    assert roster is authority.team and authority.team.members[0].tier == "lo"
+    assert reasons == [
+        "team 'teamwork' slot 'worker': kept the attached tier 'lo'; a synced tier edit "
+        "('hi') on a mesh replica is a choice of provider and waits for a local /team"
+    ]
+    local, held = live_member_roster(replace(authority, explicit_local=True), authority.team, live)
+    assert local is not None and local.members[0].tier == "hi" and held == []
+
+
 @pytest.mark.asyncio
 async def test_a_worker_of_a_settled_override_pinned_manager_takes_the_pin(tmp_path, monkeypatch):
     """Plan A.6, last clause: the ``_owned_model`` walk. A manager pinned by a

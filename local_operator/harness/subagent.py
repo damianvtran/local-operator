@@ -1853,12 +1853,50 @@ def _reread_roster(parent_session: "Session", name: str, fallback: Any) -> Any:
     """
     if not name:
         return fallback
+    authority = _bound_team_authority(parent_session)
+    if authority is not None:
+        # A bound session: tool authority stays the attach-time snapshot, and
+        # only a tier/effort edit the binding already authorizes is read live
+        # (``move_team.live_member_roster`` owns the rules and the ceiling).
+        snapshot = authority.teams.get(name.casefold(), fallback)
+        return _live_tiers_over(parent_session, authority, snapshot, name=name)
     try:
         found = lookup_team(parent_session, name)
     except Exception:  # noqa: BLE001 — an unreadable registry falls back
         logger.debug("could not re-read roster %r", name, exc_info=True)
         return fallback
     return found if found is not None else fallback
+
+
+def _live_tiers_over(
+    parent_session: "Session",
+    authority: Any,
+    snapshot: Any,
+    *,
+    name: str = "",
+    team_id: str = "",
+) -> Any:
+    """``snapshot`` with any AUTHORIZED live tier/effort edit applied.
+
+    The registry read only supplies candidate values; whether any is taken is
+    decided against the snapshot by :func:`move_team.live_member_roster`. A
+    held-back edit is logged with its reason, the same channel the registry
+    uses for an override it ignores, so the operator can see why the model did
+    not move. Any registry failure keeps the snapshot.
+    """
+    from local_operator.network.move_team import live_member_roster
+
+    registry = getattr(parent_session, "team_registry", None)
+    live = None
+    if registry is not None and snapshot is not None:
+        try:
+            live = registry.get_team(team_id) if team_id else registry.get_team_by_name(name)
+        except Exception:  # noqa: BLE001 — no live row means the snapshot stands
+            logger.debug("could not re-read roster %r", name or team_id, exc_info=True)
+    roster, reasons = live_member_roster(authority, snapshot, live)
+    for reason in reasons:
+        logger.warning("live tier edit not applied: %s", reason)
+    return roster
 
 
 def _carried_roster(
@@ -1889,7 +1927,11 @@ def _carried_roster(
         return None
     authority = getattr(parent_session, "_team_authority", None)
     if authority is not None:
-        return next((row for row in authority.teams.values() if row.id == lineage[-2]), None)
+        snapshot = next((row for row in authority.teams.values() if row.id == lineage[-2]), None)
+        bound = _bound_team_authority(parent_session)
+        if bound is None or snapshot is None:
+            return snapshot
+        return _live_tiers_over(parent_session, bound, snapshot, team_id=str(lineage[-2]))
     registry = getattr(parent_session, "team_registry", None)
     if registry is None:
         return None
