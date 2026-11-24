@@ -31,7 +31,10 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from local_operator.compaction.cutpoint import is_preserved_replay
-from local_operator.compaction.marker import COMPACTION_MARKER_TYPE, COMPACTION_REFUSED_TYPE
+from local_operator.compaction.marker import (
+    COMPACTION_MARKER_TYPE,
+    COMPACTION_REFUSED_TYPE,
+)
 from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import extract_parent_message

@@ -1294,6 +1294,16 @@ class SessionProjection:
     #: see a kept-window prompt as the first user row and pin it as the opener
     #: (PR #4521 R1-1/Q1). A projection rebuilt from the wire defaults to
     #: false; it was already capped by the process that folded it.
+    #: The daemon DOES re-cap that rebuild (``daemon._projection_frame`` ->
+    #: ``cap_projection_frame``), and with the flag false a tail tier there
+    #: would re-derive the opener from rows that no longer hold the marker.
+    #: It never gets that far because of one invariant: the rebuild is the
+    #: frame the session process already fitted under the SAME
+    #: ``PROJECTION_FRAME_SOFT_CAP_BYTES``, and the daemon adds its own fields
+    #: (``attention``) only AFTER capping, so the re-cap fits before tier 4.
+    #: A daemon-side change that grows the projection before
+    #: ``cap_projection_frame`` (or a smaller daemon cap) breaks that and
+    #: reopens R1-1; such a change must first get this decision to the daemon.
     transcript_opener_absent: bool = False
     #: WHERE EACH DELIVERED PHONE STEER SITS IN THE JOURNAL: steer row id -> the
     #: id of the row it follows there. A phone steer is painted at SEND time

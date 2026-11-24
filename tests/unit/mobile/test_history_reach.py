@@ -1410,6 +1410,57 @@ def test_a_live_append_after_a_compacted_seed_does_not_pin_a_kept_prompt(
     assert plain_frame["transcript_head_pinned"] is True
 
 
+def _uncompacted_history(turns: int = 90) -> list[AgentMessage]:
+    """A marker-free history longer than the cap: an opener, then ``turns``
+    assistant replies, so the 80-row trim must PIN ``opener`` to keep it."""
+    return [
+        Message(role="user", content=[TextContent(text="the brief")], id="opener"),
+        *(
+            Message(role="assistant", content=[TextContent(text=f"reply {index}")], id=f"a-{index}")
+            for index in range(turns)
+        ),
+    ]
+
+
+def test_re_seeding_one_fold_re_decides_the_opener_each_time(tmp_path: Path) -> None:
+    """PR #4521 review R2-2: ``fold_history`` resets ``transcript_opener_absent``.
+
+    The same fold is re-seeded on reattach (``tui_handle.py`` and
+    ``serving.py`` both call ``self._fold.fold_history(session.history())``).
+    ``_cap_tail`` only DERIVES the no-opener fact while the flag is false, so
+    without the reset a compacted seed's True would outlive it: the next,
+    uncompacted seed would pin nothing and its real opener would fall out of
+    the 80-row tail. The reverse order must also hold — an uncompacted seed's
+    pin may not survive into a compacted one.
+    """
+    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.mobile.types import SessionProjection
+
+    config = tmp_path / "config"
+    _build_many_preserved(config, kept_turns=60)
+    compacted = _replay_history(config)
+    plain = _uncompacted_history()
+
+    fold = ProjectionFold(SessionProjection(session_id=SESSION_ID, pid=0, kind="daemon"))
+    fold.fold_history(compacted)
+    assert fold.projection.transcript_opener_absent is True
+    assert fold.projection.transcript_head_pinned is False
+
+    fold.fold_history(plain)
+    ids = [row.id for row in fold.projection.transcript]
+    assert fold.projection.transcript_opener_absent is False, "the compacted seed's fact went stale"
+    assert fold.projection.transcript_head_pinned is True
+    assert ids[0] == "opener", f"the real opener fell out of the re-seed: {ids[:2]!r}"
+    assert len(ids) == PROJECTION_TRANSCRIPT_LIMIT
+
+    # Reverse: pinned first, then compacted — no pin, and no kept prompt claimed.
+    fold.fold_history(compacted)
+    ids = [row.id for row in fold.projection.transcript]
+    assert fold.projection.transcript_opener_absent is True
+    assert fold.projection.transcript_head_pinned is False, f"pinned {ids[0]!r}"
+    assert "opener" not in ids and ids[0] != "kept-req-0"
+
+
 def _replay_history(config: Path) -> list[AgentMessage]:
     """The durable fold's replay (``history``) for the reach session."""
     from local_operator.mobile.durable import _replay
