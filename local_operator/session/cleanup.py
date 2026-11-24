@@ -2383,6 +2383,12 @@ _GUARD_REFUSAL_FALLBACK = (
 #: than an empty answer.
 _DELETE_REFUSAL_FALLBACK = "That conversation could not be deleted, so nothing was removed."
 
+#: ``_guard``'s reason for a session holding a still-answerable ask. Named once
+#: because ``delete_session`` treats it differently from every other guard (it
+#: withdraws the asks rather than refusing); the policy passes still keep it.
+_OPEN_ASK_GUARD = "has an open ask"
+_ARMED_WAKE_GUARD = "has an armed wake"
+
 
 @dataclass(frozen=True)
 class DeleteOutcome:
@@ -2622,6 +2628,43 @@ def delete_session(
                     # request's own freshness window, and still not a thing to
                     # leave behind (see ``registry.EXIT_REQUEST_NAME``).
                     registry.remove_exit_request(directory)
+    if reason == _ARMED_WAKE_GUARD:
+        # The armed wake may be nothing but the asks' own hidden deadline rows;
+        # then it is the same open question, settled the same way below.
+        from local_operator.asks.orphans import only_ask_deadline_wakes
+
+        try:
+            if only_ask_deadline_wakes(config_dir, session_id):
+                reason = _OPEN_ASK_GUARD
+        except Exception:  # noqa: BLE001 -- unprovable keeps the refusal
+            logger.debug("session delete: wake probe failed", exc_info=True)
+    if reason == _OPEN_ASK_GUARD:
+        # AN EXPLICIT DELETE SETTLES ITS OWN OPEN QUESTIONS (operator report
+        # 2026-11-24). The guard exists so an AUTOMATIC pass never destroys a
+        # question the user can still answer -- and the policy keeps it. A person
+        # who names this conversation and confirms the delete has decided about
+        # the question too, and refusing them left only a misleading fallback
+        # sentence ("whether that conversation is in use could not be checked":
+        # this reason has no entry in ``_GUARD_REFUSALS``) and a conversation
+        # that could never be removed until the agent's deadline lapsed. So the
+        # asks are WITHDRAWN first (``reason: conversation_deleted`` in the
+        # session's own log, the same event the queue's withdraw writes) and the
+        # guard is re-evaluated: only a withdrawal that did not land keeps the
+        # refusal. A rehearsal writes nothing and reports the delete it would do.
+        if dry_run:
+            reason = None
+        else:
+            from local_operator.asks.orphans import (
+                drop_ask_deadline_wakes,
+                withdraw_open_asks,
+            )
+
+            try:
+                withdraw_open_asks(directory, by=actor or "delete")
+                drop_ask_deadline_wakes(config_dir, session_id)
+            except Exception:  # noqa: BLE001 -- the re-check below decides
+                logger.warning("session delete: could not withdraw open asks", exc_info=True)
+            reason = _guard(directory, config_dir, clock)
     if reason is not None:
         return DeleteOutcome(
             session_id=session_id,
@@ -3147,7 +3190,7 @@ def _guard(
         if _has_spooled_mail(directory):
             return "has unread spooled mail"
         if _has_open_asks(directory):
-            return "has an open ask"
+            return _OPEN_ASK_GUARD
     except Exception as exc:  # noqa: BLE001 — a guard that cannot answer keeps
         logger.warning("session cleanup: guard failed for %s (%r); keeping it", directory.name, exc)
         return f"guard failed: {type(exc).__name__}"

@@ -101,6 +101,40 @@ def first_question(row: Mapping[str, Any]) -> str:
     return ""
 
 
+def origin_label(directory: Path) -> str:
+    """The task ``label`` a delegated session's ``origin.json`` records, or ``""``.
+
+    Tolerant like every other reader of that marker (``resume.session_origin``):
+    a truncated or hand-edited file is "no label", never a failed list request.
+    Only HIDDEN origins carry a label; a user session's marker (or its absence)
+    yields ``""`` and the stored title stays the only name.
+    """
+    import json
+
+    try:
+        raw = (directory / "origin.json").read_text(encoding="utf-8", errors="replace")
+        payload = json.loads(raw)
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    label = payload.get("label")
+    return label.strip() if isinstance(label, str) else ""
+
+
+def is_remote_key(key: str) -> bool:
+    """Whether a ``notify`` row mirrors ANOTHER device's conversation.
+
+    The peer forwarders (``remote_attention``: ``remote-done``/``remote-notice``/
+    ``remote-ask:``; ``remote_park``: ``remote-gate``) file rows under the PEER's
+    session id, which never has a directory on this device. Such a row is not an
+    orphan, so neither the ``conversation_deleted`` flag nor the orphan sweep may
+    judge it by the local ``sessions/`` directory. Every one of those key
+    families starts ``remote-``, and no local writer uses that prefix.
+    """
+    return key.startswith("remote-")
+
+
 class SessionFacts:
     """Session title / live / agent facts, read once per session per request.
 
@@ -132,12 +166,22 @@ class SessionFacts:
             title = ""
             live = False
             cwd = ""
+            # ``None`` = unknown (the probe raised), never claimed as deleted.
+            exists: bool | None = None
             try:
                 from local_operator.resume import live_runtime_pid, stored_session_title
 
                 directory = self.config_dir / "sessions" / session_id
-                if directory.is_dir():
-                    title = stored_session_title(directory)
+                exists = bool(session_id) and directory.is_dir()
+                if exists:
+                    # A DELEGATED run (subagent, background) never gets a stored
+                    # title: nobody renames it and the first-turn titler is a
+                    # user-session feature. Its origin marker DOES carry the task
+                    # label the parent gave it ("Core relay patch release
+                    # window"), which is the only human name such a row has --
+                    # without it the desktop painted "Untitled conversation" on a
+                    # subagent's ask (operator report, ask a-00ac, 2026-11-24).
+                    title = stored_session_title(directory) or origin_label(directory)
                     # THE WORKSPACE DIRECTORY BELONGS ON THE SESSION BLOCK (R3-1).
                     # Every surface already receives this block, and a row with no
                     # stored title has nothing else to name it but the bare session
@@ -150,7 +194,7 @@ class SessionFacts:
                 live = live_runtime_pid(self.config_dir, session_id) is not None
             except Exception:  # noqa: BLE001 — chrome; the snapshot title stands in
                 logger.debug("notifications: session facts unavailable", exc_info=True)
-            cached = {"title": title, "live": live, "cwd": cwd}
+            cached = {"title": title, "live": live, "cwd": cwd, "exists": exists}
             self._cache[session_id] = cached
         return {
             "id": session_id,
@@ -163,6 +207,37 @@ class SessionFacts:
             # consumer has to disbelieve an empty string.
             **({"cwd": cached["cwd"]} if cached.get("cwd") else {}),
         }
+
+    def deleted(self, session_id: str) -> bool:
+        """Whether this row's owning conversation is PROVABLY gone from this device.
+
+        True only when the directory probe ran and found nothing; an unknown
+        (the probe raised) is not a deletion. Callers must not ask this of a
+        peer-mirrored row (:func:`is_remote_key`): its session never lives here.
+        """
+        from local_operator.asks.orphans import is_conversation_id
+
+        if not is_conversation_id(session_id):
+            # A machine-level row ("") or a fixed pseudo-session
+            # (``network-credentials``) never had a conversation to lose.
+            return False
+        self.get(session_id)
+        cached = self._cache[session_id]
+        if cached.get("exists") is not False:
+            return False
+        if "gone" not in cached:
+            # No directory is not yet a deletion: a conversation mid-hand-off or
+            # MOVED to another device (still in the peer listing this process
+            # holds) is reachable, and saying "deleted" about it would be false.
+            # The same verdict the orphan sweep acts on, so the flag and the
+            # sweep can never disagree.
+            from local_operator.asks.orphans import session_gone
+
+            try:
+                cached["gone"] = session_gone(self.config_dir, session_id)
+            except Exception:  # noqa: BLE001 -- unknown is "not deleted"
+                cached["gone"] = False
+        return bool(cached["gone"])
 
 
 #: Process-wide project snapshot per config dir. WHY: building a
@@ -424,6 +499,15 @@ def notify_item(
         "projects": projects.get(session_id),
         "ask": None,
         "actions": {"dismiss": not dismissed, "answer": False, "read": True},
+        # ADDED KEY, present only when true (shared wire contract with the
+        # desktop UI): the row's conversation no longer exists on this device,
+        # so the renderer says "conversation deleted" instead of offering a link
+        # to nowhere. A peer-mirrored row is never judged by the local store.
+        **(
+            {"conversation_deleted": True}
+            if not is_remote_key(str(row.get("key") or "")) and sessions.deleted(session_id)
+            else {}
+        ),
     }
 
 
@@ -492,6 +576,12 @@ def ask_item(
         },
         # The reel never dismisses an open ask (§2.3); it offers Answer.
         "actions": {"dismiss": False, "answer": True, "read": True},
+        # Same contract as ``notify_item``. Reachable when a client still holds
+        # a row the index has since dropped (the reader sweeps an entry whose
+        # session directory is gone), and for an ask row built from a stale
+        # snapshot: its Dismiss/Decline settle locally on the answers route,
+        # and a plain answer is refused ``conversation_deleted``.
+        **({"conversation_deleted": True} if sessions.deleted(session_id) else {}),
     }
 
 

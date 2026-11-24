@@ -9,6 +9,7 @@ import json
 import logging
 import pathlib
 import sqlite3
+import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import aclosing, asynccontextmanager
@@ -5444,6 +5445,167 @@ async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, bo
     return "dismissed"
 
 
+def _indexed_ask(root: pathlib.Path, session_id: str, ask_id: str) -> bool:
+    """Whether the cross-session ask index lists ``ask_id`` under ``session_id``.
+
+    The index is what the Notifications page and the dock read
+    (``notifications.items.open_asks``), so this is exactly "an ask the inbox
+    could have shown". One small JSON read; never the session's log.
+    """
+    from local_operator.asks import store as ask_store
+
+    entry = ask_store.read_entry(root, session_id) or {}
+    return any(
+        isinstance(row, Mapping) and str(row.get("ask_id") or "") == ask_id
+        for row in entry.get("asks") or ()
+    )
+
+
+def _doorless_ask_target(root: pathlib.Path, session_id: str, ask_id: str) -> str | None:
+    """Which doorless arm an ask op takes: ``"delegated"``, ``"deleted"`` or ``None``.
+
+    WHY THIS EXISTS (operator report 2026-11-24, ask a-00ac). The Notifications
+    page lists every ask in the index, including asks a SUBAGENT raised, but the
+    desktop pool's door (``_door_may_open``) deliberately refuses hidden origins,
+    so Answer, Decline and Dismiss on such a row all answered 404
+    ``requested_not_found`` and the row could never be put away. The same 404
+    met a row whose conversation had been deleted while a client still showed it.
+
+    ``None`` keeps the ordinary door, and is the answer for every id the door can
+    serve (a user conversation, a peer's conversation) and for every id this
+    function cannot vouch for -- so nothing the door used to answer changes.
+
+    * ``"delegated"``: the directory is here, the door refuses its origin, and
+      the INDEX lists this ask under it. The widening is per ASK, not per origin:
+      a subagent id with no indexed ask still gets the door's 404, so this is not
+      the "hidden but reachable" catch-all ``_door_may_open`` forbids.
+    * ``"deleted"``: no directory here and the shared orphan verdict
+      (``asks.orphans.session_gone``: not handed away, not in the cached peer
+      listing) agrees. Only reached AFTER the pool door answered "unknown",
+      which already includes its own peer read -- a silent peer raises the
+      retryable peer refusal there and never reaches this function.
+
+    Blocking (a few stats, one JSON read): call it off the event loop.
+    """
+    from local_operator.server.utils.desktop_sessions import _door_may_open
+    from local_operator.session.catalog import session_directory_name
+
+    # Same id-shape guard ``cleanup.delete_session`` applies: ``Path`` joining
+    # does not keep an id inside ``sessions/``.
+    if not session_directory_name(session_id) or session_id != pathlib.Path(session_id).name:
+        return None
+    directory = root / "sessions" / session_id
+    if directory.is_dir():
+        if _door_may_open(directory):
+            return None
+        return "delegated" if _indexed_ask(root, session_id, ask_id) else None
+    from local_operator.asks.orphans import session_gone
+
+    return "deleted" if session_gone(root, session_id) else None
+
+
+async def _answer_deleted_owner(
+    request: Request, session_id: str, body: Answer
+) -> CRUDResponse[AnswerReceipt]:
+    """Settle an ask whose conversation no longer exists, locally (shared contract).
+
+    Dismiss and Decline are the operator putting a row away, and there is no
+    agent left to tell, so both succeed HERE: the ask is dropped from the index
+    entry (if the reader's sweep has not already dropped it) and its deadline
+    wake is disarmed, exactly the two out-of-directory records the cold dismiss
+    door keeps in step. Idempotent: a second tap on a stale row is the same 200.
+
+    A plain answer (or a revision) is REFUSED 409 ``conversation_deleted``: an
+    answer is addressed to an agent, and claiming it was delivered would be a
+    lie. The sentence tells the user what to do instead.
+    """
+    from local_operator.asks import orphans
+
+    if not (body.dismiss is True or body.decline is True):
+        raise HTTPException(
+            409, _wd.conversation_deleted().envelope(code="conversation_deleted")
+        )
+    word = "dismissed" if body.dismiss is True else "declined"
+    await orphans.settle_deleted_ask(store_root(request), session_id, str(body.ask_id or ""))
+    return reply({"detail": word, "consent_bearing": None})
+
+
+async def _answer_delegated_ask(
+    request: Request, session_id: str, body: Answer
+) -> CRUDResponse[AnswerReceipt]:
+    """Answer, decline or dismiss a SUBAGENT's indexed ask without the pool door.
+
+    The same two doors the phone's cold ask route uses (``mobile/daemon.py``),
+    so a delegated session is reached the way every other surface reaches it:
+
+    * DISMISS goes cold first (``asks.dismiss.dismiss_cold``: boots nothing,
+      SA-D5 / §14), and only a LIVE owner is dialled.
+    * DECLINE / ANSWER / REVISE engage the session's runtime through the one
+      engage-and-dial seam (``engage_session_client`` with an ``AskErrand``),
+      so the answer lands in the subagent's own log and its runtime delivers it
+      as a turn -- the same "late answer arrives as a turn" contract as any ask.
+
+    """
+    from local_operator.asks.dismiss import dismiss_cold
+    from local_operator.mobile.attach_client import engage_session_client
+    from local_operator.session.runtime.launch import AskErrand
+
+    root = store_root(request)
+    ask_id = str(body.ask_id or "")
+    if body.dismiss is True:
+        outcome = await dismiss_cold(root, session_id, ask_id, by="desktop", reason=body.reason)
+        if outcome.get("ok"):
+            return reply({"detail": "dismissed", "consent_bearing": None})
+        if str(outcome.get("code") or "") != "ask_owner_present":
+            raise _dismissal_refusal(outcome.get("error"))
+    # An engage failure (no provider, a runtime that died in the gap) reaches
+    # the caller's ``errors(request)`` ladder as the SAME types the pool arm's
+    # facade raises (``AttachedSession._ensure_bound``): a vetted sentence rides
+    # ``ActionableConnectionError`` ("No model provider is configured yet..."),
+    # anything else is a plain ``ConnectionError`` and gets the generic 503.
+    from local_operator.session.runtime.launch import (
+        ActionableConnectionError,
+        RuntimeStartupError,
+    )
+
+    try:
+        client, _ = await engage_session_client(root, session_id, AskErrand(ask_id=ask_id))
+    except RuntimeStartupError as error:
+        if error.actionable:
+            raise ActionableConnectionError(error.actionable) from error
+        raise ConnectionError(str(error)) from error
+    try:
+        if body.dismiss is True:
+            detail: Any = await client.ask_dismiss(ask_id, by="desktop", reason=body.reason)
+        elif body.decline is True:
+            detail = await client.ask_decline(ask_id, by="desktop")
+        elif body.revise is True:
+            detail = await client.ask_revise(ask_id, body.answers or {}, by="desktop")
+        elif body.images:
+            detail = await client.ask_respond(
+                ask_id,
+                body.answers or {},
+                by="desktop",
+                images=[image.model_dump() for image in body.images],
+            )
+        else:
+            detail = await client.ask_respond(ask_id, body.answers or {}, by="desktop")
+    except (ValueError, RuntimeError) as error:
+        # The ask's own sentence (already answered, expired...), as the pool
+        # arm maps the same refusal: 409, never a reconnect remedy.
+        raise HTTPException(409, str(error) or "the answer was refused") from None
+    finally:
+        client.close()
+    if isinstance(detail, Mapping):
+        if not detail.get("ok", True):
+            raise _dismissal_refusal(detail.get("error"))
+        detail = "dismissed"
+    # Never consent: this backend did not start that runtime with an operator
+    # proof, so the runtime stamps the answer ``unverified`` (incident a-48e3).
+    consent = None if (body.decline or body.dismiss) else False
+    return reply({"detail": str(detail), "consent_bearing": consent})
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/profile-action-status",
     response_model=CRUDResponse[dict[str, str]],
@@ -5455,9 +5617,84 @@ async def profile_action_status(session_id: str, body: ProfileActionStatus, requ
         return reply(await bridge.remote.profile_action_status(**body.model_dump()))
 
 
+class _AskOwnerUnknown(Exception):
+    """The pool door answered "unknown session" for a QUEUED-ASK op.
+
+    Deliberately NOT a ``KeyError``: it must pass through the ``errors()``
+    ladder (which would turn a ``KeyError`` into the 404) so :func:`answer` can
+    try the doorless arms first. Raised only while ENTERING the door, never from
+    the route body, so a ``KeyError`` from an ask op itself keeps its meaning.
+    """
+
+
+@asynccontextmanager
+async def _ask_door(gate: Any) -> AsyncIterator[Any]:
+    """The pool door ``gate``, with an unknown id raised as :class:`_AskOwnerUnknown`.
+
+    Takes the ALREADY-BUILT ``host(request).session(...)`` context so the call
+    that is the door stays visibly inside the route handler (the latch walk in
+    ``tests/unit/server/test_serve_retire.py`` matches handlers on that call).
+    The door stays the ONE place that decides "unknown" (its peer read, draft
+    containment and hidden-origin refusal run unchanged); this only lets the
+    answers route react to that verdict for an ask the inbox listed.
+    """
+    try:
+        bridge = await gate.__aenter__()
+    except KeyError as error:
+        raise _AskOwnerUnknown() from error
+    try:
+        yield bridge
+    except BaseException:
+        if not await gate.__aexit__(*sys.exc_info()):
+            raise
+    else:
+        await gate.__aexit__(None, None, None)
+
+
+def _with_doorless_ask_arms(through_door: Callable[..., Awaitable[Any]]) -> Any:
+    """Wrap the answers handler: the pool door first, then the doorless ask arms.
+
+    Every request runs the original handler exactly as before. Only when its
+    door answers "unknown session" for a QUEUED ASK (``ask_id``) does the route
+    look further (``_doorless_ask_target``): a subagent's indexed ask, or an ask
+    whose conversation is gone. Anything else keeps the door's 404 unchanged.
+    Operator report 2026-11-24 (ask a-00ac): those two cases answered 404 on
+    Answer, Decline and Dismiss alike, so the Notifications row was stuck.
+
+    ``functools.wraps`` keeps the handler's name and signature, which is what
+    FastAPI reads for the body model and what the latch walk keys routes by.
+    """
+
+    @functools.wraps(through_door)
+    async def answer(session_id: str, body: Answer, request: Request):
+        try:
+            return await through_door(session_id, body, request)
+        except _AskOwnerUnknown:
+            pass
+        doorless = await asyncio.to_thread(
+            _doorless_ask_target, store_root(request), session_id, str(body.ask_id or "")
+        )
+        if doorless is None:
+            raise HTTPException(404, _wd.requested_not_found().envelope())
+        async with errors(request):
+            if doorless == "deleted":
+                # A local settle of a row with nothing behind it: safe on a
+                # latched daemon too, so the door's latch is not consulted.
+                return await _answer_deleted_owner(request, session_id, body)
+            # The delegated arm can ENGAGE a runtime, so the latch applies to it
+            # exactly as it does to the door (``DesktopSessions.assert_admitting``).
+            admitting = getattr(host(request), "assert_admitting", None)
+            if callable(admitting):
+                admitting()
+            return await _answer_delegated_ask(request, session_id, body)
+
+    return answer
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/answers", response_model=CRUDResponse[AnswerReceipt]
 )
+@_with_doorless_ask_arms
 async def answer(session_id: str, body: Answer, request: Request):
     """Answer the pending gate, or refuse because this process is leaving.
 
@@ -5489,7 +5726,12 @@ async def answer(session_id: str, body: Answer, request: Request):
     session_options: _AnswerSessionOptions = (
         {"control_only": True} if body.ask_id is not None else {}
     )
-    async with errors(request), host(request).session(session_id, **session_options) as bridge:
+    gate = host(request).session(session_id, **session_options)
+    # A queued ask's "unknown session" is raised as ``_AskOwnerUnknown`` so the
+    # wrapper (``_with_doorless_ask_arms``) can try the doorless arms; a gate
+    # answer keeps the plain door and its 404.
+    door = _ask_door(gate) if body.ask_id is not None else gate
+    async with errors(request), door as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
             # A QUEUED ASK (design §2.4/§4). Answered by id, BEFORE the epoch
