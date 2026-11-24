@@ -5,7 +5,7 @@
 // has no other trace expands in place, the body scrolls to the card, and the
 // reader's place moves onto it. A jump to an ask that is still open lands on
 // its first question instead.
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AsksSheet } from "./components/asks-sheet";
 import type { PendingAsk, SessionProjection, SessionSummary } from "./types";
@@ -51,8 +51,11 @@ beforeEach(() => {
 
 afterEach(() => {
 	cleanup();
+	vi.useRealTimers();
 	vi.clearAllMocks();
 	vi.restoreAllMocks();
+	delete (navigator as { clipboard?: unknown }).clipboard;
+	delete (document as { execCommand?: unknown }).execCommand;
 });
 
 describe("a chip's jump into the asks sheet", () => {
@@ -107,5 +110,48 @@ describe("a chip's jump into the asks sheet", () => {
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await screen.findByTestId("ask-question-text");
 		await waitFor(() => expect(document.activeElement).not.toBe(screen.getByTestId("ask-question-text")));
+	});
+
+	it("spends the jump once, so a later re-read cannot pull the reader back", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		/* A FRESH array per read, as the daemon sends: reusing one object lets
+		   React bail out of `setRows` and hides the defect this test exists for. */
+		(getAsks as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+			asks: [ask({ ask_id: "a-e53b", status: "open" }), ask({ ask_id: "a-745e", status: "withdrawn" })],
+		}));
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" jumpAsk="a-745e" />);
+		await waitFor(() => expect(screen.getByTestId("ask-card").getAttribute("data-ask-id")).toBe("a-745e"));
+		// The reader moves to the other ask.
+		const other = screen.getAllByTestId("ask-row").find((row) => row.getAttribute("data-ask-id") === "a-e53b");
+		fireEvent.click(other as HTMLElement);
+		await waitFor(() => expect(screen.getByTestId("ask-card").getAttribute("data-ask-id")).toBe("a-e53b"));
+		const reads = (getAsks as ReturnType<typeof vi.fn>).mock.calls.length;
+		// One backstop tick is a re-read: the exact shape that used to re-apply.
+		await act(async () => {
+			vi.advanceTimersByTime(21_000);
+		});
+		expect((getAsks as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(reads);
+		expect(screen.getByTestId("ask-card").getAttribute("data-ask-id")).toBe("a-e53b");
+	});
+
+	it("keeps a failed copy's notice on its own line and the row still opens", async () => {
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "a-745e", status: "withdrawn" })],
+		});
+		Object.defineProperty(navigator, "clipboard", {
+			value: { writeText: vi.fn(async () => { throw new Error("insecure context"); }) },
+			configurable: true,
+		});
+		Object.defineProperty(document, "execCommand", { value: vi.fn(() => false), configurable: true });
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await screen.findByTestId("ask-row");
+		fireEvent.click(screen.getByRole("button", { name: "Copy ask id a-745e" }));
+		const notice = await screen.findByText("Couldn't copy — the id is selected; copy it from there");
+		// The full-line basis is what stops it becoming the flex item that
+		// squeezed the row's button to zero width; the parent wraps so it can.
+		expect(notice.className).toContain("w-full");
+		expect(screen.getByTestId("ask-row").parentElement?.className).toContain("flex-wrap");
+		fireEvent.click(screen.getByTestId("ask-row"));
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
 	});
 });

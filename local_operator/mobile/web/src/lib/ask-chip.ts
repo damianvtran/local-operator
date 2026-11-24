@@ -210,18 +210,3 @@ export function askChipFacts(
 	}
 	return facts;
 }
-
-/**
- * One string that changes exactly when an id's state does, so the chip host can
- * keep its identity stable across the frames that leave it unchanged.
- *
- * The QUESTION is in the signature because it is not derived from the status: an
- * ask re-put with a reworded question keeps its state word, and the chip's
- * spoken label would otherwise keep the old question.
- */
-export function askChipSignature(facts: Map<string, AskChipFact>): string {
-	return [...facts]
-		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-		.map(([id, fact]) => `${id}:${fact.status}:${fact.question}`)
-		.join(",");
-}

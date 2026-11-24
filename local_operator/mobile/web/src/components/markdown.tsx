@@ -213,7 +213,15 @@ function renderInline(text: string, from?: number, askChips = false): ReactNode[
 				</s>,
 			);
 		} else if (italic1 !== undefined || italic2 !== undefined) {
-			out.push(<em key={idx} ref={ref}>{renderInline(italic1 ?? italic2 ?? "", undefined, askChips)}</em>);
+			/* CHIPS INSIDE EMPHASIS, BUT NOTHING ELSE CHANGES when chips are off:
+			   parsing the italic body recursively turned backticks and links inside
+			   `*...*` into code/links for every Markdown consumer, which is a
+			   behaviour change this feature has no business making (review m3). */
+			out.push(
+				<em key={idx} ref={ref}>
+					{askChips ? renderInline(italic1 ?? italic2 ?? "", undefined, askChips) : (italic1 ?? italic2)}
+				</em>,
+			);
 		} else {
 			out.push(full);
 		}
@@ -506,7 +514,7 @@ export function tableFitsIn(widths: readonly number[], available: number): boole
  * the data is still a table to assistive tech even when the phone shows it as
  * `header: value` lines.
  */
-function MarkdownTable({ lines }: { lines: readonly string[] }) {
+function MarkdownTable({ lines, askChips = false }: { lines: readonly string[]; askChips?: boolean }) {
 	const [header, ...rest] = lines;
 	const head = splitTableRow(header ?? "");
 	const rows = rest.map((row) => splitTableRow(row));
@@ -625,7 +633,7 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 								{/* `break-words` splits ONLY a token too long to fit a line by
 								    itself (a URL, a hash). An ordinary word always fits, so it
 								    is never cut mid-word. */}
-								<span className="min-w-0 break-words text-ink">{renderInline(row[column] ?? "")}</span>
+								<span className="min-w-0 break-words text-ink">{renderInline(row[column] ?? "", undefined, askChips)}</span>
 							</div>
 						))}
 					</div>
@@ -644,7 +652,7 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 								key={column}
 								className="border-b border-hairline px-2 py-1 text-start font-semibold text-ink"
 							>
-								{renderInline(head[column] ?? "")}
+								{renderInline(head[column] ?? "", undefined, askChips)}
 							</th>
 						))}
 					</tr>
@@ -657,7 +665,7 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 									key={column}
 									className="border-b border-hairline px-2 py-1 align-top text-ink-muted last:border-b-0"
 								>
-									{renderInline(row[column] ?? "")}
+									{renderInline(row[column] ?? "", undefined, askChips)}
 								</td>
 							))}
 						</tr>
@@ -728,7 +736,7 @@ const MarkdownBlock = memo(function MarkdownBlock({ block: b, from, askChips = f
 				{b.lines.map((_, i) => <div key={b.lineStarts[i]}>{inline(i)}</div>)}
 			</div>;
 		case "table":
-			return <MarkdownTable lines={b.lines} />;
+			return <MarkdownTable lines={b.lines} askChips={askChips} />;
 		default:
 			return <p ref={ref}>
 				{b.lines.map((_, i) => <span key={b.lineStarts[i]}>

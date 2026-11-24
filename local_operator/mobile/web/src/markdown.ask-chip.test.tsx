@@ -90,6 +90,25 @@ describe("Markdown ask chips", () => {
 		expect(screen.queryByRole("button")).toBeNull();
 	});
 
+	it("draws a chip in a table cell, where an agent often lists asks", () => {
+		const { value } = host();
+		const table = "| id | note |\n|---|---|\n| a-745e | x |";
+		render(
+			<AskChipHostProvider value={value}>
+				<Markdown text={table} askChips />
+			</AskChipHostProvider>,
+		);
+		expect(screen.getByRole("button", { name: /Ask a-745e/ })).toBeTruthy();
+	});
+
+	it("leaves italic markup alone when chips are off", () => {
+		// Parsing the italic body recursively is needed for a chip inside it,
+		// but it must not turn backticks into code for every other consumer.
+		const { container } = render(<Markdown text={"*a`b`*"} />);
+		expect(container.querySelector("em")?.textContent).toBe("a`b`");
+		expect(container.querySelector("code")).toBeNull();
+	});
+
 	it("never chips when the surface did not ask for them", () => {
 		const { value } = host();
 		render(

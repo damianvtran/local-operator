@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 import {
 	askChipFacts,
 	askChipOpen,
-	askChipSignature,
 	askChipWord,
 	askIdSegments,
 	isAskId,
@@ -151,15 +150,5 @@ describe("askChipFacts", () => {
 	it("treats an absent frame as no live reading, so the aggregate may still speak", () => {
 		const facts = askChipFacts({ settled: [ask({ session_id: "mine", status: "open" })] }, "mine");
 		expect(facts.get("a-745e")?.status).toBe("open");
-	});
-});
-
-describe("askChipSignature", () => {
-	it("changes when a state or the question changes, not when order does", () => {
-		const one = askChipFacts({ frame: [ask()] }, "mine");
-		const reordered = askChipFacts({ frame: [ask()] }, "mine");
-		expect(askChipSignature(one)).toBe(askChipSignature(reordered));
-		const reworded = askChipFacts({ frame: [ask({ questions: [{ ...ask().questions[0], question: "Which region now?" }] })] }, "mine");
-		expect(askChipSignature(reworded)).not.toBe(askChipSignature(one));
 	});
 });

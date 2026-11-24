@@ -21,12 +21,24 @@ import { messageRuntime } from "../store";
  *  the card below is re-read on its own schedule anyway. */
 const COPIED_MS = 2000;
 
+/** How long the failed-copy notice stays up, and why it is longer: the reader
+ *  has to READ a sentence (and act on the selected id), where Copied is a
+ *  glance. Leaving it forever was the reported defect — it kept a settled row
+ *  squeezed until the next successful copy, which might never come. */
+const FAILED_MS = 6000;
+
 /**
  * Copy one string, or select its node so the platform's own copy gesture can
  * finish the job. A relay page can be served over plain HTTP on a LAN address,
  * where `navigator.clipboard` is absent (not a secure context) — so "copy"
  * failing is an ordinary state here rather than an exotic one, and it must
  * leave the reader something they can act on instead of a dead tap.
+ *
+ * THE LEGACY COMMAND IS TRIED BEFORE GIVING UP: `execCommand("copy")` copies
+ * the current selection and is NOT gated on a secure context, which is exactly
+ * the LAN case. It is deprecated, so it is a fallback rather than the route —
+ * and a false answer or a throw is treated as failure, never as success: the
+ * reader is still told to copy by hand.
  */
 async function copyOrSelect(text: string, node: HTMLElement | null): Promise<boolean> {
 	try {
@@ -40,6 +52,11 @@ async function copyOrSelect(text: string, node: HTMLElement | null): Promise<boo
 			selection.removeAllRanges();
 			selection.addRange(range);
 		}
+		try {
+			if (typeof document.execCommand === "function" && document.execCommand("copy")) return true;
+		} catch {
+			/* A browser that refuses the command leaves the selection in place. */
+		}
 		return false;
 	}
 }
@@ -47,21 +64,30 @@ async function copyOrSelect(text: string, node: HTMLElement | null): Promise<boo
 export function AskIdFoot({
 	askId,
 	className,
+	align = "center",
 }: {
 	askId: string;
 	/** Placement only; the foot owns its own size, ink and feedback. */
 	className?: string;
+	/** `title` puts the id's TEXT on the first line of the row it sits beside,
+	 *  where the row's title is. The 44 px box still starts at the row's top; only
+	 *  the text moves up, which is what keeps three columns (title, id, chevron)
+	 *  from reading as three heights. */
+	align?: "center" | "title";
 }) {
 	const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
 	const idNode = useRef<HTMLSpanElement>(null);
 	useEffect(() => {
-		if (state !== "copied") return;
-		const timer = window.setTimeout(() => setState("idle"), COPIED_MS);
+		if (state === "idle") return;
+		const timer = window.setTimeout(() => setState("idle"), state === "copied" ? COPIED_MS : FAILED_MS);
 		return () => window.clearTimeout(timer);
 	}, [state]);
 	const copy = async () => {
 		setState((await copyOrSelect(askId, idNode.current)) ? "copied" : "failed");
 	};
+	const frame = align === "title" ? "items-start pt-1.5" : "items-center";
+	const base =
+		`flex min-h-11 justify-end gap-1 rounded-sm px-1 font-mono text-mono-sm text-ink-muted active:bg-sunken ${frame}`;
 	return (
 		<>
 			<button
@@ -70,15 +96,22 @@ export function AskIdFoot({
 				data-ask-id-copy={askId}
 				aria-label={messageRuntime.t("relay.asks.id.copy_label", { id: askId })}
 				onClick={() => void copy()}
-				className={className === undefined
-					? "flex min-h-11 items-center justify-end gap-1 self-end rounded-sm px-1 font-mono text-mono-sm text-ink-muted active:bg-surface"
-					: `flex min-h-11 items-center justify-end gap-1 rounded-sm px-1 font-mono text-mono-sm text-ink-muted active:bg-surface ${className}`}
+				className={className === undefined ? `${base} self-end` : `${base} ${className}`}
 			>
 				<span ref={idNode} dir="ltr">{askId}</span>
-				{/* The mark is decorative: the button's own accessible name says what
-				    the tap does, and `Copied` is only a glance's confirmation. */}
-				<span aria-hidden="true" className="text-ink-dim">
-					{state === "copied" ? messageRuntime.t("relay.asks.id.copied") : "⧉"}
+				{/* ONE SLOT, TWO LABELS, so the id never moves under the finger
+				    (D2): the mark cell is as wide as the WIDER of the two, and the
+				    inactive one is `invisible`, exactly as the command block's Copy
+				    button does. The visible word is decorative — the button's own
+				    accessible name says what the tap does, and the live region below
+				    announces the named confirmation. */}
+				<span aria-hidden="true" className="grid shrink-0 text-ink-dim">
+					<span data-testid="ask-id-copy-mark" className="col-start-1 row-start-1">
+						{state === "copied" ? messageRuntime.t("relay.asks.id.copied") : "⧉"}
+					</span>
+					<span className="invisible col-start-1 row-start-1">
+						{messageRuntime.t("relay.asks.id.copied")}
+					</span>
 				</span>
 			</button>
 			{/* A LIVE REGION, not a toast and not a second `role="status"`: the relay
@@ -90,8 +123,14 @@ export function AskIdFoot({
 			<span aria-live="polite" className="sr-only">
 				{state === "copied" ? messageRuntime.t("relay.asks.id.copied_named", { id: askId }) : ""}
 			</span>
+			{/* THE FAILURE OWNS A FULL LINE (D1). In a settled row this fragment sits
+			    in a wrapping flex line (row button + foot); `w-full` moves the
+			    sentence onto its own line instead of letting it become the flex item
+			    that shrinks the row's button to 0 px. On a card the parent is a column,
+			    where `flex-basis:100%` would be a HEIGHT basis — width is the property
+			    that means the same thing in both parents. */}
 			{state === "failed" ? (
-				<p role="status" className="text-meta text-ink-dim">
+				<p role="status" className="w-full text-meta text-ink-dim">
 					{messageRuntime.t("relay.asks.id.copy_failed")}
 				</p>
 			) : null}
@@ -177,7 +216,7 @@ export function AskIdChip({ id }: { id: string }) {
 					: messageRuntime.t("relay.asks.chip.label", { id, state, question: fact.question })
 			}
 			onClick={() => host.open(id)}
-			className="mx-0.5 inline-flex min-h-6 items-center gap-1 rounded-xs bg-sunken px-1 align-baseline font-mono text-mono-sm text-ink active:bg-elevated focus-visible:underline"
+			className="inline-flex min-h-6 items-center gap-1 rounded-xs bg-sunken px-1 align-baseline font-mono text-mono-sm text-ink active:bg-elevated focus-visible:underline"
 		>
 			{/* The dot is a reading aid, never the state: the word beside it says
 			    the same thing, so the chip survives greyscale and colour blindness. */}

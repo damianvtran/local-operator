@@ -308,17 +308,35 @@ export function AsksSheet({
 		if (choice !== undefined && !choiceLive) setChoice(undefined);
 		else if (choice === undefined && defaultOpen) setChoice(defaultOpen.ask_id);
 	}, [open, loaded, choice, choiceLive, defaultOpen]);
-	/* A CHIP'S JUMP IS A PENDING INTENT, applied once the row is here. The sheet
-	   reads the aggregate asynchronously, so the id exists in `listed` a frame or
-	   two after the open; the effect waits for it rather than dropping the tap.
-	   The latch above never overwrites it: this writes a real `choice`. */
+	/* A CHIP'S JUMP IS A ONE-SHOT INTENT, applied the first time its row is
+	   present. The sheet reads the aggregate asynchronously, so the id exists in
+	   `listed` a frame or two after the open; the effect waits for it rather than
+	   dropping the tap. AFTER IT LANDS IT IS SPENT: `listed` gets a new identity on
+	   every read (the 20 s backstop, `revision`, `rowsSignature`), so keying only
+	   on it re-applied the jump and pulled the reader back to the chip's ask —
+	   reproduced by jumping, tapping another row, and waiting one backstop tick.
+	   `jumpRowHere` is a BOOLEAN so the identity of the read cannot retrigger it;
+	   `jumped` holds the last consumed target, and a close resets both so
+	   reopening the same chip jumps again. */
 	const jumpTarget = typeof jumpAsk === "string" && jumpAsk !== "" ? jumpAsk : null;
+	const jumpRowHere =
+		jumpTarget !== null && listed.some((row) => row.ask_id === jumpTarget);
+	const jumped = useRef<string | null>(null);
+	/** The open card that still owes its jump one focus move; cleared by the
+	 *  scroll effect below, so a later re-render or read cannot move focus again. */
+	const jumpFocus = useRef<string | null>(null);
 	useEffect(() => {
-		if (!open || jumpTarget === null) return;
-		if (!listed.some((row) => row.ask_id === jumpTarget)) return;
+		if (!open) {
+			jumped.current = null;
+			jumpFocus.current = null;
+			return;
+		}
+		if (jumpTarget === null || jumped.current === jumpTarget || !jumpRowHere) return;
+		jumped.current = jumpTarget;
+		jumpFocus.current = jumpTarget;
 		setChoice(jumpTarget);
 		setFocusAsk(jumpTarget);
-	}, [open, jumpTarget, listed]);
+	}, [open, jumpTarget, jumpRowHere]);
 	/* THE PINNED BAR'S ELEMENT. The open card portals its answering controls into
 	   it (`AskCard`'s `footerSlot`); a state rather than a ref so the card is
 	   re-rendered with the element once the bar mounts. */
@@ -343,11 +361,12 @@ export function AsksSheet({
 		   rule for the close control is the same). The question text is the first
 		   thing the card says; a settled receipt has no question element of its
 		   own, so the card itself takes focus there (`tabIndex={-1}`). */
-		if (jumpTarget !== null && jumpTarget === openId) {
+		if (jumpFocus.current !== null && jumpFocus.current === openId) {
+			jumpFocus.current = null;
 			const target = card.querySelector<HTMLElement>('[data-testid="ask-question-text"]') ?? card;
 			target.focus({ preventScroll: true });
 		}
-	}, [open, openId, jumpTarget]);
+	}, [open, openId]);
 	const sessionOf = (row: PendingAsk) =>
 		crossConversation ? String(row.session_id) : currentSessionId;
 	const nameOf = (row: PendingAsk) => {
@@ -483,7 +502,7 @@ export function AsksSheet({
 				    one button, and a copy control nested in a button is invalid HTML and
 				    unreachable as its own target. The foot keeps the click-to-copy door
 				    at the 44 px floor while the row keeps its whole-line press. */}
-				<div className="flex items-start gap-1">
+				<div className="flex flex-wrap items-start gap-1">
 				<button
 					type="button"
 					aria-expanded={expanded}
@@ -519,9 +538,9 @@ export function AsksSheet({
 							) : null}
 						</span>
 					</span>
-					<Chevron open={expanded} className="mt-0.5" />
+					<Chevron open={expanded} />
 				</button>
-					<AskIdFoot askId={row.ask_id} className="shrink-0" />
+					<AskIdFoot askId={row.ask_id} className="shrink-0" align="title" />
 				</div>
 				{expanded ? (
 					<AskCard

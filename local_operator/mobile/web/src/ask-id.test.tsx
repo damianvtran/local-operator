@@ -6,13 +6,14 @@
 // the id when the page has no clipboard, as a plain-HTTP LAN page does not);
 // a chip exists only for an id THIS session can answer for and opens exactly
 // that ask; an id it cannot answer for stays plain text.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AskChipHostProvider, AskIdChip, AskIdFoot } from "./components/ask-id";
 import type { AskChipFact } from "./lib/ask-chip";
 
 afterEach(() => {
 	cleanup();
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 	delete (navigator as { clipboard?: unknown }).clipboard;
 });
@@ -22,20 +23,35 @@ function host(facts: [string, AskChipFact][], open = vi.fn()) {
 }
 
 describe("AskIdFoot", () => {
+	const mark = () => screen.getByTestId("ask-id-copy-mark");
+
 	it("copies the id and confirms it by name", async () => {
 		const writeText = vi.fn(async () => {});
 		Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
 		render(<AskIdFoot askId="a-745e" />);
+		expect(mark().textContent).toBe("⧉");
 		const button = screen.getByRole("button", { name: "Copy ask id a-745e" });
 		fireEvent.click(button);
 		await waitFor(() => expect(writeText).toHaveBeenCalledWith("a-745e"));
-		await waitFor(() => expect(screen.getByText("Copied")).toBeTruthy());
+		await waitFor(() => expect(mark().textContent).toBe("Copied"));
 		expect(screen.getByText("Copied a-745e")).toBeTruthy();
 	});
 
-	it("selects the id and explains when the clipboard is unavailable", async () => {
+	it("reserves the wider label so the id cannot move under the finger", () => {
+		render(<AskIdFoot askId="a-745e" />);
+		// The slot is as wide as `Copied` even while it paints the glyph.
+		const reserve = mark().nextElementSibling as HTMLElement;
+		expect(reserve.textContent).toBe("Copied");
+		expect(reserve.className).toContain("invisible");
+	});
+
+	it("selects the id and explains when the clipboard and the legacy command both fail", async () => {
 		Object.defineProperty(navigator, "clipboard", {
 			value: { writeText: vi.fn(async () => { throw new Error("insecure context"); }) },
+			configurable: true,
+		});
+		Object.defineProperty(document, "execCommand", {
+			value: vi.fn(() => false),
 			configurable: true,
 		});
 		render(<AskIdFoot askId="a-745e" />);
@@ -44,6 +60,32 @@ describe("AskIdFoot", () => {
 			expect(screen.getByText("Couldn't copy — the id is selected; copy it from there")).toBeTruthy(),
 		);
 		expect(window.getSelection()?.toString()).toBe("a-745e");
+	});
+
+	it("finishes the copy with the legacy command when the clipboard API is absent", async () => {
+		Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+		const exec = vi.fn(() => true);
+		Object.defineProperty(document, "execCommand", { value: exec, configurable: true });
+		render(<AskIdFoot askId="a-745e" />);
+		fireEvent.click(screen.getByRole("button", { name: "Copy ask id a-745e" }));
+		await waitFor(() => expect(exec).toHaveBeenCalledWith("copy"));
+		await waitFor(() => expect(mark().textContent).toBe("Copied"));
+	});
+
+	it("clears the failure notice after its reading window", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		Object.defineProperty(navigator, "clipboard", {
+			value: { writeText: vi.fn(async () => { throw new Error("insecure context"); }) },
+			configurable: true,
+		});
+		Object.defineProperty(document, "execCommand", { value: vi.fn(() => false), configurable: true });
+		render(<AskIdFoot askId="a-745e" />);
+		fireEvent.click(screen.getByRole("button", { name: "Copy ask id a-745e" }));
+		await screen.findByText("Couldn't copy — the id is selected; copy it from there");
+		await act(async () => {
+			vi.advanceTimersByTime(6100);
+		});
+		expect(screen.queryByText("Couldn't copy — the id is selected; copy it from there")).toBeNull();
 	});
 });
 
