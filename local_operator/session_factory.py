@@ -55,7 +55,11 @@ from local_operator.ecosystem_instructions import (
     read_ecosystem_instructions,
 )
 from local_operator.harness.approval import ApprovalUnavailableError
-from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
+from local_operator.harness.rows import (
+    is_harness_chrome,
+    is_harness_injection,
+    is_harness_notice_row,
+)
 from local_operator.harness.types import AgentMessage, Message
 
 # Imported as an alias: ``config_dir`` is a parameter/local name in other
@@ -1188,6 +1192,45 @@ def _payload_user_text(payload: dict[str, Any]) -> str:
     return "".join(block.get("text", "") for block in blocks if isinstance(block, dict)).strip()
 
 
+def _is_routing_chrome(payload: dict[str, Any], text: str) -> bool:
+    # Session owns the durable ingress stamp; import lazily like the other
+    # Session-only helpers so loading this factory does not pull in the runtime.
+    from local_operator.session.session import INPUT_SURFACE_KEY, INPUT_SURFACES
+
+    provider_payload = payload.get("provider_payload")
+    surface = (
+        provider_payload.get(INPUT_SURFACE_KEY) if isinstance(provider_payload, Mapping) else None
+    )
+    if isinstance(surface, str) and surface != "unknown" and surface in INPUT_SURFACES:
+        # A known human surface can quote legacy chrome verbatim. Only an
+        # explicit injection stamp overrides that provenance; never the wording.
+        return is_harness_injection(payload)
+    # Missing or unknown provenance still needs to recognize older notices and
+    # continuations, so replay doesn't hand the harness its own text to route.
+    return is_harness_notice_row(payload) or is_harness_chrome(text)
+
+
+def _knowledge_task_id(transcript: Any, indexed_user: Any) -> str | None:
+    """Resolve advisory ownership without changing the transcript's raw user index."""
+    if indexed_user is None:
+        return None
+    try:
+        payload = getattr(indexed_user, "payload", None) or {}
+        if not _is_routing_chrome(payload, _payload_user_text(payload)):
+            return indexed_user.id
+        # The latest raw user row can be a durable continuation or notice. Look
+        # behind it, not just at the last cached owner: a real user can have arrived
+        # between provider steps before this chrome was appended.
+        for entry in reversed(transcript.entries()):
+            payload = getattr(entry, "payload", None) or {}
+            if getattr(entry, "type", None) == "message" and payload.get("role") == "user":
+                if not _is_routing_chrome(payload, _payload_user_text(payload)):
+                    return entry.id
+    except Exception:  # noqa: BLE001 — a malformed journal falls back to the indexed identity
+        return indexed_user.id
+    return None
+
+
 def _image_routing_context(transcript: Any) -> str | None:
     """Bounded reference metadata and user context, never pixels or file names.
 
@@ -1244,19 +1287,20 @@ def _latest_user_query(transcript: Any) -> str:
     prose would search the skills index for "[model switch] You are now
     running as …" and freeze the result against it as the block's task id.
     The same holds for a CHROME prompt that lost its stamp — a goal
-    continuation a pre-stamp build spooled reads as a plain user row — so the
-    scan also applies the shared :func:`is_harness_chrome` recogniser.
+    continuation a pre-stamp build spooled reads as a plain user row — but
+    not for a known human input surface quoting that same wording. Query and
+    task ownership use the same provenance check before legacy text matching.
     """
     try:
         # Production transcripts index these at durable append time. Keep the
         # historical fallback for embedders/test stores exposing entries only.
-        if hasattr(transcript, "latest_user_entry"):
+        indexed = hasattr(transcript, "latest_user_entry")
+        if indexed:
             newest_user = transcript.latest_user_entry()
             candidates: Any = [transcript.latest_entry("compaction"), newest_user]
             newest_payload = getattr(newest_user, "payload", None) or {}
-            if newest_user is not None and (
-                is_harness_notice_row(newest_payload)
-                or is_harness_chrome(_payload_user_text(newest_payload))
+            if newest_user is not None and _is_routing_chrome(
+                newest_payload, _payload_user_text(newest_payload)
             ):
                 # The indexed path names ONE user row, so a notice OR a chrome
                 # prompt there would end the scan with nothing to select on.
@@ -1269,6 +1313,7 @@ def _latest_user_query(transcript: Any) -> str:
     except Exception:  # noqa: BLE001 — degradation is the contract
         return ""
     user_text = ""
+    found_user = False
     summary = ""
     for entry in reversed(entries):
         entry_type = getattr(entry, "type", None)
@@ -1294,20 +1339,14 @@ def _latest_user_query(transcript: Any) -> str:
                         edge = candidate.strip()[-2000:]
                         break
             summary = edge or str(payload.get("summary", "")).strip()
-        if not user_text and entry_type == "message" and payload.get("role") == "user":
-            if is_harness_notice_row(payload):
-                continue
+        if not found_user and entry_type == "message" and payload.get("role") == "user":
             candidate = _payload_user_text(payload)
-            if is_harness_chrome(candidate):
-                # A harness prompt that lost its stamp — a continuation row a
-                # pre-stamp build spooled — is still not a query the operator
-                # wrote: handing selection the harness's prose searches the
-                # skills index for "Continue working toward this goal: …" and
-                # freezes the block's task id against it. The same shared
-                # recogniser every display surface makes the call with.
-                continue
-            user_text = candidate
-        if user_text and summary:
+            if not _is_routing_chrome(payload, candidate):
+                user_text = candidate
+                # On an indexed transcript, an image-only user row still owns
+                # this query. Chrome above it must not revive the prior task's text.
+                found_user = indexed or bool(user_text)
+        if found_user and summary:
             break
     return "\n".join(part for part in (user_text, summary) if part)
 
@@ -1957,7 +1996,8 @@ DEFAULT_CLASSIFICATION_MAX_CANDIDATES = 12
 #: (:func:`_classification_wait_s`), so a wait budget configured larger than the
 #: call could ever take does not spend itself on nothing. It is NOT a deadline
 #: around the call: killing a call the turn has stopped waiting for would throw away
-#: an answer the next message could have used. Same pinning as above.
+#: advice the same task could still use (legacy unknown ownership also carries),
+#: or prevent the result from filling the service memo. Same pinning as above.
 DEFAULT_CLASSIFICATION_TIMEOUT_MS = 1500
 
 #: ``values.classification.waitMs`` — how long a TURN waits for a recommendation
@@ -1994,8 +2034,8 @@ DEFAULT_CLASSIFICATION_TIMEOUT_MS = 1500
 #: So: an uncached message costs the wait the operator configured (~51 ms, inside the
 #: 100 ms ceiling and AT the 50 ms ideal rather than under it), a message that finds an
 #: answer already in hand costs ~nothing, and a session's first message pays a few tens
-#: of milliseconds once. Anything slower than the wait is delivered by the next message
-#: instead (see ``_harvest_classification``).
+#: of milliseconds once. Anything slower than the wait can reach a later step of
+#: the same task (see ``_harvest_classification``).
 DEFAULT_CLASSIFICATION_WAIT_MS = 50
 
 #: How many background classification calls may be outstanding before the oldest is
@@ -2178,18 +2218,12 @@ class _KnowledgeHooks:
     #: Calls that are STILL RUNNING after their own turn stopped waiting. Harvested
     #: with a ``done()`` check — never awaited — on every render of block 3, which is
     #: once per model STEP of the message that started them and once per later user
-    #: message. Each entry carries the task id it was computed for, because whether an
-    #: answer belongs to the message being rendered decides where it is delivered:
-    #: into THIS turn's next step, or onto the next user message.
+    #: message. A superseded task's call can still finish and populate the service
+    #: memo, but a different task must never spend prompt budget on its advice.
     classification_outstanding: list[_OutstandingClassification] = field(default_factory=list)
-    #: Recommendations that have not reached a prompt yet, oldest first. Consumed
-    #: exactly once, by the render that carries them.
-    #: NO ``late`` FLAG: it used to say whether an answer MISSED the message it was
-    #: computed for, and its only reader was the deleted notice sentence's attribution.
-    #: Where an answer goes is decided before it reaches this list
-    #: (``classification_answered_task_id``, and the pending slot itself), so the flag
-    #: was data no code read — the second shape this removal exists to delete.
-    classification_pending: list[Any] = field(default_factory=list)
+    #: Keep the owner until consumption: selection can fail after harvest, and a
+    #: subsequent render may be for a different user task.
+    classification_pending: list[tuple[str | None, Any]] = field(default_factory=list)
 
 
 #: The capability line a configured MCP server contributes when no release-owned
@@ -3209,24 +3243,18 @@ def _task_outcome(task: Any) -> Any | None:
         return None
 
 
+def _classification_owner_matches(owner: str | None, task_id: str | None) -> bool:
+    # A legacy render without identity cannot prove supersession. Keep its
+    # existing carryover on the next unfrozen render, not an in-turn refresh.
+    return owner is None or task_id is None or owner == task_id
+
+
 def _harvest_classification(hooks: _KnowledgeHooks, *, task_id: str | None = None) -> bool:
-    """Move every FINISHED background call into the pending slot. Never blocks.
+    """Queue finished advice for this task without waiting for or cancelling any call.
 
-    Called before every render of block 3 — once per model step of the message that
-    started the call, and once per later user message. ``done()`` is the only test
-    that matters: a turn must never wait for a call it already gave up on, so a call
-    still running stays outstanding and is looked at again. A recommendation with no
-    resources is dropped here rather than queued — it has nothing to deliver, and a
-    session whose answers are always empty must append nothing at all.
-
-    Returns ``True`` when an answer for ``task_id`` ITSELF just arrived. That is the
-    signal :func:`_select_knowledge_block` uses to supersede this turn's frozen block
-    so the NEXT model step of the same turn carries the advisory. Measured on this
-    machine (2026-09-18): the vendor takes 540-1500 ms against a 50 ms wait, so
-    without this the answer for a message could never reach the message — it rode the
-    NEXT user message instead, which is how a Slack question was answered with a
-    suggestion about MCP guides (live child session, `guide://mcp` for a message whose
-    roster clearly contained `mcp://slack`).
+    An answer for this exact task breaks its freeze so the next model step can use
+    it. Calls that are still running stay outstanding: dropping their eventual
+    advice must not interrupt shared in-flight work or prevent memoizing the answer.
     """
     if not hooks.classification_outstanding:
         return False
@@ -3237,16 +3265,14 @@ def _harvest_classification(hooks: _KnowledgeHooks, *, task_id: str | None = Non
             running.append(call)
             continue
         recommendation = _task_outcome(call.task)
+        if not _classification_owner_matches(call.task_id, task_id):
+            continue
         if recommendation is None or not getattr(recommendation, "resources", ()):
             continue
-        # Belongs to the message being rendered, or to one already gone. ``task_id``
-        # is None for callers that never had a task (legacy paths), which keeps their
-        # behaviour: everything harvested is treated as late.
-        in_turn = task_id is not None and call.task_id is not None and call.task_id == task_id
-        hooks.classification_pending.append(recommendation)
-        if in_turn:
+        hooks.classification_pending.append((call.task_id, recommendation))
+        if task_id is not None and call.task_id == task_id:
             hooks.classification_answered_task_id = task_id
-        arrived_in_turn = arrived_in_turn or in_turn
+            arrived_in_turn = True
     hooks.classification_outstanding = running
     return arrived_in_turn
 
@@ -3268,10 +3294,8 @@ async def _classification_recommendation(
     ``values.classification.timeoutMs``, which the service enforces itself. When
     the answer misses the wait, the turn does NOT pay the difference: the call is
     left running (``shield``, so the wait's own cancellation cannot reach it),
-    kept in ``classification_outstanding``, and delivered when this turn renders its
-    knowledge block again — its next model step while the turn runs, else the next user
-    message. Two
-    properties follow:
+    kept in ``classification_outstanding``, and delivered if this task renders its
+    knowledge block again before a different task takes over. Two properties follow:
 
     - the added wall-clock per user message is bounded by the wait, whatever the
       vendor does — measured against a real roster the vendor takes ~250 ms, and
@@ -3338,16 +3362,13 @@ async def _classification_recommendation(
         # (review round 3, N1).
         logger.info(
             "classification: no recommendation within %.0f ms; the turn continues without "
-            "one (an answer that arrives later is delivered to this turn's next step, or — "
-            "if the turn ends first — to the next user message)",
+            "one (a late answer is only useful on a later step of the same task)",
             wait_s * 1000,
         )
         return None
     except asyncio.CancelledError:
         # A cancelled TURN is a user's cancel, and they mean the WORK is over, not
-        # merely that this turn stopped waiting: the answer would otherwise be
-        # delivered onto the next message, which is how a "stop" quietly produces a
-        # recommendation for the question the user walked away from. (The WAIT's own
+        # merely that this turn stopped waiting. (The WAIT's own
         # timeout is the branch above, and it deliberately does NOT do this — "this
         # turn has waited enough" and "throw that work away" are different
         # statements. Review round 2, NIT 1: the comment here used to claim that
@@ -3784,10 +3805,10 @@ def _classification_block(
     noise that costs context and teaches nothing.
 
     ``already`` is the SAME test one step further out: resources an earlier
-    section of THIS prompt already carries. One turn can deliver two answers (the
-    one a previous message harvested, then this message's own), and a shared
-    ``limit`` — the per-message cap minus what has already been spent — is what
-    keeps the pair inside ``maxRecommendations`` instead of doubling it.
+    section of THIS prompt already carries. A render can combine earlier advice
+    for this task (or legacy unknown ownership) with newly arrived advice. The
+    shared ``limit`` — the cap minus what has already been spent — keeps the
+    combined output inside ``maxRecommendations`` instead of doubling it.
 
     ``rendered_urls`` comes back through an OUT-LIST rather than a tuple return, and
     the reason is outside this module: ``tests/unit/classification/test_block_parity.py``
@@ -3932,11 +3953,9 @@ async def _select_knowledge_block(
     layer existed (asserted in ``tests/unit/test_session_factory_classification.py``).
 
     The turn only WAITS ``values.classification.waitMs`` for the answer. An answer
-    that arrives later is not lost: the next admitted user message re-renders this
-    block (that is what the per-message cadence buys here) and the late answer is
-    appended then, which the harness journals as a ``[session-state]`` update —
-    the existing channel for late host state, so nothing here has to rewrite the
-    cached prefix or invent a second notification path.
+    that arrives later can re-render this block for its own task, not a new user
+    task. The harness journals the change as a ``[session-state]`` update without
+    rewriting the cached prefix.
     """
     # A SKILL THE TREE GAINED SINCE THE LAST RENDER, checked BEFORE the freeze below:
     # the freeze is exactly what would hide it, and the fingerprint is the only
@@ -3945,11 +3964,8 @@ async def _select_knowledge_block(
     # query is even handed over, and invalidating after that decision would re-render
     # the block with nothing selected.
     fingerprint = _refresh_knowledge_freshness(hooks)
-    # HARVEST BEFORE THE FREEZE, because a harvest that arrives for THIS task is
-    # exactly what must break it. A call that finished while this session was idle,
-    # or while this message's own turn was running, belongs to the prompt being built:
-    # the first rides in as a late answer, the second as an in-turn one. A ``done()``
-    # check per outstanding call — never a wait.
+    # Harvest before the freeze: an answer for THIS task needs to break it, but
+    # an answer for a superseded task isn't part of the prompt we're building.
     arrived_in_turn = _harvest_classification(hooks, task_id=task_id)
     if (
         hooks.frozen_block is not None
@@ -3966,7 +3982,7 @@ async def _select_knowledge_block(
     already_answered = arrived_in_turn or (
         task_id is not None and hooks.classification_answered_task_id == task_id
     )
-    if arrived_in_turn and not query.strip() and hooks.frozen_query.strip():
+    if arrived_in_turn and hooks.frozen_task_id == task_id and not query.strip():
         # AN IN-TURN ANSWER SUPERSEDES THE FREEZE, so everything below must reproduce the
         # block the freeze replaced — with the same query. The provider decided this render
         # was unchanged and handed ``""``; the query that actually selected the frozen block
@@ -4052,17 +4068,9 @@ async def _select_knowledge_block(
     # this is the weakest claim in the prompt: advisory, deduped against both, and
     # the one thing a model may ignore in full.
     #
-    # Late answers go first — they are older, they were computed for an EARLIER
-    # message, and letting this turn's fresh answer take the per-message cap first
-    # would starve them for as long as the vendor keeps missing the wait. The
-    # pending list is consumed here, so an answer reaches a prompt exactly once.
-    #
-    # The BLOCKS are per answer (each is that answer's own text, capped and deduped
-    # in order). There is no per-message announcement to accompany them any more:
-    # the one-line notice was deleted with the render path it belongs to (see
-    # ``classification.service``), because it put an internal resource-selection
-    # step under the reply the user was reading. Delivery below is unchanged — the
-    # block still reaches the prompt, and the cost line still reaches the log.
+    # Consume once and check ownership again: a previous render may have failed
+    # between harvest and delivery. Keep late-first ordering for eligible vendor
+    # answers (including legacy callers with no identity).
     pending, hooks.classification_pending = hooks.classification_pending, []
     # The message's own TRIGGERED suggestion goes FIRST, ahead of the vendor's
     # answer and any late answers: it is the highest-precision one on the page
@@ -4091,7 +4099,9 @@ async def _select_knowledge_block(
                 resources=(deterministic_team_bridge,), inline_description=True
             )
         )
-    answers.extend(pending)
+    answers.extend(
+        answer for owner, answer in pending if _classification_owner_matches(owner, task_id)
+    )
     if recommendation is not None:
         answers.append(recommendation)
     carried: set[str] = set()
@@ -4281,9 +4291,11 @@ def _make_system_blocks_provider(
     identity_name: str | None = None
     cached_key: tuple[Any, ...] | None = None
     cached_blocks: list[str] = []
+    indexed_user: Any = None
+    task_id: str | None = None
 
     async def provider(model_label: str = "") -> list[str]:
-        nonlocal cached_key, cached_blocks, identity_name
+        nonlocal cached_key, cached_blocks, identity_name, indexed_user, task_id
         # notify is wired only after Session construction. The factory's warm
         # roster lacks its door; inventory reconciliation cannot repair block
         # zero. Ask the owning Session, never infer from host type or a stub.
@@ -4328,8 +4340,15 @@ def _make_system_blocks_provider(
             build_system_blocks,
         )
 
-        task = transcript.latest_user_entry() if hasattr(transcript, "latest_user_entry") else None
-        task_id = task.id if task is not None else None
+        latest_user = (
+            transcript.latest_user_entry() if hasattr(transcript, "latest_user_entry") else None
+        )
+        # Reuse the resolved owner while the durable index still points to the
+        # same entry. Even with chrome at the tail, repeated model steps must
+        # not rescan a long journal. A journal rewrite replaces its entries.
+        if latest_user is not indexed_user:
+            indexed_user = latest_user
+            task_id = _knowledge_task_id(transcript, indexed_user)
         compaction_id = _latest_compaction_id(transcript)
         # BEFORE the freeze test, because this function is what decides whether
         # ``_select_knowledge_block`` is handed a QUERY at all: a frozen block means
