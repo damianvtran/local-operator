@@ -3541,6 +3541,37 @@ def _compact_subagent_record(record: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+# Bounded retry for the roster sidecar's ``os.replace`` on non-POSIX hosts.
+# Windows refuses to replace a destination another process (an indexer, an
+# antivirus scanner, a concurrent reader) holds open without
+# FILE_SHARE_DELETE, surfacing a transient PermissionError (sharing
+# violation). These numbers are not a measured distribution: they are a short
+# ceiling (5 attempts, ~0.15 s of total sleep) chosen so a roster write — which
+# runs on a worker thread on every roster move — never stalls noticeably, and a
+# persistent refusal still raises exactly as before.
+_ROSTER_REPLACE_ATTEMPTS = 5
+_ROSTER_REPLACE_BACKOFF_S = 0.01
+
+
+def _replace_roster_sidecar(temp: Any, path: Any) -> None:
+    """``os.replace`` that rides out a transient Windows sharing violation.
+
+    POSIX ``rename(2)`` has no such transient failure, so a PermissionError
+    there is real and propagates on the first attempt — the retry is gated to
+    ``os.name != "posix"`` and to PermissionError only.
+    """
+    attempt = 1
+    while True:
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            if os.name == "posix" or attempt >= _ROSTER_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_ROSTER_REPLACE_BACKOFF_S * (2 ** (attempt - 1)))
+            attempt += 1
+
+
 def _write_roster_sidecar(path: Any, payload: dict[str, Any]) -> None:
     """Replace current roster state durably without exposing a partial JSON file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3551,12 +3582,21 @@ def _write_roster_sidecar(path: Any, payload: dict[str, Any]) -> None:
             json.dump(payload, handle, separators=(",", ":"))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _replace_roster_sidecar(temp, path)
+        # Fsyncing the parent directory makes the rename itself durable, but
+        # only POSIX can open a directory as a file descriptor: on Windows
+        # ``os.open(dir, O_RDONLY)`` raises PermissionError (observed on a
+        # windows-latest runner, once per roster write), and NTFS journals the
+        # rename itself. Same platform gate as ``_fsync_directory`` in
+        # ``session/index_read_model.py``; unlike that helper, a POSIX failure
+        # here still raises, because the roster write has always treated a
+        # refused directory sync as a failed durable write.
+        if os.name == "posix":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         with contextlib.suppress(FileNotFoundError):
             temp.unlink()
