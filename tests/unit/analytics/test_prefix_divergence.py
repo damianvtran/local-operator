@@ -505,6 +505,39 @@ def test_a_google_style_start_without_a_response_id_commits_the_baseline() -> No
     assert stub._cache_prefix_last is before
 
 
+def test_a_google_end_event_is_the_acceptance_signal() -> None:
+    """QA round 3: Google's START has no diagnosis at all; its END does.
+
+    The real ``GoogleClient`` yields ``StreamStartEvent(response_id=None)`` with
+    no ``cache_miss_type`` and computes the local prefix verdict only after
+    ``usageMetadata``, on ``StreamEndEvent``. Committing on the start alone left
+    every Google chain uncommitted, so a warm-cache break still read ``-``.
+    """
+    from local_operator.harness.types import StreamEndEvent, StreamStartEvent
+
+    stub = _stream_stub()
+    stub._note_cache_prefix(_request(_message("user", "one")))
+    stub._note_cache_start(StreamStartEvent(response_id=None, cache_miss_type=None))
+    assert stub._cache_prefix_last is None, "a Google start says nothing about acceptance"
+
+    stub._note_cache_end(
+        StreamEndEvent(stop_reason="stop", cache_miss_type="baseline", cache_missed_tokens=0)
+    )
+    assert stub._cache_prefix_last is not None, "the diagnosed end IS the acceptance"
+
+    stub._note_cache_prefix(_request(_message("user", "one EDITED")))
+    assert stub._cache_first_divergence == "messages[0]:user"
+
+
+def test_an_undiagnosed_end_commits_nothing() -> None:
+    from local_operator.harness.types import StreamEndEvent
+
+    stub = _stream_stub()
+    stub._note_cache_prefix(_request(_message("user", "one")))
+    stub._note_cache_end(StreamEndEvent(stop_reason="error"))
+    assert stub._cache_prefix_last is None
+
+
 def test_the_stream_loop_gates_the_commit_on_the_diagnosis_not_a_response_id() -> None:
     """R3-3: the wiring itself, pinned — the old gate cannot come back silently.
 
@@ -525,9 +558,12 @@ def test_the_stream_loop_gates_the_commit_on_the_diagnosis_not_a_response_id() -
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "_note_cache_start"
+        and node.func.attr in ("_note_cache_start", "_note_cache_end")
     ]
-    assert len(calls) == 1, "the stream loop calls the commit step exactly once"
+    assert {node.func.attr for node in calls} == {
+        "_note_cache_start",
+        "_note_cache_end",
+    }, "both acceptance shapes reach the commit step"
     enclosing = [
         node
         for node in ast.walk(tree)

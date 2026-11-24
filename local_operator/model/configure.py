@@ -44,6 +44,7 @@ from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
     ModelSpec,
+    StreamEndEvent,
     StreamEvent,
     StreamStartEvent,
     Usage,
@@ -7838,6 +7839,13 @@ class SessionStreamFn:
                 )
             if request.cache_diagnostics and isinstance(event, StreamStartEvent):
                 self._note_cache_start(event)
+            elif request.cache_diagnostics and isinstance(event, StreamEndEvent):
+                # Google diagnoses on the END: its start carries no id and no
+                # comparison (providers/clients.py), and the local prefix
+                # verdict is only known once usageMetadata has arrived. A
+                # diagnosed end is therefore this provider's acceptance
+                # signal, exactly as a diagnosed start is Anthropic's.
+                self._note_cache_end(event)
             if (
                 request.cache_diagnostics
                 and usage is not None
@@ -8521,6 +8529,10 @@ class SessionStreamFn:
         """
         if getattr(event, "cache_miss_type", None) is None:
             return
+        self._commit_cache_prefix()
+
+    def _commit_cache_prefix(self) -> None:
+        """Settle the in-flight snapshot against an ACCEPTED request."""
         if self._cache_prefix_failed:
             # This request WAS accepted, and its own snapshot is missing: the
             # baseline it would have replaced now describes a non-adjacent
@@ -8531,6 +8543,20 @@ class SessionStreamFn:
         elif self._cache_prefix_pending is not None:
             self._cache_prefix_last = self._cache_prefix_pending
         self._cache_prefix_pending = None
+
+    def _note_cache_end(self, event: Any) -> None:
+        """Commit the prefix baseline from a DIAGNOSED end (Google's shape).
+
+        Google's ``StreamStartEvent`` carries neither a response id nor a
+        diagnosis — the local prefix verdict is computed from ``usageMetadata``
+        and rides the END event, which the client emits only after a successful
+        non-empty stream. Gating the commit on the start alone left every
+        Google chain uncommitted (QA round 3), the same failure the ``response_id``
+        gate caused on Anthropic-shaped providers in round 2.
+        """
+        if getattr(event, "cache_miss_type", None) is None:
+            return
+        self._commit_cache_prefix()
 
     def _note_cache_prefix(self, request: ChatRequest) -> None:
         """Compare THIS request's context with the last one the provider ACCEPTED.
