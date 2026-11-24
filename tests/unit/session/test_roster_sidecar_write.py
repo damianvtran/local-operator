@@ -6,7 +6,8 @@ descriptor — so the parent-directory fsync must be POSIX-only. POSIX keeps its
 strict semantics (a refused directory sync still fails the write), and the
 publish step rides out a transient Windows sharing violation on ``os.replace``
 for a bounded number of attempts. These tests simulate the non-POSIX branch by
-patching ``os.name`` only for the duration of the write.
+swapping the session module's ``os`` binding for a forwarding stand-in that
+reports ``name == "nt"`` (see ``_pretend_non_posix``).
 """
 
 from __future__ import annotations
@@ -39,6 +40,30 @@ def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return sleeps
 
 
+class _NonPosixOs:
+    """Forward every attribute to the real ``os`` except ``name``.
+
+    Why not ``monkeypatch.setattr(os, "name", "nt")``: that flips the global
+    ``os.name`` for the whole interpreter, so anything else building a path
+    meanwhile — e.g. the root conftest's real-store guard during
+    ``temp.unlink()`` — makes pathlib pick ``WindowsPath`` on Linux and raise
+    ``NotImplementedError`` (PR #4541 Q1). Rebinding only the session module's
+    ``os`` keeps the simulation local to the code under test. Lookups are
+    forwarded lazily, so a test's later ``monkeypatch.setattr(os, "replace",
+    ...)`` on the real module is still seen through the stand-in.
+    """
+
+    name = "nt"
+
+    def __getattr__(self, attribute: str):
+        return getattr(os, attribute)
+
+
+def _pretend_non_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    # monkeypatch restores the binding at teardown, even when the write raises.
+    monkeypatch.setattr(session_module, "os", _NonPosixOs())
+
+
 def _refuse_directory_open(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Make ``os.open`` behave like Windows for directories."""
     real_open = os.open
@@ -56,9 +81,9 @@ def _refuse_directory_open(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 def test_non_posix_skips_directory_fsync(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
     refused = _refuse_directory_open(monkeypatch)
-    monkeypatch.setattr(os, "name", "nt")
+    _pretend_non_posix(monkeypatch)
     _write_roster_sidecar(target, PAYLOAD)
-    monkeypatch.setattr(os, "name", "posix")
+    assert os.name == "posix"
     assert json.loads(target.read_text(encoding="utf-8")) == PAYLOAD
     assert refused == []
     assert _leftover_temps(target.parent) == []
@@ -113,9 +138,9 @@ def test_non_posix_replace_retries_transient_sharing_violation(
         real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", flaky)
-    monkeypatch.setattr(os, "name", "nt")
+    _pretend_non_posix(monkeypatch)
     _write_roster_sidecar(target, PAYLOAD)
-    monkeypatch.setattr(os, "name", "posix")
+    assert os.name == "posix"
     assert len(calls) == 3
     assert len(_no_sleep) == 2
     assert json.loads(target.read_text(encoding="utf-8")) == PAYLOAD
@@ -132,10 +157,10 @@ def test_non_posix_replace_gives_up_after_bounded_attempts(
         raise PermissionError(13, "sharing violation", os.fspath(dst))
 
     monkeypatch.setattr(os, "replace", refuse)
-    monkeypatch.setattr(os, "name", "nt")
+    _pretend_non_posix(monkeypatch)
     with pytest.raises(PermissionError):
         _write_roster_sidecar(target, PAYLOAD)
-    monkeypatch.setattr(os, "name", "posix")
+    assert os.name == "posix"
     assert len(calls) == session_module._ROSTER_REPLACE_ATTEMPTS
     assert sum(_no_sleep) < 0.5
     assert not target.exists()
