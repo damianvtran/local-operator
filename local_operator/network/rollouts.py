@@ -69,6 +69,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.network.types import MeshRefusal
 
 if TYPE_CHECKING:
@@ -292,9 +293,7 @@ def _write_record(record: Mapping[str, Any], root: Path | None = None) -> None:
     """Atomic replace, inside the caller's lock (or for a fresh record)."""
     path = record_path(str(record["id"]), root)
     payload = json.dumps(record, sort_keys=True, indent=2)
-    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, payload)
 
 
 def mutate_record(

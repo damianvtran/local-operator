@@ -288,6 +288,7 @@ from pathlib import Path
 # ``update`` — which reaches it through ``~`` and this module through the
 # passwd home (see :func:`runtime_root`). ``install_defaults`` is deliberately
 # stdlib-only so importing it costs this startup path nothing.
+from local_operator.atomic_files import atomic_symlink
 from local_operator.install_defaults import STABLE_ROOT_RELATIVE
 
 logger = logging.getLogger(__name__)
@@ -1446,13 +1447,7 @@ def _plant_libpython(link: Path, real: Path, name: str) -> bool:
         #
         # Symlink via a temp name + replace, for the same concurrency reason as
         # the hardlink: sibling worktrees plant this at the same moment.
-        tmp = target.with_name(f".{name}.{os.getpid()}.tmp")
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        os.symlink(source, tmp)
-        os.replace(tmp, target)
+        atomic_symlink(target, source, hidden=True)
         return True
     except OSError as exc:
         logger.debug("libpython symlink not planted: %s", exc)

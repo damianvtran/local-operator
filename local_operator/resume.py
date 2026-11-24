@@ -26,6 +26,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.procstate import is_zombie, pid_liveness, process_sample
 
 # The transcript resolver, also stdlib-only at ITS module scope, and needed by
@@ -886,12 +887,10 @@ def write_session_title(
             previous = None
         session_dir.mkdir(parents=True, exist_ok=True)
         sidecar = session_dir / TITLE_SIDECAR_NAME
-        # The temp carries the writer's PID so two sessions writing at once do
-        # not ``replace`` a document the other is still filling — the same
-        # torn-write hazard ``search_index._save`` documents.
-        tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(sidecar)
+        # A per-write temp (pid + thread + random) so two writers -- sessions or
+        # threads -- at once do not ``replace`` a document the other is still
+        # filling: the torn-write hazard ``search_index._save`` documents.
+        atomic_write_text(sidecar, json.dumps(payload))
         if previous is not None:
             os.utime(session_dir, (previous, previous))
     except (OSError, TypeError, ValueError):
@@ -1003,9 +1002,7 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
             previous = None
         session_dir.mkdir(parents=True, exist_ok=True)
         sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
-        tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(sidecar)
+        atomic_write_text(sidecar, json.dumps(payload))
         if previous is not None:
             os.utime(session_dir, (previous, previous))
     except (OSError, TypeError, ValueError):
@@ -1090,9 +1087,7 @@ def write_goal_record(session_dir: Path, payload: dict[str, Any]) -> None:
             previous = None
         session_dir.mkdir(parents=True, exist_ok=True)
         sidecar = session_dir / GOAL_SIDECAR_NAME
-        tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(sidecar)
+        atomic_write_text(sidecar, json.dumps(payload))
         if previous is not None:
             os.utime(session_dir, (previous, previous))
     except (OSError, TypeError, ValueError):
@@ -1321,9 +1316,7 @@ def _write_origin_scan_sentinel(session_dir: Path) -> None:
         except OSError:
             previous = None
         sentinel = session_dir / ORIGIN_SCAN_SENTINEL_NAME
-        tmp = sentinel.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({"scanned": True}), encoding="utf-8")
-        tmp.replace(sentinel)
+        atomic_write_text(sentinel, json.dumps({"scanned": True}))
         if previous is not None:
             os.utime(session_dir, (previous, previous))
     except (OSError, TypeError, ValueError):
@@ -1337,7 +1330,7 @@ def _write_title_scan_sentinel(session_dir: Path) -> None:
     the same trade: the sentinel is a boot-cost optimisation, and a session on
     a read-only volume must still RUN. The cost of a failed write is one
     redundant full scan on the next boot — the pre-fix behaviour — never a
-    lost turn. Mtime is preserved and the write is atomic (pid-named temp +
+    lost turn. Mtime is preserved and the write is atomic (per-write temp +
     ``replace``) for the reasons the title sidecar's writer documents at
     length: journalling a scan is bookkeeping ABOUT a session, never activity
     IN it, and a concurrent reader must never see a torn file.
@@ -1348,9 +1341,7 @@ def _write_title_scan_sentinel(session_dir: Path) -> None:
         except OSError:
             previous = None
         sentinel = session_dir / TITLE_SCAN_SENTINEL_NAME
-        tmp = sentinel.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({"scanned": True}), encoding="utf-8")
-        tmp.replace(sentinel)
+        atomic_write_text(sentinel, json.dumps({"scanned": True}))
         if previous is not None:
             os.utime(session_dir, (previous, previous))
     except (OSError, TypeError, ValueError):
@@ -1864,12 +1855,10 @@ def _save_origin_cache(
             # brought into being by the entries-changed write above or by a
             # long-lived polling path.
             return
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         document: dict[str, Any] = {"version": ORIGIN_CACHE_VERSION, "entries": entries}
         if revalidated_at is not None:
             document["revalidated_at"] = revalidated_at
-        tmp.write_text(json.dumps(document), encoding="utf-8")
-        tmp.replace(path)
+        atomic_write_text(path, json.dumps(document))
     except OSError:
         return
 
