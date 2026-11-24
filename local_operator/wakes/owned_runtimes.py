@@ -74,6 +74,16 @@ SUPERVISOR_PID_ENV = "LOP_WAKE_SUPERVISOR_PID"
 #: to a newer launch path.
 LEGACY_ACTIVE_ENV = "LOP_WAKE_SUPERVISOR_ACTIVE"
 
+#: "This runtime was started by the wake supervisor." Stamped under exactly the
+#: same rule as ``OWNER_ENV`` (only the supervisor process itself stamps; every
+#: other spawner strips it), and consumed ONCE by the runtime's session when it
+#: loads its wakes (``harness.wake.take_supervisor_started``): a cold boot the
+#: supervisor paid for also delivers that session's wakes due within
+#: ``WAKE_COALESCE_WINDOW_MS``, instead of a second boot minutes later. Kept
+#: out of :data:`MARKER_ENVS` on purpose: ``forget_inherited_marker`` runs at
+#: runtime boot, and this fact must survive until the session reads it.
+SUPERVISOR_STARTED_ENV = "LOP_WAKE_SUPERVISOR_STARTED"
+
 #: Every variable the marker scheme uses: stripped from a child environment
 #: unless the supervisor itself is stamping, and from a runtime's own
 #: environment at boot.
@@ -93,8 +103,10 @@ def stamp_child_env(env: dict[str, str]) -> None:
     supervisor_pid = os.environ.get(SUPERVISOR_PID_ENV) or ""
     for name in MARKER_ENVS:
         env.pop(name, None)
+    env.pop(SUPERVISOR_STARTED_ENV, None)
     if owner and supervisor_pid == str(os.getpid()):
         env[OWNER_ENV] = owner
+        env[SUPERVISOR_STARTED_ENV] = "1"
 
 
 def forget_inherited_marker() -> None:

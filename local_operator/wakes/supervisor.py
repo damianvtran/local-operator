@@ -446,77 +446,6 @@ def _fireable_due_ms(entry: dict[str, Any], now_ms: int) -> int | None:
     return min(candidates) if candidates else None
 
 
-def _delayable_wake_row(raw: Mapping[str, Any]) -> bool:
-    """Whether coalescing may hold this row past its own due time.
-
-    ONE-SHOTS ONLY, and only the model's own: everything else keeps exactly
-    the timing it has without coalescing.
-
-    - Recurring (``every_ms``): a runtime that fires a recurring wake late
-      re-phases it to the fire time (``advance_wake_schedule`` advances from the
-      load-time re-armed due), so holding one would shift its cadence and, held
-      repeatedly behind a slower sibling, make it fire FEWER times than it
-      would uncoalesced. Never holding it keeps its ``fired_count`` and
-      ``next_due_at`` byte-identical to separate firings. It may still be the
-      LATEST member a cluster waits for.
-    - Operator-authored (``origin`` cli/desktop/tui) or ``notify``: a reminder
-      a person set, or one that pings the desktop, is promised at its time.
-    - Internal/hidden timers (patience waits, ask deadlines): mechanisms whose
-      timing other code depends on.
-    """
-    from local_operator.harness.wake_types import OPERATOR_WAKE_ORIGINS
-    from local_operator.wakes.store import is_internal_wake_row
-
-    if raw.get("every_ms") is not None:
-        return False
-    if raw.get("origin") in OPERATOR_WAKE_ORIGINS or raw.get("notify"):
-        return False
-    return not (is_internal_wake_row(raw) or raw.get("hidden"))
-
-
-def _coalesced_release_ms(entry: Mapping[str, Any], anchor_ms: int) -> int:
-    """When the engagement for ``anchor_ms`` (the entry's earliest fireable due)
-    should happen so it also carries the session's other wakes due soon after.
-
-    WHY (wake boot economy, 2026-11-24). The supervisor engages a session when
-    its earliest wake is due; a sibling due a few minutes later finds the
-    runtime idle-exited (residency median ~147 s) and pays a second cold boot
-    (median 11.4 s). Holding the earlier wake until the latest sibling due
-    within :data:`~local_operator.harness.wake.WAKE_COALESCE_WINDOW_MS` makes
-    ONE boot; the runtime's load then folds every overdue schedule into one
-    turn listing each schedule id, its original due time and its message, in
-    due order (``Session._format_missed_wake_catchup``), and fires each
-    schedule exactly as it would have fired alone (one-shots retire with
-    ``fired_count`` 1; recurring rows are never held, see
-    :func:`_delayable_wake_row`).
-
-    INVARIANTS. The cluster is anchored on ``anchor_ms`` and never extends past
-    ``anchor_ms + window``, so no wake is held more than the window past its
-    own due time, and chaining cannot postpone forever. Any member that would
-    be held but is not delayable disables the hold (engage now, as before).
-    Returns ``anchor_ms`` when there is nothing to wait for.
-    """
-    from local_operator.harness.wake import WAKE_COALESCE_WINDOW_MS
-
-    horizon = anchor_ms + WAKE_COALESCE_WINDOW_MS
-    cluster: list[tuple[int, Mapping[str, Any]]] = []
-    for raw in entry.get("schedules") or ():
-        if not isinstance(raw, Mapping):
-            continue
-        due = raw.get("next_due_at")
-        if isinstance(due, bool) or not isinstance(due, int):
-            continue
-        if anchor_ms <= due <= horizon:
-            cluster.append((due, raw))
-    if not cluster:
-        return anchor_ms
-    release = max(due for due, _raw in cluster)
-    for due, raw in cluster:
-        if due < release and not _delayable_wake_row(raw):
-            return anchor_ms
-    return release
-
-
 def _has_fireable_schedule(entry: dict[str, Any], now_ms: int) -> bool:
     """Whether ANY schedule in this entry is still worth supervising.
 
@@ -893,22 +822,6 @@ def _due_sessions(
                         (nxt - now_ms) / 1000.0,
                         record.get("state") or "retrying",
                         record.get("last_error") or "unknown",
-                    )
-                continue
-        if record is None:
-            # COALESCE (see `_coalesced_release_ms`). Only a FRESH fire is held:
-            # one with a ledger record is already owed and late, and holding it
-            # further would stack the hold on top of its retry backoff.
-            release = _coalesced_release_ms(entry, fireable)
-            if release > now_ms:
-                if _skip_log.should_log(session_id, "coalescing"):
-                    logger.info(
-                        "coalescing: holding %s — its wake due %d waits %.0fs for the "
-                        "wake(s) due by %d, so one boot delivers them all",
-                        session_id,
-                        fireable,
-                        (release - now_ms) / 1000.0,
-                        release,
                     )
                 continue
         # A missing index cwd is no opinion, not an explicit HOME override.
@@ -1584,10 +1497,7 @@ async def _engage_one(
         # live-stalled, the live skip's escalated form). Whether the engage
         # SUCCEEDS is decided below, and its own throttle key must survive this
         # pass — see `_SkipLog.forget`.
-        # "coalescing" too: each held cluster announces its own hold once.
-        _skip_log.forget(
-            session_id, "live", "live-stalled", "ghost", "wedged", "stale", "coalescing"
-        )
+        _skip_log.forget(session_id, "live", "live-stalled", "ghost", "wedged", "stale")
         logger.info(
             "engaging %s: %s due %d, %.1fs overdue (deadline %.0fs)",
             session_id,

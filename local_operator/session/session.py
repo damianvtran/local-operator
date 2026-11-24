@@ -35318,7 +35318,18 @@ class Session:
                     "patience: retired %d stale wait(s) at load", len(schedules) - len(kept)
                 )
             schedules = kept
-        self._wake.load(schedules)
+        from local_operator.harness.wake import (
+            WAKE_COALESCE_WINDOW_MS,
+            take_supervisor_started,
+        )
+
+        # A runtime the wake supervisor cold-booted also delivers this session's
+        # wakes due within the window, instead of paying another cold boot for
+        # each of them minutes later (wake boot economy; see ``load``).
+        self._wake.load(
+            schedules,
+            pull_forward_ms=WAKE_COALESCE_WINDOW_MS if take_supervisor_started() else 0,
+        )
 
     def _load_monitor_schedules(self) -> None:
         """Adopt the transcript's ``monitor_schedules`` rows, latest entry wins.
@@ -36482,27 +36493,36 @@ class Session:
 
         lines = []
         cold_boot_only = True
-        # DUE ORDER, not creation order: the wake supervisor coalesces a
-        # session's wakes due within a window into one cold boot, and the turn
-        # it delivers must read as the sequence the wakes came due in.
+        # DUE ORDER, not creation order: a supervisor-started runtime also
+        # delivers the session's wakes due within a window (pulled forward into
+        # this one turn), and the turn must read as the sequence they come due in.
         for entry in sorted(missed, key=lambda item: item["schedule"].next_due_at):
             schedule = entry["schedule"]
             # The DUE-while-down count is what the agent should read (M2).
             occurrences = entry["due"]
             # A COLD-BOOT DELIVERY IS NOT A MISS. The supervisor starts a runtime
             # for a wake only once it is due, so its runtime always loads that
-            # wake overdue — by the boot latency, plus any coalescing hold. Within
+            # wake overdue, by the engage + boot latency. Within
             # ``COLD_BOOT_DELIVERY_MS`` a single occurrence is a punctual delivery
             # by the supervisor, and calling it "missed while the session was
             # down" told the model to treat on-time fires as missed ones
             # (316765a40496: 85 such notices in 3.57 days, each a distinct
-            # on-time wake — they read as repeated missed-notice boots).
-            cold_boot = occurrences <= 1 and now_ms - schedule.next_due_at <= COLD_BOOT_DELIVERY_MS
+            # on-time wake; they read as repeated missed-notice boots). An
+            # ``early`` row was pulled forward into this boot and is not due yet.
+            early = bool(entry.get("early"))
+            cold_boot = early or (
+                occurrences <= 1 and now_ms - schedule.next_due_at <= COLD_BOOT_DELIVERY_MS
+            )
             cold_boot_only = cold_boot_only and cold_boot
-            if cold_boot:
+            if early:
+                header = (
+                    f"- {schedule.id} (due {_due_label(schedule)}): not due yet; delivered "
+                    "early with this start instead of starting the session again for it."
+                )
+            elif cold_boot:
                 header = (
                     f"- {schedule.id} (due {_due_label(schedule)}): came due while no "
-                    "runtime was running; delivered by the wake supervisor's start."
+                    "runtime was running; delivered at this start."
                 )
             elif occurrences > 1:
                 # occurrences > 1 implies a repeating schedule, so every_ms is
@@ -36524,9 +36544,10 @@ class Session:
         if cold_boot_only:
             # i18n: ignore model-facing wake prompt
             return (
-                "(alarm) The wake supervisor started this session for the following "
-                "scheduled wake(s), listed in the order they came due, each with its own "
-                "id and due time. Handle each one now.\n\n" + "\n".join(lines)
+                "(alarm) Scheduled wake(s) delivered at this start, listed in due order, "
+                "each with its own id and due time. None was missed: no runtime was "
+                "running when they came due (or they are due shortly). Handle each one "
+                "now.\n\n" + "\n".join(lines)
             )
         return (
             "(alarm) The session resumed after being closed; the following scheduled wake(s) "
