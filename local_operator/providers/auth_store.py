@@ -1649,7 +1649,15 @@ class _SerializedConnection:
         # explicit :meth:`close` first makes it a no-op (sqlite's ``close`` is
         # idempotent). Closing here cannot cut a live caller short: a caller
         # mid-statement holds the wrapper, so the finalizer cannot have run.
-        weakref.finalize(self, conn.close)
+        self._finalizer = weakref.finalize(self, conn.close)
+        # Release only: never at interpreter exit. ``finalize`` defaults to
+        # ``atexit=True``, and ``weakref._exitfunc`` would then close every live
+        # store's handle WITHOUT ``self._lock`` while daemon threads still run
+        # -- one mid-``sqlite3_step`` would have the db pulled out from under
+        # it. The orderly shutdown closer is ``close_shared_auth_stores``, which
+        # goes through :meth:`close` and takes the lock; the OS reclaims the
+        # rest at exit. (PR #4539 review finding R1.)
+        self._finalizer.atexit = False
 
     @property
     def lock(self) -> threading.RLock:

@@ -21,12 +21,11 @@ bare form; add a file here when converting it, so it cannot regress.
 from __future__ import annotations
 
 import gc
-import os
 import re
 import sqlite3
 from pathlib import Path
 
-import pytest
+from tests.fd_probe import open_fds_on
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -52,13 +51,6 @@ def test_converted_files_never_use_the_non_closing_with_form() -> None:
     )
 
 
-def _open_fd_count() -> int:
-    for candidate in ("/proc/self/fd", "/dev/fd"):
-        if os.path.isdir(candidate):
-            return len(os.listdir(candidate))
-    pytest.skip("no fd directory on this platform")
-
-
 def test_the_bare_with_form_really_leaves_the_descriptor_open(tmp_path: Path) -> None:
     """Negative control: the rule above guards a real leak, not a style."""
     database = tmp_path / "probe.sqlite3"
@@ -66,13 +58,16 @@ def test_the_bare_with_form_really_leaves_the_descriptor_open(tmp_path: Path) ->
     gc.collect()
     gc.disable()
     try:
-        baseline = _open_fd_count()
+        # Descriptors on THIS database only: a process-wide count moves with
+        # other threads' fds and failed CI as ``assert 19 == 18`` (run
+        # 45381339350; see tests/fd_probe.py).
+        assert open_fds_on([database]) == 0
         with sqlite3.connect(database) as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS t (x)")
         del conn
-        assert _open_fd_count() > baseline
+        assert open_fds_on([database]) == 1
         gc.collect()
-        assert _open_fd_count() == baseline
+        assert open_fds_on([database]) == 0
     finally:
         if was_enabled:
             gc.enable()

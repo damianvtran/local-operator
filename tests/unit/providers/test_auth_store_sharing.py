@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import gc
-import os
 import sqlite3
+import sys
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -38,6 +38,7 @@ from local_operator.providers.auth_store import (
     close_shared_auth_stores,
     shared_auth_store,
 )
+from tests.fd_probe import open_fds_on
 
 #: Provider env vars the cascade would otherwise resolve from the developer's
 #: shell. The suite must not read a real key while asserting on the store.
@@ -334,13 +335,6 @@ def test_the_map_is_bounded_and_never_closes_a_held_store(
     assert held.list_credentials() == []
 
 
-def _open_fd_count() -> int:
-    for candidate in ("/proc/self/fd", "/dev/fd"):
-        if os.path.isdir(candidate):
-            return len(os.listdir(candidate))
-    pytest.skip("no fd directory on this platform")
-
-
 @pytest.fixture()
 def no_cyclic_gc() -> Iterator[None]:
     """Disable the cyclic collector so only REFCOUNT release is measured.
@@ -371,11 +365,12 @@ def test_a_dropped_store_releases_its_descriptors_without_gc(
     """
     db = tmp_path / "dropped" / "auth.db"
     db.parent.mkdir()
-    AuthStore(db, config_dir=db.parent).list_credentials()  # first open creates the files
-    baseline = _open_fd_count()
+    # Counted per FILE, not per process: other threads in a worker open and
+    # close unrelated fds concurrently (see tests/fd_probe.py, CI run
+    # 45381339350), so only descriptors on this database are evidence.
     for _ in range(20):
         AuthStore(db, config_dir=db.parent).list_credentials()
-    assert _open_fd_count() == baseline
+    assert open_fds_on([db]) == 0
 
 
 def test_evicted_shared_stores_release_their_descriptors_without_gc(
@@ -388,20 +383,40 @@ def test_evicted_shared_stores_release_their_descriptors_without_gc(
     exactly the many-roots shape that evicts. Open fds may grow by at most the
     map's bound (three per resident root), never by the number of roots seen.
     """
-    baseline = _open_fd_count()
+    databases = []
     for index in range(auth_store_module._SHARED_STORES_MAX * 5):
         extra = tmp_path / f"evict-{index}"
         extra.mkdir()
-        shared_auth_store(extra / "auth.db", config_dir=extra).list_credentials()
-    assert _open_fd_count() - baseline <= auth_store_module._SHARED_STORES_MAX * 3
+        databases.append(extra / "auth.db")
+        shared_auth_store(databases[-1], config_dir=extra).list_credentials()
+    # Per-file count (tests/fd_probe.py): a process-wide one drifts with other
+    # threads' descriptors and made this bound a flake.
+    assert open_fds_on(databases) <= auth_store_module._SHARED_STORES_MAX * 3
 
 
-def test_close_after_release_is_still_safe(root: Path, tmp_path: Path) -> None:
-    """An explicit close followed by the finalizer must not raise or double-free."""
+def test_close_after_release_is_still_safe(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit close, then release, runs the finalizer once and quietly.
+
+    An exception in a weakref callback never reaches the test -- CPython routes
+    it to ``sys.unraisablehook`` -- so "did not raise" proves nothing. Instead:
+    capture that hook, hold the wrapper's finalizer, and assert it actually ran
+    on release (``alive`` turns False) with nothing reported. The finalizer must
+    also be release-only, never an interpreter-exit closer (see the comment in
+    ``_SerializedConnection.__init__``).
+    """
+    unraisable: list[Any] = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
     store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    finalizer = store._conn._finalizer
+    assert finalizer.alive
+    assert finalizer.atexit is False
     store.close()
     del store
     gc.collect()
+    assert not finalizer.alive
+    assert unraisable == []
 
 
 def test_a_caller_that_owns_its_connection_still_closes_it(
