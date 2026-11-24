@@ -95,14 +95,18 @@ def registries(tmp_path: Path) -> tuple[AgentRegistry, TeamRegistry]:
 
 
 def _session(
-    tmp_path: Path, registries: tuple[AgentRegistry, TeamRegistry], *, directory: Path | None = None
+    tmp_path: Path,
+    registries: tuple[AgentRegistry, TeamRegistry],
+    *,
+    directory: Path | None = None,
+    stream: ScriptedStream | None = None,
 ) -> Session:
     """A session over ``tmp_path/sess`` — reopening one RESUMES it, which is
     exactly the shape both ``--resume <id>`` and the ``/resume`` picker build."""
     agents, teams = registries
     return Session(
         model=MODEL,
-        stream_fn=ScriptedStream([[]]),
+        stream_fn=stream if stream is not None else ScriptedStream([[]]),
         tools=[],
         transcript=Transcript(directory or tmp_path / "sess"),
         system_blocks_provider=lambda: [],
@@ -779,6 +783,125 @@ def test_present_attachment_without_completed_binding_is_not_authority(
     assert reopened.goal == "keep"
     reopened.attach_team(registries[1].get_team_by_name("lopdev"))
     assert _session(tmp_path, registries, directory=directory).active_team_name == "lopdev"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "local",
+        "mesh-node",
+        "verified-move",
+        "missing-team",
+        "mesh-arrival",
+        "replica",
+        "write-error",
+        "copied-origin",
+        "incomplete-binding",
+    ],
+)
+async def test_witnessed_legacy_attachment_admission(tmp_path, registries, monkeypatch, case):
+    import asyncio
+
+    from local_operator.harness.types import StreamTextDelta
+    from local_operator.network import move_team
+    from local_operator.resume import (
+        ORIGIN_AGENT_WORKSTREAM,
+        mark_session_origin,
+        write_session_title,
+    )
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.errors import AttachmentUnavailable
+    from local_operator.session.placement import MeshStamp, write_stamp_into
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    sid = "000000000001"
+    directory = tmp_path / "sessions" / sid
+    name = "deleted" if case == "missing-team" else "lopdev"
+    if case == "copied-origin":
+        from local_operator.resume import ORIGIN_NAME
+
+        directory.mkdir(parents=True)
+        (directory / ORIGIN_NAME).write_text(json.dumps({"origin": ORIGIN_AGENT_WORKSTREAM}))
+    else:
+        mark_session_origin(directory, ORIGIN_AGENT_WORKSTREAM)
+    write_session_attachment(directory, team=name, agent="", goal="keep")
+    write_session_title(directory, "Existing conversation", user_set=True, past_names=[])
+    binding = directory / move_team.LOCAL_BINDING_NAME
+    accepted = case in {"local", "mesh-node", "verified-move"}
+    already_journaled = case in {"replica", "incomplete-binding"}
+    if case == "mesh-node":
+        from local_operator.network.identity import mint
+
+        mint(tmp_path)
+    elif case == "verified-move":
+        source = _session(tmp_path, registries)
+        try:
+            source.attach_team(registries[1].get_team_by_name(name))
+            offer = move_team.source_offer(tmp_path, tmp_path / "sess", supported=True)
+            verified = move_team.check_arrival(tmp_path, directory, offer)
+            assert verified is not None
+            write_stamp_into(directory, MeshStamp(session_id=sid, origin={move_team.KEY: verified}))
+        finally:
+            await source.dispose()
+    elif case == "mesh-arrival":
+        write_stamp_into(directory, MeshStamp(session_id=sid))
+    elif case == "incomplete-binding":
+        binding.write_text(json.dumps({move_team.KEY: {"name": name}}))
+    elif case == "replica":
+        move_team.require_replica_reauthorization(directory)
+    elif case == "write-error":
+
+        def cannot_write(*args, **kwargs):
+            raise OSError("journal unavailable")
+
+        monkeypatch.setattr(move_team, "_write_local_binding", cannot_write)
+
+    if case != "write-error":
+        viewer = AttachedSession(config_dir=tmp_path, session_id=sid, takeover_factory=lambda: None)
+        assert viewer._cold_bound_team() == (name if accepted else "")
+        assert binding.exists() == already_journaled
+
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="continued"), StreamEndEvent(stop_reason="stop")]]
+    )
+    session = _session(tmp_path, registries, directory=directory, stream=stream)
+    handle = ServingSessionHandle(
+        session,
+        asyncio.get_running_loop(),
+        cwd=str(tmp_path),
+        config_dir=tmp_path,
+        install_gates=False,
+    )
+    try:
+        if accepted:
+            assert session.active_team_name == name
+            assert json.loads(binding.read_text())[move_team.KEY]["name"] == name
+            await handle.prompt("resume my work", command_id="legacy-send", wait_complete=True)
+            assert handle.has_admitted_command("legacy-send")
+            assert len(stream.requests) == 1
+        else:
+            assert session._unresolved_team == name
+            with pytest.raises(AttachmentUnavailable):
+                await handle.prompt("resume my work", command_id="legacy-send")
+            assert binding.exists() == already_journaled
+        assert session.goal == "keep"
+    finally:
+        await handle.dispose()
+
+
+def test_witness_does_not_override_an_unreadable_binding(tmp_path, registries):
+    from local_operator.network.move_team import LOCAL_BINDING_NAME, TeamIdentityRefused
+    from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
+
+    directory = tmp_path / "sessions" / "000000000001"
+    mark_session_origin(directory, ORIGIN_AGENT_WORKSTREAM)
+    write_session_attachment(directory, team="lopdev", agent="", goal="")
+    binding = directory / LOCAL_BINDING_NAME
+    binding.write_text("{")
+    with pytest.raises(TeamIdentityRefused, match="attachment evidence is unavailable"):
+        _session(tmp_path, registries, directory=directory)
+    assert binding.read_text() == "{"
 
 
 @pytest.mark.asyncio

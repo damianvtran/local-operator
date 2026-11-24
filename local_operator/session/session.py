@@ -9598,22 +9598,12 @@ class Session:
         live_goal = self._goal_state.text
         if stored.goal and (not live_goal or live_goal == stored.goal):
             self._goal_state.set(stored.goal)
-        if (
+        legacy_candidate = (
             stored.team
             and not self.active_agent
             and not self.active_team_name
             and needs_reauthorization(directory)
-        ):
-            # Recovery preserves the attachment bytes as a hint, not a grant.
-            # Leave the journal intact so merely setting a goal cannot certify it.
-            self._unresolved_team = stored.team
-            self._unresolved_agent = stored.agent
-            self.attachment_restore_notice = str(
-                TeamIdentityRefused(
-                    stored.team, "recorded authority is unavailable; re-attach via /team"
-                )
-            )
-            return
+        )
         if stored.agent or stored.team:
             from local_operator.session.errors import ProfileRegistryUnavailable
 
@@ -9631,6 +9621,34 @@ class Session:
 
         self._restoring_attachment = True
         try:
+            if legacy_candidate:
+                from local_operator.network.move_team import resolve_legacy_local_team
+
+                try:
+                    team = resolve_legacy_local_team(directory, stored.team, self.team_registry)
+                    if team is not None:
+                        # The ordinary attach journals the current authority before
+                        # publishing it. Do not journal the attachment itself on restore.
+                        self.attach_team(team)
+                        return
+                except (OSError, TeamIdentityRefused) as error:
+                    logger.debug("legacy team attachment could not be authorized", exc_info=True)
+                    self.attachment_restore_notice = _with_team_remedy(
+                        error
+                        if isinstance(error, TeamIdentityRefused)
+                        else TeamIdentityRefused(stored.team, "recorded authority could not be saved")
+                    )
+                else:
+                    # A recovery or incomplete copy carries the name as a hint,
+                    # never as a grant. Leave the attachment and journal intact.
+                    self.attachment_restore_notice = str(
+                        TeamIdentityRefused(
+                            stored.team, "recorded authority is unavailable; re-attach via /team"
+                        )
+                    )
+                self._unresolved_team = stored.team
+                self._unresolved_agent = stored.agent
+                return
             self._apply_stored_attachment(stored)
         finally:
             self._restoring_attachment = False

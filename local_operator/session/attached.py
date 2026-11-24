@@ -2408,11 +2408,9 @@ class AttachedSession:
 
         NO NAME-ONLY RECOVERY, on the cold side too. The checkpoint's
         ``active_team`` is a NAME the last owner wrote (possibly another device,
-        possibly before a move or fork completed its binding). The warm restore
-        (``Session._restore_attachment``) refuses exactly that: with no
-        completed local binding (``move_team.needs_reauthorization``) the stored
-        team is kept only as an unresolved hint, ``active_team_name`` and
-        ``active_agent`` stay empty, and the warm frame publishes
+        possibly before a move or fork completed its binding). Without a binding
+        or a positively witnessed local legacy attachment, the warm restore
+        keeps the name only as an unresolved hint, and the warm frame publishes
         ``active_team=""`` with the explicit empty identity
         (``FrontendStateStore.refresh_from_session`` reads ``active_team_name``,
         never the hint). The cold frame must say the same thing in all three cells:
@@ -2422,9 +2420,8 @@ class AttachedSession:
         same: ``team`` is the team in force, never merely a name on disk.
 
         SAME SOURCE AS WARM, not just the same gate. The warm restore attaches
-        the team named by the session's attachment sidecar, and only when the
-        completed binding names that same team (``_verify_name``,
-        case-insensitive). So the team cells come from exactly there
+        the team named by the session's attachment sidecar, not a name from the
+        checkpoint. So the team cells come from exactly there
         (:meth:`_cold_bound_team`), never from the checkpoint's name: a
         checkpoint that lags or was written elsewhere (naming ``admins`` beside a
         ``lopdev`` binding) would otherwise paint ``admins`` while the runtime
@@ -2473,22 +2470,29 @@ class AttachedSession:
     def _cold_bound_team(self) -> str:
         """The team the warm restore would attach, or ``""`` (best-effort).
 
-        The attachment sidecar's team, but only when the session's completed
-        local binding names that same team — the two checks the warm restore
-        makes before any team is in force. Any failure reading either is
-        treated as unbound: this is display, and fail-closed display matches
-        what the runtime will do.
+        The sidecar must name a bound team or a locally witnessed legacy team
+        that still resolves. This only previews migration; the runtime alone
+        can journal and exercise authority.
         """
         from local_operator.network.move_team import (
             has_local_authority,
+            needs_reauthorization,
             read_local_attachment,
+            resolve_legacy_local_team,
         )
 
         directory = self._config_dir / "sessions" / self._session_id
         try:
             stored = read_local_attachment(directory)
             team = stored.team if stored is not None else ""
-            return team if team and has_local_authority(directory, team) else ""
+            if not team:
+                return ""
+            if has_local_authority(directory, team):
+                return team
+            if not needs_reauthorization(directory):
+                return ""
+            legacy = resolve_legacy_local_team(directory, team, self.team_registry)
+            return legacy.name if legacy is not None else ""
         except Exception:  # noqa: BLE001 — unreadable evidence is no authority
             return ""
 

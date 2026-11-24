@@ -225,6 +225,45 @@ def needs_reauthorization(directory: Path) -> bool:
     return binding is None or (isinstance(binding, dict) and "delegation" not in binding)
 
 
+def resolve_legacy_local_team(
+    directory: Path, name: str, registry: TeamRegistry | None
+) -> Team | None:
+    """Resolve a legacy team only with a device-local workstream creation witness."""
+    from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.guardrails.provenance import read_lineage
+    from local_operator.resume import ORIGIN_AGENT_SHELL, ORIGIN_AGENT_WORKSTREAM, ORIGIN_NAME
+    from local_operator.session.placement import MESH_STAMP_NAME
+
+    if registry is None or directory.parent.name != "sessions":
+        return None
+    # v0.112.10 began requiring a binding. Treat an old attachment on its own
+    # device as a local attach, but do NOT infer origin from two missing files:
+    # historical recovery could leave a partial copy before stamping it. The
+    # protected lineage journal is outside the portable session tree, records
+    # agent-shell sessions only at local creation, and is keyed by the new ID
+    # (fork/recovery allocate their own IDs). Legacy sessions without this
+    # positive witness still require explicit re-attachment.
+    for marker in (LOCAL_BINDING_NAME, MESH_STAMP_NAME, FORK_BOUNDARY_NAME):
+        try:
+            (directory / marker).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        return None
+    try:
+        origin = json.loads((directory / ORIGIN_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    kind = origin.get("origin") if isinstance(origin, dict) else None
+    if kind not in (ORIGIN_AGENT_WORKSTREAM, ORIGIN_AGENT_SHELL):
+        return None
+    row = read_lineage(directory.parent.parent).get(directory.name)
+    if row is None or row.get("origin") != kind:
+        return None
+    return _resolve(registry, name)
+
+
 def has_local_authority(directory: Path, name: str) -> bool:
     """Whether a completed local binding exists FOR ``name`` — the warm gates.
 
