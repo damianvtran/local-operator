@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings",
-  "history_sha256": "04f18e434b4a990380d5fa74d91ff358b5176bcc87a99e1e08b740fa0fefeea5",
+  "history_sha256": "8aacc548aee52aa67ff5cff95bbacde2bf113effc729363999ad341bd624fe91",
   "entries": [
     {
       "locale": "ru",
@@ -7718,6 +7718,31 @@
       },
       "status": "passed",
       "note": "Independent semantic audit of PR #4514 (branch feat/mcp-result-normalization, head 3dc289d5a384 + this commit), 2026-11-23: the 8 NEW keys wire.settings.mcp_result_normalization.{label,help,choice.off.label,choice.off.description,choice.prose_links.label,choice.prose_links.description,choice.strip_links.label,choice.strip_links.description}, judged against en source + context sidecar, i18n/glossary.md and i18n/style-guides/ru.md (accuracy, glossary terms, neighbouring-key terminology, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; 'prose-links'/'strip-links' labels byte-identical to en per the sidecar; rich.cells.cell_len within every maxCells (label 29, help 188, descriptions 48, off label 12); key parity 8/8. Every other key in this namespace is byte-identical to merge-base 989351cd16c0's file, whose last receipt here passed against that base's en hash b3753dde0a01… (scripted diff: 8 added, 0 changed, 0 removed; context sidecar 8 added, 0 changed). 0 findings. агент/инструмент per glossary; 'отключено' matches compaction_strategy/network_rollout_on_update off labels; infinitive descriptions match neighbours ('держать …', 'только сообщать'); 'Отключено: …' names the off choice. Label 'Сокращать разметку MCP' drops 'results' to fit 29 cells (22/29); help carries the full scope."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "4ce6048a2a6fdda1a7e6623d0ffef3202ca684628739a3877d200e48c917d756",
+      "context_sha256": "b0c1332306474a5293f2c69e438208e229f81501806321b15d5512d4558e0873",
+      "target_sha256": "5a118e165266fb0c097c1e913ebcbba0a15f9ce293dd18622458b45ee9f4d433",
+      "keys_audited": 9,
+      "round": "convergence-r1",
+      "translator": {
+        "agent": "not re-translated here: the 8 wire.settings.mcp_result_normalization.* keys from PR #4514 (row above, source 7eaf3e95c31c), wire.settings.tool_approval_mode.choice.auto.description from origin/main (rows above, source 2ffdcc0c9444)",
+        "model": "see the rows above",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 09b1208daf93 (independent of both translators; did not write PR #4514 or the origin/main change)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Convergence audit of PR #4514 merge commit 724de4b1dae8 (parents f246cbc6 PR head + 0fa001da origin/main; merge-base 989351cd16c0), 2026-11-24. Scripted merge proof (flattened JSON, every key): en and this locale's wire.settings.json == merge-base + origin/main's only change (wire.settings.tool_approval_mode.choice.auto.description) + the PR's 8 added mcp_result_normalization keys, values byte-identical to their audited sides; 913 keys, 0 overlap, 0 lost, 0 other changes; en context sidecar likewise (origin/main's note/role/tone for the auto description + the PR's 8 entries). Semantic re-read of the 9 changed keys against the en source, context sidecar, i18n/glossary.md and i18n/style-guides/ru.md: auto description keeps both the rule and both exempt gates (profile save, community post); 'prose-links'/'strip-links' byte-identical; rich.cells.cell_len within every maxCells; no ICU arguments. Audit-history merge: origin/main's rows are a byte-identical prefix and every PR row is present, 0 extra rows. 0 findings."
     }
   ]
 }
