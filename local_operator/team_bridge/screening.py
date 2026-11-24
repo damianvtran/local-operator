@@ -1543,6 +1543,31 @@ _HOLD_FOR_COMMIT = {
     "unknown_attempt": "retry_later",
 }
 
+#: Re-drive gap for a ``write_once_conflict`` hold (seconds): one day, not the
+#: connector's hourly-capped doubling ladder.
+#:
+#: WHY (diagnosis 2026-11-24). Every live conflict hold on the operator's Mac
+#: was a message screening had ALLOWED: its committed receipt names the model
+#: that actually served (a failover between two approved, preferred ids), while
+#: a re-screen produces a receipt for the live default model, and
+#: ``Store.finish_screening``'s replay tuple demands exact ``model`` equality
+#: (plus an admission revision that has since moved). The conflict is
+#: therefore stable: re-screening it hourly cannot change the answer, and 27
+#: such holds were about two thirds of this machine's screening calls.
+#:
+#: WHAT THIS IS NOT. It is a schedule, never a disposition: the hold stays a
+#: hold, nothing is delivered, discarded or ACKed, and the replay comparison is
+#: untouched. A daily re-drive still lets ``_resolve_write_once_conflict``
+#: answer a conflict whose committed receipt becomes current again. The real
+#: fix — letting a fully-current preferred allow supersede a stale allow — is
+#: the follow-up PR ("PR-2"); when it lands these holds resolve on their next
+#: daily pass. The connector (``connector.loop``) applies the same constant so
+#: its in-memory backoff and a restart (which re-bases that backoff at 60 s)
+#: both keep the persisted day-long ``retry_at`` instead of pulling it in.
+WRITE_ONCE_CONFLICT_RETRY_S = 24 * 60 * 60.0
+WRITE_ONCE_CONFLICT_HOLD = "write_once_conflict"
+
+
 #: A refused cache-hit adoption (``Store.adopt_cached_receipt``) -> its hold.
 #: The commit mapping, plus damaged proof under its own name (#3420 N-1).
 #: Every refusal holds; none admits. Anything unlisted reads as the policy
@@ -1618,8 +1643,19 @@ def _persist_hold(
     *,
     failure_class: str | None = None,
 ) -> None:
-    """Best-effort durable hold for a VALID live owner; never raises."""
+    """Best-effort durable hold for a VALID live owner; never raises.
 
+    A ``write_once_conflict`` hold with no explicit time is scheduled a day out
+    (``WRITE_ONCE_CONFLICT_RETRY_S``). Every screening-side conflict hold —
+    the fresh-screen commit, the cache-hit adoption and the owner-release
+    commits — persists through here, so one rule covers them all; a NULL
+    ``retry_at`` would make the row due on the very next pass.
+    """
+
+    if retry_at is None and code == WRITE_ONCE_CONFLICT_HOLD:
+        import time as _time
+
+        retry_at = _time.time() + WRITE_ONCE_CONFLICT_RETRY_S
     try:
         store.persist_hold(owner, message_id, code, retry_at=retry_at, failure_class=failure_class)
     except StoreRefused:

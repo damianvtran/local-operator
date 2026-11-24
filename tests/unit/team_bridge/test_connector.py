@@ -2287,6 +2287,94 @@ def test_repeat_failure_advances_bounded_backoff(tmp_path, monkeypatch) -> None:
     loop_mod._RETRY_ATTEMPTS.pop("bmsg_f", None)
 
 
+def _write_once_spine(monkeypatch, tmp_path) -> dict[str, Any]:
+    """The standard fake spine, but every screen answers ``write_once_conflict``."""
+
+    record, _ = _wire_spine(monkeypatch, tmp_path, disposition="hold")
+
+    async def conflict_screen(owner, item, *, config_dir, auth_store, settings=None):
+        record["screened"] += 1
+        return ScreenResult(disposition="hold", hold_code="write_once_conflict")
+
+    monkeypatch.setattr(wake_mod, "screen_item", conflict_screen)
+    return record
+
+
+def _retry(owner: OwnerSnapshot, tmp_path: Path) -> dict[str, Any]:
+    return asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+
+
+def test_write_once_conflict_hold_backs_off_a_day_across_a_restart(tmp_path, monkeypatch) -> None:
+    """2026-11-24: write-once conflict holds were re-screened hourly (two thirds
+    of one Mac's screening calls) although the conflict cannot change until the
+    replay rule does. The re-drive is scheduled a day out, a restart (which
+    clears the in-process doubling counter) must not pull it back to 60 s, and
+    the row stays a HOLD throughout: nothing is delivered or acked."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record = _write_once_spine(monkeypatch, tmp_path)
+    store.persist_hold(owner, "bmsg_w", "write_once_conflict", retry_at=clock.now - 5)
+
+    first = _retry(owner, tmp_path)
+    assert first["outcomes"] == [{"message_id": "bmsg_w", "action": "hold"}]
+    assert record["screened"] == 1
+    row = store.screening_hold(owner, "bmsg_w")
+    assert row is not None and row["hold_code"] == "write_once_conflict"
+    assert row["retry_at"] == pytest.approx(clock.now + 86400.0, abs=1.0)
+
+    # Simulated restart: the in-process counter is gone. Every pass short of a
+    # day re-screens nothing, at the hourly cadence the old ladder ran.
+    loop_mod._RETRY_ATTEMPTS.clear()
+    for _ in range(23):
+        clock.now += loop_mod.RETRY_MAX_S
+        assert _retry(owner, tmp_path) == {"due": 0, "outcomes": []}
+    assert record["screened"] == 1
+
+    # A day on it is re-driven ONCE and re-scheduled a day out again, not at
+    # the restarted counter's 60 s.
+    clock.now += loop_mod.RETRY_MAX_S + 5
+    assert _retry(owner, tmp_path)["due"] == 1
+    assert record["screened"] == 2
+    row = store.screening_hold(owner, "bmsg_w")
+    assert row is not None and row["hold_code"] == "write_once_conflict"
+    assert row["retry_at"] == pytest.approx(clock.now + 86400.0, abs=1.0)
+    assert record["delivered"] == [] and record["acks"] == []
+
+    # The feed path's first-time write takes the same schedule after a restart.
+    loop_mod._RETRY_ATTEMPTS.clear()
+    loop_mod._persist_hold_backoff(store, owner, "bmsg_w2", "write_once_conflict")
+    fresh = store.screening_hold(owner, "bmsg_w2")
+    assert fresh is not None
+    assert fresh["retry_at"] == pytest.approx(clock.now + 86400.0, abs=1.0)
+    loop_mod._RETRY_ATTEMPTS.clear()
+
+
+def test_other_hold_codes_keep_the_doubling_backoff(tmp_path, monkeypatch) -> None:
+    """The day-long gap is keyed on the code alone: every other hold keeps the
+    60 s → 3600 s ladder, and a hold that names its own time keeps it."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    for code in ("screening_hold", "retry_later", "policy_stale", "proof_corrupt"):
+        loop_mod._persist_hold_backoff(store, owner, f"bmsg_{code}", code)
+        row = store.screening_hold(owner, f"bmsg_{code}")
+        assert row is not None
+        assert row["retry_at"] == pytest.approx(clock.now + loop_mod.RETRY_BASE_S, abs=1.0)
+    loop_mod._persist_hold_backoff(
+        store, owner, "bmsg_budget", "budget_exhausted", retry_at=clock.now + 120
+    )
+    budget = store.screening_hold(owner, "bmsg_budget")
+    assert budget is not None and budget["retry_at"] == pytest.approx(clock.now + 120, abs=1.0)
+    loop_mod._RETRY_ATTEMPTS.clear()
+
+
 def test_budget_exhaustion_hold_uses_the_same_due_path(tmp_path, monkeypatch) -> None:
     """Early (pre-attempt) holds retry identically — same due mechanism."""
 
