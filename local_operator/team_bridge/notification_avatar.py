@@ -540,9 +540,6 @@ def compose(
     a person.
     """
 
-    from PIL import Image as PILImage
-    from PIL import ImageChops
-
     # Always draw at 256 and downsample, so 64 px is a faithful reduction of
     # the same geometry rather than a second layout.
     side = 256
@@ -564,6 +561,24 @@ def compose(
         face = _cover(decode_source(photo), side)
     else:
         face = _placeholder(side, colour, variant.initials)
+    return _finish(
+        face, theme=variant.theme, size=variant.size, agent_marker=variant.kind == "person_agent"
+    )
+
+
+def _finish(face: Image, *, theme: Theme, size: int, agent_marker: bool) -> bytes:
+    """Circle-crop a 256 px ``face``, punch and draw the overlays, encode the PNG.
+
+    The one place the corner geometry lives, shared by the Team Bridge
+    composite (:func:`compose`) and the local agent composite
+    (:func:`compose_agent_picture`), so the two banner families can never
+    drift apart in badge size, gap or position.
+    """
+
+    from PIL import Image as PILImage
+    from PIL import ImageChops
+
+    side = face.width
     canvas = PILImage.new("RGBA", (side, side), (0, 0, 0, 0))
     face.putalpha(ImageChops.multiply(face.getchannel("A"), _circle_mask(side)))
     canvas.alpha_composite(face)
@@ -572,15 +587,15 @@ def compose(
     badge_side = int(side * BADGE_RATIO)
     badge_at = side - badge_side
     _punch(canvas, (badge_at, badge_at, badge_side), gap)
-    canvas.alpha_composite(_badge(badge_side, variant.theme), (badge_at, badge_at))
-    if variant.kind == "person_agent":
+    canvas.alpha_composite(_badge(badge_side, theme), (badge_at, badge_at))
+    if agent_marker:
         marker_side = int(side * AGENT_MARKER_RATIO)
         marker_x = side - marker_side
         _punch(canvas, (marker_x, 0, marker_side), gap)
-        canvas.alpha_composite(_agent_marker(marker_side, variant.theme), (marker_x, 0))
+        canvas.alpha_composite(_agent_marker(marker_side, theme), (marker_x, 0))
 
-    if variant.size != side:
-        canvas = canvas.resize((variant.size, variant.size), PILImage.Resampling.LANCZOS)
+    if size != side:
+        canvas = canvas.resize((size, size), PILImage.Resampling.LANCZOS)
     out = io.BytesIO()
     # Fresh encode: no source metadata, ICC or text chunks are carried over.
     canvas.save(out, format="PNG", optimize=True)
@@ -609,27 +624,83 @@ async def render(
     simply drops the bytes: there is no store for a late result to land in.
     """
 
+    def work() -> bytes:
+        check_owner()
+        data = compose(
+            variant,
+            origin=origin,
+            account_id=account_id,
+            photo=photo,
+            agent_picture=agent_picture,
+            on_fallback=on_fallback,
+        )
+        check_owner()
+        return data
+
+    return await _bounded(work)
+
+
+async def _bounded(work: Callable[[], bytes]) -> bytes:
+    """Run one render under the shared pending/active bounds, off the event loop.
+
+    Both composite families share ONE pair of semaphores on purpose: they
+    decode untrusted-size images on the same process, and a burst of local
+    agent banners must not double the decode concurrency a Team Bridge burst
+    is already allowed.
+    """
+
     if not _PENDING.acquire(blocking=False):
         raise RendererBusy("renderer busy")
 
-    def work() -> bytes:
+    def run() -> bytes:
         try:
             with _RENDER_SLOTS:
-                check_owner()
-                data = compose(
-                    variant,
-                    origin=origin,
-                    account_id=account_id,
-                    photo=photo,
-                    agent_picture=agent_picture,
-                    on_fallback=on_fallback,
-                )
-                check_owner()
-                return data
+                return work()
         finally:
             _PENDING.release()
 
     # Shield ensures a cancelled HTTP request cannot cancel a queued worker
     # before it releases its pending slot. The worker's result is local to
     # this call, so a cancelled caller leaves nothing behind.
-    return await asyncio.shield(asyncio.to_thread(work))
+    return await asyncio.shield(asyncio.to_thread(run))
+
+
+# -- local agent pictures (desktop session banners) ----------------------------
+#
+# WHY. A desktop banner about a session bound to a local agent that has its own
+# stored picture (``local_operator/agent_avatar.py``) should read as "your
+# agent is messaging you", not as a generic app notice. It uses the same visual
+# language as a Team Bridge banner -- the picture circle-cropped, the LO mark in
+# the bottom-right badge -- but deliberately WITHOUT the agent marker and
+# without any glyph/initials fallback: the picture IS the agent's own face, and
+# a session with no usable picture gets no composite at all (the route answers
+# 404 and the desktop posts today's banner unchanged). It lives beside
+# :func:`compose` rather than in a neutral module so the decode limits, the
+# overlay geometry and the render bounds stay single-sourced; the
+# ``team_bridge`` package import is cheap (its ``__init__`` imports nothing).
+#
+# The source is local, operator-owned data that ``agent_avatar.read_stored``
+# has already digest-verified, but it is still decoded through
+# :func:`decode_source` under the same ceilings: the file sits in a directory
+# the agent itself can write.
+
+
+def compose_agent_picture(picture: bytes, *, theme: Theme, size: int) -> bytes:
+    """One local-agent banner PNG: the picture plus the LO badge. Call off-loop.
+
+    Raises :class:`AvatarImageRejected` for bytes outside the decode limits;
+    there is no fallback face here by contract (see the section comment).
+    """
+
+    if theme not in THEMES or size not in SIZES:
+        raise ValueError("unsupported variant")
+    return _finish(_cover(decode_source(picture), 256), theme=theme, size=size, agent_marker=False)
+
+
+async def render_agent_picture(picture: bytes, *, theme: Theme, size: int) -> bytes:
+    """:func:`compose_agent_picture` under the shared render bounds.
+
+    Raises :class:`RendererBusy` without queueing when the pending queue is full.
+    """
+
+    return await _bounded(lambda: compose_agent_picture(picture, theme=theme, size=size))

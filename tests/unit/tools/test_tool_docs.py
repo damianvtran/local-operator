@@ -369,7 +369,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # ask_withdraw 378 -> 389 (+11, PR #4326 QA Q-F2): the two moot examples
     # system.md does not carry ("you found the answer yourself or the work moved
     # on") return to the description; same printed table, nothing else moved.
-    "ask": 1198,
+    "ask": 1222,
     "ask_withdraw": 389,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only
@@ -497,7 +497,8 @@ MEASURED_TOKENS: dict[str, int] = {
     # "teammates use bridge" (restated by the ONE-channel sentence) and the
     # ``to`` hint's "or substring" (implied by WHOLE), paying for the emoji hint.
     # File-read admission guidance, paid for by deduplicating existing prose.
-    "bridge": 1992,
+    # channel_history says replies are excluded and names channel_thread (+9).
+    "bridge": 2001,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds

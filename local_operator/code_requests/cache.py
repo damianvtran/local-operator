@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import threading
 import time
@@ -63,6 +62,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.code_requests.adapters.base import FetchOutcome
 from local_operator.code_requests.refs import Ref
 
@@ -175,13 +175,10 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> bool:
-    """Atomic write (pid-suffixed temp + replace). False when it could not land."""
+    """Atomic write (per-write temp + replace). False when it could not land."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        with tmp.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, separators=(",", ":"))
-        os.replace(tmp, path)
+        atomic_write_text(path, json.dumps(payload, separators=(",", ":")), hidden=True)
         return True
     except OSError:
         logger.debug("could not write code-request cache entry %s", path, exc_info=True)

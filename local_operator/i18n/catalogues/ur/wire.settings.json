@@ -778,7 +778,7 @@
   "wire.settings.team_bridge_hold_release.help": "نئے کام کی کچھ درخواستیں روکی جاتی ہیں تاکہ آپ انہیں پہنچائیں یا مسترد کریں۔ آپ کے پہنچائے بغیر ایجنٹ تک کچھ نہیں پہنچتا۔ بند ہونے پر ان سے انکار ہوتا ہے۔",
   "wire.settings.tool_approval_mode.choice.ask.description": "لکھنے/چلانے والے ٹولز سے پہلے پوچھیں",
   "wire.settings.tool_approval_mode.choice.ask.label": "پوچھیں",
-  "wire.settings.tool_approval_mode.choice.auto.description": "بغیر پوچھے چلائیں",
+  "wire.settings.tool_approval_mode.choice.auto.description": "بغیر پوچھے چلائیں، سوائے اکاؤنٹ پروفائل محفوظ کرنے اور کمیونٹی میں پوسٹ کرنے کے",
   "wire.settings.tool_approval_mode.choice.auto.label": "خودکار",
   "wire.settings.tool_approval_mode.help": "نرم کرنے کے لیے اسی سیشن میں لکھنا ہوگا — /approvals auto۔",
   "wire.settings.tool_approval_mode.label": "ٹول منظوری موڈ",

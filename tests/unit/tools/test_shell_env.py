@@ -717,15 +717,7 @@ def test_lop_resolves_to_this_build_when_the_path_has_none(tmp_path, monkeypatch
     assert builtin.own_launcher_path_injection(shim_root, parent_path=str(elsewhere)) == {}
 
 
-@pytest.mark.parametrize("which", ["target", "staged"])
-def test_a_directory_at_the_shim_names_is_never_touched(tmp_path, monkeypatch, which) -> None:
-    """A real directory at ``bin/lop`` or the staged temp name is left alone.
-
-    The shim root is the session scratchpad, inside ``sessions/<id>/``: the
-    session-deletion guard allow-lists the shim's unlink/replace only because
-    neither can reach a directory. With one in the way, injection is skipped and
-    the directory and its contents survive untouched.
-    """
+def _shim_venv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import sys
 
     scripts = tmp_path / "venv" / "bin"
@@ -734,18 +726,52 @@ def test_a_directory_at_the_shim_names_is_never_touched(tmp_path, monkeypatch, w
     (scripts / "lop").chmod(0o755)
     monkeypatch.setattr(sys, "executable", str(scripts / "python"))
 
+
+def test_a_directory_at_the_shim_name_is_never_touched(tmp_path, monkeypatch) -> None:
+    """A real directory at ``bin/lop`` is left alone.
+
+    The shim root is the session scratchpad, inside ``sessions/<id>/``: the
+    session-deletion guard allow-lists the shim's replace only because it cannot
+    reach a directory. With one in the way, injection is skipped and the
+    directory and its contents survive untouched.
+    """
+    _shim_venv(tmp_path, monkeypatch)
     empty = tmp_path / "empty"
     empty.mkdir()
     shim_root = tmp_path / "scratch"
-    name = "lop" if which == "target" else f".lop.{os.getpid()}.tmp"
-    blocker = shim_root / "bin" / name
+    blocker = shim_root / "bin" / "lop"
     blocker.mkdir(parents=True)
     (blocker / "keep.txt").write_text("user data", encoding="utf-8")
 
     assert builtin.own_launcher_path_injection(shim_root, parent_path=str(empty)) == {}
     assert blocker.is_dir() and not blocker.is_symlink()
     assert (blocker / "keep.txt").read_text(encoding="utf-8") == "user data"
-    assert sorted(os.listdir(shim_root / "bin")) == [name]
+    assert sorted(os.listdir(shim_root / "bin")) == ["lop"]
+
+
+def test_a_directory_at_the_old_staging_name_is_left_alone_and_the_shim_lands(
+    tmp_path, monkeypatch
+) -> None:
+    """The staging entry is per write now, so nothing pre-existing is in its way.
+
+    Before the shared writer the staging name was the fixed ``.lop.<pid>.tmp``,
+    and a directory there made the shim give up. The per-write name
+    (``atomic_files.unique_temp``) cannot collide with anything already in
+    ``bin/``, so a directory at the old name is simply never named: it survives
+    byte-for-byte and the shim still installs beside it.
+    """
+    _shim_venv(tmp_path, monkeypatch)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    shim_root = tmp_path / "scratch"
+    legacy = shim_root / "bin" / f".lop.{os.getpid()}.tmp"
+    legacy.mkdir(parents=True)
+    (legacy / "keep.txt").write_text("user data", encoding="utf-8")
+
+    injected = builtin.own_launcher_path_injection(shim_root, parent_path=str(empty))
+    assert injected["PATH"].split(os.pathsep)[0] == str(shim_root / "bin")
+    assert (legacy / "keep.txt").read_text(encoding="utf-8") == "user data"
+    assert sorted(os.listdir(shim_root / "bin")) == sorted([legacy.name, "lop"])
 
 
 def test_the_launcher_shim_never_shadows_the_users_python(tmp_path, monkeypatch) -> None:

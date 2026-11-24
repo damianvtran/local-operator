@@ -269,6 +269,44 @@ def test_plain_exact_own_checkout_accepts_shared_link_witness(home: Path, repo: 
     assert ranked.risk is Risk.HIGH and ranked.targets[0].cleanup_hold, ranked.reasons
 
 
+@pytest.mark.parametrize("deletion", [False, True], ids=["clean", "tracked-deletion"])
+def test_finder_witness_is_plain_only_force_keeps_base_hold(
+    home: Path, repo: Path, deletion: bool
+) -> None:
+    """PR #4503 R1/Q1: the ``.DS_Store`` witness must not reach ``--force``.
+
+    An own, ff-merged and pushed tree whose ONLY ignored entries are regular
+    ``.DS_Store`` files. Plain removal is LOW (the operator request), but the
+    exact-path ``--force`` route keeps base's hold: ``_interrupted_cleanup_state``
+    accepts the shared dependency link as its only witness. Before the fix this
+    ``--force`` ranked LOW with no reasons.
+    """
+    wt = _branch_tree(home, repo, "finder")
+    _git("merge", "--ff-only", "fix/finder", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write(".DS_Store\n")
+    (wt / "sub").mkdir()
+    for at in (wt, wt / "sub"):
+        (at / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1" + os.urandom(64))
+    (wt / "sub" / "kept.txt").write_text("tracked\n")
+    _git("add", "sub/kept.txt", cwd=wt)
+    _git("commit", "-qm", "sub", cwd=wt)
+    _git("merge", "--ff-only", "fix/finder", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    _record(home, wt, creator=ME)
+    assert prov.plain_cleanup_ignored_inventory(str(wt)) == prov.IgnoredInventory(0, 0)
+    plain = _rank(home, f"git -C {repo} worktree remove -- {wt}")
+    assert plain.risk is Risk.LOW, plain.reasons
+    if deletion:
+        (wt / "a.txt").unlink()
+    forced = _rank(home, f"git -C {repo} worktree remove --force -- {wt}")
+    assert forced.risk is Risk.HIGH and forced.targets[0].cleanup_hold, forced.reasons
+    assert "preservation check failed" in forced.targets[0].reason
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("relative", [False, True], ids=["canonical", "relative"])
 @pytest.mark.parametrize("payload", ["ignored", "ignored-and-edit", "unknown", "tracked-deletion"])

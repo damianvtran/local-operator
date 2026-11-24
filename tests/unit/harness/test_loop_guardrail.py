@@ -359,3 +359,127 @@ async def test_loop_refuses_a_write_tool_call_onto_a_transcript(home: Path) -> N
         if refused:
             assert _text(result).startswith("BLOCKED by guardrail dangerous-delete (critical)")
     assert [a["path"] for a in executed] == [str(home / "notes.md")]
+
+
+async def _run_write(
+    home: Path,
+    path: str,
+    *,
+    judge: Any = None,
+    approve: bool | None = True,
+    user_text: str = "add a rule that blocks force-push",
+) -> tuple[ToolResult, list[dict[str, Any]]]:
+    """One ``write`` call through the loop's real checkpoint (auto approval or yolo)."""
+    executed: list[dict[str, Any]] = []
+
+    async def execute(call_id: str, args: dict[str, Any], *_: Any) -> ToolResult:
+        executed.append(args)
+        return ToolResult(tool_call_id=call_id, tool_name="write", content=[TextContent(text="ok")])
+
+    async def request_approval(*_: Any) -> bool:
+        return True
+
+    tool = AgentTool(
+        name="write",
+        parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+        execute=execute,
+        approval_tier="write",
+    )
+    state = home / ".local-operator"
+    context = LoopContext(
+        messages=[Message.user(user_text)],
+        tool_context=ToolContext(
+            cwd=str(home),
+            session_id="own",
+            scratchpad_dir=str(state / "sessions" / "own" / "scratchpad"),
+            request_approval=request_approval if approve else None,
+        ),
+    )
+    config = LoopConfig(
+        model=MODEL,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=lambda *_: None,
+        guard_judge=judge,
+    )
+    args = {"path": path, "content": "x"}
+    call = ToolCall(id="w1", name="write", arguments=args, raw_arguments=json.dumps(args))
+    result = await AgentLoop()._runner_result(
+        _PlannedCall(call=call, tool=tool, args=args), context, config, None, asyncio.Queue()
+    )
+    return result, executed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approve", [True, None], ids=["auto-approval", "yolo-no-gate"])
+@pytest.mark.parametrize("target", ["rules/x.md", "hooks.json", "config.yml"])
+async def test_loop_sends_a_policy_write_to_the_judge(
+    home: Path, approve: bool | None, target: str
+) -> None:
+    """A write onto the guard's own rules/hooks/config is the judge's call: a BLOCK
+    stops it before the tool runs, an ALLOW on the operator's typed request lets
+    it run once, under auto approval and under a yolo pin alike."""
+    path = str(home / ".local-operator" / target)
+    blocker = _Judge("BLOCK: that empties a rule")
+    result, executed = await _run_write(home, path, judge=blocker, approve=approve)
+    assert executed == [] and result.is_error
+    assert _text(result).startswith("BLOCKED by guardrail guard-policy-write (review)")
+    assert len(blocker.calls) == 1
+    assert "add a rule that blocks force-push" in blocker.calls[0][1]
+
+    allower = _Judge("ALLOW operator")
+    result, executed = await _run_write(home, path, judge=allower, approve=approve)
+    assert len(executed) == 1 and not result.is_error
+    assert len(allower.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_loop_policy_write_without_a_judge_fails_closed(home: Path) -> None:
+    path = str(home / ".local-operator" / "hooks.json")
+    result, executed = await _run_write(home, path, judge=None)
+    assert executed == [] and "could not reach a verdict" in _text(result)
+
+
+@pytest.mark.asyncio
+async def test_loop_fault_in_the_guard_closes_only_for_policy_writes(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prelude's fault branch used to fail OPEN for every non-bash tool. It now
+    closes for a call that touches the guard's policy and stays open for the rest
+    (a broken rule file must not stop every ``write``)."""
+    from local_operator.guardrails import check as guard_check
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("settings unreadable")
+
+    monkeypatch.setattr(guard_check, "read_settings", boom)
+    judge = _Judge("ALLOW operator")
+    result, executed = await _run_write(
+        home, str(home / ".local-operator" / "hooks.json"), judge=judge
+    )
+    assert executed == [] and result.is_error
+    assert _text(result).startswith("BLOCKED by guardrail (error)")
+    result, executed = await _run_write(home, str(home / "notes.md"), judge=judge)
+    assert len(executed) == 1 and not result.is_error
+    assert judge.calls == []
+
+
+@pytest.mark.asyncio
+async def test_loop_builds_no_operator_brief_for_an_ordinary_write(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``operator_brief`` scans up to 400 history rows: only bash and a policy
+    edit need it, so a plain ``write`` must not pay for it."""
+    from local_operator.guardrails import provenance
+
+    built: list[int] = []
+    real = provenance.operator_brief
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        built.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(provenance, "operator_brief", counting)
+    _, executed = await _run_write(home, str(home / "notes.md"), judge=_Judge("ALLOW"))
+    assert len(executed) == 1 and built == []
+    await _run_write(home, str(home / ".local-operator" / "hooks.json"), judge=_Judge("ALLOW"))
+    assert built == [1]

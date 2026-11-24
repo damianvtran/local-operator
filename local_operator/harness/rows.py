@@ -1048,9 +1048,264 @@ def gate_timeout_subject(details: Mapping[str, Any] | None) -> str:
     return f"{tool} ({description})" if description else tool
 
 
-#: The surface words an ``ask_response`` dismissal receipt shows. ``remote`` is what
-#: the relay stamps for the phone's tap (an empty ``by`` on the wire).
-_DISMISS_SURFACE_WORDS = {"remote": "phone", "tui": "terminal"}
+#: How WIDE a receipt's name may be, in display CELLS. The name is a HANDLE,
+#: not a summary: the measured first questions are long (966 asks, median 177
+#: chars, p90 394), the receipt is ONE line on the phone, and the id next to it
+#: is what makes two asks distinguishable — the name only has to be enough for
+#: a person to recognise which ask is meant.
+#:
+#: Cells, not characters, because the widths differ by script: a 40-character
+#: CJK name is 80 cells on the line and pushed the STATE half of the receipt out
+#: of the row entirely (review round 1, M1).
+_ASK_NAME_CELLS = 32
+
+#: The room the TUI's collapsed row must have left for the name before it is
+#: worth printing at all. Below this, the ellipsised stump is noise beside the
+#: id and it is the STATE — the audit content of the row — that has to survive
+#: (review round 1, M1b).
+ASK_NAME_MIN_CELLS = 12
+
+#: What a receipt calls a SECRET ask. Only the card that owns it can answer it,
+#: so neither its question text nor its key may reach a transcript line, a phone
+#: frame or another session's relay: the name is this word instead.
+_SECRET_ASK_NAME = "secret question"
+
+#: Directional controls that REORDER text without being control sequences:
+#: embeddings and overrides (U+202A-202E) and isolates (U+2066-2069).
+#: ``ansi.strip_control_sequences`` covers terminal control sequences and leaves
+#: these — an RLO (U+202E) in a model-written question could reverse the run
+#: after it, making the receipt's STATE half read as words the question wrote
+#: (QA round 1, Q1).
+_BIDI_CONTROLS_RE = re.compile("[\u202a-\u202e\u2066-\u2069]")
+
+#: A double quote inside the name would close the frame around it early: a
+#: question writing ``x" — Answered, delivering`` could forge the state half of
+#: the audit line (review m1). Every double quote becomes a single quote — the
+#: frame keeps the only pair of them on the line.
+_ASK_NAME_QUOTES = str.maketrans(
+    {'"': "'", "\u201c": "'", "\u201d": "'", "\u201e": "'", "\u201f": "'"}
+)
+
+
+def _cell_len(text: str) -> int:
+    """Display width, through the ONE width model the TUI measures with."""
+    from rich.cells import cell_len
+
+    return cell_len(text)
+
+
+def _is_regional_indicator(text: str, index: int) -> bool:
+    """Whether ``text[index]`` is half of a flag."""
+    return "\U0001f1e6" <= text[index] <= "\U0001f1ff"
+
+
+def _grapheme_spans(text: str) -> list[tuple[int, int, int]]:
+    """``(start, end, cells)`` per USER-PERCEIVED cluster of ``text``.
+
+    ``rich.cells.split_graphemes`` already joins combining marks, variation
+    selectors and ZWJ sequences, so a cut between two spans can never leave half
+    an emoji or a bare accent behind (review m3). It leaves a flag's two
+    regional indicators as separate one-cell spans, and a cut between them draws
+    one lone indicator box, so those pairs are merged here.
+    """
+    from rich.cells import split_graphemes
+
+    spans, _total = split_graphemes(text)
+    merged: list[tuple[int, int, int]] = []
+    index = 0
+    while index < len(spans):
+        start, end, cells = spans[index]
+        following = spans[index + 1] if index + 1 < len(spans) else None
+        if _is_regional_indicator(text, start) and following is not None:
+            if _is_regional_indicator(text, following[0]):
+                merged.append((start, following[1], cells + following[2]))
+                index += 2
+                continue
+        merged.append((start, end, cells))
+        index += 1
+    return merged
+
+
+def fit_name_cells(text: str, cells: int) -> str:
+    """``text`` cut to at most ``cells`` display cells, or unchanged if it fits.
+
+    Grapheme-safe, word-preferred and ellipsis-inclusive: the ellipsis is paid
+    for out of the budget rather than appended past it, so a single unbroken
+    word still lands within the cap (review m3). A word boundary is only taken
+    when it keeps at least half the room — trimming a 30-cell cut down to its
+    first word would waste the row to no reader's benefit.
+
+    The TUI calls this too, with the room its row has left after the id and the
+    state (review M1b), so a name narrows the same way on both surfaces.
+    """
+    ellipsis = "\u2026"
+    if cells <= 0:
+        return ""
+    if _cell_len(text) <= cells:
+        return text
+    # A name that was CUT before (``ask_name``'s own cap, then a narrower row)
+    # must not end in two ellipses.
+    if text.endswith(ellipsis):
+        text = text[: -len(ellipsis)]
+        if _cell_len(text) <= cells:
+            return f"{text}{ellipsis}"
+    room = cells - _cell_len(ellipsis)
+    if room <= 0:
+        return ellipsis
+    used = 0
+    cut = 0
+    for start, end, width in _grapheme_spans(text):
+        if used + width > room:
+            break
+        used += width
+        cut = end
+    head = text[:cut]
+    space = head.rfind(" ")
+    if space > 0 and space >= room // 2:
+        head = head[:space]
+    head = head.rstrip(" ,;:.—–-")
+    if not head:
+        return ellipsis
+    return f"{head}{ellipsis}"
+
+
+def _name_line(raw: str) -> str:
+    """A question's words as ONE printable line that cannot repaint or forge.
+
+    Three hazards, in the order they are removed: terminal control sequences
+    (the same helper the picker strips with before anything reaches a tty),
+    directional controls that reorder the line around the name, and the double
+    quotes that frame it. The whitespace collapse is last, so a newline smuggled
+    inside an escape payload cannot open a line of its own.
+    """
+    from local_operator.ansi import strip_control_sequences
+
+    return " ".join(_BIDI_CONTROLS_RE.sub("", strip_control_sequences(raw)).split()).translate(
+        _ASK_NAME_QUOTES
+    )
+
+
+def is_bridge_ask_question(question: Mapping[str, Any]) -> bool:
+    """Whether this question's words are ANOTHER organization's (a bridge ask).
+
+    ``asks/render._timeout_listing_line`` refuses to repeat a bridge request's
+    text outside its own framing (TB-05, design §11.1), and a receipt quoting
+    it under our own words is exactly that unframed re-serve (review m2). A SITE
+    card carries a ``question_id`` too, but its words are OURS — built from the
+    origin — so it is checked first, the same order and predicate the timeout
+    listing uses (incident 2026-11-15, ask a-652b).
+
+    Derived from the row's own question dicts: both producers (``asks/queue.py``)
+    copy the questions whole onto the response and timeout rows, so the
+    carriage is there to read.
+    """
+    question_id = str(question.get("question_id") or "")
+    if not question_id:
+        return False
+    from local_operator.browser_bridge.site_approval import is_site_question_id
+
+    return not is_site_question_id(question_id)
+
+
+def ask_name(
+    details: Mapping[str, Any] | None, *, secret_label: str = _SECRET_ASK_NAME
+) -> str | None:
+    """The few words a receipt calls an ask by, or ``None`` when it has none.
+
+    Asks carry no title field, so the name is cut from the FIRST question's text
+    — the only words a person already knows the ask by. Ben, 2026-11-23: an id
+    alone is hard to match to an ask in the UIs, so every receipt now names the
+    ask in words and puts the id first.
+
+    Derived from the row's own ``questions``, never a store lookup: the response
+    row and the timeout row both carry them (``asks/queue.py``), and an older
+    timeout row that does not still renders with the id alone rather than
+    reaching into a queue the reader does not own.
+
+    A SECRET question replaces the whole name with ``secret_label``: quoting the
+    first question of a mixed ask would leak a prompt whose answer must stay in
+    its own card. ``secret_label`` is the caller's localized word; the default
+    is English because the tool receipt (``asks/render.py``) is model-facing.
+
+    One further question per ``+N`` suffix says the ask holds more than the one
+    named — the count is the only other matching handle a row has.
+
+    The text is UNTRUSTED — a model wrote it — so it is cleaned before it is
+    cut: control sequences stripped, bidi overrides removed, inner double quotes
+    neutralised (:func:`_name_line`). A BRIDGE request is named by its id alone:
+    its words belong to another organization and no receipt of ours may quote
+    them outside their framing (:func:`is_bridge_ask_question`).
+    """
+    details = details or {}
+    questions = [q for q in (details.get("questions") or ()) if isinstance(q, Mapping)]
+    if not questions:
+        return None
+    further = f" +{len(questions) - 1}" if len(questions) > 1 else ""
+    if any(q.get("secret") for q in questions):
+        return f"{secret_label}{further}"
+    if any(is_bridge_ask_question(q) for q in questions):
+        return None
+    text = _name_line(str(questions[0].get("question") or ""))
+    if not text:
+        return None
+    return f"{fit_name_cells(text, _ASK_NAME_CELLS)}{further}"
+
+
+def _ask_receipt_line(ask_id: str, name: str | None, state: str) -> str:
+    """The one receipt line, ID FIRST: ``a-745e · "Settings layout" — Answered, delivering``.
+
+    The id leads because it is the ``addressable`` token — the thing an agent's
+    prose cites and the thing a surface can link — and because it sits at a
+    fixed offset no language's word order moves. The name is quoted so a
+    person can see where the question's own words stop, and the state is a
+    whole phrase from the catalogue rather than a concatenated sentence.
+    """
+    if name:
+        return f'{ask_id} · "{name}" — {state}'
+    return f"{ask_id} — {state}"
+
+
+def ask_response_parts(
+    details: Mapping[str, Any] | None,
+) -> tuple[str, str | None, str, NoticeSeverity]:
+    """The ``ask_response`` receipt as PARTS: ``(ask_id, name, state, ink)``.
+
+    WHY PARTS. The phone and the desktop print this line whole; a surface may
+    instead want the id in its own column, because a column of ids is what a
+    person scans when the agent's prose cites one. Splitting here keeps ONE
+    author of the words — :func:`_ask_receipt_line` is the only place they
+    become a sentence — so a surface that lays them out separately cannot
+    invent different words for the same state.
+
+    The three statuses are deliberately distinguishable to a HUMAN even though
+    they ride one message type for the model — a person reading back a
+    conversation needs to know whether their answer landed in time, landed late,
+    or was a decline. ``ink`` is: an answer is a receipt, a late answer is a
+    receipt the user should notice, and a decline is a plain state.
+    """
+    from local_operator.harness import ask_receipts_copy as _copy
+
+    details = details or {}
+    ask_id = str(details.get("ask_id") or "")
+    name = ask_name(details, secret_label=_copy.secret_ask_name())
+    status = str(details.get("status") or "answered")
+    if status == "declined":
+        return (ask_id, name, _copy.declined_text(), "info")
+    if status == "late":
+        return (ask_id, name, _copy.late_text(), "warning")
+    if status == "dismissed":
+        # The audit receipt of an operator dismissal (design §15): who, through
+        # which surface, and why. Without this branch the row would fall through
+        # to the answered words, which are false for a dismissal.
+        by = details.get("by")
+        surface = str(by.get("surface") or "") if isinstance(by, Mapping) else ""
+        return (
+            ask_id,
+            name,
+            _copy.dismissed_text(surface=surface, reason=str(details.get("reason") or "")),
+            "info",
+        )
+    return (ask_id, name, _copy.answered_text(), "info")
 
 
 def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
@@ -1061,50 +1316,81 @@ def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeS
     and the other misses is how a row renders on one surface and nowhere on the
     other (docs/design/history-fold-convergence.md §3).
 
-    The three statuses are deliberately distinguishable to a HUMAN even though
-    they ride one message type for the model — a person reading back a
-    conversation needs to know whether their answer landed in time, landed late,
-    or was a decline. ``kind`` is the ink: an answer is a receipt, a late answer
-    is a receipt the user should notice, and a decline is a plain state.
+    A thin wrapper on :func:`ask_response_parts` so the callers that want the
+    whole sentence (both folds, today) keep their shape.
     """
-    details = details or {}
-    status = str(details.get("status") or "answered")
-    ask_id = str(details.get("ask_id") or "")
-    if status == "declined":
-        return (f"Ask {ask_id} declined — the agent was told", "info")
-    if status == "late":
-        return (f"Answered late — the agent was told (ask {ask_id})", "warning")
-    if status == "dismissed":
-        # The audit receipt of an operator dismissal (design §15): who, through
-        # which surface, and why. Without this branch the row would fall through
-        # to "Answered — delivering", which is false for a dismissal.
-        by = details.get("by")
-        surface = str(by.get("surface") or "") if isinstance(by, Mapping) else ""
-        surface = _DISMISS_SURFACE_WORDS.get(surface, surface)
-        # One source for the labels: the response text and this receipt must not drift.
-        from local_operator.asks.render import DISMISS_REASON_LABELS
+    ask_id, name, state, severity = ask_response_parts(details)
+    return (_ask_receipt_line(ask_id, name, state), severity)
 
-        reason = DISMISS_REASON_LABELS.get(str(details.get("reason") or ""), "no longer needed")
-        via = f" ({surface})" if surface else ""
-        return (f"Dismissed by you{via} — {reason} (ask {ask_id})", "info")
-    return (f"Answered — delivering (ask {ask_id})", "info")
+
+def ask_timeout_parts(
+    details: Mapping[str, Any] | None,
+) -> tuple[str, str | None, str, NoticeSeverity]:
+    """The ``ask_timeout`` receipt as PARTS: ``(ask_id, name, state, ink)``.
+
+    It says the agent went ahead WITHOUT the answer, in the phone's lapsed-card
+    words. It does not add "you can still answer": no surface offers a late
+    answer since decision D10, so that half would be untrue. ``warning`` ink:
+    this is the moment the user learns their silence had a cost.
+
+    An older timeout row carries no ``questions``; :func:`ask_name` then returns
+    ``None`` and the line is the id alone, which is still the addressable token.
+    """
+    from local_operator.harness import ask_receipts_copy as _copy
+
+    details = details or {}
+    ask_id = str(details.get("ask_id") or "")
+    name = ask_name(details, secret_label=_copy.secret_ask_name())
+    return (ask_id, name, _copy.timed_out_text(waited=gate_waited_text(details)), "warning")
 
 
 def ask_timeout_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
     """The human one-liner for an ``ask_timeout`` row: ``(text, kind)``.
 
-    It says the agent went ahead WITHOUT the answer, in the phone's lapsed-card
-    words. It no longer adds "you can still answer": no surface offers a late
-    answer since decision D10, so that half became untrue. ``warning`` ink: this
-    is the moment the user learns their silence had a cost.
+    A thin wrapper on :func:`ask_timeout_parts`, for the same reason
+    :func:`ask_response_notice` is one.
     """
+    ask_id, name, state, severity = ask_timeout_parts(details)
+    return (_ask_receipt_line(ask_id, name, state), severity)
+
+
+def ask_withdrawn_parts(
+    details: Mapping[str, Any] | None,
+) -> tuple[str, str | None, str, NoticeSeverity]:
+    """The ``ask_withdrawn`` receipt as PARTS: ``(ask_id, name, state, ink)``.
+
+    The row says the ASKER retracted the question (``ask_withdraw``, reason
+    ``moot``), which is a different fact from every answer, decline, dismissal
+    or expiry the other receipts state: nobody was told anything, because the
+    party who would have been told is the one who asked. That is why it is the
+    only ask row that never reaches the model — see
+    ``ASK_WITHDRAWN_MESSAGE_TYPE``.
+
+    ``info`` ink, not ``dim``: the id and the name are the audit content (what
+    was withdrawn, and when the operator reads back), and the withdrawal is a
+    thing that happened rather than a row to skim past.
+
+    The name is PR A's :func:`ask_name`: a secret ask keeps its generic label,
+    a bridge ask is named by id only, and an ask with no questions still
+    renders the id alone.
+    """
+    from local_operator.harness import ask_receipts_copy as _copy
+
     details = details or {}
     ask_id = str(details.get("ask_id") or "")
-    waited = gate_waited_text(details)
-    return (
-        f"Timed out after {waited} — the agent goes ahead without your answer (ask {ask_id})",
-        "warning",
-    )
+    name = ask_name(details, secret_label=_copy.secret_ask_name())
+    return (ask_id, name, _copy.withdrawn_text(), "info")
+
+
+def ask_withdrawn_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
+    """The human one-liner for an ``ask_withdrawn`` row: ``(text, kind)``.
+
+    A thin wrapper on :func:`ask_withdrawn_parts`, for the same reason the other
+    two receipts have one: the surfaces that paint the whole sentence and the
+    ones that lay the id out in its own column must read the SAME author.
+    """
+    ask_id, name, state, severity = ask_withdrawn_parts(details)
+    return (_ask_receipt_line(ask_id, name, state), severity)
 
 
 def gate_timeout_notice(details: dict[str, Any]) -> str:

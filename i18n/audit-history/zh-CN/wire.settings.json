@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "b59d6a66fc681b230021c867dcc05655f3b30ebc3cc1f4ef096aab4b108e4401",
+  "history_sha256": "c4167300759888f92787bdeb047d36472e3705906f715d55929f72dee2235a5d",
   "entries": [
     {
       "locale": "zh-CN",
@@ -7422,6 +7422,56 @@
       },
       "status": "passed",
       "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings (origin/main: 30 keys added since the merge-base; branch: 10 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 10 added/changed keys; origin/main's 895 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "7163a940aaa7e6c7c3df54e8efa44a6b99bc45a89b2330a4d61f2d7976652c2c",
+      "keys_audited": 1,
+      "round": "i18n-wave-A",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent fda0f7e67273)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "7163a940aaa7e6c7c3df54e8efa44a6b99bc45a89b2330a4d61f2d7976652c2c",
+      "keys_audited": 1,
+      "round": "i18n-wave-B",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent 466731e890b3)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits. Auditor B shares the translator model but is a different agent session."
     },
     {
       "locale": "zh-CN",

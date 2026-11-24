@@ -118,6 +118,7 @@ from local_operator.harness.message_types import (
     ASK_RELAY_MESSAGE_TYPE,
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
+    ASK_WITHDRAWN_MESSAGE_TYPE,
     DIVERGENCE_NOTICE_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
     PEER_DELIVERABLE_CUSTOM_TYPES,
@@ -5399,6 +5400,10 @@ class Session:
         # when ``_open_pending_body_turn`` actually won a reservation, so a
         # session with nothing pending never pays for the per-call gate.
         self._pending_body_turn: Any | None = None
+        #: Id of the dictated user message whose next provider calls carry the
+        #: spoken-summary note (``_compose_transform_context``). In memory only:
+        #: a resumed session has none, so a resumed turn simply gets no note.
+        self._voice_note_for: str | None = None
         #: Team Bridge card excerpt decisions, frozen at each card's first render
         #: in this process (``card_projection.attach_history_excerpts``): keeps
         #: already-cached card bytes stable. Cleared whenever standing fails and
@@ -11072,6 +11077,7 @@ class Session:
             # row (goal loop, serving chrome) is not the operator's words,
             # so it must not park a wake either.
             self._operator_turn_open = not harness_injected
+        voice_note_armed = False
         try:
             # A USER TURN IS A REPLY (R34): retire every pending patience row
             # before anything else in this turn. Over-cancel is deliberate —
@@ -11132,6 +11138,22 @@ class Session:
             # default to None on ``Message``).
             if input_mode is not None:
                 extra["input_mode"] = input_mode
+            # SPOKEN-SUMMARY NOTE (docs/design/voice-spoken-summary.md): only a
+            # voice-DICTATED prompt, and only while this session holds the voice
+            # slot. A typed prompt, a wake, a monitor and a subagent's turn reach
+            # no listener, so none is asked for a spoken paragraph. The text is
+            # NOT touched: the stored row is exactly what the person said, and
+            # the note is appended per provider call to a request-local copy
+            # (``_compose_transform_context``), keyed by this message's id. One
+            # small slot read, so it is off the session loop and costs nothing
+            # for a prompt that was not dictated.
+            wants_voice_note = False
+            if input_mode == "dictated" and not harness_injected:
+                from local_operator.voice import slot as voice_slot
+
+                wants_voice_note = await asyncio.to_thread(
+                    voice_slot.is_voice_session, self._config_dir, self._session_id
+                )
             if audio:
                 # The audio door is DAEMON-DERIVED, never client-asserted (the
                 # vocabulary's own rule): the blocks are on the message this
@@ -11142,6 +11164,9 @@ class Session:
             elif input_path is not None:
                 extra["input_path"] = input_path
             user = Message.user(text, images, audio=audio, documents=documents, **extra)
+            # Every other prompt disarms: only this message id is asked to carry it.
+            self._voice_note_for = user.id if wants_voice_note else None
+            voice_note_armed = wants_voice_note
             if not harness_injected:
                 self._file_owner().bind(user.id, _file_capture)
                 if producer_command_id:
@@ -11223,6 +11248,11 @@ class Session:
                 carried_prompt=True,
             )
         finally:
+            # The note belongs to THIS prompt's turn: a wake, monitor or steer
+            # that opens the next turn must not inherit it, because none of
+            # them add a user message that would displace the id.
+            if voice_note_armed:
+                self._voice_note_for = None
             # A body this person's turn left pending is served by its own turn.
             self._rearm_pending_body_followup()
             # The operator turn is CLOSED: wake-defer now measures the quiet
@@ -15345,11 +15375,103 @@ class Session:
         Under the kill switch this refuses in words exactly like
         :meth:`respond_ask`: with no queue there is nothing to withdraw, and the
         caller hears that rather than a traceback or a silent success.
+
+        TWO REASONS, ONE ROW (Ben, 2026-11-23).
+
+        * ``moot`` is the agent retracting its own question, so the operator gets
+          a display-only row for it — ``a-745e · "Settings layout" — Withdrawn by
+          the agent`` (see :meth:`_record_ask_withdrawn`). The model gets nothing:
+          it asked and it took the ask back.
+        * ``answered_in_chat`` is NOT a withdrawal at all. The queue records it
+          through the ``answered`` machinery, and the standard ``ask_response``
+          row follows through ``reconcile`` — which already paints "Answered,
+          delivering" and already carries the answer to the model. A second
+          "withdrawn" row beside it would state the opposite of what happened.
         """
         queue = self.ask_queue()
         if queue is None:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
-        return queue.withdraw(ask_id, reason=reason, answers=answers, message_id=message_id, by=by)
+        # The questions are read HERE, before the withdraw, because the fold is
+        # the only source that has them: ``AskQueue.withdraw`` deliberately does
+        # not return them, since its ``details`` reach the MODEL and the row this
+        # feeds is display-only (the two audiences must not share a payload).
+        questions: list[Mapping[str, Any]] = []
+        if reason == "moot":
+            try:
+                questions = [
+                    dict(question)
+                    for record in queue.records()
+                    if str(record.get("ask_id") or "") == ask_id
+                    for question in (record.get("questions") or ())
+                    if isinstance(question, Mapping)
+                ]
+            except Exception:  # noqa: BLE001 — a receipt is never worth a failed withdraw
+                logger.debug("ask: could not read the withdrawn ask's questions", exc_info=True)
+        outcome = queue.withdraw(
+            ask_id, reason=reason, answers=answers, message_id=message_id, by=by
+        )
+        if outcome.get("ok") and reason == "moot":
+            self._record_ask_withdrawn(ask_id, questions)
+        return outcome
+
+    def _record_ask_withdrawn(self, ask_id: str, questions: Sequence[Mapping[str, Any]]) -> None:
+        """Paint the agent's retraction of an ask into the transcript.
+
+        Called SYNCHRONOUSLY from the ``ask_withdraw`` tool's own path, so the
+        durable write is handed to the session's background group the way
+        :meth:`_record_divergence_notice` does, and for the same reason: the
+        caller has a settled ask to answer for and must not wait on a journal
+        write to do it.
+
+        A MESSAGE entry carrying a ``CustomMessage`` rather than
+        ``append_custom``: ``build_llm_history`` ignores custom ENTRIES by
+        design, so a row written the other way would reach no viewer that
+        replays the history. It stays out of the MODEL's context because
+        ``ASK_WITHDRAWN_MESSAGE_TYPE`` is absent from the renderer's injection
+        tuple and from ``MODEL_VISIBLE_INJECTED_TYPES`` — a separate type, so no
+        allow-list, no response-row reader and no reconcile delivery has to
+        remember to exclude a status.
+
+        The row id is ``ask-withdrawn-<ask_id>`` and the check is
+        ``transcript.has_entry`` INSIDE the task: the id is the marker, so a
+        restart replay (which re-reads the journal but never re-plans a
+        withdrawal) and a duplicate spawn both land as one row.
+        """
+        from local_operator.asks import store as _ask_store
+        from local_operator.harness.rows import ask_withdrawn_notice
+
+        row_id = _ask_store.withdrawn_row_id(ask_id)
+        if not row_id:
+            return
+        details: dict[str, Any] = {
+            "ask_id": ask_id,
+            "status": "withdrawn",
+            "questions": [dict(question) for question in questions],
+            "by": "agent",
+            "at": int(time.time() * 1000),
+        }
+        # The sentence is composed by the shared receipt author rather than here,
+        # so the terminal row, the phone notice and the desktop row state the
+        # same fact in the same words; it is stored on the row because the
+        # surfaces that receive it as text do not re-derive it.
+        details["text"] = ask_withdrawn_notice(details)[0]
+
+        async def _append() -> None:
+            try:
+                if self._transcript.has_entry(row_id):
+                    return
+                await self._transcript.append_message(
+                    CustomMessage(
+                        custom_type=ASK_WITHDRAWN_MESSAGE_TYPE,
+                        attribution="agent",
+                        id=row_id,
+                        details=details,
+                    )
+                )
+            except Exception:  # noqa: BLE001 — a receipt must never break a turn
+                logger.debug("could not record the withdrawn ask row", exc_info=True)
+
+        self._spawn_background(_append())
 
     def site_ask_lapses(self, origin: str) -> int:
         """How many site cards for ``origin`` lapsed unanswered since the operator last spoke.
@@ -23243,16 +23365,42 @@ class Session:
             return messages
 
     def _compose_transform_context(self) -> Any:
-        """The loop's one ``transform_context``: excerpts first, then the live frame."""
+        """The loop's one ``transform_context``: excerpts, the live frame, then the voice note."""
         frame = self._pending_body_turn
-        if getattr(self, "bridge_runtime", None) is None:
-            return frame.transform if frame is not None else None
+        bridge = getattr(self, "bridge_runtime", None) is not None
 
         def transform(messages: list[Any]) -> list[Any]:
-            shaped = self._bridge_history_transform(messages)
-            return frame.transform(shaped) if frame is not None else shaped
+            shaped = self._bridge_history_transform(messages) if bridge else messages
+            if frame is not None:
+                shaped = frame.transform(shaped)
+            return self._with_voice_note(shaped)
 
         return transform
+
+    def _with_voice_note(self, messages: list[Any]) -> list[Any]:
+        """``messages`` plus the spoken-summary note, when the newest user turn earns it.
+
+        Request-local and never stored (docs/design/voice-spoken-summary.md): the
+        loop applies this to a copy before every provider call, so the row, the
+        replay, the preview and compaction never see the note. It is the LAST
+        message and flagged ``_ephemeral``, so the prompt-cache breakpoint stays
+        on the persistent message before it and the cached prefix is identical
+        with and without the note. A newer user message (a steer, an injected
+        prompt) displaces the dictated one and the note with it.
+        """
+        armed = self._voice_note_for
+        if armed is None:
+            return messages
+        newest = next(
+            (m for m in reversed(messages) if isinstance(m, Message) and m.role == "user"), None
+        )
+        if newest is None or newest.id != armed:
+            return messages
+        from local_operator.voice.summary_note import VOICE_SUMMARY_NOTE
+
+        note = Message.user(VOICE_SUMMARY_NOTE)
+        note._ephemeral = True
+        return [*messages, note]
 
     async def _open_pending_body_turn(
         self,

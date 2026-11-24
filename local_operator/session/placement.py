@@ -42,6 +42,8 @@ from pathlib import Path
 from secrets import token_hex
 from typing import Any, Literal
 
+from local_operator.atomic_files import atomic_write_bytes
+
 #: The sidecar's name inside a session directory. A WIRE-ADJACENT CONSTANT:
 #: ``fork.EXCLUDED_SIDECARS`` names it, a peer's catalogue builder reads it, and
 #: ``tests/unit/session/test_mesh_stamp.py`` pins the pair — a second spelling
@@ -267,21 +269,10 @@ def write_stamp_into(directory: Path, stamp: MeshStamp) -> Path:
     path = Path(directory) / MESH_STAMP_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(stamp.to_json(), indent=2, sort_keys=True).encode("utf-8")
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-        os.replace(str(tmp), str(path))
-    except OSError:
-        # A half-written stamp is deliberately NOT renamed into place: the
-        # reader treats a missing stamp as "unplaced", while a truncated one
-        # would be a claim nobody made.
-        try:
-            os.unlink(str(tmp))
-        except OSError:
-            pass
-        raise
+    # A half-written stamp is deliberately NOT renamed into place (the writer
+    # removes its temp and re-raises): the reader treats a missing stamp as
+    # "unplaced", while a truncated one would be a claim nobody made.
+    atomic_write_bytes(path, payload, mode=0o600, hidden=True)
     return path
 
 

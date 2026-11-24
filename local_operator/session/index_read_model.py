@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from local_operator import procstate
+from local_operator.atomic_files import atomic_write_text, unique_temp
 from local_operator.session import transcript_index as ti
 
 #: Bumped whenever the companion's tables/semantics change. An older companion
@@ -62,11 +63,17 @@ _RETAIN_PREVIOUS = 2
 #: than this, so a session's first publication is never swept mid-write.
 _ORPHAN_GRACE_S = 3600.0
 
-#: A writer's temp file: ``<token>.<pid>.tmp`` (the companion build),
-#: ``<token>.naming.<pid>.naming.tmp`` (the sidecar — ``with_suffix`` replaces
-#: only ``.json``), and SQLite's ``-journal`` sibling of either. The pid is the
-#: WRITER's, which is the only identity a leaked temp carries.
-_WRITER_TEMP = re.compile(r"^[^.]+(?:\.naming)?\.(?P<pid>\d+)(?:\.naming)?\.tmp(?:-journal)?$")
+#: A writer's temp file, in both shapes a killed writer can have left:
+#: the per-write names :func:`local_operator.atomic_files.unique_temp` builds now
+#: (``<token>.sqlite.<pid>.<thread>.<hex>.tmp`` for the companion build,
+#: ``<token>.naming.json.<pid>.<thread>.<hex>.tmp`` for the sidecar), and the
+#: pid-only names earlier builds used (``<token>.<pid>.tmp``,
+#: ``<token>.naming.<pid>.naming.tmp``) -- plus SQLite's ``-journal`` sibling of
+#: any. The pid is the WRITER's, which is the only identity a leaked temp carries.
+_WRITER_TEMP = re.compile(
+    r"^[^.]+(?:\.naming)?\.(?:(?:sqlite|json)\.)?(?P<pid>\d+)(?:\.\d+\.[0-9a-f]{8})?"
+    r"(?:\.naming)?\.tmp(?:-journal)?$"
+)
 
 #: Other sessions' read-model directories visited per :func:`collect` call. The
 #: start rotates (:data:`_TEMP_SWEEP_CURSOR`), so every directory is reached
@@ -466,7 +473,7 @@ def publish(root: str | Path, sid: str, index: ti.TranscriptIndex) -> str | None
     if path.is_file():
         return token  # already published for this exact derivation
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(f".{os.getpid()}.tmp")
+    temp = unique_temp(path)
     meta = {
         "schema": SCHEMA,
         "projection": PROJECTION,
@@ -682,19 +689,14 @@ def write_naming(root: str | Path, sid: str, token: str | None, naming: dict[str
     if not isinstance(token, str) or not isinstance(naming, dict):
         return False
     path = _path(Path(root), sid, token).with_suffix(".naming.json")
-    temp = path.with_suffix(f".{os.getpid()}.naming.tmp")
     payload = {
         "schema": SCHEMA,
         "publication_id": token,
         "prompt_version": naming.get("prompt_version"),
         "items": naming.get("items") if isinstance(naming.get("items"), dict) else {},
     }
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        temp.replace(path)
-    finally:
-        temp.unlink(missing_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(payload, separators=(",", ":")))
     return True
 
 
@@ -1444,7 +1446,7 @@ def _sweep_orphans(root: str | Path, directory: Path, sid: str, limit: int = 64)
 def _sweep_dead_writer_temps(directory: Path, sid: str, limit: int = _TEMP_SWEEP_DIRS) -> None:
     """Unlink temp FILES whose writer is provably gone, bounded per call.
 
-    WHY. :func:`publish` and :func:`write_naming` build into a pid-named temp and
+    WHY. :func:`publish` and :func:`write_naming` build into a pid-led temp and
     remove it in a ``finally`` — which never runs when the process is KILLED
     (an update restart, a resource guard, SIGKILL). Nothing else ever names those
     files: :func:`collect` only ranks ``.sqlite``/``.json`` and :func:`_sweep_orphans`

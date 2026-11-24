@@ -780,7 +780,7 @@
   "wire.settings.team_bridge_hold_release.help": "Certaines demandes de nouveau travail sont retenues pour que vous les transmettiez ou les écartiez. Rien n’atteint votre agent sans transmission. Désactivé, elles sont refusées.",
   "wire.settings.tool_approval_mode.choice.ask.description": "demander avant les outils d’écriture/exécution",
   "wire.settings.tool_approval_mode.choice.ask.label": "demander",
-  "wire.settings.tool_approval_mode.choice.auto.description": "les exécuter sans demander",
+  "wire.settings.tool_approval_mode.choice.auto.description": "les exécuter sans demander, sauf pour enregistrer le profil du compte ou publier dans la communauté",
   "wire.settings.tool_approval_mode.choice.auto.label": "automatique",
   "wire.settings.tool_approval_mode.help": "Assouplir exige une écriture dans cette session — /approvals auto.",
   "wire.settings.tool_approval_mode.label": "Mode d’approbation des outils",

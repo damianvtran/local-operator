@@ -780,7 +780,7 @@
   "wire.settings.team_bridge_hold_release.help": "Некоторые запросы на новую работу задерживаются, чтобы вы их доставили или отклонили. Без вашей доставки агент ничего не получит. Если выключено, им отказывают.",
   "wire.settings.tool_approval_mode.choice.ask.description": "спрашивать перед инструментами записи/выполнения",
   "wire.settings.tool_approval_mode.choice.ask.label": "спрашивать",
-  "wire.settings.tool_approval_mode.choice.auto.description": "выполнять их, не спрашивая",
+  "wire.settings.tool_approval_mode.choice.auto.description": "выполнять их, не спрашивая, кроме сохранения профиля аккаунта и публикации в сообществе",
   "wire.settings.tool_approval_mode.choice.auto.label": "автоматически",
   "wire.settings.tool_approval_mode.help": "Для ослабления нужна запись в этой сессии — /approvals auto.",
   "wire.settings.tool_approval_mode.label": "Режим одобрения инструментов",

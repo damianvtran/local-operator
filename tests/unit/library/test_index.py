@@ -745,3 +745,56 @@ def test_an_index_written_under_the_old_schema_is_rebuilt_with_the_stored_title(
     rebuilt = index.build_catalog(root, budget_s=None)
 
     assert rebuilt.assets[0].occurrences[0].title == "Victor support triage"
+
+
+def test_two_threads_writing_the_index_never_share_a_temp(tmp_path, monkeypatch) -> None:
+    """Threads of one process share a pid, so a ``<pid>.tmp`` name collided.
+
+    The barrier holds both writers after each has finished its temp and before
+    either replaces: with a shared name the first ``os.replace`` consumed the
+    file and the second raised (swallowed as a debug log), and a writer still
+    streaming into the shared temp would publish a torn index.
+    """
+    import threading
+
+    path = tmp_path / "index.json"
+    barrier = threading.Barrier(2, timeout=10)
+    real_replace = os.replace
+    temps: list[str] = []
+    failures: list[BaseException] = []
+
+    def gated_replace(src, dst, *args, **kwargs):
+        if Path(dst) == path:
+            temps.append(str(src))
+            barrier.wait()
+            try:
+                return real_replace(src, dst, *args, **kwargs)
+            except OSError as error:
+                failures.append(error)
+                raise
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(index.os, "replace", gated_replace)
+    workers = [
+        threading.Thread(target=index._write, args=(path, {"writer": name})) for name in ("a", "b")
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=20)
+
+    assert len(set(temps)) == 2, f"writers shared a temp file: {temps}"
+    assert not failures, failures
+    assert json.loads(path.read_text()) in ({"writer": "a"}, {"writer": "b"})
+    assert [p.name for p in tmp_path.iterdir()] == ["index.json"], "a temp file leaked"
+
+
+def test_a_failed_index_write_leaves_no_temp(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "index.json"
+
+    def disk_full(src, dst, *args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(index.os, "replace", disk_full)
+    index._write(path, {"x": 1})
+    assert list(tmp_path.iterdir()) == []

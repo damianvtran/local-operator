@@ -780,7 +780,7 @@
   "wire.settings.team_bridge_hold_release.help": "Một số yêu cầu việc mới được giữ để bạn chuyển hoặc loại bỏ. Không gì đến được tác nhân của bạn nếu bạn không chuyển. Khi tắt, chúng bị từ chối.",
   "wire.settings.tool_approval_mode.choice.ask.description": "hỏi trước với công cụ ghi/thực thi",
   "wire.settings.tool_approval_mode.choice.ask.label": "Hỏi trước",
-  "wire.settings.tool_approval_mode.choice.auto.description": "chạy chúng không hỏi",
+  "wire.settings.tool_approval_mode.choice.auto.description": "chạy chúng không hỏi, trừ khi lưu hồ sơ tài khoản hoặc đăng bài trong cộng đồng",
   "wire.settings.tool_approval_mode.choice.auto.label": "Tự động",
   "wire.settings.tool_approval_mode.help": "Nới lỏng cần một lần ghi trong chính phiên này — /approvals auto.",
   "wire.settings.tool_approval_mode.label": "Chế độ phê duyệt công cụ",

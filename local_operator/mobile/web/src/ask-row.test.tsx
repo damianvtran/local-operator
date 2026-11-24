@@ -138,7 +138,7 @@ describe("AskRow", () => {
 			/>,
 		);
 		fireEvent.click(screen.getByRole("button"));
-		expect(screen.getByText("what the agent was told")).toBeTruthy();
+		expect(screen.getByText("What the agent was told")).toBeTruthy();
 		expect(screen.getByText(/Proceed without it/)).toBeTruthy();
 	});
 });
