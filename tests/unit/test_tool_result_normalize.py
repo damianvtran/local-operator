@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from typing import Any
 
 import pytest
 
@@ -148,7 +149,7 @@ def test_many_unmatched_backticks_and_brackets_stay_linear() -> None:
 # ---- normalize_tool_text: JSON routing ---------------------------------------------
 
 
-def _fetch_payload() -> dict[str, object]:
+def _fetch_payload() -> dict[str, Any]:
     return {
         "url": "https://en.wikipedia.org/wiki/Mark_Sutcliffe_(politician)",
         "title": "Mark Sutcliffe - Wikipedia",
