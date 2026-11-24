@@ -560,7 +560,11 @@ def test_the_stream_loop_gates_the_commit_on_the_diagnosis_not_a_response_id() -
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in ("_note_cache_start", "_note_cache_end")
     ]
-    assert {node.func.attr for node in calls} == {
+
+    def _call_name(node: ast.Call) -> str:
+        return node.func.attr if isinstance(node.func, ast.Attribute) else ""
+
+    assert {_call_name(node) for node in calls} == {
         "_note_cache_start",
         "_note_cache_end",
     }, "both acceptance shapes reach the commit step"
