@@ -737,6 +737,8 @@ def bind_runtime_authority(
     snapshot = _snapshot(
         team, teams, agents, max_depth=depth, readonly_shell=readonly_shell or confined
     )
+    if restoring:
+        snapshot = _with_recorded_tiers(snapshot, expected)
     record = snapshot.record()
     if restoring:
         _compare(expected, record, local=True)
@@ -755,9 +757,89 @@ def bind_runtime_authority(
             {
                 **record,
                 "explicit_local": explicit_local,
+                MEMBER_TIERS_KEY: _member_tiers(snapshot),
             },
         )
     return snapshot
+
+
+# ---------------------------------------------------------------------------
+# Restore applies the same split: the RECORDED tiers are the snapshot's
+# ---------------------------------------------------------------------------
+#
+# WHY. A warm bound session keeps its snapshot in memory, so a tier-only roster
+# edit reaches its launches through ``live_member_roster`` (the split below).
+# A STORED session has no snapshot in memory: ``restore_bound`` re-snapshots
+# the live row, and the live row's edited ``tier``/``effort`` changed the
+# ``structure`` digest the recorded authority is compared on, so the reopen
+# refused ("team definition ... does not match") and the conversation could not
+# send -- after an edit the warm path explicitly allows. Main had no snapshot
+# to refuse against, so this refusal was a regression, not a stricter rule.
+#
+# HOW. The binding also journals each snapshotted row's member
+# ``[tier, effort]`` pairs (``MEMBER_TIERS_KEY``). On restore those recorded
+# values are put back onto the freshly read rows BEFORE the record is built,
+# so:
+#
+# * the authority comparison (``_compare``) is untouched and still runs on the
+#   full structure digest: a role, slot, kind, manager, saver or count edit
+#   changes bytes that substitution never touches, so it still refuses with the
+#   existing "re-attach via /team" text;
+# * the recorded pairs are authenticated by that same digest -- a pair that is
+#   not the one the binding attested cannot reproduce it, so a tampered or
+#   stale journal refuses rather than granting a tier;
+# * the restored snapshot carries the ATTESTED tiers, so the edited tier then
+#   reaches a launch only through ``live_member_roster`` -- the provider
+#   ceiling, the mesh-replica rule and the ``not applied`` receipt, exactly as
+#   on a warm resume -- instead of silently becoming the new authority.
+#
+# A binding without the key (written before it existed, or a mesh arrival,
+# which records the destination's own snapshot) gets no substitution: the live
+# row is compared as-is, i.e. the pre-existing behaviour.
+
+#: Binding key for the per-row ``[tier, effort]`` pairs the snapshot attested.
+#: Local journal only: ``record()`` (what travels on a move) does not carry it.
+MEMBER_TIERS_KEY = "member_tiers"
+
+
+def _member_tiers(authority: TeamAuthority) -> dict[str, list[list[str | None]]]:
+    return {
+        key: [[member.tier, member.effort] for member in team.members]
+        for key, team in authority.teams.items()
+    }
+
+
+def _with_recorded_tiers(authority: TeamAuthority, expected: Any) -> TeamAuthority:
+    """``authority`` with each row's member tier/effort replaced by the recorded
+    pairs. Only those two fields are ever written; a row whose recorded pairs are
+    missing or malformed (wrong count, non-string values) is left as read, so
+    the comparison decides it on the live bytes. See the section comment above.
+    """
+    recorded = expected.get(MEMBER_TIERS_KEY) if isinstance(expected, dict) else None
+    if not isinstance(recorded, dict):
+        return authority
+    teams: dict[str, Team] = {}
+    for key, team in authority.teams.items():
+        pairs = recorded.get(key)
+        if (
+            not isinstance(pairs, list)
+            or len(pairs) != len(team.members)
+            or not all(
+                isinstance(pair, list)
+                and len(pair) == 2
+                and all(value is None or isinstance(value, str) for value in pair)
+                for pair in pairs
+            )
+        ):
+            teams[key] = team
+            continue
+        members = [
+            member.model_copy(update={"tier": tier, "effort": effort})
+            for member, (tier, effort) in zip(team.members, pairs, strict=True)
+        ]
+        teams[key] = team.model_copy(update={"members": members})
+    root = teams[authority.team.name.casefold()]
+    return replace(authority, team=root, teams=teams)
 
 
 # ---------------------------------------------------------------------------

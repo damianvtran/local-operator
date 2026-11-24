@@ -18,6 +18,7 @@ LAUNCH and the roster has to be re-derived from the child's record.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolContext,
 )
+from local_operator.network.move_team import KEY, LOCAL_BINDING_NAME, MEMBER_TIERS_KEY
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
@@ -1017,6 +1019,143 @@ async def test_split_a_resumed_team_child_on_a_bound_session_passes_the_ceiling(
         ) in text, text
     finally:
         await root.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The split on RESTORE: a stored bound parent reopened after a tier edit
+# ---------------------------------------------------------------------------
+#
+# The resume tests above keep the parent warm. These reopen it from disk (a new
+# ``Session`` on the same transcript: ``_restore_attachment`` ->
+# ``restore_bound`` -> ``bind_runtime_authority(restoring=True)``), the path
+# ``lop exec --resume`` takes, where a tier-only roster edit used to fail the
+# recorded-authority comparison and leave the conversation unable to send.
+
+
+async def _bind_and_store(tmp_path: Path, registry: TeamRegistry, stream: RecordingStream) -> None:
+    """Bind ``teamwork`` with a ``lo`` worker, launch once, close the session."""
+    session = make_session(tmp_path, registry, stream, team="teamwork")
+    try:
+        assert session._team_authority is not None and session._team_authority.explicit_local
+        row = await launch(session, stream, "before the edit", agent="worker")
+        assert row.model_label == LO
+    finally:
+        await session.dispose()
+
+
+def _reopen(tmp_path: Path, registry: TeamRegistry, stream: RecordingStream) -> Session:
+    return make_session(tmp_path, registry, stream, transcript=tmp_path / "sess")
+
+
+@pytest.mark.asyncio
+async def test_restore_a_same_provider_tier_edit_reopens_on_the_new_tier(tmp_path, monkeypatch):
+    """A tier-only roster edit to a tier on the SAME provider: the stored
+    parent reopens bound to its team and the next launch runs on the edited tier.
+
+    Negative control (run when this test was written): with the tier allowance
+    disabled (``_with_recorded_tiers`` returning the live snapshot as read), the
+    reopen refuses and the notice assertion fails on "team definition
+    'teamwork' does not match; re-attach via /team"."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "med": MED})
+    registry = TeamRegistry(config)
+    team = make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+    stream = RecordingStream()
+    await _bind_and_store(tmp_path, registry, stream)
+
+    registry.update_team(team.id, TeamEditFields(members=[TeamMember(role="worker", tier="med")]))
+    reopened = _reopen(tmp_path, registry, stream)
+    try:
+        assert not reopened.attachment_restore_notice, reopened.attachment_restore_notice
+        assert reopened.active_team_name == "teamwork" and not reopened._unresolved_team
+        receipt = await _task_receipt(reopened, "worker", "after the same-provider edit")
+        await wait_for(lambda: len(stream.requests_for("after the same-provider edit")) == 1)
+        assert stream.model_for("after the same-provider edit") == MED, receipt
+        assert "not applied" not in receipt, receipt
+    finally:
+        await reopened.dispose()
+
+
+@pytest.mark.asyncio
+async def test_restore_a_cross_provider_tier_edit_reopens_on_the_snapshot_tier(
+    tmp_path, monkeypatch
+):
+    """A tier-only edit to a tier on ANOTHER provider: the reopen still
+    succeeds, but the recorded tier (not the edited one) stays the authority, so
+    the provider ceiling keeps the child on ``lo`` and the receipt says why.
+
+    The re-written binding keeps the ATTESTED pair, so a reopen never promotes
+    the edited tier into authority.
+
+    Negative control (run when this test was written): with the provider
+    ceiling in ``live_member_roster`` bypassed (a crossing edit taken as if
+    same-provider), the child runs on ``elsewhere/far-model`` and the model
+    assertion fails."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "hi": "elsewhere/far-model"})
+    registry = TeamRegistry(config)
+    team = make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+    stream = RecordingStream()
+    await _bind_and_store(tmp_path, registry, stream)
+
+    registry.update_team(team.id, TeamEditFields(members=[TeamMember(role="worker", tier="hi")]))
+    reopened = _reopen(tmp_path, registry, stream)
+    try:
+        assert not reopened.attachment_restore_notice, reopened.attachment_restore_notice
+        assert reopened.active_team_name == "teamwork" and not reopened._unresolved_team
+        receipt = await _task_receipt(reopened, "worker", "after the cross-provider edit")
+        await wait_for(lambda: len(stream.requests_for("after the cross-provider edit")) == 1)
+        assert stream.model_for("after the cross-provider edit") == LO, receipt
+        reason = (
+            "team 'teamwork' slot 'worker': kept the attached tier 'lo' (provider test); the "
+            "edited tier 'hi' routes to provider elsewhere, which this binding did not "
+            "authorize; re-attach via /team to use it"
+        )
+        assert f"[selection: team; not applied: {reason}]" in receipt, receipt
+        binding = json.loads((tmp_path / "sess" / LOCAL_BINDING_NAME).read_text("utf-8"))
+        assert binding[KEY][MEMBER_TIERS_KEY]["teamwork"] == [["lo", None]], binding
+    finally:
+        await reopened.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "members",
+    [
+        pytest.param([TeamMember(role="other", tier="lo")], id="role"),
+        pytest.param(
+            [TeamMember(role="worker", tier="lo"), TeamMember(role="worker", tier="lo")],
+            id="slot",
+        ),
+    ],
+)
+async def test_restore_a_roster_edit_beyond_tier_still_refuses(tmp_path, monkeypatch, members):
+    """Anything beyond tier/effort is still an authority change: the reopen
+    refuses with the existing /team remedy and leaves the team unresolved, so
+    admission raises ``AttachmentUnavailable`` ("could not be restored").
+
+    Negative control (run when this test was written): with the restore skipping
+    the recorded-authority comparison, the role/slot edit attaches and the
+    ``not active_team_name`` assertion fails."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "med": MED})
+    registry = TeamRegistry(config)
+    team = make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+    stream = RecordingStream()
+    await _bind_and_store(tmp_path, registry, stream)
+
+    registry.update_team(team.id, TeamEditFields(members=members))
+    reopened = _reopen(tmp_path, registry, stream)
+    try:
+        assert not reopened.active_team_name and reopened.active_team is None
+        assert reopened._unresolved_team == "teamwork"
+        notice = reopened.attachment_restore_notice or ""
+        assert "'teamwork'" in notice and notice.endswith("re-attach via /team"), notice
+    finally:
+        await reopened.dispose()
 
 
 @pytest.mark.asyncio
