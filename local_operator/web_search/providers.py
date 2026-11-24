@@ -9,6 +9,7 @@ Each transport stays dependency-free beyond the project's existing ``httpx``.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import html
 import json
 import os
@@ -18,14 +19,17 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, NamedTuple
+from typing import Any, Awaitable, Callable, Literal, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 
+from local_operator.i18n.keys import web_search as web_search_copy
+from local_operator.i18n.messages import Msg
 from local_operator.web_search.cost import estimate_search_cost
 from local_operator.web_search.models import (
     PROVIDER_IDS,
+    ChainLegStatus,
     ProviderStatus,
     ProviderTier,
     SearchProviderId,
@@ -35,11 +39,42 @@ from local_operator.web_search.models import (
     WebSearchSettings,
 )
 from local_operator.web_search.pages import PAGE_CONTEXTS
+from local_operator.web_search.radient import (
+    radient_credit_refusal_remaining,
+    radient_login_present,
+    search_radient,
+)
 
 ProviderSearch = Callable[
     [httpx.AsyncClient, Path | None, WebSearchSettings, str, int],
     Awaitable[SearchResponse],
 ]
+
+#: The mode the chain leg being walked asked for, or ``None`` outside a walk.
+#:
+#: WHY A CONTEXT VARIABLE rather than a sixth ``ProviderSearch`` argument: the
+#: transport signature is a public seam -- tests and harness wrappers substitute
+#: ``replace(PROVIDERS[id], search=fake)`` with five-argument callables -- and only
+#: the four dual-mode transports care about the mode. The service sets this around
+#: each leg (``leg_mode``); a dual-mode transport reads it to serve its keyless
+#: tier even when a key is stored, and falls back to the old key-decides rule when
+#: it is unset (a direct call outside the chain).
+LEG_MODE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "web_search_leg_mode", default=None
+)
+
+
+def _keyed_leg(config_dir: Path | None, key_name: str) -> str:
+    """The key to use for THIS call of a dual-mode transport, or "" for its free tier.
+
+    A walked leg decides: its free mode means keyless even with a stored key, and
+    its keyed mode means the key. Outside a walk (``LEG_MODE`` unset) the stored
+    key decides, as it always did.
+    """
+    mode = LEG_MODE.get()
+    if mode is not None and mode not in METERED_AUTH_MODES:
+        return ""
+    return _credential(config_dir, key_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,10 +83,22 @@ class ProviderDefinition:
 
     id: SearchProviderId
     label: str
-    access: str
-    detail: str
+    #: ``Msg`` for copy that is keyed (newer rows); plain ``str`` rows predate the
+    #: catalogue. ``provider_copy`` renders either at display time.
+    access: str | Msg
+    detail: str | Msg
     credential_keys: tuple[str, ...]
     search: ProviderSearch
+
+
+def provider_copy(value: str | Msg) -> str:
+    """A provider row's access/detail text in the active locale."""
+    if isinstance(value, Msg):
+        from local_operator.i18n.text import tr
+
+        # Every keyed provider row lives in the ``web_search`` namespace.
+        return tr("web_search")(value)
+    return value
 
 
 def _credential(config_dir: Path | None, *keys: str) -> str:
@@ -252,7 +299,7 @@ async def _search_tavily(
     query: str,
     limit: int,
 ) -> SearchResponse:
-    key = _credential(config_dir, "TAVILY_API_KEY")
+    key = _keyed_leg(config_dir, "TAVILY_API_KEY")
     headers = {"Content-Type": "application/json"}
     auth_mode = "api-key"
     if key:
@@ -506,7 +553,7 @@ async def _search_perplexity(
     query: str,
     limit: int,
 ) -> SearchResponse:
-    key = _credential(config_dir, "PERPLEXITY_API_KEY")
+    key = _keyed_leg(config_dir, "PERPLEXITY_API_KEY")
     if key:
         response = await client.post(
             "https://api.perplexity.ai/chat/completions",
@@ -1488,7 +1535,13 @@ async def _search_exa(
     # A stored key keeps the REST transport deliberately: it returns a
     # query-grounded ``summary`` as structured JSON, where MCP returns a text blob.
     # Routing keyed traffic to MCP would regress the keyed experience for nothing.
-    if provider_auth_mode("exa", config_dir, settings) != "api-key":
+    leg_mode = LEG_MODE.get()
+    keyed = (
+        leg_mode in METERED_AUTH_MODES
+        if leg_mode is not None
+        else provider_auth_mode("exa", config_dir, settings) == "api-key"
+    )
+    if not keyed:
         payload = await _mcp_call(
             client,
             EXA_MCP_ENDPOINT,
@@ -1558,7 +1611,7 @@ async def _search_parallel(
     ever wants the vendor's meter surfaced, it belongs in ``SearchUsage`` -- never
     in ``usd``.
     """
-    key = _credential(config_dir, "PARALLEL_API_KEY")
+    key = _keyed_leg(config_dir, "PARALLEL_API_KEY")
     payload = await _mcp_call(
         client,
         PARALLEL_MCP_ENDPOINT,
@@ -1678,6 +1731,16 @@ PROVIDERS: dict[SearchProviderId, ProviderDefinition] = {
         ("DEEPSEEK_API_KEY",),
         _search_deepseek,
     ),
+    "radient": ProviderDefinition(
+        "radient",
+        "Radient",
+        web_search_copy.radient_access(),
+        web_search_copy.radient_detail(),
+        # No search-specific secret: the leg uses the Radient sign-in
+        # (`local-operator login radient`), never an environment variable.
+        (),
+        search_radient,
+    ),
     "perplexity": ProviderDefinition(
         "perplexity",
         "Perplexity",
@@ -1741,7 +1804,15 @@ PROVIDERS: dict[SearchProviderId, ProviderDefinition] = {
 #: ``rotate`` is the credential-free pool that round-robin balances; ``fallback``
 #: is credential-free but best-effort (perplexity's anonymous tier is documented
 #: "best-effort" and refused live on this machine during the investigation), so it
-#: is never a first attempt; ``metered`` spends money or a model turn.
+#: is never a first attempt; ``radient`` is Radient-hosted search billed to the
+#: signed-in account's credits; ``metered`` (the API_KEY band) spends a key the
+#: user stored. The dual-mode providers (``DUAL_MODE_FREE_MODES``) are listed by
+#: their FREE leg's band: a stored key ADDS a second, keyed leg in ``metered``
+#: rather than moving the provider (see :func:`provider_legs`).
+#:
+#: Native model search (DeepSeek today) is not in this table: its band depends on
+#: the credential class, which :data:`NATIVE_VENDORS` and
+#: :data:`NATIVE_MODEL_KEY_BAND` decide.
 AUTO_PROVIDER_TIERS: dict[SearchProviderId, ProviderTier] = {
     "duckduckgo": "rotate",
     "tavily": "rotate",
@@ -1749,25 +1820,186 @@ AUTO_PROVIDER_TIERS: dict[SearchProviderId, ProviderTier] = {
     "parallel": "rotate",
     "searxng": "rotate",
     "perplexity": "fallback",
-    "deepseek": "metered",
+    "radient": "radient",
     "brave": "metered",
     "serpapi": "metered",
 }
 
 #: Auth modes that spend a credential -- money, or a model turn billed to one. A
-#: provider whose EFFECTIVE mode is one of these is metered whatever the table
-#: above says: a keyed exa or tavily the user never listed must not be rotated
-#: into the free pool, because that would spend on their behalf.
-METERED_AUTH_MODES = frozenset({"api-key", "login"})
+#: provider whose EFFECTIVE mode is one of these has a leg outside the free pool:
+#: a keyed exa or tavily the user never listed must not be rotated into the free
+#: pool, because that would spend on their behalf. ``radient-credits`` spends the
+#: user's Radient balance.
+METERED_AUTH_MODES = frozenset({"api-key", "login", "radient-credits"})
+
+#: The free mode each dual-mode provider serves WITHOUT a key. A stored key never
+#: removes this leg: "first use free providers where available" means the keyless
+#: tier is tried in the FREE band and the key is spent only in the API_KEY band,
+#: after native search and Radient. (Before the leg split a stored key moved the
+#: WHOLE provider to the paid tail, so its free tier was never tried at all.)
+DUAL_MODE_FREE_MODES: dict[SearchProviderId, str] = {
+    "tavily": "keyless",
+    "exa": "keyless-mcp",
+    "parallel": "keyless-mcp",
+    "perplexity": "anonymous",
+}
+
+#: Where native search through a PAY-AS-YOU-GO MODEL API KEY sits in the chain.
+#:
+#: POLICY, DECIDED BY THE OPERATOR 2026-11-24: after Radient. The request reads
+#: "free providers -> native search on each provider -> Radient if credits are
+#: available -> any API keys"; native search billed to a model API key (DeepSeek,
+#: an Anthropic/OpenAI key) counts as an "API key" leg and sits in the
+#: ``metered`` (API_KEY) band AFTER Radient, because it spends per search and can
+#: cost more than Radient's flat $0.01. Flip it to ``"native"`` to put model-key
+#: native legs before Radient; nothing else changes (the resolver and the matrix
+#: tests read this constant). Plan/subscription native legs ALWAYS sit in
+#: ``native``. DeepSeek is model-key class in both its modes: ``api-key`` and
+#: ``login`` both store a pay-per-use DeepSeek key.
+NATIVE_MODEL_KEY_BAND: ProviderTier = "metered"
+
+#: Credential class of a native-search leg: ``plan`` is included in a
+#: subscription the user already pays for (no marginal cash), ``key`` bills a
+#: pay-as-you-go model API key per search.
+NativeClass = Literal["plan", "key"]
+
+
+@dataclass(frozen=True, slots=True)
+class NativeVendor:
+    """A model vendor whose own API has built-in web search.
+
+    ``modes`` returns the legs this vendor can serve HERE as ``(mode, class)``
+    pairs -- empty when no credential is stored. ``fee_usd`` is the approximate
+    per-search price used only to order paid legs cheapest-first inside a band.
+    The registry is the seam the native-search family (one module per vendor)
+    plugs into; the band code reads nothing vendor-specific.
+    """
+
+    id: str
+    modes: Callable[[Path | None, WebSearchSettings], list[tuple[str, NativeClass]]]
+    fee_usd: float | None = None
+
+
+def _deepseek_native_modes(
+    config_dir: Path | None, settings: WebSearchSettings
+) -> list[tuple[str, NativeClass]]:
+    # Read through the module attribute so tests that pin ``provider_auth_mode``
+    # classify DeepSeek from the same pinned state as every other provider.
+    mode = provider_auth_mode("deepseek", config_dir, settings)
+    return [(mode, "key")] if mode else []
+
+
+#: Native-search vendors, in registration order. DeepSeek is the only one in this
+#: release; the band code is vendor-agnostic so more slot in by registration.
+#: ``fee_usd`` for DeepSeek is the measured median model turn (~$0.0024
+#: off-peak, see the DeepSeek block above).
+NATIVE_VENDORS: dict[str, NativeVendor] = {
+    "deepseek": NativeVendor("deepseek", _deepseek_native_modes, fee_usd=0.0024),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ChainLeg:
+    """One attempt in the chain: a provider, the mode it serves in, and its band.
+
+    WHY LEGS. The chain used to be a list of provider ids and each transport chose
+    its own mode from whether a key was stored, which made "try Tavily's free tier
+    first, and spend the Tavily key only after Radient" unexpressible: one id,
+    one position. A leg pins the mode, so one provider can appear twice in
+    different bands. ``mode == ""`` marks a LISTED provider that cannot serve; it
+    is walked and reports ``not configured`` (see ``WebSearchService``).
+    """
+
+    provider: SearchProviderId
+    mode: str
+    band: ProviderTier
+    #: ``free`` / ``best-effort`` / ``plan`` / ``paid`` / ``credits`` / ``setup``.
+    cost_class: str = "free"
+
+    @property
+    def label(self) -> str:
+        """How the failure digest names this leg: ``tavily`` or ``tavily (key)``.
+
+        Only a dual-mode provider's KEYED leg is qualified, because only there
+        can one id name two different attempts in one digest.
+        """
+        if self.provider in DUAL_MODE_FREE_MODES and self.mode in METERED_AUTH_MODES:
+            return f"{self.provider} (key)"
+        return self.provider
+
+
+def _leg(provider_id: SearchProviderId, mode: str, band: ProviderTier) -> ChainLeg:
+    if not mode:
+        cost_class = "setup"
+    elif band == "radient":
+        cost_class = "credits"
+    elif band == "metered":
+        cost_class = "paid"
+    elif band == "fallback":
+        cost_class = "best-effort"
+    else:
+        cost_class = "free"
+    return ChainLeg(provider_id, mode, band, cost_class)
+
+
+def provider_legs(
+    provider_id: SearchProviderId,
+    config_dir: Path | None,
+    settings: WebSearchSettings,
+) -> list[ChainLeg]:
+    """Every leg ``provider_id`` contributes on this install, in band order.
+
+    Empty when it cannot serve at all. The order of the returned legs is the
+    order of their bands, so a caller that keeps them in sequence never puts a
+    provider's keyed leg ahead of its free one.
+    """
+    vendor = NATIVE_VENDORS.get(provider_id)
+    if vendor is not None:
+        legs: list[ChainLeg] = []
+        for mode, native_class in vendor.modes(config_dir, settings):
+            if native_class == "plan":
+                legs.append(ChainLeg(provider_id, mode, "native", "plan"))
+            else:
+                band = NATIVE_MODEL_KEY_BAND
+                legs.append(ChainLeg(provider_id, mode, band, "paid"))
+        return legs
+    mode = provider_auth_mode(provider_id, config_dir, settings)
+    if not mode:
+        return []
+    free_mode = DUAL_MODE_FREE_MODES.get(provider_id)
+    if free_mode is not None:
+        free = _leg(provider_id, free_mode, AUTO_PROVIDER_TIERS[provider_id])
+        if mode in METERED_AUTH_MODES:
+            return [free, _leg(provider_id, mode, "metered")]
+        return [free]
+    if mode in METERED_AUTH_MODES and AUTO_PROVIDER_TIERS[provider_id] != "radient":
+        return [_leg(provider_id, mode, "metered")]
+    return [_leg(provider_id, mode, AUTO_PROVIDER_TIERS[provider_id])]
 
 
 class ProviderBands(NamedTuple):
-    """The chain split into its parts, in the order a search walks them."""
+    """The chain split into its bands, in the order a search walks them.
 
-    prefix: list[SearchProviderId]
-    rotate: list[SearchProviderId]
-    fallback: list[SearchProviderId]
-    metered: list[SearchProviderId]
+    Every field is a list of :class:`ChainLeg`. ``prefix`` + ``rotate`` is the
+    FREE pool round-robin rotates; nothing after it ever rotates.
+    """
+
+    prefix: list[ChainLeg]
+    rotate: list[ChainLeg]
+    fallback: list[ChainLeg]
+    native: list[ChainLeg]
+    radient: list[ChainLeg]
+    metered: list[ChainLeg]
+
+    def legs(self) -> list[ChainLeg]:
+        return [
+            *self.prefix,
+            *self.rotate,
+            *self.fallback,
+            *self.native,
+            *self.radient,
+            *self.metered,
+        ]
 
 
 def provider_auth_mode(
@@ -1775,12 +2007,13 @@ def provider_auth_mode(
     config_dir: Path | None,
     settings: WebSearchSettings,
 ) -> str:
-    """The transport this provider would use HERE, or "" when it cannot serve.
+    """The STRONGEST transport this provider would use HERE, or "" when it cannot serve.
 
     One function answers two questions that used to be answered separately --
     "can this provider serve" (:func:`provider_available`) and "what would it use"
     -- so the chain and the status view cannot disagree about WHY a provider is or
-    is not in play.
+    is not in play. For a dual-mode provider with a key this is ``api-key``; its
+    free leg still exists (:func:`provider_legs` splits them).
 
     N3 (round 1) asked whether Tavily's OAuth MCP transport belongs here. It does
     not, deliberately: the delegate that serves it is injected by the harness
@@ -1813,6 +2046,9 @@ def provider_auth_mode(
         if _credential(config_dir, "DEEPSEEK_API_KEY"):
             return "api-key"
         return "login" if _deepseek_login_present() else ""
+    if provider_id == "radient":
+        # A PERSISTED login only: env never makes this paid leg appear.
+        return "radient-credits" if radient_login_present(config_dir) else ""
     if provider_id == "searxng":
         endpoint = settings.searxng_endpoint
         return "self-hosted" if endpoint.startswith(("http://", "https://")) else ""
@@ -1826,6 +2062,8 @@ def provider_available(
     settings: WebSearchSettings,
 ) -> bool:
     """Whether the provider can make a request with current local configuration."""
+    if provider_id in NATIVE_VENDORS:
+        return bool(NATIVE_VENDORS[provider_id].modes(config_dir, settings))
     return provider_auth_mode(provider_id, config_dir, settings) != ""
 
 
@@ -1834,104 +2072,161 @@ def provider_tier(
     config_dir: Path | None,
     settings: WebSearchSettings,
 ) -> ProviderTier | None:
-    """The automatic band ``provider_id`` joins on this install, or None.
+    """The band of ``provider_id``'s FIRST leg on this install, or None.
 
-    The EFFECTIVE auth mode wins over the table: a provider whose transport would
-    use a credential here is metered even where the table says ``rotate``. That is
-    what keeps a keyed exa/tavily out of the free rotation.
+    A keyed tavily/exa/parallel/perplexity answers with its FREE band: its first
+    attempt is the keyless tier, and the keyed leg follows in ``metered``.
     """
-    mode = provider_auth_mode(provider_id, config_dir, settings)
-    if not mode:
-        return None
-    if mode in METERED_AUTH_MODES:
-        return "metered"
-    return AUTO_PROVIDER_TIERS[provider_id]
+    legs = provider_legs(provider_id, config_dir, settings)
+    return legs[0].band if legs else None
+
+
+def _native_order(legs: list[ChainLeg]) -> list[ChainLeg]:
+    """Plan legs first (no marginal cash), then paid legs cheapest-first.
+
+    Stable, so vendors with the same fee keep registration order.
+    """
+
+    def fee(leg: ChainLeg) -> float:
+        vendor = NATIVE_VENDORS.get(leg.provider)
+        return vendor.fee_usd if vendor is not None and vendor.fee_usd is not None else 1.0
+
+    plan = [leg for leg in legs if leg.cost_class == "plan"]
+    paid = sorted((leg for leg in legs if leg.cost_class != "plan"), key=fee)
+    return [*plan, *paid]
 
 
 def resolve_provider_bands(
     settings: WebSearchSettings,
     config_dir: Path | None,
 ) -> ProviderBands:
-    """Split this install's provider chain into its bands.
+    """Split this install's provider chain into its bands, as legs.
 
-    ``web_search.providers`` is a PRIORITY PREFIX, not an allowlist, and its
-    authority is over ORDER WITHIN A BAND. Listing a provider whose effective
-    transport here would spend a credential (a key, or a model turn) therefore
-    does NOT move it to the front of the chain: it moves to the head of the METERED
-    band, ahead of the auto-joined metered legs and behind every free leg. That is
-    what makes "no free leg is ever skipped for a paid one" true by construction --
-    the band invariant used to constrain rotation only, which left a listed paid
-    provider free to sit ahead of available free legs (round-1 M2/Q2/D1/U2).
-    ``excluded_providers`` is still the only way to say never, and exclusion beats
-    listing.
+    THE BAND INVARIANT: band order is fixed and no configuration crosses it --
+    FREE (prefix + rotate, then best-effort fallback) < NATIVE < RADIENT <
+    API_KEY (``metered``). That is the operator's "free first, then native search,
+    then Radient if credits are available, then any API keys", and it generalises
+    the older rule "no free leg is ever skipped for a paid one" (round-1
+    M2/Q2/D1/U2).
+
+    ``web_search.providers`` is a PRIORITY PREFIX whose authority is over ORDER
+    WITHIN A BAND: a listed provider's legs go to the head of each band they land
+    in. Its free and best-effort legs form the ``prefix`` (the head of the
+    rotating pool, as before); a listed keyed leg heads ``metered``, a listed
+    Radient heads ``radient``, a listed native leg heads its band. A listed
+    provider that cannot serve stays in the prefix: trying it costs nothing, and
+    the search loop reports `not configured` for it rather than silently dropping
+    what the user asked for. ``excluded_providers`` removes EVERY leg of a
+    provider and beats listing.
+
+    Within API_KEY, dedicated search keys come first (in declaration order) and
+    native model-key legs follow them: a search key is what the user bought for
+    search; a model key serves search only incidentally.
     """
-    excluded: set[SearchProviderId] = set(settings.excluded_providers)
-    listed: list[SearchProviderId] = [
-        value for value in settings.providers if value not in excluded
-    ]
-    prefix: list[SearchProviderId] = []
-    listed_metered: list[SearchProviderId] = []
-    for provider_id in listed:
-        # A listed provider that cannot serve at all (no credential, no endpoint)
-        # stays in the prefix: trying it costs nothing, and the search loop reports
-        # `not configured` for it rather than silently dropping what the user asked
-        # for. Only a provider that WOULD spend is held back.
-        if provider_auth_mode(provider_id, config_dir, settings) in METERED_AUTH_MODES:
-            listed_metered.append(provider_id)
-        else:
-            prefix.append(provider_id)
-    rotate: list[SearchProviderId] = []
-    fallback: list[SearchProviderId] = []
-    metered: list[SearchProviderId] = []
-    bands: dict[ProviderTier, list[SearchProviderId]] = {
-        "rotate": rotate,
-        "fallback": fallback,
-        "metered": metered,
+    excluded: set[str] = set(settings.excluded_providers)
+    prefix: list[ChainLeg] = []
+    listed_heads: dict[str, list[ChainLeg]] = {"native": [], "radient": [], "metered": []}
+    for provider_id in settings.providers:
+        if provider_id in excluded:
+            continue
+        legs = provider_legs(provider_id, config_dir, settings)
+        if not legs:
+            prefix.append(_leg(provider_id, "", AUTO_PROVIDER_TIERS.get(provider_id, "rotate")))
+            continue
+        for leg in legs:
+            if leg.band in ("rotate", "fallback"):
+                prefix.append(leg)
+            else:
+                listed_heads[leg.band].append(leg)
+    auto: dict[str, list[ChainLeg]] = {
+        "rotate": [],
+        "fallback": [],
+        "native": [],
+        "radient": [],
+        "metered": [],
     }
-    for provider_id in AUTO_PROVIDER_TIERS:  # declaration order IS the band order
-        if provider_id in settings.providers or provider_id in excluded:
-            # `settings.providers`, not `prefix`: a listed leg the prefix dropped
-            # (because it is metered) has already been placed in the paid band and
-            # must not also be auto-joined there.
+    native_key_legs: list[ChainLeg] = []
+    # `settings.providers`, not `prefix`: a listed leg already placed in a later
+    # band must not also be auto-joined there.
+    skip = set(settings.providers) | excluded
+    for provider_id in [*AUTO_PROVIDER_TIERS, *NATIVE_VENDORS]:
+        if provider_id in skip:
             continue
-        tier = provider_tier(provider_id, config_dir, settings)
-        if tier is None:
-            continue
-        bands[tier].append(provider_id)
-    # Listing decides order INSIDE a band too, and a listed leg comes first there:
-    # a user who names a paid provider has said it matters to them, so it outranks
-    # the auto-joined paid legs rather than being demoted behind them.
-    return ProviderBands(prefix, rotate, fallback, [*listed_metered, *metered])
+        for leg in provider_legs(provider_id, config_dir, settings):  # type: ignore[arg-type]
+            if provider_id in NATIVE_VENDORS and leg.band == "metered":
+                native_key_legs.append(leg)
+            else:
+                auto[leg.band].append(leg)
+    return ProviderBands(
+        prefix,
+        auto["rotate"],
+        auto["fallback"],
+        [*listed_heads["native"], *_native_order(auto["native"])],
+        [*listed_heads["radient"], *auto["radient"]],
+        [*listed_heads["metered"], *auto["metered"], *_native_order(native_key_legs)],
+    )
+
+
+def _unique(provider_ids: list[SearchProviderId]) -> list[SearchProviderId]:
+    return list(dict.fromkeys(provider_ids))
+
+
+def resolve_legs(
+    settings: WebSearchSettings,
+    config_dir: Path | None,
+) -> list[ChainLeg]:
+    """Every leg as a search will walk it, before rotation."""
+    return resolve_provider_bands(settings, config_dir).legs()
 
 
 def free_pool(
     settings: WebSearchSettings,
     config_dir: Path | None,
 ) -> list[SearchProviderId]:
-    """The legs `round_robin` spreads its first attempt across: prefix + rotate.
+    """The provider ids `round_robin` spreads its first attempt across: prefix + rotate.
 
     ONE pool, not two: the listed free legs in their listed order, then the
     auto-joined free band in declaration order. Rotating only the auto band -- which
     sits behind the whole prefix -- pinned the first attempt to ``providers[0]`` on
     every install, withdrawing the released strategy's whole purpose (round-1
-    M1/Q1/D2/U1). Metered and best-effort legs are never in the pool: they do not
-    rotate.
+    M1/Q1/D2/U1). Native, Radient, metered and best-effort legs are never in the
+    pool: they do not rotate.
     """
     bands = resolve_provider_bands(settings, config_dir)
-    return [*bands.prefix, *bands.rotate]
+    return _unique([leg.provider for leg in (*bands.prefix, *bands.rotate)])
 
 
 def resolve_providers(
     settings: WebSearchSettings,
     config_dir: Path | None,
 ) -> list[SearchProviderId]:
-    """The chain as a search will walk it, before rotation."""
-    bands = resolve_provider_bands(settings, config_dir)
-    return [*bands.prefix, *bands.rotate, *bands.fallback, *bands.metered]
+    """The chain's provider ids in first-attempt order, de-duplicated.
+
+    For callers that need a provider set (bridge egress, the singleflight key,
+    status rows); the walk itself uses :func:`resolve_legs`.
+    """
+    return _unique([leg.provider for leg in resolve_legs(settings, config_dir)])
 
 
 def provider_state_label(status: ProviderStatus) -> str:
-    """The ONE state vocabulary `search list` and `/search` print.
+    """The state word for ``status``, rendered for display.
+
+    The older words ARE their codes (English literals that predate the
+    catalogue); the words this release adds are keyed and rendered in the active
+    locale. Surfaces that look a word up in a table (the TUI ink map, the legend)
+    use :func:`provider_state_code` instead, so a translated word never misses.
+    """
+    code = provider_state_code(status)
+    keyed = _KEYED_STATE_WORDS.get(code)
+    if keyed is None:
+        return code
+    from local_operator.i18n.text import tr
+
+    return tr("web_search")(keyed())
+
+
+def provider_state_code(status: ProviderStatus) -> str:
+    """The ONE state vocabulary `search list` and `/search` print, as stable codes.
 
     Every word answers "what does the chain do with this provider": ``enabled``
     (listed and free) / ``enabled (paid)`` (listed, and therefore in the paid band)
@@ -1958,9 +2253,25 @@ def provider_state_label(status: ProviderStatus) -> str:
         # as walled in practice, so plain `enabled` would hide a fact the auto row
         # prints for the same provider on an install that did not list it
         # (round-2 U2-6).
-        if status.tier == "metered":
+        if status.tier in ("metered", "radient") or any(
+            leg.cost_class == "paid" and leg.band == "native" for leg in status.legs
+        ):
             return "enabled (paid)"
         return "enabled (best-effort)" if status.tier == "fallback" else "enabled"
+    if status.tier == "radient":
+        # Out of credits is a state of its own: the leg is still in the chain but
+        # is skipped locally until the remembered 402 lapses.
+        return (
+            "radient refused" if radient_credit_refusal_remaining() is not None else "auto radient"
+        )
+    if status.tier == "native":
+        if status.legs and all(leg.cost_class == "plan" for leg in status.legs):
+            return "auto native plan"
+        return "auto native paid"
+    if status.tier in ("rotate", "fallback") and any(leg.band == "metered" for leg in status.legs):
+        # A stored key no longer replaces the free tier: the provider is tried
+        # free first and its key later, and the row has to say both.
+        return "auto free, then key"
     if status.tier == "rotate":
         return "auto free"
     if status.tier == "fallback":
@@ -1968,12 +2279,23 @@ def provider_state_label(status: ProviderStatus) -> str:
     return "auto paid"
 
 
+#: Codes added with the leg split, rendered through the catalogue. The codes
+#: themselves are stable identifiers (table keys), never shown.
+_KEYED_STATE_WORDS: dict[str, Callable[[], Msg]] = {
+    "auto radient": web_search_copy.state_auto_radient,
+    "radient refused": web_search_copy.state_radient_refused,
+    "auto native plan": web_search_copy.state_auto_native_plan,
+    "auto native paid": web_search_copy.state_auto_native_paid,
+    "auto free, then key": web_search_copy.state_auto_free_then_key,
+}
+
+
 #: What each state label MEANS for the user's next search. It lives beside the
 #: labels themselves (not in the CLI and the TUI) for the same reason the labels
 #: do: a surface that prints `auto paid` and a surface that explains it must not be
 #: able to drift into saying different things. Declaration order is the legend's
 #: order.
-STATE_MEANINGS: dict[str, str] = {
+STATE_MEANINGS: dict[str, str | Msg] = {
     "enabled": "in your priority order",
     "enabled (paid)": "listed, and tried in the paid band after every free leg",
     # NOT "tried after the free pool": only a METERED listed leg is hoisted, so a
@@ -1992,7 +2314,24 @@ STATE_MEANINGS: dict[str, str] = {
     # so the old wording was a claim the `chain:` line above it disproved
     # (round-1 N5, round-2 Q2-1/D2-2/U2-3).
     "needs setup": "cannot serve yet; a listed one is still tried and reports `not configured`",
+    # Keyed meanings for the codes the leg split added (rendered by
+    # ``state_meaning``; the older English entries predate the catalogue).
+    "auto free, then key": web_search_copy.meaning_auto_free_then_key(),
+    "auto native plan": web_search_copy.meaning_auto_native_plan(),
+    "auto native paid": web_search_copy.meaning_auto_native_paid(),
+    "auto radient": web_search_copy.meaning_auto_radient(),
+    "radient refused": web_search_copy.meaning_radient_refused(),
 }
+
+
+def state_meaning(code: str) -> str:
+    """What a state code means, in the active locale where it is keyed."""
+    meaning = STATE_MEANINGS[code]
+    if isinstance(meaning, Msg):
+        from local_operator.i18n.text import tr
+
+        return tr("web_search")(meaning)
+    return meaning
 
 
 def state_legend(statuses: list[ProviderStatus]) -> str:
@@ -2009,18 +2348,24 @@ def state_legend(statuses: list[ProviderStatus]) -> str:
     listing are what a narrow terminal folds away first (round-3 D3-3). Order is
     first appearance, so the line reads in the order the rows above it do.
     """
-    words: list[str] = []
+    codes: list[str] = []
+    labels: dict[str, str] = {}
     for status in statuses:
-        word = provider_state_label(status)
-        if word not in words:
-            words.append(word)
-    return "States: " + " · ".join(f"{word} = {STATE_MEANINGS[word]}" for word in words)
+        code = provider_state_code(status)
+        if code not in codes:
+            codes.append(code)
+            labels[code] = provider_state_label(status)
+    return "States: " + " · ".join(f"{labels[code]} = {state_meaning(code)}" for code in codes)
 
 
 def provider_setup_hint(provider_id: SearchProviderId) -> str:
     """The command that makes ``provider_id`` servable, for copy that must say it."""
     if provider_id == "searxng":
         return f"`local-operator search setup {provider_id} --endpoint <url>`"
+    if provider_id == "radient":
+        # Radient search rides the Radient sign-in; there is nothing to set up
+        # under `search setup`.
+        return "`local-operator login radient`"
     if provider_id == "deepseek":
         # DeepSeek search has no search-specific secret: it bills the model key, and
         # `login` is where that key lives. `search setup` says so too.
@@ -2066,8 +2411,9 @@ def provider_landing_line(provider_id: SearchProviderId, status: ProviderStatus)
     full stop, the TUI `; applies now`), and a second copy for the tail is how the
     two sentences drifted apart before (round-1 U6).
     """
+    code = provider_state_code(status)
     state = provider_state_label(status)
-    if state == "needs setup":
+    if code == "needs setup":
         # "enabled (off; not usable yet)" told the user their action had both
         # worked and not worked and named no next step (round-1 U4). The honest
         # reply says the provider is allowed and names what it still needs.
@@ -2075,8 +2421,8 @@ def provider_landing_line(provider_id: SearchProviderId, status: ProviderStatus)
             f"{provider_id} is allowed, but no search can use it yet: run "
             f"{provider_setup_hint(provider_id)}"
         )
-    meaning = STATE_MEANINGS[state]
-    if state.startswith("enabled"):
+    meaning = state_meaning(code)
+    if code.startswith("enabled"):
         # The state word IS the verb here, so printing it again stutters:
         # "brave enabled (enabled; in your priority order)" (round-1 D3/U10).
         return f"{provider_id} enabled ({meaning})"
@@ -2098,6 +2444,8 @@ def chain_leg_marker(status: ProviderStatus) -> str:
       a listed leg as well as an auto-joined one: the operator lists `perplexity`,
       and hiding its tier was the disclosure gap U2-6 found.
     """
+    if status.legs:
+        return _leg_marker(status.legs[0].cost_class)[0]
     if status.tier == "metered":
         return "(paid)"
     if not status.available:
@@ -2105,6 +2453,52 @@ def chain_leg_marker(status: ProviderStatus) -> str:
     if status.tier == "fallback":
         return "(best-effort)"
     return ""
+
+
+def _leg_marker(cost_class: str) -> tuple[str, str]:
+    """``(marker text, ink token)`` for one leg's cost class.
+
+    `(plan)` and `(credits)` are keyed (added with the leg split); the older
+    markers are the English literals the surfaces always printed.
+    """
+    if cost_class == "paid":
+        return "(paid)", "warning"
+    if cost_class == "setup":
+        return "(setup needed)", "muted"
+    if cost_class == "best-effort":
+        return "(best-effort)", "muted"
+    if cost_class in ("plan", "credits"):
+        from local_operator.i18n.text import tr
+
+        keyed = (
+            web_search_copy.marker_plan()
+            if cost_class == "plan"
+            else web_search_copy.marker_credits()
+        )
+        # `(credits)` spends money, so it takes the same amber as `(paid)`.
+        return tr("web_search")(keyed), "muted" if cost_class == "plan" else "warning"
+    return "", ""
+
+
+def chain_leg_entries(statuses: list[ProviderStatus]) -> list[tuple[str, str, str]]:
+    """Every chain LEG in try order as ``(label, marker, ink token)``.
+
+    Built from legs, not providers: a keyed Tavily is two entries -- `Tavily`
+    in the free pool and `Tavily (paid)` in the API_KEY band -- which is the
+    chain the search actually walks. The CLI prints label+marker; the TUI paints
+    the marker in its token, so both surfaces read this one function.
+    """
+    legs = [
+        (leg.position, status.label, leg.cost_class)
+        for status in statuses
+        if status.enabled
+        for leg in status.legs
+    ]
+    entries: list[tuple[str, str, str]] = []
+    for _position, label, cost_class in sorted(legs):
+        marker, token = _leg_marker(cost_class)
+        entries.append((label, marker, token))
+    return entries
 
 
 #: Ink token for each marker, so the chain row emphasises what the row below it
@@ -2126,17 +2520,10 @@ def chain_label(statuses: list[ProviderStatus]) -> str:
     chain (round-1 D1). See :func:`chain_leg_marker` for what a leg is marked with
     and why.
     """
-    legs = [status for status in statuses if status.enabled]
-    if not legs:
+    entries = chain_leg_entries(statuses)
+    if not entries:
         return "(none)"
-    return " → ".join(
-        f"{status.label} {marker}".strip() for status, marker in _chain_legs(statuses)
-    )
-
-
-def _chain_legs(statuses: list[ProviderStatus]) -> list[tuple[ProviderStatus, str]]:
-    """The in-chain statuses paired with their marker, in try order."""
-    return [(status, chain_leg_marker(status)) for status in statuses if status.enabled]
+    return " → ".join(f"{label} {marker}".strip() for label, marker, _token in entries)
 
 
 def provider_order_note(
@@ -2155,8 +2542,16 @@ def provider_order_note(
     keeps both halves: the ids that DO lead, and the ones that are held back.
     """
     bands = resolve_provider_bands(settings, config_dir)
-    leads = [provider_id for provider_id in provider_ids if provider_id not in bands.metered]
-    held = [provider_id for provider_id in provider_ids if provider_id in bands.metered]
+    # A provider LEADS when one of its legs landed in the prefix; every other
+    # named provider landed in a later band (native, Radient or API keys).
+    in_prefix = {leg.provider for leg in bands.prefix}
+    later = {leg.provider for leg in (*bands.native, *bands.radient, *bands.metered)}
+    leads = [provider_id for provider_id in provider_ids if provider_id in in_prefix]
+    held = [
+        provider_id
+        for provider_id in provider_ids
+        if provider_id not in in_prefix and provider_id in later
+    ]
     clauses: list[str] = []
     if leads:
         clauses.append("tried first")
@@ -2186,20 +2581,33 @@ def provider_statuses(
     Perplexity row while the chain put it last (round-1 D1). A provider outside the
     chain keeps its catalogue position, which is the only order left for it.
     """
-    chain = resolve_providers(settings, config_dir)
-    position = {provider_id: index for index, provider_id in enumerate(chain)}
+    chain = resolve_legs(settings, config_dir)
+    position: dict[str, int] = {}
+    leg_rows: dict[str, list[ChainLegStatus]] = {}
+    for index, leg in enumerate(chain):
+        position.setdefault(leg.provider, index)
+        leg_rows.setdefault(leg.provider, []).append(
+            ChainLegStatus(mode=leg.mode, band=leg.band, position=index, cost_class=leg.cost_class)
+        )
     statuses = [
         ProviderStatus(
             id=provider_id,
             label=PROVIDERS[provider_id].label,
             enabled=provider_id in position,
             available=provider_available(provider_id, config_dir, settings),
-            access=PROVIDERS[provider_id].access,
-            detail=PROVIDERS[provider_id].detail,
+            access=provider_copy(PROVIDERS[provider_id].access),
+            detail=provider_copy(PROVIDERS[provider_id].detail),
             listed=provider_id in settings.providers,
             excluded=provider_id in settings.excluded_providers,
-            tier=provider_tier(provider_id, config_dir, settings) or "",
+            # The band the provider is FIRST tried in; a listed leg sits where
+            # the resolver put it, which is what the chain row shows.
+            tier=(
+                leg_rows[provider_id][0].band
+                if provider_id in leg_rows and leg_rows[provider_id][0].mode
+                else provider_tier(provider_id, config_dir, settings) or ""
+            ),
             mode=provider_auth_mode(provider_id, config_dir, settings),
+            legs=leg_rows.get(provider_id, []),
         )
         for provider_id in PROVIDER_IDS
     ]

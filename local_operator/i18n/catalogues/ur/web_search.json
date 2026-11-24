@@ -1,0 +1,19 @@
+{
+  "web_search.radient.access": "Radient کریڈٹس",
+  "web_search.radient.detail": "آپ کے Radient اکاؤنٹ کے ذریعے Tavily سرچ، ہر سرچ پر آپ کے کریڈٹس سے ‎$0.01؛ `local-operator login radient` سے سائن اِن کریں",
+  "web_search.radient.credits_low": "سرچ کے لیے آپ کا Radient کریڈٹ بیلنس بہت کم ہے۔ Radient Console میں کریڈٹس شامل کریں؛ Radient سرچ 5 منٹ کے اندر دوبارہ آزمائی جائے گی۔",
+  "web_search.radient.sign_in_again": "Radient نے آپ کا سائن اِن مسترد کر دیا۔ دوبارہ سائن اِن کرنے کے لیے `local-operator login radient` چلائیں۔",
+  "web_search.radient.not_signed_in": "آپ Radient میں سائن اِن نہیں ہیں۔ `local-operator login radient` چلائیں۔",
+  "web_search.state.auto_radient": "خودکار، Radient کریڈٹس",
+  "web_search.state.radient_refused": "Radient کریڈٹس ختم",
+  "web_search.state.auto_native_plan": "خودکار، اندرونی (پلان)",
+  "web_search.state.auto_native_paid": "خودکار، اندرونی (ادائیگی)",
+  "web_search.state.auto_free_then_key": "خودکار مفت، پھر کلید",
+  "web_search.meaning.auto_radient": "مفت اور اندرونی مراحل کے بعد آزمایا جاتا ہے؛ آپ کے Radient کریڈٹس سے بل ہوتا ہے",
+  "web_search.meaning.radient_refused": "کریڈٹس شامل کرنے تک چھوڑ دیا جاتا ہے؛ Radient کو 5 منٹ کے اندر دوبارہ آزمایا جاتا ہے",
+  "web_search.meaning.auto_native_plan": "آپ کے ماڈل پلان کی اندرونی سرچ، مفت مراحل کے بعد آزمائی جاتی ہے",
+  "web_search.meaning.auto_native_paid": "آپ کی ماڈل API کلید کی اندرونی سرچ، ہر سرچ پر بل",
+  "web_search.meaning.auto_free_then_key": "پہلے مفت درجہ؛ آپ کی API کلید Radient کے بعد آزمائی جاتی ہے",
+  "web_search.marker.plan": "(پلان)",
+  "web_search.marker.credits": "(کریڈٹس)"
+}

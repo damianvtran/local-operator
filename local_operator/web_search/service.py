@@ -22,9 +22,9 @@ from local_operator.web_search.models import (
     WebSearchSettings,
 )
 from local_operator.web_search.providers import (
+    LEG_MODE,
     PROVIDERS,
-    free_pool,
-    provider_available,
+    ChainLeg,
     provider_refusal,
     resolve_provider_bands,
     resolve_providers,
@@ -229,6 +229,15 @@ class WebSearchService:
         return resolve_providers(self.settings, self.config_dir)
 
     def candidates(self, forced_provider: SearchProviderId | None = None) -> list[SearchProviderId]:
+        """The provider of every leg this call would walk, in order.
+
+        A provider can appear TWICE (a keyed Tavily: its free leg in the pool and
+        its keyed leg in the API_KEY band); the walk itself uses
+        :meth:`candidate_legs`.
+        """
+        return [leg.provider for leg in self.candidate_legs(forced_provider)]
+
+    def candidate_legs(self, forced_provider: SearchProviderId | None = None) -> list[ChainLeg]:
         if not self.settings.enabled:
             raise RuntimeError("Web search is disabled. Run `local-operator search on`.")
         bands = resolve_provider_bands(self.settings, self.config_dir)
@@ -236,47 +245,42 @@ class WebSearchService:
             # Allowed iff it is in the resolved chain, so an EXCLUDED provider is
             # still refused (the forced path is also web_read's pin, and a pin must
             # not override an explicit "never"), while an available provider that
-            # auto-joined the metered band is allowed. The refusal says WHY and
-            # names the command that can actually fix it: the old copy always said
-            # `search enable`, which stopped being able to help once `enable` meant
-            # "clear an exclusion" (round-1 U3).
-            if forced_provider not in (
-                *bands.prefix,
-                *bands.rotate,
-                *bands.fallback,
-                *bands.metered,
-            ):
+            # auto-joined a later band is allowed. The refusal says WHY and names
+            # the command that can actually fix it (round-1 U3). Every leg of the
+            # forced provider is walked, in band order: forcing a keyed Tavily
+            # still tries its free tier before the key.
+            forced = [leg for leg in bands.legs() if leg.provider == forced_provider]
+            if not forced:
                 raise RuntimeError(
                     f"Search provider "
                     f"{provider_refusal(forced_provider, self.settings, self.config_dir)}"
                 )
             if self.restrict_to is not None and forced_provider not in self.restrict_to:
                 raise RuntimeError(_tainted_refusal())
-            return [forced_provider]
+            return forced
         if self.restrict_to is not None:
             allowed = self.restrict_to
-            restricted: list[SearchProviderId] = [
-                p for p in self._unrestricted_candidates() if str(p) in allowed
+            restricted = [
+                leg for leg in self._unrestricted_candidates() if str(leg.provider) in allowed
             ]
             if not restricted:
                 raise RuntimeError(_tainted_refusal())
             return restricted
         return self._unrestricted_candidates()
 
-    def _unrestricted_candidates(self) -> list[SearchProviderId]:
+    def _unrestricted_candidates(self) -> list[ChainLeg]:
         bands = resolve_provider_bands(self.settings, self.config_dir)
         # ONE rotating free pool: the listed free legs in their listed order, then
         # the auto-joined free band. Rotating only the auto band pinned the first
         # attempt to providers[0] on every install (round-1 M1/Q1/D2/U1).
-        pool = free_pool(self.settings, self.config_dir)
+        pool = [*bands.prefix, *bands.rotate]
         if self.settings.strategy == "round_robin" and len(pool) > 1:
             offset = _next_offset(len(pool))
             pool = pool[offset:] + pool[:offset]
-        # THE BAND INVARIANT, strengthened: nothing that spends can rotate, and
-        # nothing that spends can precede a free leg -- the paid band is appended
-        # last here and a listed paid leg is resolved INTO that band rather than
-        # left in the prefix.
-        return [*pool, *bands.fallback, *bands.metered]
+        # THE BAND INVARIANT: FREE < NATIVE < RADIENT < API_KEY, and nothing after
+        # the free pool rotates. A listed paid leg is resolved INTO its band rather
+        # than left in the prefix, so no configuration crosses a band boundary.
+        return [*pool, *bands.fallback, *bands.native, *bands.radient, *bands.metered]
 
     async def search(
         self,
@@ -290,7 +294,7 @@ class WebSearchService:
             raise ValueError("Search query must not be empty")
         limit = min(max(limit, 1), 20)
         failures: list[str] = []
-        candidates = self.candidates(forced_provider)
+        candidates = self.candidate_legs(forced_provider)
         if not candidates:
             raise RuntimeError(
                 "No web search providers are in this session's chain. Run "
@@ -312,7 +316,7 @@ class WebSearchService:
         self,
         owner: WebReadIO,
         timeout: httpx.Timeout,
-        candidates: list[SearchProviderId],
+        candidates: list[ChainLeg],
         clean_query: str,
         limit: int,
         failures: list[str],
@@ -323,8 +327,17 @@ class WebSearchService:
             follow_redirects=True,
             transport=self.transport,
         ) as client:
-            for provider_id in candidates:
-                if provider_id == "tavily" and self.tavily_oauth_search is not None:
+            for leg in candidates:
+                provider_id = leg.provider
+                label = leg.label
+                # The OAuth MCP delegate is Tavily's FREE tier on the user's own
+                # account, so it runs on the free leg only -- never in front of
+                # the keyed leg in the API_KEY band.
+                if (
+                    provider_id == "tavily"
+                    and leg.band in ("rotate", "fallback")
+                    and self.tavily_oauth_search is not None
+                ):
                     try:
                         oauth_response = await self.tavily_oauth_search(clean_query, limit)
                     except Exception as error:
@@ -336,13 +349,16 @@ class WebSearchService:
                             oauth_response.failures = list(failures)
                             return oauth_response
                         failures.append("tavily OAuth MCP: returned no results")
-                if not provider_available(provider_id, self.config_dir, self.settings):
+                if not leg.mode:
                     # Kept INSIDE the loop on purpose: a provider the user LISTED but
                     # that has no usable credential stays in the chain and reports
                     # `not configured` here, rather than being silently dropped from
                     # the chain the status surfaces describe.
-                    failures.append(f"{provider_id}: not configured")
+                    failures.append(f"{label}: not configured")
                     continue
+                # Pin the leg's mode for the transport (``providers.LEG_MODE``):
+                # the free leg of a keyed provider must not spend the key.
+                token = LEG_MODE.set(leg.mode)
                 try:
                     response = await PROVIDERS[provider_id].search(
                         client,
@@ -357,10 +373,12 @@ class WebSearchService:
                     # used to render as a bare `exa: ` in the digest and, once the
                     # lead moved to the last leg, as an empty LEAD sentence in the
                     # cropped card (round-2 N4/Q2-2, round-1 Q3).
-                    failures.append(f"{provider_id}: {str(error) or type(error).__name__}")
+                    failures.append(f"{label}: {str(error) or type(error).__name__}")
                     continue
+                finally:
+                    LEG_MODE.reset(token)
                 if not response.sources and not (response.answer or "").strip():
-                    failures.append(f"{provider_id}: returned no results")
+                    failures.append(f"{label}: returned no results")
                     continue
                 # Price the search in ONE place for every provider: the
                 # transports report usage, the price table and the token
@@ -393,7 +411,7 @@ class WebSearchService:
         # and this function cannot tell them apart -- so the message says what is
         # true of either: this provider failed and no other was tried.
         if len(candidates) == 1:
-            only = candidates[0]
+            only = candidates[0].label
             detail = summary
             redundant = f"{only}: "
             if detail.startswith(redundant):
@@ -428,9 +446,21 @@ class WebSearchService:
         # card's 432-cell reason budget and re-truncated the expansion the round-2
         # shape had just fixed (round-3 D3-2) -- the lead already carries one reason
         # in full, and the rest only have to be recognisable.
+        # Per-leg cap derived from the chain being printed (the lift the caps'
+        # comment spells out): a native/Radient/keyed-leg chain can be 13 legs,
+        # and a fixed 30-cell cap would fold its tail out of the card. Never
+        # above 30, so a six-leg chain keeps the measured shape it had.
+        ids = sum(cell_len(provider_id) for provider_id, _reason in tried)
+        legs = max(len(tried), 1)
+        per_leg = max(
+            MIN_PER_LEG_REASON_CELLS,
+            min(
+                PER_LEG_REASON_CELLS,
+                (REASON_MAX_CELLS - 32 - LEAD_REASON_CELLS - ids - 4 * legs) // legs,
+            ),
+        )
         breakdown = "; ".join(
-            f"{provider_id}: {_short_reason(reason, PER_LEG_REASON_CELLS)}"
-            for provider_id, reason in tried
+            f"{provider_id}: {_short_reason(reason, per_leg)}" for provider_id, reason in tried
         )
         raise RuntimeError(
             f"{len(candidates)}/{len(candidates)} providers failed: {lead} " f"(tried: {breakdown})"
@@ -474,6 +504,14 @@ class WebSearchService:
 #: (`All connection attempts failed`), so the usual case is not truncated at all.
 LEAD_REASON_CELLS = 128
 PER_LEG_REASON_CELLS = 30
+#: The tool card's whole reason budget (``tui.widgets.tool_card.REASON_MAX_CELLS``),
+#: restated because importing the TUI widget module into the search service
+#: would put the TUI on every CLI search's import path;
+#: ``test_service`` pins the two values equal.
+REASON_MAX_CELLS = 432
+#: Floor for the computed per-leg cap: below ~8 cells a reason stops being
+#: recognisable at all, and the leg ids alone still name every leg.
+MIN_PER_LEG_REASON_CELLS = 8
 
 
 def _short_reason(reason: str, cap: int) -> str:

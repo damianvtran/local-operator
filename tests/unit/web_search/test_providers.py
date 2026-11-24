@@ -1336,35 +1336,39 @@ def test_the_two_best_effort_words_match_the_placements_the_resolver_makes(tmp_p
     here instead of shipping a legend that contradicts the chain row.
     """
     from local_operator.web_search.providers import (
-        STATE_MEANINGS,
         provider_state_label,
         provider_statuses,
         resolve_provider_bands,
+        state_meaning,
     )
 
     credentials = _credentials(tmp_path)
 
     listed_settings = WebSearchSettings(providers=["duckduckgo", "perplexity"])
     bands = resolve_provider_bands(listed_settings, credentials)
-    assert "perplexity" in bands.prefix and "perplexity" not in bands.fallback
+    prefix_ids = [leg.provider for leg in bands.prefix]
+    fallback_ids = [leg.provider for leg in bands.fallback]
+    assert "perplexity" in prefix_ids and "perplexity" not in fallback_ids
     listed = next(
         status
         for status in provider_statuses(listed_settings, credentials)
         if status.id == "perplexity"
     )
     assert provider_state_label(listed) == "enabled (best-effort)"
-    assert "after the free pool" not in STATE_MEANINGS["enabled (best-effort)"]
+    assert "after the free pool" not in state_meaning("enabled (best-effort)")
 
     unlisted_settings = WebSearchSettings(providers=["duckduckgo"])
     bands = resolve_provider_bands(unlisted_settings, credentials)
-    assert "perplexity" in bands.fallback and "perplexity" not in bands.prefix
+    prefix_ids = [leg.provider for leg in bands.prefix]
+    fallback_ids = [leg.provider for leg in bands.fallback]
+    assert "perplexity" in fallback_ids and "perplexity" not in prefix_ids
     unlisted = next(
         status
         for status in provider_statuses(unlisted_settings, credentials)
         if status.id == "perplexity"
     )
     assert provider_state_label(unlisted) == "auto best-effort"
-    assert "after the free pool" in STATE_MEANINGS["auto best-effort"]
+    assert "after the free pool" in state_meaning("auto best-effort")
 
 
 def test_the_legend_defines_the_painted_words_and_only_those(tmp_path) -> None:
@@ -2141,6 +2145,7 @@ def test_the_landing_line_reuses_the_status_vocabulary(tmp_path) -> None:
         provider_state_label,
         provider_statuses,
         state_legend,
+        state_meaning,
     )
 
     credentials = _credentials(tmp_path)
@@ -2172,9 +2177,17 @@ def test_the_landing_line_reuses_the_status_vocabulary(tmp_path) -> None:
     # listed leg are distinguished by the word itself (paid = hoisted to the paid
     # band; best-effort = stays in the pool where the user put it), so the legend
     # cannot describe one of them with the other's placement.
+    # The leg split's states (keyed free-then-key, native, Radient) are emitted
+    # only on installs with those credentials; the matrix tests in
+    # test_search_chain_matrix.py paint each of them.
     assert set(STATE_MEANINGS) == {provider_state_label(status) for status in statuses.values()} | {
         "enabled (paid)",
         "enabled (best-effort)",
+        "auto free, then key",
+        "auto native plan",
+        "auto native paid",
+        "auto radient",
+        "radient refused",
     }
-    assert "after the free pool" not in STATE_MEANINGS["enabled (best-effort)"]
-    assert "pool" in STATE_MEANINGS["enabled (best-effort)"]
+    assert "after the free pool" not in state_meaning("enabled (best-effort)")
+    assert "pool" in state_meaning("enabled (best-effort)")

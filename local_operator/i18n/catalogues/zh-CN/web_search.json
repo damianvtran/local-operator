@@ -1,0 +1,19 @@
+{
+  "web_search.radient.access": "Radient 额度",
+  "web_search.radient.detail": "通过你的 Radient 账户进行 Tavily 搜索，每次搜索从额度中扣除 0.01 美元；使用 `local-operator login radient` 登录",
+  "web_search.radient.credits_low": "你的 Radient 额度余额不足，无法搜索。请在 Radient Console 中充值；5 分钟内会重新尝试 Radient 搜索。",
+  "web_search.radient.sign_in_again": "Radient 拒绝了你的登录。运行 `local-operator login radient` 重新登录。",
+  "web_search.radient.not_signed_in": "你尚未登录 Radient。运行 `local-operator login radient`。",
+  "web_search.state.auto_radient": "自动 · Radient 额度",
+  "web_search.state.radient_refused": "Radient 额度已用尽",
+  "web_search.state.auto_native_plan": "自动 · 原生（套餐）",
+  "web_search.state.auto_native_paid": "自动 · 原生（付费）",
+  "web_search.state.auto_free_then_key": "自动 · 先免费后密钥",
+  "web_search.meaning.auto_radient": "在免费和原生环节之后尝试；从你的 Radient 额度扣费",
+  "web_search.meaning.radient_refused": "在你充值前跳过；5 分钟内会重新尝试 Radient",
+  "web_search.meaning.auto_native_plan": "你的模型套餐自带的搜索，在免费环节之后尝试",
+  "web_search.meaning.auto_native_paid": "你的模型 API 密钥自带的搜索，按次计费",
+  "web_search.meaning.auto_free_then_key": "先用免费层级；你的 API 密钥在 Radient 之后尝试",
+  "web_search.marker.plan": "（套餐）",
+  "web_search.marker.credits": "（额度）"
+}

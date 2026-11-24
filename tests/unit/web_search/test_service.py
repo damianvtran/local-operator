@@ -438,9 +438,21 @@ def test_a_listed_keyed_provider_is_held_back_to_the_paid_band(tmp_path, monkeyp
     listed = WebSearchService(
         WebSearchSettings(providers=["exa", "duckduckgo"]), _credentials(tmp_path)
     )
-    # `exa` is listed FIRST and still resolves last: the keyed leg is held back to
-    # the paid band, behind `tavily` which joined automatically and is free.
-    assert listed.resolve() == ["duckduckgo", "tavily", "exa"]
+    # `exa` is listed FIRST: its FREE leg leads the pool, and its keyed leg is
+    # held back to the paid band, behind `tavily` which joined automatically and
+    # is free. (Before the leg split a stored key moved the whole provider to the
+    # paid band, so its free tier was never tried.)
+    assert [leg.label for leg in listed.candidate_legs()][-1] == "exa (key)"
+    listed_ordered = WebSearchService(
+        WebSearchSettings(providers=["exa", "duckduckgo"], strategy="ordered"),
+        _credentials(tmp_path),
+    )
+    assert [leg.label for leg in listed_ordered.candidate_legs()] == [
+        "exa",
+        "duckduckgo",
+        "tavily",
+        "exa (key)",
+    ]
 
     # With free legs behind it, the paid leg still goes last -- and it keeps its
     # listing order relative to the OTHER paid legs, which is what "listing is
@@ -458,8 +470,19 @@ def test_a_listed_keyed_provider_is_held_back_to_the_paid_band(tmp_path, monkeyp
         WebSearchSettings(providers=["serpapi", "exa", "tavily", "duckduckgo"]),
         _credentials(tmp_path),
     )
-    assert mixed.resolve() == ["tavily", "duckduckgo", "serpapi", "exa"]
-    assert mixed.candidates() == ["tavily", "duckduckgo", "serpapi", "exa"]
+    # The paid tail never rotates: listed serpapi heads it, the keyed exa leg follows.
+    assert mixed.candidates()[-2:] == ["serpapi", "exa"]
+    mixed_ordered = WebSearchService(
+        WebSearchSettings(providers=["serpapi", "exa", "tavily", "duckduckgo"], strategy="ordered"),
+        _credentials(tmp_path),
+    )
+    assert [leg.label for leg in mixed_ordered.candidate_legs()] == [
+        "exa",
+        "tavily",
+        "duckduckgo",
+        "serpapi",
+        "exa (key)",
+    ]
 
 
 def test_forced_provider_is_refused_when_excluded(tmp_path, monkeypatch) -> None:

@@ -107,6 +107,7 @@ from local_operator.ui_console.policy import (
     DEFAULT_OWNER_LIMIT,
     DEFAULT_USER_RESERVED,
 )
+from local_operator.web_defaults import WEB_SEARCH_PROVIDER_IDS
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from local_operator.config import ConfigManager
@@ -4849,17 +4850,9 @@ SETTINGS: tuple[Setting, ...] = (
         # "exactly these" would be surprised by the chain -- and that surprise is
         # the documented cost of not writing a freezing migration.
         help=_t(_ws.web_search_providers_help()),
-        members=(
-            "duckduckgo",
-            "tavily",
-            "deepseek",
-            "perplexity",
-            "brave",
-            "exa",
-            "parallel",
-            "serpapi",
-            "searxng",
-        ),
+        # From the one provider-id list, so a new provider is settable here the
+        # moment it exists (the hand-copied tuple silently omitted new ids).
+        members=WEB_SEARCH_PROVIDER_IDS,
     ),
     Setting(
         key="web_search.excluded_providers",
@@ -4874,17 +4867,9 @@ SETTINGS: tuple[Setting, ...] = (
         # empty priority list does.
         empty_unsets=True,
         help=_t(_ws.web_search_excluded_providers_help()),
-        members=(
-            "duckduckgo",
-            "tavily",
-            "deepseek",
-            "perplexity",
-            "brave",
-            "exa",
-            "parallel",
-            "serpapi",
-            "searxng",
-        ),
+        # From the one provider-id list, so a new provider is settable here the
+        # moment it exists (the hand-copied tuple silently omitted new ids).
+        members=WEB_SEARCH_PROVIDER_IDS,
     ),
     Setting(
         key="web_search.timeout_seconds",

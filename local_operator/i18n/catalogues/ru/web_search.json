@@ -1,0 +1,19 @@
+{
+  "web_search.radient.access": "Кредиты Radient",
+  "web_search.radient.detail": "Поиск Tavily через ваш аккаунт Radient, $0.01 за поиск из ваших кредитов; войдите командой `local-operator login radient`",
+  "web_search.radient.credits_low": "На балансе Radient недостаточно кредитов для поиска. Пополните кредиты в Radient Console; поиск через Radient будет повторён в течение 5 минут.",
+  "web_search.radient.sign_in_again": "Radient отклонил ваш вход. Выполните `local-operator login radient`, чтобы войти снова.",
+  "web_search.radient.not_signed_in": "Вы не вошли в Radient. Выполните `local-operator login radient`.",
+  "web_search.state.auto_radient": "авто, кредиты Radient",
+  "web_search.state.radient_refused": "кредиты Radient закончились",
+  "web_search.state.auto_native_plan": "авто, встроенный (подписка)",
+  "web_search.state.auto_native_paid": "авто, встроенный (платно)",
+  "web_search.state.auto_free_then_key": "авто бесплатно, затем ключ",
+  "web_search.meaning.auto_radient": "используется после бесплатных и встроенных звеньев; списывается с кредитов Radient",
+  "web_search.meaning.radient_refused": "пропускается, пока вы не пополните кредиты; Radient повторяется в течение 5 минут",
+  "web_search.meaning.auto_native_plan": "встроенный поиск вашей подписки на модель, после бесплатных звеньев",
+  "web_search.meaning.auto_native_paid": "встроенный поиск по вашему API-ключу модели, оплата за каждый поиск",
+  "web_search.meaning.auto_free_then_key": "сначала бесплатный тариф; ваш API-ключ используется после Radient",
+  "web_search.marker.plan": "(подписка)",
+  "web_search.marker.credits": "(кредиты)"
+}

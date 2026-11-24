@@ -148,6 +148,11 @@ class RadientSearchResponse(BaseModel):
 
     query: str
     results: List[RadientSearchResult]
+    #: The server's charge for this search (``amount_usd``, ``basis: "billed"``,
+    #: ``usage_record_id``, ...). Declared rather than left to ``extra`` so callers
+    #: can see what a search cost; ``None`` on servers that do not send it.
+    cost: Optional[Dict[str, Any]] = None
+    total_found: Optional[int] = None
     # Allow additional fields
     model_config = {"extra": "allow"}
 

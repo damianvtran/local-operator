@@ -1,0 +1,95 @@
+{
+  "web_search.radient.access": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse label",
+    "note": "access column for the Radient search provider; 'Radient' is a product name, never translated",
+    "maxCells": 24
+  },
+  "web_search.radient.detail": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "one-line description of the Radient search provider row. Keep 'Tavily', 'Radient', '$0.01' and the backticked command verbatim."
+  },
+  "web_search.radient.credits_low": {
+    "role": "web_search failure reason shown in the tool card and returned to the model (rendered in English for the model; translated for display)",
+    "tone": "plain, actionable",
+    "note": "Keep 'Radient', 'Radient Console' and the backticked command verbatim."
+  },
+  "web_search.radient.sign_in_again": {
+    "role": "web_search failure reason shown in the tool card and returned to the model (rendered in English for the model; translated for display)",
+    "tone": "plain, actionable",
+    "note": "Keep 'Radient', 'Radient Console' and the backticked command verbatim."
+  },
+  "web_search.radient.not_signed_in": {
+    "role": "web_search failure reason shown in the tool card and returned to the model (rendered in English for the model; translated for display)",
+    "tone": "plain, actionable",
+    "note": "Keep 'Radient', 'Radient Console' and the backticked command verbatim."
+  },
+  "web_search.state.auto_radient": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a 16-cell column; 'Radient' is a product name. 'native' means the model vendor's own built-in web search.",
+    "maxCells": 24
+  },
+  "web_search.state.radient_refused": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a 16-cell column; 'Radient' is a product name. 'native' means the model vendor's own built-in web search.",
+    "maxCells": 24
+  },
+  "web_search.state.auto_native_plan": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a 16-cell column; 'Radient' is a product name. 'native' means the model vendor's own built-in web search.",
+    "maxCells": 24
+  },
+  "web_search.state.auto_native_paid": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a 16-cell column; 'Radient' is a product name. 'native' means the model vendor's own built-in web search.",
+    "maxCells": 24
+  },
+  "web_search.state.auto_free_then_key": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a 16-cell column; 'Radient' is a product name. 'native' means the model vendor's own built-in web search.",
+    "maxCells": 24
+  },
+  "web_search.meaning.auto_radient": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.meaning.radient_refused": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.meaning.auto_native_plan": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.meaning.auto_native_paid": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.meaning.auto_free_then_key": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.marker.plan": {
+    "role": "marker after a provider name in the `chain:` line",
+    "tone": "terse parenthetical",
+    "note": "'(plan)' = included in a subscription the user already pays for; '(credits)' = billed to Radient credits. Keep the parentheses.",
+    "maxCells": 12
+  },
+  "web_search.marker.credits": {
+    "role": "marker after a provider name in the `chain:` line",
+    "tone": "terse parenthetical",
+    "note": "'(plan)' = included in a subscription the user already pays for; '(credits)' = billed to Radient credits. Keep the parentheses.",
+    "maxCells": 12
+  }
+}
