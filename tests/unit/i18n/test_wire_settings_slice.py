@@ -14,6 +14,9 @@ no change to the existing extraction-time strings or translated copy.
 The ``team_bridge.hold_release`` row (PR #4317) adds two slots the same way,
 copied from the en catalogue whose bytes carry that PR's passed copy-audit
 receipts (round ``pr4317-copy-r2``, ``keys_audited`` = exactly these two).
+The ``mcp.result_normalization`` row (PR #4514) adds eight slots (label, help
+and three choices' label + description), copied byte-for-byte from the en
+catalogue; no existing slot changes.
 
 The second test pins the resolution PATH: the registry's strings must come
 through the `wire.settings` catalogue (not from leftovers), and an unknown

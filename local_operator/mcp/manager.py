@@ -98,6 +98,11 @@ from local_operator.mcp.tool_bridge import (
 )
 from local_operator.mcp.tool_cache import McpToolCache, config_digest
 from local_operator.optional import missing_extra_error
+from local_operator.tools.result_normalize import (
+    RESULT_NORMALIZATION_DEFAULT,
+    RESULT_NORMALIZATION_MODES,
+    RESULT_NORMALIZATION_PATH,
+)
 
 if TYPE_CHECKING:
     # Annotation-only SDK references: the extra may be absent, and even when
@@ -949,6 +954,65 @@ def _settle_future_error(future: asyncio.Future[ServerConnection] | None, exc: E
     if future is not None and not future.done():
         future.set_exception(exc)
         future.exception()  # mark retrieved; waiters still see the raise
+
+
+def read_result_normalization_mode() -> str:
+    """Read ``mcp.result_normalization`` at CALL time; the default on any trouble.
+
+    A fresh ``ConfigManager`` per result keeps the key LIVE in ``/settings``,
+    as ``tools.builtin._search_interception_config`` does, and gives an A/B
+    harness (or an operator chasing a link-list payload) a per-call switch.
+    The unreadable-config probe runs first for that reader's reason:
+    ``ConfigManager`` MOVES a broken file aside instead of raising, and a tool
+    result must never be the thing that renames the operator's config. An
+    unknown value also falls back to the default rather than raising -- config
+    trouble must never fail a tool call that already succeeded.
+    """
+    try:
+        from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+        from local_operator.paths import config_dir
+        from local_operator.tools.shell_env import _config_file_is_unreadable
+
+        if _config_file_is_unreadable(config_dir() / CONFIG_FILE_NAME):
+            return RESULT_NORMALIZATION_DEFAULT
+        value = ConfigManager(config_dir()).get_nested_value(
+            RESULT_NORMALIZATION_PATH, RESULT_NORMALIZATION_DEFAULT
+        )
+    except Exception:  # noqa: BLE001 — config trouble must never fail a result
+        return RESULT_NORMALIZATION_DEFAULT
+    if value is False:
+        # YAML 1.1 reads a hand-typed bare ``off`` as boolean False; the
+        # operator meant the escape hatch, so honour it rather than ignore it.
+        return "off"
+    return value if value in RESULT_NORMALIZATION_MODES else RESULT_NORMALIZATION_DEFAULT
+
+
+def _format_with_normalization_setting(
+    result: Any,
+    tool_call_id: str,
+    tool_label: str,
+    context: ToolContext,
+    *,
+    producer_scope: str | None,
+    machine_read: bool,
+) -> ToolResult:
+    """``format_mcp_result`` under the live ``mcp.result_normalization`` mode.
+
+    Runs in the worker thread, so the per-call config read (file I/O) stays off
+    the event loop. A result the HARNESS parses (a monitor tick, a built-in's
+    delegate) is never normalized: its text is compared against a baseline an
+    already-armed monitor stored, or ``json.loads``-ed by a built-in that
+    renders its own output, so it must stay the server's bytes -- the same
+    reason the dropped-argument note skips those calls.
+    """
+    return format_mcp_result(
+        result,
+        tool_call_id,
+        tool_label,
+        context,
+        producer_scope=producer_scope,
+        normalization="off" if machine_read else read_result_normalization_mode(),
+    )
 
 
 def resolve_mcp_timeout_s(cfg: MCPServerConfig | None) -> float | None:
@@ -4732,12 +4796,13 @@ class McpManager:
         producer_scope = capture_producer_scope(server_name, mcp_tool_name, context.session_id)
         return noted(
             await asyncio.to_thread(
-                format_mcp_result,
+                _format_with_normalization_setting,
                 result,
                 tool_call_id,
                 tool_label,
                 context,
                 producer_scope=producer_scope,
+                machine_read=machine_read,
             )
         )
 

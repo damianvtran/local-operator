@@ -392,6 +392,47 @@ def _search_interception(watcher: ConfigWatcher) -> tuple[bool, bool, bool]:
     return _search_interception_config()
 
 
+def _mcp_result_normalization_applied(_watcher: ConfigWatcher) -> str:
+    """The ``mcp.result_normalization`` mode an MCP tool result is formatted under.
+
+    Observed through ``_format_with_normalization_setting`` -- the function every
+    model-facing MCP call runs its result through, which reads the setting via
+    ``read_result_normalization_mode`` (a fresh ``ConfigManager`` on
+    ``paths.config_dir()``) per result. Rather than echo the reader, the probe
+    formats a real ``CallToolResult`` and names the mode whose transform the
+    output matches, so it fails if the read is live but the transform ignores it.
+    The sample is chosen so all three modes render differently (asserted, so a
+    future normalizer change cannot make the probe silently unable to tell them
+    apart).
+    """
+    from mcp.types import CallToolResult, TextContent
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.mcp.manager import _format_with_normalization_setting
+    from local_operator.tools.result_normalize import (
+        RESULT_NORMALIZATION_MODES,
+        normalize_tool_text,
+    )
+
+    raw = (
+        "Release notes ![](https://px.example/1.gif) are in the "
+        "[changelog](https://example.com/changelog) for this version."
+    )
+    rendered = {mode: normalize_tool_text(raw, mode) for mode in RESULT_NORMALIZATION_MODES}
+    assert len(set(rendered.values())) == len(rendered), rendered
+    result = _format_with_normalization_setting(
+        CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False),
+        "probe-call",
+        "mcp__probe__read",
+        ToolContext(),
+        producer_scope=None,
+        machine_read=False,
+    )
+    matches = [mode for mode, text in rendered.items() if text == result.text]
+    assert len(matches) == 1, (result.text, rendered)
+    return matches[0]
+
+
 def _guardrails(_watcher: ConfigWatcher, *, authorised: bool = True) -> Any:
     """What the guardrail checkpoint resolves per checked call (``read_settings``)."""
     from local_operator.guardrails.check import LOOSENING_KEYS, read_settings
@@ -909,6 +950,11 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "tools.search_interception.enabled": (False, lambda s, w: _search_interception(w)[0]),
     "tools.search_interception.block": (False, lambda s, w: _search_interception(w)[1]),
     "tools.search_interception.rg_excludes": (False, lambda s, w: _search_interception(w)[2]),
+    # Read per MCP result by ``mcp.manager.read_result_normalization_mode``, so a
+    # write lands on the next tool call. Observed as the transform actually applied
+    # to a formatted result; ``strip-links`` because ``off`` would also match a
+    # reader that never ran the normalizer at all.
+    "mcp.result_normalization": ("strip-links", lambda s, w: _mcp_result_normalization_applied(w)),
     # ``bash.query_budget.*`` is the same shape: read per ``bash`` call through a
     # fresh ``ConfigManager`` (``builtin._query_budget_config``), so an edit lands
     # on the next command. Observed through that reader, not the raw mapping.
