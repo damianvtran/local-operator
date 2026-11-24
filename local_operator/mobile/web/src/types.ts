@@ -603,6 +603,14 @@ export interface SessionProjection {
 	queued_count: number;
 	/** Process gone; history still resumable. */
 	ended: boolean;
+	/** Set ONLY on the terminal frame the relay publishes when a cold prompt's
+	    wake failed after it was answered `waking` (`daemon._publish_failed_wake`):
+	    the failed command's id. The composer's ONE failure signal for that
+	    pending send (agent review round 2, R2-1) — a cold session's health reads
+	    `ended` from its pid-0 disk rebuild before, during and after a wake, so
+	    health cannot say which boot failed. Absent on every other frame and from
+	    an older relay. */
+	wake_failed?: string;
 	/** Record fresh but socket unreachable. */
 	degraded: boolean;
 	/** The relay's "owner has gone quiet" verdict (`SessionProjection.

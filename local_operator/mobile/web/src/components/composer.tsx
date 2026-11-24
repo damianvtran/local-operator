@@ -538,6 +538,12 @@ const RETRY_BUTTON_LABEL = "Retry earlier instruction";
    draft" named a noun that describes only the retry-of-a-retained-instruction
    case, which is now the rarer one. */
 const RETRY_ACK_NOTICE = "Earlier instruction delivered. Your draft is ready to send.";
+/* The same situation while the earlier instruction is still WAKING its session
+   (agent review round 2, R2-2): a new send replays the retained envelope first,
+   and a `waking` answer means it is not delivered yet, so RETRY_ACK_NOTICE's
+   "delivered" would be false. Without any line the tap looked like it did
+   nothing — the draft simply stayed. Same vocabulary ("earlier", "draft"). */
+const RETRY_WAKING_NOTICE = "Earlier instruction is still sending. Your draft is ready to send.";
 /* U4: the reason the primary send is disabled while an uncertain envelope is
    pending — stated inline so the dead control reads as intentional. */
 const RETRY_DISABLED_HINT = "Resolve the earlier instruction first.";
@@ -989,7 +995,20 @@ export function Composer({
 	const [retryEnvelope, setRetryEnvelope] = useState(() => getPendingContinuation(pid));
 	/* The cold prompt answered `waking` and not yet settled by the stream. A ref,
 	   not state: nothing renders from it; the settle effect reads it. */
-	const wakingCommand = useRef<{ pid: string; commandId: string; text: string; sawLive: boolean } | null>(null);
+	const wakingCommand = useRef<{
+		pid: string;
+		commandId: string;
+		text: string;
+		/* A frame from a RUNNING owner (`projection.pid > 0`) arrived since the
+		   `waking` answer: only then is a later `projection.ended` this boot's end
+		   (the fallback for a relay without the `wake_failed` marker). */
+		sawLive: boolean;
+		/* The stream already reported this wake failed and the composer turned it
+		   into the failed send. Still tracked, because the row can land after all
+		   (another surface woke the session, or the retry joined), and that row
+		   must take the failure copy down with it. */
+		failed: boolean;
+	} | null>(null);
 	const retryPending = retryEnvelope !== null;
 	/* Presentation is deliberately separate from the immutable retry envelope.
 	   Each occurrence is an object, even for identical copy: a queued close from
@@ -1396,23 +1415,54 @@ export function Composer({
 	/* SETTLE A RETAINED ENVELOPE FROM THE STREAM (prompt wake, R1-1). Two
 	   outcomes only the stream can report:
 	   - the projection carries a row under the envelope's id: the session wrote
-	     the message, so the envelope is cleared;
-	   - a `waking` send's session reports `ended` without that row: the boot
-	     failed, so this becomes the failed send it is — the row comes down, the
-	     text returns to an empty composer, and the retry replays the SAME id. */
+	     the message, so the envelope is cleared — and if the stream had already
+	     reported this wake failed, the failure copy and the restored draft go
+	     with it (the message is in the transcript; leaving "send failed" up
+	     would invite a second send under a NEW id);
+	   - the stream reports THIS wake failed without that row: the boot failed,
+	     so this becomes the failed send it is — the row comes down, the text
+	     returns to an empty composer, and the retry replays the SAME id.
+
+	   WHY NOT THE SCREEN'S `ended` (agent review round 2, R2-1). `ended` is the
+	   header dot's health, and a cold conversation is served as a disk rebuild
+	   with `pid: 0`, which health reads as ended BEFORE, DURING and after a
+	   wake. Keyed on it, a boot that failed before its first live frame was
+	   never reported (the row said "sending…" forever), and a reconnect blip
+	   (health `reconnecting`, then the reconnect's pid-0 seed) read as a
+	   failure while the boot carried on. The failure signal is now a fact about
+	   the wake itself: the relay's `wake_failed: <command_id>` marker on the
+	   terminal frame it publishes for a failed wake, or — from a relay without
+	   the marker — `projection.ended` after a frame from a running owner. */
 	useEffect(() => {
 		const waking = wakingCommand.current?.pid === pid ? wakingCommand.current : null;
-		if (waking && !ended) waking.sawLive = true;
+		if (waking && projection.pid > 0 && projection.ended !== true) waking.sawLive = true;
+		const wakeFailed =
+			waking !== null &&
+			!waking.failed &&
+			(projection.wake_failed === waking.commandId ||
+				(waking.sawLive && projection.ended === true));
 		const outcome = settleWakingContinuation(
 			pid,
 			(commandId) => projectionCarriesCommand(projection.transcript, commandId),
-			ended && (waking?.sawLive ?? false),
+			wakeFailed,
 			waking?.commandId ?? null,
 		);
 		if (outcome === "delivered") {
 			wakingCommand.current = null;
-		} else if (outcome === "failed" && waking) {
-			wakingCommand.current = null;
+			if (waking?.failed) {
+				const failedCopy = messageRuntime.t("relay.health.ended_send_failed");
+				setRetryEnvelope(null);
+				setErrorOccurrence((current) =>
+					current.message === failedCopy || current.message === RETAINED_RETRY_ERROR
+						? { message: "" }
+						: current,
+				);
+				/* Only the draft THIS failure handed back, untouched since: anything
+				   the user typed over it is theirs. */
+				if (textRef.current.trim() === waking.text.trim()) clearDraft();
+			}
+		} else if (outcome === "failed" && waking && wakeFailed) {
+			waking.failed = true;
 			withdrawPendingEcho(pid, waking.commandId);
 			if (textRef.current.trim() === "") {
 				provenanceRef.current = emptyProvenance();
@@ -1424,7 +1474,7 @@ export function Composer({
 		} else if (outcome === null) {
 			wakingCommand.current = null;
 		}
-	}, [pid, projection.transcript, ended]);
+	}, [pid, projection.transcript, projection.pid, projection.ended, projection.wake_failed]);
 
 	const addFiles = async (files: Iterable<File>) => {
 		/* Nothing silent: a file that cannot be attached (not an image, or one
@@ -1951,15 +2001,33 @@ export function Composer({
 					   yet, so the row keeps saying it is going out and the envelope stays
 					   retained until the stream settles it (the effect on
 					   `wakingCommand` below). The draft already moved into the row. */
-					/* `sawLive` guards a STALE `ended`: a conversation opened ended is
-					   un-ended by the wake itself, so only an `ended` seen AFTER the
-					   stream showed it not ended is this boot's failure. */
+					/* `sawLive` starts false whatever the screen shows: the frame on screen
+					   predates this boot, and only a running owner's frame AFTER the answer
+					   makes a later `ended` this boot's end (the settle effect). A retry
+					   that joins the same wake keeps what the stream already showed. */
+					const prior = wakingCommand.current;
+					const joined =
+						prior !== null &&
+						prior.pid === pid &&
+						prior.commandId === receipt.envelope.command_id &&
+						!prior.failed
+							? prior
+							: null;
 					wakingCommand.current = {
 						pid,
 						commandId: receipt.envelope.command_id,
 						text: receipt.envelope.text,
-						sawLive: !ended,
+						sawLive: joined?.sawLive ?? false,
+						failed: false,
 					};
+					/* A NEW draft that rode along (R2-2): the send replayed the retained
+					   earlier instruction, which is still waking, and the composer kept
+					   what the user just typed. Say so — the tap otherwise looked dead. */
+					const draft = textRef.current.trim();
+					if (draft !== "" && draft !== receipt.envelope.text.trim()) {
+						setNoticeTone("neutral");
+						setNotice(RETRY_WAKING_NOTICE);
+					}
 					return;
 				}
 				/* The session admitted this command — the receipt IS that fact, and it is
@@ -1990,7 +2058,9 @@ export function Composer({
 					   rather than presenting an idempotent ACK as delivery of content the
 					   owner never received. This is a positive outcome, so it renders in the
 					   success notice, not the danger alert (D11). The pending row stays up
-					   either way — it is a row the session genuinely owes. */
+					   either way — it is a row the session genuinely owes. The tone is
+					   set, not inherited: the waking branch's neutral line may precede it. */
+					setNoticeTone("success");
 					setNotice(RETRY_ACK_NOTICE);
 				}
 				/* A skill the relay could not attach is SAID (SKM-D4): the message

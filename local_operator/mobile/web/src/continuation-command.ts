@@ -256,16 +256,17 @@ export function hasPendingContinuation(sessionId: string): boolean {
  * `"delivered"`: the projection carries a row under the envelope's id — the
  * session wrote the message, the definitive acknowledgement of this UUID — so
  * the envelope is cleared.
- * `"failed"`: the stream has since reported the session `ended` without the
- * row — the boot failed, so the envelope stays and the caller offers it as the
- * failed send's retry.
+ * `"failed"`: the caller's `failed` — the stream reported THIS wake failed
+ * (the relay's `wake_failed` marker, or `ended` after a live owner's frame;
+ * the composer decides, see its settle effect) — without the row, so the
+ * envelope stays and the caller offers it as the failed send's retry.
  * `"pending"`: neither yet (or not a waking envelope). `null`: nothing
  * retained. Pure apart from the clear, so the composer's effect and the tests
  * share one rule. */
 export function settleWakingContinuation(
 	sessionId: string,
 	carried: (commandId: string) => boolean,
-	ended: boolean,
+	failed: boolean,
 	wakingCommandId: string | null,
 ): "delivered" | "failed" | "pending" | null {
 	const pending = getPendingContinuation(sessionId);
@@ -275,7 +276,7 @@ export function settleWakingContinuation(
 		clearPendingContinuation(sessionId);
 		return "delivered";
 	}
-	return ended ? "failed" : "pending";
+	return failed ? "failed" : "pending";
 }
 
 export function clearPendingContinuation(sessionId: string): void {

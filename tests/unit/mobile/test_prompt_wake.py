@@ -168,6 +168,14 @@ def test_a_boot_that_fails_after_waking_still_reports_the_failure(
         # The last frame the stream saw is the terminal ``ended`` receipt.
         assert published, "the stream was never told the wake failed"
         assert published[-1].get("ended") is True
+        # ...and it NAMES the failed send (agent review round 2, R2-1): a cold
+        # session's frames are pid-0 rebuilds that the phone's health already
+        # reads as ended, so ``ended`` alone cannot tell it which wake failed.
+        # Expected red on e1a2d2a1 by construction (no marker existed).
+        assert published[-1].get("wake_failed") == COMMAND_ID
+        # Only that frame carries it: the marker is a one-shot receipt, never
+        # projection state a later frame could repeat.
+        assert all("wake_failed" not in frame for frame in published[:-1])
 
 
 def test_a_boot_that_fails_before_constructing_is_still_an_error(
@@ -459,6 +467,9 @@ async def test_a_resume_that_fails_after_starting_ends_the_stream(
     published = [frames.get_nowait() for _ in range(frames.qsize())]
     assert published, "the stream was never told the resume failed"
     assert published[-1].get("ended") is True
+    # A resume has no pending prompt to fail: no ``wake_failed`` marker, so a
+    # phone's pending send is never failed by somebody else's resume.
+    assert "wake_failed" not in published[-1]
 
 
 @pytest.mark.asyncio

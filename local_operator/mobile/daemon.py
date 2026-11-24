@@ -4094,7 +4094,7 @@ async def _prompt_wake(
                     type(exc).__name__,
                 )
                 if this.acknowledged and not isinstance(exc, asyncio.CancelledError):
-                    await _publish_failed_wake(daemon, session_id)
+                    await _publish_failed_wake(daemon, session_id, command_id=command_id)
                 raise
             finally:
                 if daemon._prompt_wakes.get(key) is this:
@@ -4140,8 +4140,22 @@ async def _prompt_wake(
     raise TimeoutError(f"phone wake {session_id}: no outcome within the ack window")
 
 
-async def _publish_failed_wake(daemon: "MobileDaemon", session_id: str) -> None:
-    """Tell a session's stream that an acknowledged wake did not produce a runtime."""
+async def _publish_failed_wake(
+    daemon: "MobileDaemon", session_id: str, *, command_id: str | None = None
+) -> None:
+    """Tell a session's stream that an acknowledged wake did not produce a runtime.
+
+    ``command_id`` (a prompt wake; the resume route has none) rides the frame
+    as ``wake_failed``. WHY A MARKER (agent review round 2, R2-1): the phone
+    cannot read this failure off the frame's health. A cold conversation is
+    served as a disk rebuild with ``pid=0``, which the web app's health reads
+    as ``ended`` before, during and after the wake, so "ended" alone could not
+    tell a failed boot from the seed it started on, and a reconnect's pid-0
+    seed mid-wake looked like a failure. The marker names the one pending send
+    this frame fails. Additive: it is set on this frame only (never stored on
+    the projection, so no later frame repeats it), and a client that does not
+    know the key ignores it.
+    """
     if _entry_for_session(daemon, session_id) is not None:
         # A runtime is registered after all (another surface woke it); its live
         # frames are the truth, and an ended frame would contradict them.
@@ -4153,9 +4167,12 @@ async def _publish_failed_wake(daemon: "MobileDaemon", session_id: str) -> None:
         return
     if projection is None:
         return
+    frame = _projection_frame(projection)
+    if command_id is not None:
+        frame["wake_failed"] = command_id
     for queue in daemon.table.session_subscribers.get(session_id, set()):
         try:
-            queue.put_nowait(_projection_frame(projection))
+            queue.put_nowait(frame)
         except asyncio.QueueFull:
             pass
 
@@ -7894,9 +7911,12 @@ def build_app(daemon: MobileDaemon):
                 # (``request_flag``) may additionally get 2xx ``waking: true``
                 # as soon as a runtime is constructing; it MUST then keep its
                 # retry copy until the session stream carries the message id
-                # (= ``command_id``), and treat ``ended`` without it as a failed
-                # send. A failure after that answer retracts the active claim
-                # and sends the stream its ``ended`` frame. A client that does
+                # (= ``command_id``), and treat the frame naming it in
+                # ``wake_failed`` as a failed send (not health ``ended``: a cold
+                # session's pid-0 frames read as ended throughout the wake). A
+                # failure after that answer retracts the active claim and sends
+                # the stream its ``ended`` frame carrying ``wake_failed:
+                # <command_id>``. A client that does
                 # not opt in gets the old answers: the outcome within 15 s, else
                 # 504 "session did not answer" (retry under the same id).
                 "prompt_wake": {
@@ -10165,6 +10185,12 @@ def build_app(daemon: MobileDaemon):
                     return denied
                 if body.pop("expand_skills", False):
                     return remote_failure(RemoteSessionError("remote_unsupported", 409))
+                # The prompt-wake opt-in is a transport flag between the phone and
+                # THIS relay (see the local path below); a remote owner answers
+                # from its own admission, never ``waking``, so the flag is dropped
+                # here too rather than forwarded to a peer that does not know it
+                # (agent review round 2, R2-3).
+                body.pop("accept_waking", None)
                 try:
                     answer = await admit_remote_command(relay_root, owner_row, remote_op, body)
                 except ValueError:
