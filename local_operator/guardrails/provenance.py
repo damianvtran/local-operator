@@ -1521,6 +1521,32 @@ def _regenerable(name: str) -> bool:
     return name in _REGENERABLE or any(fnmatch.fnmatchcase(name, g) for g in _REGENERABLE_GLOBS)
 
 
+#: OS folder-metadata FILE names on :data:`_REGENERABLE` (plus ``._*``). Under
+#: these names only a regular file is the OS's (#4503): a directory or special
+#: file named ``.DS_Store`` is someone's data and stays held.
+_OS_METADATA_FILES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+def _own_tree_sheds(physical: str) -> bool:
+    """May removal of a ledger-proven OWN tree take this ignored entry? (#4493)
+
+    One rule for the plain and the ``--force`` routes. An ignored symlink:
+    yes, Git and ``rm`` remove the link, never its target. An OS metadata
+    name: only as a regular file. Any other name on :data:`_REGENERABLE`:
+    yes, unless it holds a nested repository. Everything else: no. Unreadable
+    is no (fail closed)."""
+    name = os.path.basename(physical)
+    try:
+        st = os.lstat(physical)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    if name in _OS_METADATA_FILES or name.startswith("._"):
+        return stat.S_ISREG(st.st_mode)
+    return _regenerable(name) and not _holds_git(physical)
+
+
 #: Bound on ONE process-cwd inventory (``lsof -a -u <uid> -d cwd -Fn -w``).
 #: Measured on this machine under ~25 concurrent sessions: QA round 1 of
 #: PR #3700, n=28, 1.6–5.54 s with 11/28 censored at the old 5 s bound; the
@@ -2455,6 +2481,35 @@ def _shared_dependencies_link(real: str, entry: str) -> bool:
     return False
 
 
+def _finder_metadata_file(real: str, entry: str) -> bool:
+    """An ignored ``.DS_Store`` that is a plain regular file inside the tree.
+
+    Why (operator request 2026-11-23, guard 0.112.5 field case): removing an
+    agent's own clean, merged worktree was held for "ignored entries the guard
+    cannot prove regenerable" when the only ignored entries were Finder
+    ``.DS_Store`` files. Finder rewrites them whenever a folder is viewed, so
+    that hold can never be satisfied on an indexed tree, and they carry only
+    view state (icon positions, sort order): losing them loses no user data.
+
+    Constraints: exact basename only, and only a regular file by ``lstat`` — a
+    directory, symlink or special file under that name is not Finder's and
+    stays held. This is deliberately NOT the broad regenerable basename set
+    (build/dist/.venv stay held, PR #4399), and AppleDouble ``._*`` files are
+    excluded because they can carry resource-fork data. Fails closed.
+    """
+    if os.path.basename(entry) != ".DS_Store":
+        return False
+    physical = os.path.join(real, entry)
+    try:
+        if not stat.S_ISREG(os.lstat(physical).st_mode):
+            return False
+        # A symlinked parent would put the file outside the tree being removed.
+        parent = os.path.realpath(os.path.dirname(physical))
+    except OSError:
+        return False
+    return parent == real or parent.startswith(real + os.sep)
+
+
 def _strict_cleanup_status(real: str) -> str | None:
     return _git_quiet(
         [
@@ -2494,8 +2549,8 @@ class IgnoredInventory:
     the verdict already needed — no extra filesystem walk, no file names.
     """
 
-    #: Ignored entries Git would delete that are not the one supported
-    #: regenerable witness (the shared ``node_modules`` link).
+    #: Ignored entries Git would delete that are not a supported witness (the
+    #: shared ``node_modules`` link or a regular-file Finder ``.DS_Store``).
     unverified_ignored: int
     #: Tracked or untracked status rows (the work plain Git itself refuses).
     changes: int
@@ -2536,19 +2591,11 @@ def plain_cleanup_ignored_inventory(
         entry = _cleanup_status_path(row)
         if entry is None:
             return None
-        if _shared_dependencies_link(real, entry):
+        # Any tree (#4503): the shared ``node_modules`` link and a regular-file
+        # Finder ``.DS_Store`` are verified witnesses for plain removal.
+        if _shared_dependencies_link(real, entry) or _finder_metadata_file(real, entry):
             continue
-        if own_regenerable and os.path.islink(os.path.join(real, entry)):
-            # Git removes the LINK, never what it points to (``rm`` and
-            # ``git worktree remove`` do not follow it), so an ignored
-            # symlink in an own tree loses at most a link string: the shared
-            # ``node_modules`` link with ANY target, a ``.venv`` link, etc.
-            continue
-        if (
-            own_regenerable
-            and _regenerable(os.path.basename(entry))
-            and not _holds_git(os.path.join(real, entry))
-        ):
+        if own_regenerable and _own_tree_sheds(os.path.join(real, entry)):
             continue
         unverified += 1
     return IgnoredInventory(unverified, changes)
@@ -2610,12 +2657,13 @@ def _interrupted_cleanup_state(
         # A name or package manifest cannot account for the bytes under an
         # ignored directory. The only supported witness is a shared dependency
         # link: Git removes the reproducible link entry, not its referent.
+        # For a tree this session did not make, Finder ``.DS_Store`` is NOT a
+        # witness on this ``--force`` route (#4503 R1/Q1 kept ``--force`` as on
+        # base for foreign trees). A ledger-proven OWN tree sheds the same
+        # regenerable names and links as plain removal (#4493 QA Q-R4-1).
         if _shared_dependencies_link(real, entry):
             continue
-        if own_regenerable and (
-            os.path.islink(physical)
-            or (_regenerable(os.path.basename(entry)) and not _holds_git(physical))
-        ):
+        if own_regenerable and _own_tree_sheds(physical):
             continue
         return "dirty"
     if _nested_repository(real, worktrees=True, linked_root=True) is not None:

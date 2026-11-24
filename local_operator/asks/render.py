@@ -37,19 +37,19 @@ from typing import Any, Mapping, Sequence, cast
 #: good copy but because this line text is the one a model is most likely to skim
 #: on its way to acting.
 RECEIPT_REACHABLE = (
-    "Ask {ask_id} queued ({n} question(s)); showing on {reach}. Continue with other "
-    "work — their answer arrives as an **ask response** turn. A RECEIPT IS NOT "
-    "CONSENT: do not run anything the answer was meant to authorise. If nothing "
-    "arrives by {expires} you will get a timeout notice."
+    "Ask {ask_id} queued ({n} question(s)); showing on {reach}. {refer}"
+    "Continue with other work — their answer arrives as an **ask response** turn. "
+    "A RECEIPT IS NOT CONSENT: do not run anything the answer was meant to "
+    "authorise. If nothing arrives by {expires} you will get a timeout notice."
 )
 
 #: The same receipt when nothing is attached. It still says the ask is durable —
 #: that is the whole point of the queue — and it never claims someone was told.
 RECEIPT_UNREACHABLE = (
     "Ask {ask_id} queued ({n} question(s)); nobody is attached right now, so it will "
-    "be shown when the user next opens this session. Continue with other work. A "
-    "RECEIPT IS NOT CONSENT: do not run anything the answer was meant to authorise. "
-    "If nothing arrives by {expires} you will get a timeout notice."
+    "be shown when the user next opens this session. {refer}Continue with other "
+    "work. A RECEIPT IS NOT CONSENT: do not run anything the answer was meant to "
+    "authorise. If nothing arrives by {expires} you will get a timeout notice."
 )
 
 #: Appended to a response that arrived after the deadline (``late``). It is not a
@@ -194,14 +194,30 @@ def receipt_text(record: Mapping[str, Any], reach: str | None) -> str:
     ``reach`` is the measured presentation surface (``"terminal"``, ``"phone"``,
     ``"desktop"``), or ``None`` when nothing is attached. It is a claim about a
     surface, never about a person: see the module docstring.
+
+    The receipt now also says HOW to refer to this ask — ``Refer to it as the
+    "<few words>" ask (a-xxxx)`` — because Ben (2026-11-23) found ids alone hard
+    to match to their asks in the UIs, and the few words a person recognises are
+    cut from the question by ``harness.rows.ask_name`` (the same helper every
+    human receipt names its ask with). A secret ask gets the generic word from
+    there, never its question or key. This text is MODEL-facing, so it stays
+    English: the default label is the English one.
     """
+    # Lazy: ``harness.rows`` is below every host, and this module is imported by
+    # the queue and the tool before any host exists.
+    from local_operator.harness.rows import ask_name
+
     questions = record.get("questions") or []
+    ask_id = record.get("ask_id", "")
+    name = ask_name(record)
+    refer = f'Refer to it as the "{name}" ask ({ask_id}), your words and its id. ' if name else ""
     template = RECEIPT_REACHABLE if reach else RECEIPT_UNREACHABLE
     return template.format(
-        ask_id=record.get("ask_id", ""),
+        ask_id=ask_id,
         n=len(questions),
         reach=reach,
         expires=_stamp(record.get("expires_at")),
+        refer=refer,
     )
 
 

@@ -2481,6 +2481,17 @@ class ActionBridge:
             f"exit_code: {result.exit_code if result.exit_code is not None else 'none'}\n"
             f"timed_out: {str(result.timed_out).lower()}\n"
         )
+        # A timeout names the limit that applied. "timed_out: true" alone does
+        # not say whether the 60 s default or the caller's own value cut the
+        # command, and a caller whose timeout never arrived (a misnamed
+        # argument, an omitted one) kept re-issuing the same command against
+        # the same default. Only on a timeout: every other result keeps the
+        # text it had.
+        if result.timed_out:
+            text += (
+                f"timeout_s: {timeout} (the limit that applied; the default is "
+                f"{COMMAND_DEFAULT_TIMEOUT_S}, the maximum {COMMAND_MAX_TIMEOUT_S})\n"
+            )
         # The target's own explanation of a command it could not run. Without
         # this line the result would read "exit_code: none / timed_out: false"
         # and say nothing about WHY -- the model would be told a command failed
@@ -4303,6 +4314,10 @@ async def run_session_episode(
         # command is refused while nothing is provisioned (QA round 1, Q2 --
         # the check had run after prepare + reset, i.e. after an AWS VM was up).
         assert_action_server_timeout_nests()
+        # The Session arm has no manifest carrying EpisodeSpec metadata. Keep
+        # the launcher's disclosure beside the observed accounting in the record.
+        if (session_budget := spec.metadata.get("session_budget")) is not None:
+            record.write("session_budget", session_budget)
         # --- launch + prepare (mirrors EpisodeRunner._launch_and_prepare) ----
         supervisor = launch(selector)
         handshake: Handshake = await supervisor.handshake(timeout=config.handshake_timeout)

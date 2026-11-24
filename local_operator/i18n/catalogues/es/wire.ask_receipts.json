@@ -1,0 +1,8 @@
+{
+  "wire.ask_receipts.name.secret_question": "pregunta secreta",
+  "wire.ask_receipts.response.answered": "Respondido, entregando",
+  "wire.ask_receipts.response.declined": "Rechazado, se avisó al agente",
+  "wire.ask_receipts.response.dismissed": "{surface, select, remote{Descartada por ti (teléfono)} tui{Descartada por ti (terminal)} chat{Descartada por ti (conversación)} desktop{Descartada por ti (app de escritorio)} other{Descartada por ti}}, {reason, select, answered_in_chat{respondida en la conversación} other{ya no hace falta}}",
+  "wire.ask_receipts.response.late": "Respondido tarde, se avisó al agente",
+  "wire.ask_receipts.timeout.timed_out": "Se agotó el tiempo tras {waited}, el agente continúa sin tu respuesta"
+}

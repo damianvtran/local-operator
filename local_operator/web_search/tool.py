@@ -318,7 +318,14 @@ def _tavily_oauth_delegate(
             {"query": query, "max_results": limit, "search_depth": "basic"},
             signal,
             on_update,
-            context,
+            # ``_tavily_mcp_payload`` parses this result's text (JSON first,
+            # then the official server's prose), so the MCP manager must hand
+            # it back exactly as the server wrote it: were a strict server
+            # schema ever to stop declaring one of the three keys above, the
+            # manager's dropped-argument note would trail the body, defeat the
+            # JSON parse and end up inside the last result's snippet. A
+            # per-call copy, so the caller's own context is left as it was.
+            context.model_copy(update={"result_parsed_by_harness": True}),
         )
         if result.is_error:
             raise RuntimeError(result.text or "Tavily OAuth MCP search failed")

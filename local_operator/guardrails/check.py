@@ -19,7 +19,11 @@ Order, first refusal wins:
    ``guardrails.critical_override`` (operator-authorised only, see
    ``harness/approval.loosening_is_authorised``) turns CRITICAL into HIGH —
    never into a pass.
-2. User rules (``<config_dir>/rules/*.md``): block / review / warn. They can
+2. Built-in guard-policy-write (every other tool): a call that edits the
+   guard's own rules, hooks or settings (``guardrails/policy.py`` names the
+   set) goes to a context-free judge that needs the operator's words; with none
+   in the session it is refused with no model call.
+3. User rules (``<config_dir>/rules/*.md``): block / review / warn. They can
    only add restriction.
 
 The refusal is returned as the tool RESULT (not stderr) so the model reads it
@@ -50,10 +54,12 @@ from local_operator.guardrails.classify import (
 )
 from local_operator.guardrails.judge import (
     GUARDRAILS_JUDGE_TIMEOUT_DEFAULT,
+    POLICY_WRITE_SYSTEM_PROMPT,
     JudgeBrief,
     JudgeCall,
     run_judge,
 )
+from local_operator.guardrails.policy import hit_facts, hits_text, policy_hits
 from local_operator.guardrails.rules import Rule, call_text, load_rules
 
 logger = logging.getLogger(__name__)
@@ -118,6 +124,9 @@ def _safe_text(text: str) -> str:
 #: so English by design and never localised.
 BLOCK_MARKER = "BLOCKED by guardrail"
 DANGEROUS_DELETE_RULE = "dangerous-delete"
+#: The built-in layer for edits to the guard's own rules, hooks and settings
+#: (``guardrails/policy.py`` names the set).
+POLICY_WRITE_RULE = "guard-policy-write"
 
 
 def guard_version() -> str:
@@ -452,6 +461,15 @@ def worktree_flagged(verdict: Verdict) -> bool:
 JUDGE_UNAVAILABLE = "judge unavailable"
 
 
+#: What a refused policy edit tells the agent it CAN do. Model-facing (English by
+#: design). The operator's typed request or an approved ``ask`` answer is what
+#: unlocks the judge; a narrower path is no remedy here.
+POLICY_WRITE_ASK = (
+    "Ask the user: this edits the guard's own rules, hooks or settings, and their typed "
+    "request or an approved `ask` answer settles it."
+)
+
+
 def review_text(
     rule: str,
     reason: str,
@@ -485,11 +503,12 @@ def review_text(
             f"explicit operator instruction naming {'these paths' if paths else 'this call'}."
             f"{clause}"
         )
-    tail = (
-        SUPPORTED_DELETE_PATHS
-        if rule == DANGEROUS_DELETE_RULE
-        else ("Ask the user, or target a narrower path.")
-    )
+    if rule == DANGEROUS_DELETE_RULE:
+        tail = SUPPORTED_DELETE_PATHS
+    elif rule == POLICY_WRITE_RULE:
+        tail = POLICY_WRITE_ASK
+    else:
+        tail = "Ask the user, or target a narrower path."
     return (
         f"{BLOCK_MARKER} {rule} (review): {reason}. Targets: {targets}. Nothing was run. "
         f"{tail} {REFUSAL_SCOPE}{clause}"
@@ -2504,6 +2523,84 @@ async def _dangerous_delete(
     )
 
 
+async def _policy_write_review(
+    tool_name: str,
+    args: Mapping[str, Any],
+    ctx: CallContext,
+    settings: GuardSettings,
+    judge: JudgeCall | None,
+) -> GuardOutcome | None:
+    """Judge a call that edits the guard's own policy; ``None`` when it touches none.
+
+    No trusted operator words in the session (a subagent, an agent-opened lane, a
+    wake) refuses WITHOUT a model call: nobody there can ask for the change, and
+    an approved ``ask`` answer enters ``operator_of`` and unlocks the judge. The
+    judge is the context-free one on purpose: it judges the content against the
+    operator's words, and a forked judge would read the session's history, injected
+    text included. Fail closed inside ``run_judge``; no citation is verified because
+    the operator rarely names the path ("add a rule that blocks force-push").
+    """
+    hits = policy_hits(
+        tool_name,
+        args,
+        cwd=ctx.cwd,
+        rules_dirs=settings.rules_dirs,
+        scratchpad=ctx.scratchpad,
+    )
+    if not hits:
+        return None
+    targets = hits_text(hits)
+    operator = operator_of(ctx)
+    if not operator.words:
+        _journal(POLICY_WRITE_RULE, "high", "block", 0.0, targets, "no operator words")
+        return GuardOutcome(
+            blocked=True,
+            text=review_text(
+                POLICY_WRITE_RULE,
+                "no trusted operator words in this session ask for this change",
+                targets,
+            ),
+            rule=POLICY_WRITE_RULE,
+            risk="high",
+        )
+    result = await run_judge(
+        JudgeBrief(
+            tool=tool_name,
+            call_text=call_text(tool_name, args),
+            flagged=f"edits the guard's own policy: {targets}",
+            question=(
+                "Did the operator ask for exactly this change to the guard's rules, "
+                "hooks or settings?"
+            ),
+            intent=ctx.intent,
+            operator_words=tuple((w.label, w.text) for w in operator.words),
+            excluded=", ".join(f"{n} {kind}" for kind, n in sorted(operator.excluded.items())),
+            target_facts=hit_facts(tool_name, args, hits),
+            system=POLICY_WRITE_SYSTEM_PROMPT,
+        ),
+        judge,
+        timeout=settings.judge_timeout_s,
+    )
+    _journal(
+        POLICY_WRITE_RULE, "high", "allow" if result.allowed else "block", result.latency_s, targets
+    )
+    if not result.allowed:
+        return GuardOutcome(
+            blocked=True,
+            text=review_text(
+                POLICY_WRITE_RULE, result.reason, targets, no_verdict=result.no_verdict
+            ),
+            rule=POLICY_WRITE_RULE,
+            risk="high",
+        )
+    outcome = GuardOutcome(blocked=False, rule=POLICY_WRITE_RULE, risk="high")
+    outcome.warnings.append(
+        f"Guardrail {POLICY_WRITE_RULE}: allowed — the operator asked for this change to "
+        f"the guard's own policy ({targets})."
+    )
+    return outcome
+
+
 async def check_tool_call(
     tool_name: str,
     args: Mapping[str, Any],
@@ -2609,6 +2706,14 @@ async def _check_tool_call(
                 rule=DANGEROUS_DELETE_RULE,
                 risk="critical",
             )
+    if tool_name != "bash":
+        # After the evidence refusal (CRITICAL wins) and before user rules. Not
+        # gated on ``settings.enabled``: like dangerous-delete it is built in.
+        policy = await _policy_write_review(tool_name, args, ctx, settings, judge)
+        if policy is not None:
+            if policy.blocked:
+                return policy
+            outcome = policy
     warnings: list[str] = []
     for rule in rules.user:
         if not rule.matches(tool_name, args):

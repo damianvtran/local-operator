@@ -53,12 +53,28 @@ def card_other() -> Msg:
     return Msg("relay.asks.card.other", {})
 
 
+def card_other_kept() -> Msg:
+    return Msg("relay.asks.card.other_kept", {})
+
+
 def card_placeholder_answer() -> Msg:
     return Msg("relay.asks.card.placeholder_answer", {})
 
 
 def card_placeholder_secret() -> Msg:
     return Msg("relay.asks.card.placeholder_secret", {})
+
+
+def card_progress_pick_or_type() -> Msg:
+    return Msg("relay.asks.card.progress_pick_or_type", {})
+
+
+def card_progress_tally(*, answered: str, total: str) -> Msg:
+    return Msg("relay.asks.card.progress_tally", {"answered": answered, "total": total})
+
+
+def card_progress_type() -> Msg:
+    return Msg("relay.asks.card.progress_type", {})
 
 
 def card_recommended() -> Msg:
@@ -279,6 +295,10 @@ def sheet_not_running_wait() -> Msg:
 
 def sheet_retry() -> Msg:
     return Msg("relay.asks.sheet.retry", {})
+
+
+def sheet_settled() -> Msg:
+    return Msg("relay.asks.sheet.settled", {})
 
 
 def sheet_title_lapsed(*, count: int | float) -> Msg:

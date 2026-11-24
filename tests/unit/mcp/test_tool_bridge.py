@@ -23,12 +23,17 @@ from local_operator.harness.types import ImageContent as HarnessImageContent
 from local_operator.harness.types import ToolContext
 from local_operator.mcp.tool_bridge import (
     INTENT_FIELD,
+    MAX_NOTE_DECLARED_NAMES,
+    MAX_NOTE_NAME_CHARS,
+    MAX_NOTE_REJECTED_NAMES,
     build_agent_tool,
     capture_producer_scope,
+    clean_outbound_args,
     create_mcp_tool_name,
     format_mcp_result,
     is_retriable_connection_error,
     normalize_input_schema,
+    outbound_args_note,
     prepare_outbound_args,
 )
 from local_operator.tools import spill
@@ -169,6 +174,95 @@ class TestPrepareOutboundArgs:
         args = {"a": 1, INTENT_FIELD: "why"}
         prepare_outbound_args(args, {"a": {}}, [], False)
         assert args == {"a": 1, INTENT_FIELD: "why"}
+
+
+class TestRejectedOutboundArgs:
+    """The channel beside the cleaned dict: which model-supplied keys a strict
+    schema made the bridge withhold, and the note a result carries for them.
+
+    The recorded case: a worker passed ``timeout`` to a tool declaring
+    ``timeout_s``; the key was dropped silently, the 60 s default applied, six
+    calls timed out and nothing told the model its argument never arrived.
+    """
+
+    STRICT = {"command": {"type": "string"}, "timeout_s": {"type": "integer"}}
+
+    def test_undeclared_model_key_under_strict_schema_is_reported(self) -> None:
+        out = clean_outbound_args(
+            {"command": "sleep 90", "timeout": 120}, self.STRICT, ["command"], False
+        )
+        assert out.cleaned == {"command": "sleep 90"}  # still dropped, as before
+        assert out.rejected == ("timeout",)
+        note = outbound_args_note(out.rejected, self.STRICT)
+        assert note is not None
+        assert "timeout" in note and "NOT sent" in note
+        # The declared names are what lets the model correct itself.
+        assert "Declared arguments: command, timeout_s." in note
+
+    def test_intent_field_drop_is_not_reported(self) -> None:
+        """The harness added ``i``; the model made no mistake."""
+        out = clean_outbound_args(
+            {"command": "ls", INTENT_FIELD: "Listing files"}, self.STRICT, ["command"], False
+        )
+        assert out.cleaned == {"command": "ls"}
+        assert out.rejected == ()
+        assert outbound_args_note(out.rejected, self.STRICT) is None
+
+    @pytest.mark.parametrize("placeholder", [None, "", {}])
+    def test_placeholder_drops_are_not_reported(self, placeholder: object) -> None:
+        """Neither a declared optional placeholder nor an undeclared one: an
+        empty value is a slot the model did not mean to fill."""
+        out = clean_outbound_args(
+            {"command": "ls", "timeout_s": placeholder, "timeout": placeholder},
+            self.STRICT,
+            ["command"],
+            False,
+        )
+        assert out.cleaned == {"command": "ls"}
+        assert out.rejected == ()
+
+    @pytest.mark.parametrize("additional", [None, True, {}])
+    def test_non_strict_schema_forwards_and_reports_nothing(self, additional: Any) -> None:
+        out = clean_outbound_args({"command": "ls", "timeout": 120}, self.STRICT, [], additional)
+        assert out.cleaned == {"command": "ls", "timeout": 120}
+        assert out.rejected == ()
+
+    def test_cleaned_matches_the_dict_entry_point(self) -> None:
+        """One pass feeds both: the dict callers get is the one reported on."""
+        args = {"command": "ls", "timeout": 5, "timeout_s": "", INTENT_FIELD: "why"}
+        assert clean_outbound_args(
+            args, self.STRICT, ["command"], False
+        ).cleaned == prepare_outbound_args(args, self.STRICT, ["command"], False)
+
+    def test_non_dict_input_reports_nothing(self) -> None:
+        out = clean_outbound_args(None, self.STRICT, [], False)
+        assert out.cleaned == {} and out.rejected == ()
+
+    def test_note_names_every_rejected_key_in_plural(self) -> None:
+        note = outbound_args_note(("timeout", "cwd"), self.STRICT)
+        assert note is not None
+        assert "arguments not declared by this tool were NOT sent: timeout, cwd." in note
+        assert "was sent without them" in note
+
+    def test_note_is_bounded(self) -> None:
+        """A server may declare dozens of properties and a model may invent
+        any number of keys: both lists are cut and the remainder counted."""
+        declared = {f"p{n}": {} for n in range(MAX_NOTE_DECLARED_NAMES + 5)}
+        rejected = tuple(f"x{n}" for n in range(MAX_NOTE_REJECTED_NAMES + 3)) + ("y" * 500,)
+        note = outbound_args_note(rejected, declared)
+        assert note is not None
+        assert "(+4 more)" in note  # rejected: 3 extra + the long one
+        assert "(+5 more)" in note  # declared
+        assert f"p{MAX_NOTE_DECLARED_NAMES}" not in note
+        assert "y" * (MAX_NOTE_NAME_CHARS + 1) not in note
+        assert len(note) < 1200
+
+    def test_long_name_is_cut(self) -> None:
+        note = outbound_args_note(("z" * 500,), {})
+        assert note is not None
+        assert "z" * MAX_NOTE_NAME_CHARS + "..." in note
+        assert "z" * (MAX_NOTE_NAME_CHARS + 1) not in note
+        assert "Declared arguments: (none)." in note
 
 
 class TestFormatMcpResult:

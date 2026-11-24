@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.ask_receipts",
+  "history_sha256": "47bec67ae7fd00fe75e952c05c69a780cbcf8290bb1967230ebeb33cc8d29497",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "wire.ask_receipts",
+      "source_sha256": "1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507",
+      "context_sha256": "48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa",
+      "target_sha256": "eff065acd174aae671e952af5e7cb56d2a0c0ebb298621ed18b63a821f137e7d",
+      "translator": {
+        "agent": "coding agent (translator role, this lane's earlier session); session id not supplied in the audit brief, not independently verified",
+        "model": "radient/auto (as stated in the brief; underlying served model not disclosed)",
+        "fallback": "none (as stated in the brief; not independently verified)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev task subagent, lane ask-id-harness); not the translator, did not author these keys",
+        "session": "c4e600431e1c",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 1,
+        "finding_detail": "0 blocker, 0 major, 1 minor (fixed), 1 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of every key of the namespace"
+      },
+      "status": "passed",
+      "note": "Independent audit 2026-11-23 of all 6 keys of wire.ask_receipts in hi against en source 1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507 and sidecar 48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa; target eff065acd174aae671e952af5e7cb56d2a0c0ebb298621ed18b63a821f137e7d recomputed from the file after the audit edits. Method: read docs/I18N.md, glossary, the locale style guide and the sidecar; compared with the shipped relay.ask / relay.asks sibling renderings of the same states; rendered every key with local_operator.i18n.messages.render for surface remote/tui/chat/desktop/other x reason answered_in_chat/moot/absent/unknown and waited 45s/3h/42m; checked placeholder and ICU select arm parity, NFC, no manual bidi controls, no English word inside a translated sentence, and cell widths against maxCells. Edits by the auditor (translator of record unchanged): timeout.timed_out: `{waited} बाद` -> `{waited} के बाद`. Pre-audit target sha256 afa78764f629b7052cd9be0b5c42b14639c01bd9546cd189de1b923129f65db3. Findings: [minor, fixed] timeout.timed_out used the colloquial bare `{waited} बाद`; standard written Hindi after a duration token is `के बाद`. Changed. | [nit, open/deferred] dismissed mixes उत्तर (answered/late/timeout) with जवाब (reason arm); both are in shipped hi vocabulary (relay.ask uses जवाब, relay.asks उत्तर). Left as is. Evidence is this auditor's own command output in the lane session, not an external report."
+    }
+  ]
+}

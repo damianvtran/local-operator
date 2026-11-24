@@ -1,0 +1,8 @@
+{
+  "wire.ask_receipts.name.secret_question": "секретный вопрос",
+  "wire.ask_receipts.response.answered": "Отвечено, доставляется",
+  "wire.ask_receipts.response.declined": "Отклонено, агент уведомлён",
+  "wire.ask_receipts.response.dismissed": "{surface, select, remote{Убрано вами (телефон)} tui{Убрано вами (терминал)} chat{Убрано вами (чат)} desktop{Убрано вами (настольное приложение)} other{Убрано вами}}, {reason, select, answered_in_chat{ответ дан в чате} other{больше не нужно}}",
+  "wire.ask_receipts.response.late": "Отвечено с опозданием, агент уведомлён",
+  "wire.ask_receipts.timeout.timed_out": "Время истекло через {waited}, агент продолжает без вашего ответа"
+}

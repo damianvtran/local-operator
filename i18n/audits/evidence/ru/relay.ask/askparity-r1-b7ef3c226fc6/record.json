@@ -1,0 +1,61 @@
+{
+ "schema": 1,
+ "audit_id": "askparity-r1-b7ef3c226fc6",
+ "audit_kind": "independent semantic audit of the PR #4495 English delta; unchanged keys carried by byte proof",
+ "locale": "ru",
+ "namespace": "relay.ask",
+ "status": "passed",
+ "verdict": "passed",
+ "pr": "damianvtran/local-operator#4495",
+ "audited_revision": "1697a373b",
+ "catalogue_state": "1697a373b bytes, unmodified by this audit",
+ "scope": "the 6 key(s) whose en or ru bytes differ between base 43dab8a03 and 1697a373b, read against the en source, en/relay.ask.context.json, i18n/glossary.md, i18n/style-guides/ru.md and local-operator-mobile origin/main 849c61cf src/i18n/catalogues/ru/mobile.asks.json; the other 5 key(s) are byte-identical in en and ru to base 43dab8a03, whose last ledger row was passed with source 2ead3ad3 = sha256(en at 43dab8a03); that row records no target hash; the base target file was last changed at or before the row's audit (es/fr/hi/ru/vi 38698adcc 2026-10-23, ur d8a1a183a 2026-10-24, zh-CN a1bcb8407 2026-10-24) and unchanged from then to base",
+ "keys_audited": [
+  "relay.ask.dismiss.answered_in_chat",
+  "relay.ask.dismiss.answered_in_chat_note",
+  "relay.ask.dismiss.cancel",
+  "relay.ask.dismiss.moot_note",
+  "relay.ask.dismiss.open",
+  "relay.ask.dismiss.title"
+ ],
+ "keys_total": 11,
+ "mechanical_checks": [
+  "key set and order parity with en",
+  "ICU argument names parity",
+  "plural categories exactly the CLDR set for the locale",
+  "NFC",
+  "no bidi/zero-width/control characters",
+  "no ASCII ellipsis",
+  "sentence case on the rewritten strings",
+  "em/en dash only where the en source or an unchanged sibling has it",
+  "ru plural case government per branch",
+  "byte parity with mobile.asks where the en string is identical",
+  "cell width via rich.cells.cell_len against context maxCells (advisory: progress line wraps, ask-card.tsx:1362)"
+ ],
+ "translator": {
+  "agent": "lopdev coder (PR #4495 commits bc826fc62..0e439855a); identity and model as stated in the lopdev manager's audit brief, not recorded in the commits",
+  "model": "anthropic/claude-sonnet-5-5",
+  "fallback": "unknown (not recorded in the commits)",
+  "date": "2026-11-23"
+ },
+ "auditor": {
+  "agent": "independent i18n auditor (lopdev reviewer role, session b7ef3c226fc6; not the translator)",
+  "session": "b7ef3c226fc6",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none observed in this session",
+  "date": "2026-11-23",
+  "result": "passed",
+  "findings": 1,
+  "unresolved_blocker_major": 0,
+  "minor": 1,
+  "nit": 0
+ },
+ "findings_note": "R1 MINOR deferred: answered_in_chat/_note use 'беседе' while relay.asks uses 'разговор' for the same conversation (card.gone, cold_wait, ended_wait, not_running_wait) in one sheet; kept for parity with mobile.asks.dismiss_reason.chat (byte-identical); pick one ru word for 'conversation' across both repos later.",
+ "report": "manager report, lopdev team task (not posted to GitHub)",
+ "source_sha256": "a79fa2b558172f58f329da3cbc30b795c4129cab1ecbb417767d105476662494",
+ "target_sha256": "8cec21d91353e07625c7dc0b5f4ee3896e92291f1b87487792bac81d908246eb",
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/relay.ask.json",
+  "target": "local_operator/i18n/catalogues/ru/relay.ask.json"
+ }
+}

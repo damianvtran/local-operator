@@ -40,6 +40,7 @@ from local_operator.guardrails.check import (
     check_tool_call,
 )
 from local_operator.guardrails.classify import Risk, classify_bash
+from local_operator.guardrails.preview import BUILTIN_PASS, preview_tool_call
 from local_operator.harness.message_types import (
     PEER_MESSAGE_MESSAGE_TYPE,
     TEAM_BRIDGE_MESSAGE_TYPE,
@@ -708,7 +709,7 @@ async def test_sibling_tree_still_holds_a_foreign_symlink(home: Path, mobile: Pa
     assert own is not None and own.unverified_ignored == 0
 
 
-@pytest.mark.parametrize("payload", ["ui-qa", "dotenv"])
+@pytest.mark.parametrize("payload", ["ui-qa", "dotenv", "ds-store-dir"])
 def test_exact_force_route_sheds_own_regenerable_payload(
     home: Path, mobile: Path, payload: str
 ) -> None:
@@ -742,8 +743,128 @@ def test_exact_force_route_sheds_own_regenerable_payload(
     link.symlink_to(elsewhere)
     if payload == "dotenv":
         (tree / ".env").write_text("TOKEN=hand-made\n")
+    elif payload == "ds-store-dir":
+        # #4503: a DIRECTORY named .DS_Store is not Finder's; it stays held.
+        (tree / ".DS_Store").unlink()
+        (tree / ".DS_Store").mkdir()
+        (tree / ".DS_Store" / "payload").write_text("not Finder's\n")
     real = os.path.realpath(tree)
     own = prov._interrupted_cleanup_state(real, None, own_regenerable=True)
     foreign = prov._interrupted_cleanup_state(real, None)
     assert foreign == "dirty"
     assert own == ("clean" if payload == "ui-qa" else "dirty")
+
+
+# --- Finder ``.DS_Store`` metadata (operator request 2026-11-23) -------------
+#
+# Field case, guard 0.112.5: ``git worktree remove`` of an own, clean, merged
+# worktree was held with "N ignored entries the guard cannot prove
+# regenerable" when the only ignored entries were Finder ``.DS_Store`` files
+# (root, docs/, i18n/, src/, src/i18n/). Finder rewrites them, so the hold could
+# never be satisfied. A regular-file ``.DS_Store`` is now a witness; anything
+# else under that name, and every other ignored entry, stays held.
+
+DS_TREE = "keyboard-bound"
+DS_DIRS = ("", "docs", "src", "src/i18n")
+
+
+def _ds_store_tree(home: Path, mobile: Path) -> Path:
+    """The witnessed tree plus ignored ``.DS_Store`` regular files, root and nested."""
+    wt = mobile / ".worktrees" / DS_TREE
+    with (mobile / ".git" / "info" / "exclude").open("a") as fh:
+        fh.write(".DS_Store\n.env\n")
+    for sub in DS_DIRS:
+        (wt / sub).mkdir(parents=True, exist_ok=True)
+        # Git does not list an empty directory; a tracked-looking sibling would
+        # be an untracked change, so give each directory only its .DS_Store.
+        (wt / sub / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    _record(home, wt)  # the root changed after recording (Linux ctime stamp)
+    return wt
+
+
+def _remove_preview(home: Path, wt: Path) -> Any:
+    ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=S)
+    return preview_tool_call("bash", {"command": f"git worktree remove {wt}"}, ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mobile", [True], indirect=True, ids=["witnessed"])
+async def test_finder_ds_store_alone_does_not_hold_own_plain_remove(
+    home: Path, mobile: Path
+) -> None:
+    wt = _ds_store_tree(home, mobile)
+    inventory = prov.plain_cleanup_ignored_inventory(str(wt))
+    assert inventory == prov.IgnoredInventory(unverified_ignored=0, changes=0)
+    v = classify_bash(
+        f"git worktree remove {wt}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S
+    )
+    assert v.risk is Risk.LOW and not v.targets[0].cleanup_hold, v.targets[0].reason
+    report = _remove_preview(home, wt)
+    assert report.builtin_effect == BUILTIN_PASS, report.render()
+    judge = _Judge("BLOCK: should not be asked")
+    outcome = await _check(home, f"git worktree remove {wt}", judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
+def _held_one(home: Path, wt: Path) -> None:
+    inventory = prov.plain_cleanup_ignored_inventory(str(wt))
+    assert inventory is not None and inventory.unverified_ignored == 1, inventory
+    v = classify_bash(
+        f"git worktree remove {wt}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S
+    )
+    assert v.risk is Risk.HIGH and v.targets[0].cleanup_hold, v.targets[0].reason
+    assert "1 ignored entry the guard cannot prove regenerable" in v.targets[0].reason
+
+
+@pytest.mark.parametrize("mobile", [True], indirect=True, ids=["witnessed"])
+@pytest.mark.parametrize("kind", ["directory", "symlink", "other-ignored"])
+def test_non_finder_ds_store_or_other_ignored_entry_still_holds(
+    home: Path, mobile: Path, kind: str
+) -> None:
+    wt = _ds_store_tree(home, mobile)
+    if kind == "directory":
+        (wt / "docs" / ".DS_Store").unlink()
+        (wt / "docs" / ".DS_Store").mkdir()
+        (wt / "docs" / ".DS_Store" / "payload").write_text("not Finder's")
+    elif kind == "symlink":
+        (wt / "docs" / ".DS_Store").unlink()
+        (wt / "docs" / ".DS_Store").symlink_to(mobile / "App.tsx")
+    else:
+        (wt / ".env").write_text("TOKEN=synthetic\n")
+    _record(home, wt)
+    if kind == "symlink":
+        # PR #4493: an OWN tree sheds any ignored link (Git removes the link,
+        # never its target), whatever its name; the target is untouched.
+        inventory = prov.plain_cleanup_ignored_inventory(str(wt), own_regenerable=True)
+        assert inventory is not None and inventory.unverified_ignored == 0, inventory
+        assert (mobile / "App.tsx").is_file()
+        return
+    _held_one(home, wt)
+    assert prov.worktree_state(str(wt), own=True) == "clean"
+
+
+@pytest.mark.parametrize("mobile", [True], indirect=True, ids=["witnessed"])
+@pytest.mark.parametrize(
+    "template", ["git worktree remove --force {wt}", "rm -rf {wt}"], ids=["force", "rm-rf"]
+)
+def test_force_and_rm_rf_ranking_ignores_the_finder_witness(
+    home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch, template: str
+) -> None:
+    """--force and rm -rf rank exactly as they did before the witness existed.
+
+    The tree's ONLY ignored entries are ``.DS_Store`` regular files: an extra
+    ignored ``.env`` here once masked a witness leak into the --force route
+    (PR #4503 round 1, R1/Q1), because it held the tree on its own.
+    """
+    wt = _ds_store_tree(home, mobile)
+    command = template.format(wt=wt)
+
+    def rank() -> tuple[Any, ...]:
+        prov._cwd_inventory_cache = None
+        v = classify_bash(command, cwd=str(home), env=_env(home), scratchpad=None, session_id=S)
+        return tuple((t.path, t.risk, t.reason, t.cleanup_hold) for t in v.targets) + (v.risk,)
+
+    with_witness = rank()
+    monkeypatch.setattr(prov, "_finder_metadata_file", lambda real, entry: False)
+    assert rank() == with_witness
