@@ -35163,20 +35163,49 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     return f"- {label} ({agent}) {_model_clause(model, owns, session_model)}: job {job_id}"
 
 
-def _selection_tag(source: str, note: str = "") -> str:
+#: Lead of the continuation line that carries a held-back tier/effort edit's
+#: reason (``AsyncJob.model_selection_note``). It is ALSO an entry of
+#: ``tool_card._HARNESS_ADVISORY_LEADS``, which is what makes the operator's
+#: tool card WRAP the line instead of cropping it to one row: as the tail of
+#: the ``[selection: …]`` line the 215-225-character reason lost everything
+#: past cell 27 (100 columns) or 77 (150 columns), remedy included (design
+#: review D1). Spelled with ``selection`` rather than a bare ``not applied:``
+#: because the card recognises leads by text alone -- a captured row carries no
+#: provenance -- and a bare ``not applied:`` is an opening a program's stdout
+#: could plausibly wear (the R2-2 narrowing rule on that list). Change it here
+#: and in that list together; the card's wrap test fails until both move.
+SELECTION_NOTE_LEAD = "  selection not applied: "
+
+
+def _selection_tag(source: str) -> str:
     """The `` [selection: <layer>]`` tag on a launch/resume receipt line.
 
-    ``note`` is why a live tier/effort edit was NOT applied on a bound session
-    (``AsyncJob.model_selection_note``: provider ceiling, mesh replica). It sits
-    INSIDE the tag because the tag is where the operator -- and the delegating
-    model -- read which layer chose the child's model; a held-back edit is part
-    of that answer, and a reason only in the log reads here as though the edit
-    took effect.
+    The tag is where the operator -- and the delegating model -- read which
+    layer chose the child's model. It stays short on purpose: why a live
+    edit was held back is a separate line, :func:`_selection_note_line`.
     """
     if not source:
         return ""
     # i18n: ignore model-facing tool output, English-only
-    return f" [selection: {source}; not applied: {note}]" if note else f" [selection: {source}]"
+    return f" [selection: {source}]"
+
+
+def _selection_note_line(source: str, note: str) -> str:
+    """Why a live tier/effort edit was NOT applied, on its own receipt line.
+
+    ``note`` is ``AsyncJob.model_selection_note`` (provider ceiling, mesh
+    replica). A held-back edit is part of the "which layer chose the model"
+    answer -- a reason only in the log reads here as though the edit took
+    effect -- so it rides the receipt directly under the ``[selection: …]``
+    line. It is its OWN line, led by :data:`SELECTION_NOTE_LEAD`, rather than
+    the tag's tail, because the tool card crops every captured line to one row
+    and only a recognised advisory lead wraps (design review D1). Emitted only
+    with a selection source, exactly as the note used to sit inside the tag.
+    """
+    if not source or not note:
+        return ""
+    # i18n: ignore model-facing tool output, English-only
+    return f"\n{SELECTION_NOTE_LEAD}{note}"
 
 
 def _not_applied_note(entry: Mapping[str, Any]) -> str:
@@ -35436,11 +35465,14 @@ async def execute_task(
         return _error(tool_call_id, "task", f"could not launch subagent(s): {detail}")
     lines = [
         _launched_line(entry, context)
-        + _selection_tag(
+        + _selection_tag(str(entry.get("model_selection_source") or ""))
+        + _not_applied_note(entry)
+        # After ``_not_applied_note`` so that same-line bracket stays on the
+        # launch line; the held-back reason is its own wrapped line below it.
+        + _selection_note_line(
             str(entry.get("model_selection_source") or ""),
             str(entry.get("model_selection_note") or ""),
         )
-        + _not_applied_note(entry)
         + (f"\n  {entry['brief_notice']}" if entry.get("brief_notice") else "")
         for entry in launched
     ]
@@ -37418,10 +37450,11 @@ async def _execute_hub_parent(
                         previous_models.get(from_id, ""),
                         session_model,
                     )
-                    + _selection_tag(source, note)
+                    + _selection_tag(source)
                     + _not_applied_note(
                         {"model_selection_source": source, "model_pick": params.model}
                     )
+                    + _selection_note_line(source, note)
                 )
             else:
                 lines.append(f"- {label} ({from_id}): failed \u2014 {error}")

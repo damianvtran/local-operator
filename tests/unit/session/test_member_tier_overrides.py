@@ -49,6 +49,23 @@ from local_operator.tools.agent_tool import AgentParams, write_profile
 from local_operator.tools.builtin import execute_hub, execute_task
 from local_operator.tools.team_tool import execute_team
 
+#: The held-back reason's line lead, spelled out rather than imported so a
+#: drift in ``builtin.SELECTION_NOTE_LEAD`` fails here instead of moving the
+#: expectation with it.
+_NOTE_LEAD = "  selection not applied: "
+
+
+def assert_held_back(receipt: str, source: str, reason: str) -> None:
+    """The receipt names ``source`` on the launch line and carries ``reason``,
+    WHOLE, as its own following line led by the advisory lead the tool card
+    wraps (design review D1): as the tag's tail it was cropped to one row."""
+    lines = receipt.splitlines()
+    note = f"{_NOTE_LEAD}{reason}"
+    assert note in lines, receipt
+    at = lines.index(note)
+    assert at > 0 and lines[at - 1].endswith(f"[selection: {source}]"), receipt
+
+
 #: The launching session's own model, with a real ladder so an inherited EFFORT
 #: is observable on the child's request rather than only a model label.
 BIRTH = ModelSpec(
@@ -742,7 +759,7 @@ async def test_split_a_tier_edit_that_crosses_providers_is_refused_with_a_reason
         assert f"live tier edit not applied: {reason}" in messages, messages
         # SURFACED, not only logged: the hub receipt the operator reads names
         # the refusal inside the selection tag (product-owner ruling, MAJOR 2).
-        assert f"[selection: team; not applied: {reason}]" in text, text
+        assert_held_back(text, "team", reason)
     finally:
         await session.dispose()
 
@@ -889,10 +906,10 @@ async def test_split_a_role_effort_tag_edit_that_crosses_providers_is_refused_wi
         text = await hub_resume(session, row.id)
         await wait_for(lambda: completed(session, resumed_id(session, text)))
         assert stream.model_for(RESUME_PROMPT) == LO
-        assert f"[selection: role; not applied: {reason}]" in text, text
+        assert_held_back(text, "role", reason)
 
         fresh = await _task_receipt(session, "worker", "fresh launch after the repin")
-        assert f"[selection: role; not applied: {reason}]" in fresh, fresh
+        assert_held_back(fresh, "role", reason)
     finally:
         await session.dispose()
 
@@ -955,7 +972,7 @@ async def test_split_a_resume_under_a_live_bound_parent_keeps_its_ceiling_after_
             "tag 'hi' routes to provider elsewhere, which this binding did not authorize; "
             "re-attach via /team to use it"
         )
-        assert f"[selection: role; not applied: {reason}]" in text, text
+        assert_held_back(text, "role", reason)
     finally:
         stream.release.set()
         await root.dispose()
@@ -1017,11 +1034,13 @@ async def test_split_a_resumed_team_child_on_a_bound_session_passes_the_ceiling(
         text = await hub_resume(root, row.id)
         await wait_for(lambda: completed(root, resumed_id(root, text)))
         assert stream.model_for(RESUME_PROMPT) == LO
-        assert (
-            "[selection: team; not applied: team 'org' slot 'pod': kept the attached tier "
+        assert_held_back(
+            text,
+            "team",
+            "team 'org' slot 'pod': kept the attached tier "
             "'lo' (provider test); the edited tier 'hi' routes to provider elsewhere, which "
-            "this binding did not authorize; re-attach via /team to use it]"
-        ) in text, text
+            "this binding did not authorize; re-attach via /team to use it",
+        )
     finally:
         await root.dispose()
 
@@ -1118,7 +1137,7 @@ async def test_restore_a_cross_provider_tier_edit_reopens_on_the_snapshot_tier(
             "edited tier 'hi' routes to provider elsewhere, which this binding did not "
             "authorize; re-attach via /team to use it"
         )
-        assert f"[selection: team; not applied: {reason}]" in receipt, receipt
+        assert_held_back(receipt, "team", reason)
         binding = json.loads((tmp_path / "sess" / LOCAL_BINDING_NAME).read_text("utf-8"))
         assert binding[KEY][MEMBER_TIERS_KEY]["teamwork"] == [["lo", None]], binding
     finally:
@@ -1281,7 +1300,7 @@ async def test_restore_a_cross_provider_role_effort_edit_reopens_on_the_attested
             "tag 'hi' routes to provider elsewhere, which this binding did not authorize; "
             "re-attach via /team to use it"
         )
-        assert f"[selection: role; not applied: {reason}]" in receipt, receipt
+        assert_held_back(receipt, "role", reason)
         binding = json.loads((tmp_path / "sess" / LOCAL_BINDING_NAME).read_text("utf-8"))
         assert binding[KEY][ROLE_EFFORTS_KEY]["worker"] == "lo", binding
     finally:
@@ -1341,6 +1360,139 @@ async def test_restore_a_role_authority_edit_still_refuses(tmp_path, monkeypatch
         assert reopened.attachment_restore_notice == refusal
     finally:
         await reopened.dispose()
+
+
+# The journals are a LOCAL file the restore trusts only as far as the record
+# lets it: a recorded value is put back on the live row, then the unchanged
+# ``_compare`` decides. These pin the refusals the code review (MINOR-2) probed
+# by hand, so the journal can never become a way to launder an edit.
+
+
+def _rewrite_binding(tmp_path: Path, mutate: Any) -> None:
+    """Edit the stored session's binding journal in place, as a tamperer would."""
+    path = tmp_path / "sess" / LOCAL_BINDING_NAME
+    binding = json.loads(path.read_text("utf-8"))
+    mutate(binding[KEY])
+    path.write_text(json.dumps(binding), "utf-8")
+
+
+_ROLE_REFUSAL = (
+    "teamwork: role definition 'worker' differs from the recorded one; re-attach via /team"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutate", "edited_effort"),
+    [
+        # A journal claiming a tag the record never attested: substituting it
+        # re-derives a digest the record does not carry, so the reopen refuses
+        # even though the role itself was never edited.
+        pytest.param(
+            lambda record: record[ROLE_EFFORTS_KEY].update(worker="med"), None, id="tampered"
+        ),
+        # A non-string tag is ignored (the live bytes are compared), so the
+        # edited role refuses exactly as it did before the journal existed.
+        pytest.param(
+            lambda record: record[ROLE_EFFORTS_KEY].update(worker=42), "med", id="malformed"
+        ),
+        # A binding written before the key existed gets no substitution: the
+        # pre-existing refusal for any edited role tag.
+        pytest.param(lambda record: record.pop(ROLE_EFFORTS_KEY), "med", id="old-binding-no-key"),
+    ],
+)
+async def test_restore_an_untrustworthy_role_effort_journal_refuses(
+    tmp_path, monkeypatch, mutate, edited_effort
+):
+    registry, agents, stream = await _bind_role_and_store(
+        tmp_path, monkeypatch, {"lo": LO, "med": MED}
+    )
+    _rewrite_binding(tmp_path, mutate)
+    if edited_effort is not None:
+        _edit_worker(agents, effort=edited_effort)
+    reopened = _role_session(tmp_path, registry, agents, stream)
+    try:
+        assert not reopened.active_team_name and reopened.active_team is None
+        assert reopened._unresolved_team == "teamwork"
+        assert reopened.attachment_restore_notice == _ROLE_REFUSAL
+    finally:
+        await reopened.dispose()
+
+
+@pytest.mark.asyncio
+async def test_restore_a_wrong_slot_count_tier_journal_refuses_an_edited_tier(
+    tmp_path, monkeypatch
+):
+    """A recorded pair list whose length is not the row's member count is
+    malformed: the row is compared as read, so a same-provider tier edit that a
+    well-formed journal would admit refuses instead."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "med": MED})
+    registry = TeamRegistry(config)
+    team = make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+    stream = RecordingStream()
+    await _bind_and_store(tmp_path, registry, stream)
+    _rewrite_binding(
+        tmp_path, lambda record: record[MEMBER_TIERS_KEY].update(teamwork=[["lo", None]] * 2)
+    )
+
+    registry.update_team(team.id, TeamEditFields(members=[TeamMember(role="worker", tier="med")]))
+    reopened = _reopen(tmp_path, registry, stream)
+    try:
+        assert not reopened.active_team_name and reopened.active_team is None
+        assert reopened._unresolved_team == "teamwork"
+        notice = reopened.attachment_restore_notice or ""
+        assert "'teamwork'" in notice and notice.endswith("re-attach via /team"), notice
+    finally:
+        await reopened.dispose()
+
+
+@pytest.mark.asyncio
+async def test_restore_a_same_provider_manager_effort_edit_reopens(tmp_path, monkeypatch):
+    """The manager branch of ``_with_recorded_efforts``: the team's MANAGER role
+    is journalled and substituted like any member role, so a same-provider tag
+    edit on it reopens, and a tampered manager tag refuses."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "med": MED})
+    agents = AgentRegistry(config)
+    _edit_worker(agents, creating=True)
+    pin_role(agents, "lead", "lo")
+    registry = TeamRegistry(config)
+    make_team(registry, "teamwork", [TeamMember(role="worker")], manager="lead")
+    stream = RecordingStream()
+    session = _role_session(tmp_path, registry, agents, stream)
+    try:
+        session.attach_team(registry.get_team_by_name("teamwork"))
+    finally:
+        await session.dispose()
+    binding = json.loads((tmp_path / "sess" / LOCAL_BINDING_NAME).read_text("utf-8"))
+    assert binding[KEY][ROLE_EFFORTS_KEY]["lead"] == "lo", binding
+
+    write_profile(
+        agents,
+        AgentParams(op="update", name="lead", effort="med"),
+        creating=False,
+        scope="global",
+    )
+    reopened = _role_session(tmp_path, registry, agents, stream)
+    try:
+        assert not reopened.attachment_restore_notice, reopened.attachment_restore_notice
+        assert reopened.active_team_name == "teamwork" and not reopened._unresolved_team
+    finally:
+        await reopened.dispose()
+
+    # The reopen re-journals the ATTESTED tag; claiming another one refuses.
+    _rewrite_binding(tmp_path, lambda record: record[ROLE_EFFORTS_KEY].update(lead="hi"))
+    tampered = _role_session(tmp_path, registry, agents, stream)
+    try:
+        assert not tampered.active_team_name and tampered._unresolved_team == "teamwork"
+        assert "role definition 'lead' differs from the recorded one" in (
+            tampered.attachment_restore_notice or ""
+        ), tampered.attachment_restore_notice
+    finally:
+        await tampered.dispose()
 
 
 @pytest.mark.asyncio
