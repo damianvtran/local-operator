@@ -906,3 +906,145 @@ def test_the_orphan_rule_needs_an_id_before_the_no_break_space():
     assert without_marks("● ok", start=0, end=-1, previous_row="word\u00a0") == "● ok"
     # The decorator's own shape still goes.
     assert without_marks("○ tail", start=0, end=-1, previous_row="x a-745e\u00a0") == " tail"
+
+
+# -- round 4 remediation -----------------------------------------------------
+
+
+def test_every_link_shape_leaves_its_text_alone():
+    """Round 4: the regex stopped at the first ``]``; the scanner balances.
+
+    A nested or escaped bracket put a cited id inside link text that the
+    pattern read as OUTSIDE the construct, so the id was decorated and a click
+    ran the ask action and the URL opener on one cell. Every shape a reader sees
+    as a link is covered, and an id between two links is still a citation.
+    """
+    states = {"a-745e": "open"}
+    plain = [
+        "[nested [a-745e]](https://x.test)",
+        "[abc \\] a-745e](https://x.test)",
+        "[a](https://x.test)[a-745e](https://y.test)",
+        "| [a-745e](https://x.test) | 0.9 |",
+        '[a-745e](https://x.test "the title")',
+        "![a-745e](p.png)",
+        "<https://x.test/a-745e>",
+        "[a-745e][1] text",
+        "[a-745e]: https://x.test",
+        "[a-745e](https://x.test/a_(b))",
+    ]
+    for text in plain:
+        assert decorate_source(text, states) == text, text
+    # ...and the same id outside the construct is still decorated.
+    assert decorate_source("[a-745e](https://x.test) and a-745e here", states) == (
+        f"[a-745e](https://x.test) and a-745e{NBSP}● here"
+    )
+    # A fence is not a link carrier either way.
+    assert decorate_source("```\n[a-745e](https://x.test)\n```\nand a-745e", states) == (
+        f"```\n[a-745e](https://x.test)\n```\nand a-745e{NBSP}●"
+    )
+
+
+async def test_a_nested_or_escaped_link_opens_only_the_url(enabled):
+    """The dispatcher half of round 4: one click, one action."""
+    from local_operator.tui.widgets.ask_queue import AskQueueList
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    session = _AskSession()
+    for text in (
+        "see [nested [a-745e]](https://x.test/doc) here",
+        "see [abc \\] a-745e](https://x.test/doc) here",
+    ):
+        app = _app(session)
+        opened: list[str] = []
+        app.open_transcript_link = lambda url: opened.append(url)  # type: ignore[method-assign]
+        async with app.run_test(size=(120, 40)) as pilot:
+            await await_booted(app, pilot)
+            app._sync_ask_surface(ask_rows([_row("a-745e", "Ship it?"), _row("a-e53b", "x")]))
+            await pilot.pause()
+            prose = AssistantBlock()
+            prose.update_text(text)
+            app._append_block(prose)
+            await pilot.pause()
+            rendered = prose._render()
+            assert isinstance(rendered, Content)
+            plain = rendered.plain.split("\n")[0]
+            at = plain.index("a-745e")
+            cell = app.screen.get_style_at(prose.region.x + at, prose.region.y)
+            assert "@click" not in (cell.meta or {}), (text, cell)
+            assert NBSP not in plain, (text, plain)
+            await pilot.click(prose, offset=(at, 0))
+            await pilot.pause()
+            assert opened == ["https://x.test/doc"], (text, opened)
+            assert len(app.query(AskQueueList)) == 0, text
+
+
+async def test_copy_and_select_all_on_a_block_with_links_are_unchanged(enabled):
+    """Masking changed what prose PAINTS, not what ``/copy`` or a drag reads."""
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(ask_rows([_row("a-745e", "Ship it?"), _row("a-e53b", "x")]))
+        await pilot.pause()
+        source = "see [a-745e](https://x.test/doc) and also a-745e outside"
+        prose = AssistantBlock()
+        prose.update_text(source)
+        app._append_block(prose)
+        await pilot.pause()
+        # The message source is what /copy reads, and it is byte-identical.
+        assert prose.text() == source
+        whole = prose.get_selection(Selection(None, None))
+        assert whole is not None
+        assert NBSP not in whole[0] and "○" not in whole[0] and "●" not in whole[0]
+        assert "a-745e" in whole[0] and "https://x.test/doc" in whole[0]
+
+
+async def test_the_qa_round_4_trimmed_fold_copies_no_mark(enabled):
+    """QA round 4: the same shape through the real fold and selection path.
+
+    Text from the QA repro, block refit to 16 cells: row 0 ends ``a-745e`` with
+    its space trimmed away, row 1 opens with the mark. Selecting row 1's first
+    four cells used to copy ``○ a``; it now copies what the reader highlighted.
+    """
+    from textual.geometry import Offset
+
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a-745e", "Ship it?", status="withdrawn"), _row("a-e53b", "x")])
+        )
+        await pilot.pause()
+        prose = AssistantBlock()
+        prose.update_text("word word a-745e a-e53b word")
+        app._append_block(prose)
+        await pilot.pause()
+        prose.refit_width(16)
+        rendered = prose._render()
+        assert isinstance(rendered, Content)
+        rows = rendered.plain.split("\n")
+        assert rows[0].rstrip() == "word word a-745e", rows
+        assert rows[1][:1] == "○", rows
+        got = prose.get_selection(Selection.from_offsets(Offset(0, 1), Offset(4, 1)))
+        assert got is not None
+        assert "○" not in got[0] and NBSP not in got[0], got
+
+
+def test_a_trimmed_no_break_space_still_orphans_its_mark():
+    """Round 4: Rich TRIMS the pair's space at a fold, so the tail may lack it.
+
+    At 16 cells the real fold is ``word word a-745e`` / ``○ a-e53b● word`` —
+    an id, no space, the mark alone at column 0.
+    """
+    from local_operator.tui.ask_ink import without_marks
+
+    assert without_marks("○ a-e53b", start=0, end=-1, previous_row="word a-745e") == " a-e53b"
+    # ...and prose that merely ends in an id keeps its mark.
+    assert without_marks("○ ok", start=0, end=-1, previous_row="see a-745e now") == "○ ok"
+    # A word that only RUNS INTO an id is not the decorator's tail.
+    assert without_marks("○ ok", start=0, end=-1, previous_row="xa-745e") == "○ ok"

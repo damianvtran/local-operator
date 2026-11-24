@@ -51,7 +51,7 @@ from rich.text import Text
 
 from local_operator.asks import store
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.link_markup import _AUTOLINK_RE, _MD_LINK_RE, _fenced_spans
+from local_operator.tui.link_markup import _REF_DEF_RE, _fenced_spans
 from local_operator.tui.link_targets import _URL_START_RE, _body_end
 
 __all__ = [
@@ -102,10 +102,20 @@ NBSP = "\u00a0"
 #: the id sits inside.
 _TICKS_RE = re.compile(r"`+")
 
-#: The tail an ORPHAN mark must follow: the id and the no-break space at the
-#: end of the previous row, which is the only shape the decorator can leave
-#: behind when a fold splits a pair.
-_ORPHAN_TAIL_RE = re.compile(rf"{ASK_ID_PATTERN}{re.escape(NBSP)}$")
+#: The tail an ORPHAN mark must follow: an ask id at the end of the previous
+#: row, with the no-break space optional.
+#:
+#: The space is optional because Rich TRIMS it at a fold: at 16 cells
+#: ``word word a-745e`` / ``○ a-e53b● word`` is a real fold, with the pair's
+#: space gone and the mark alone at column 0. That shape is still the
+#: decorator's — nothing else puts a state glyph at a row start after an id.
+#:
+#: The ID must also sit at a real token boundary (the same left context
+#: :data:`_ASK_TOKEN_RE` requires). A rule keyed on "ends with an id-shaped
+#: word" would strip a mark after prose that merely runs into one —
+#: ``xa-745e`` is a word, not an id — and only the token the decorator could
+#: have resolved is allowed to orphan a mark.
+_ORPHAN_TAIL_RE = re.compile(rf"(?<![\w/.@-]){ASK_ID_PATTERN}{re.escape(NBSP)}?$")
 
 #: ``id`` + no-break space + mark, as it appears in the flattened rows.
 _MARKED_RE = re.compile(rf"({ASK_ID_PATTERN}){NBSP}([●✓○])")
@@ -153,27 +163,153 @@ def mark_for_status(status: str) -> str:
     return MARKS[state_for_status(status)]
 
 
-#: ``[text][ref]`` — a reference-style link's USE. Not in ``link_markup``
-#: because the bare-URL pass never needs it: a reference use carries no URL of
-#: its own, so there is nothing there to wrap. Here it decides whether a cited
-#: id sits inside link text, which is the one thing this surface must leave
-#: alone (review N-4).
-_REF_USE_RE = re.compile(r"\[[^\]]*\]\[[^\]]*\]")
+def _scan_label(text: str, open_at: int) -> int | None:
+    """Index just past the ``]`` that closes the label opened at ``open_at``.
+
+    BRACKET-BALANCED and escape-aware, which the regex it replaces was not
+    (review round 4): ``[nested [a-745e]](url)`` and ``[abc \\] a-745e](url)``
+    both put a cited id inside link text, and a pattern stopping at the first
+    ``]`` read the first as ``[nested [a-745e]`` — a construct that ends before
+    the id is even closed — and decorated it, so a click ran the ask action AND
+    the URL opener on the same cell.
+
+    A blank line ends the search: a label may hold at most one newline in
+    CommonMark, and no construct may reach across a paragraph break.
+    """
+    depth = 1
+    index = open_at + 1
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "\n" and text.startswith("\n\n", index):
+            return None
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
+def _scan_destination(text: str, open_at: int) -> int | None:
+    """Index just past the ``)`` closing the destination opened at ``open_at``.
+
+    Parentheses are balanced (CommonMark's one-level allowance, and deeper
+    balance costs nothing here) and backslash escapes are skipped; a blank line
+    ends it, for the same reason as :func:`_scan_label`.
+    """
+    depth = 1
+    index = open_at + 1
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "\n" and text.startswith("\n\n", index):
+            return None
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
+def _scan_autolink(text: str, open_at: int) -> int | None:
+    """Index just past ``>`` when ``<…>`` is an autolink, else ``None``.
+
+    CommonMark's shape: no whitespace and no ``<`` inside, and either a scheme
+    (``<https://x>``) or an address (``<me@x.test>``).
+    """
+    index = open_at + 1
+    length = len(text)
+    while index < length and text[index] not in "<>\n":
+        index += 1
+    if index >= length or text[index] != ">":
+        return None
+    body = text[open_at + 1 : index]
+    if not body or " " in body or "\t" in body:
+        return None
+    if ":" not in body and "@" not in body:
+        return None
+    return index + 1
+
+
+def _link_constructs(text: str) -> list[tuple[int, int]]:
+    """Every Markdown link/autolink range that starts outside a fence.
+
+    ONE left-to-right pass (review round 4's perf constraint): each construct
+    consumes the text it covers, and a ``[`` that never closes costs one
+    character of advance, so the walk is linear in the text. This is what the
+    masking needs to be Markdown-aware rather than pattern-shaped — the shapes
+    that matter are the ones a *reader* sees as a link, and those are the ones
+    a regex over ``[^]]*`` cannot see.
+    """
+    spans: list[tuple[int, int]] = []
+    fences = _fenced_spans(text)
+
+    def in_fence(position: int) -> bool:
+        return any(low <= position < high for low, high in fences)
+
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "<":
+            end = _scan_autolink(text, index)
+            if end is not None and not in_fence(index):
+                spans.append((index, end))
+                index = end
+                continue
+            index += 1
+            continue
+        if char == "[" and not in_fence(index):
+            label_end = _scan_label(text, index)
+            if label_end is not None and label_end < length:
+                if text[label_end] == "(":
+                    end = _scan_destination(text, label_end)
+                    if end is not None:
+                        spans.append((index, end))
+                        index = end
+                        continue
+                elif text[label_end] == "[":
+                    ref_end = _scan_label(text, label_end)
+                    if ref_end is not None:
+                        spans.append((index, ref_end))
+                        index = ref_end
+                        continue
+        index += 1
+    for match in _REF_DEF_RE.finditer(text):
+        if not in_fence(match.start()):
+            spans.append((match.start(), match.end()))
+    return spans
 
 
 def _masked_spans(text: str) -> list[tuple[int, int]]:
     """Ranges a cited id must NOT be decorated inside: fences, links and URLs.
 
     LINK TEXT IS MASKED, not just its target (review N-4). An id inside
-    ``[a-745e](url)`` used to be decorated, which gave its cells BOTH a
-    ``@click`` action and the link style — and a real click dispatches
-    ``Widget._on_click`` (the action) and ``TranscriptBlock.on_click`` (the
-    URL) on the same widget, so one click both navigated and jumped the TUI to
-    the ask. The rule is the module docstring's: links stay plain.
+    ``[a-745e](url)`` was given BOTH a ``@click`` action and the link style, and
+    a real click dispatches ``Widget._on_click`` (the action) and
+    ``TranscriptBlock.on_click`` (the URL) on the same widget, so one click both
+    navigated and jumped the TUI to the ask. The rule is the module docstring's:
+    links stay plain. Links are read with :func:`_link_constructs`, a
+    Markdown-aware scanner, because the shapes that matter (nested brackets,
+    escapes, reference definitions) are exactly the ones a regex mis-reads.
     """
     spans = list(_fenced_spans(text))
-    for pattern in (_MD_LINK_RE, _REF_USE_RE, _AUTOLINK_RE):
-        spans.extend(match.span() for match in pattern.finditer(text))
+    spans.extend(_link_constructs(text))
     scan = 0
     while True:
         match = _URL_START_RE.search(text, scan)
