@@ -63,6 +63,7 @@ def high_socketpair() -> Iterator[tuple[socket.socket, socket.socket]]:
     low, peer = socket.socketpair()
     try:
         high = socket.socket(fileno=_dup_high(low.fileno()))
+        assert high.fileno() >= _HIGH_FD
         low.close()
         try:
             yield high, peer
@@ -188,3 +189,59 @@ def test_high_fd_dup_leaves_a_live_descriptor_at_the_target_intact() -> None:
                 os.close(writer)
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_host_theme_high_fd_tty_uses_poll_not_kqueue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Above the ceiling the probe waits with ``poll``, on a real character device.
+
+    ``selectors.DefaultSelector`` is kqueue on macOS, which #4532's review saw
+    refuse a ``/dev/tty`` registration; ``poll`` is what ``auth_cli`` uses too.
+    A pty slave stands in for ``/dev/tty`` (both are character devices).
+    """
+    pty = pytest.importorskip("pty")
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    needed = _HIGH_FD + 16
+    if hard != resource.RLIM_INFINITY and hard < needed:
+        pytest.skip(f"RLIMIT_NOFILE hard limit {hard} cannot reach fd {_HIGH_FD}")
+    if soft != resource.RLIM_INFINITY and soft < needed:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
+    master, slave = pty.openpty()
+    high = _dup_high(slave)
+    polls: list[int] = []
+    real_poll = select.poll
+
+    def recording_poll() -> object:
+        polls.append(1)
+        return real_poll()
+
+    monkeypatch.setattr(host_theme.select, "poll", recording_poll)
+    monkeypatch.setattr(
+        "selectors.DefaultSelector",
+        lambda: pytest.fail("high-fd tty wait must not build a kqueue/DefaultSelector"),
+    )
+    try:
+        assert not host_theme._readable_within(high, 0)
+        os.write(master, b"x\n")  # canonical mode: a line is what makes it readable
+        assert host_theme._readable_within(high, 5)
+        assert polls
+    finally:
+        for fd in (high, slave, master):
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_host_theme_low_fd_oserror_still_reaches_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A select() failure on the low path propagates, so ``probe`` returns b"".
+
+    Before the high-fd split, ``probe``'s own ``except OSError`` turned it into
+    ``b""``; swallowing it inside the helper would instead return whatever
+    partial reply had been read so far. (A stubbed failure rather than a closed
+    fd: a closed number can be reused by another thread before the call.)
+    """
+
+    def failing_select(*_args: object) -> object:
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr(host_theme.select, "select", failing_select)
+    with pytest.raises(OSError):
+        host_theme._readable_within(3, 0)

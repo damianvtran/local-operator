@@ -21,7 +21,9 @@ AuthStore())`` in ``tunnels/`` — must still close theirs.
 from __future__ import annotations
 
 import asyncio
+import gc
 import sqlite3
+import sys
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -36,6 +38,7 @@ from local_operator.providers.auth_store import (
     close_shared_auth_stores,
     shared_auth_store,
 )
+from tests.fd_probe import open_fds_on
 
 #: Provider env vars the cascade would otherwise resolve from the developer's
 #: shell. The suite must not read a real key while asserting on the store.
@@ -330,6 +333,90 @@ def test_the_map_is_bounded_and_never_closes_a_held_store(
     # The held store survived eviction and is still live.
     assert not held.closed
     assert held.list_credentials() == []
+
+
+@pytest.fixture()
+def no_cyclic_gc() -> Iterator[None]:
+    """Disable the cyclic collector so only REFCOUNT release is measured.
+
+    A dropped ``sqlite3.Connection`` sits in a reference cycle with its own
+    statement cache, so with the collector on a leak would hide behind
+    whenever generation 2 happened to run. These tests pin that release is
+    deterministic, which is the property a long-lived process relies on.
+    """
+    was_enabled = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+def test_a_dropped_store_releases_its_descriptors_without_gc(
+    root: Path, tmp_path: Path, no_cyclic_gc: None
+) -> None:
+    """``AuthStore(...)`` dropped without ``close()`` frees auth.db + WAL + SHM.
+
+    Regression: before the wrapper's finalizer, each dropped store kept three
+    descriptors until a cyclic collection; test_builtin_tools.py alone peaked
+    at 466 open fds from them.
+    """
+    db = tmp_path / "dropped" / "auth.db"
+    db.parent.mkdir()
+    # Counted per FILE, not per process: other threads in a worker open and
+    # close unrelated fds concurrently (see tests/fd_probe.py, CI run
+    # 45381339350), so only descriptors on this database are evidence.
+    for _ in range(20):
+        AuthStore(db, config_dir=db.parent).list_credentials()
+    assert open_fds_on([db]) == 0
+
+
+def test_evicted_shared_stores_release_their_descriptors_without_gc(
+    root: Path, tmp_path: Path, no_cyclic_gc: None
+) -> None:
+    """Eviction drops the map's reference; that must actually free the fds.
+
+    ``shared_auth_store`` documents that evicted descriptors "return by
+    refcount once the last holder lets go"; a per-test ``tmp_path`` root is
+    exactly the many-roots shape that evicts. Open fds may grow by at most the
+    map's bound (three per resident root), never by the number of roots seen.
+    """
+    databases = []
+    for index in range(auth_store_module._SHARED_STORES_MAX * 5):
+        extra = tmp_path / f"evict-{index}"
+        extra.mkdir()
+        databases.append(extra / "auth.db")
+        shared_auth_store(databases[-1], config_dir=extra).list_credentials()
+    # Per-file count (tests/fd_probe.py): a process-wide one drifts with other
+    # threads' descriptors and made this bound a flake.
+    assert open_fds_on(databases) <= auth_store_module._SHARED_STORES_MAX * 3
+
+
+def test_close_after_release_is_still_safe(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit close, then release, runs the finalizer once and quietly.
+
+    An exception in a weakref callback never reaches the test -- CPython routes
+    it to ``sys.unraisablehook`` -- so "did not raise" proves nothing. Instead:
+    capture that hook, hold the wrapper's finalizer, and assert it actually ran
+    on release (``alive`` turns False) with nothing reported. The finalizer must
+    also be release-only, never an interpreter-exit closer (see the comment in
+    ``_SerializedConnection.__init__``).
+    """
+    unraisable: list[Any] = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    finalizer = store._conn._finalizer
+    assert finalizer.alive
+    assert finalizer.atexit is False
+    store.close()
+    del store
+    gc.collect()
+    assert not finalizer.alive
+    assert unraisable == []
 
 
 def test_a_caller_that_owns_its_connection_still_closes_it(
