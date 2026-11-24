@@ -220,7 +220,11 @@ async def test_timed_out_ask_does_not_hold_a_lossless_remnant(
     from types import SimpleNamespace
 
     from local_operator.guardrails import provenance as prov
-    from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
+    from local_operator.guardrails.check import (
+        CallContext,
+        GuardSettings,
+        check_tool_call,
+    )
 
     gone = _committed_tree(repo, f"asked-{lossless}")
     if not lossless:
