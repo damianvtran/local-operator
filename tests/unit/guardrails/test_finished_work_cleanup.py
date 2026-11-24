@@ -1797,13 +1797,20 @@ def _cache_payload(wt: Path, payload: str) -> None:
     if payload == "pycache-link":
         (pyc / "evil.pyc").symlink_to(wt / "a.txt")
     tagged = wt / ".pytest_cache"
-    if payload in {"pytest-cache", "bad-tag", "tagged-repo"}:
+    if payload in {"pytest-cache", "bad-tag", "tagged-repo", "tagged-venv", "tagged-unreadable"}:
         (tagged / "v" / "cache").mkdir(parents=True)
         (tagged / "v" / "cache" / "nodeids").write_text("[]\n")
         sig = b"Signature: not-a-cache" if payload == "bad-tag" else _CACHEDIR_SIG
         (tagged / "CACHEDIR.TAG").write_bytes(sig + b"\n# pytest\n")
     if payload == "tagged-repo":
         subprocess.run(["git", "init", "-q", str(tagged / "v")], check=True)
+    if payload == "tagged-venv":
+        # uv tags every venv it creates (#4528 R1-M1): still held.
+        (tagged / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    if payload == "tagged-unreadable":
+        # A repository behind an unlistable directory (#4528 R1-B1): held.
+        subprocess.run(["git", "init", "-q", str(tagged / "v" / "hidden")], check=True)
+        (tagged / "v" / "hidden").chmod(0)
 
 
 @pytest.mark.parametrize(
@@ -1815,10 +1822,12 @@ def _cache_payload(wt: Path, payload: str) -> None:
         ("pycache-link", False),
         ("bad-tag", False),
         ("tagged-repo", False),
+        ("tagged-venv", False),
+        ("tagged-unreadable", False),
     ],
 )
 def test_content_verified_caches_shed_from_a_foreign_merged_tree(
-    home: Path, repo: Path, payload: str, shed: bool
+    home: Path, repo: Path, payload: str, shed: bool, request: pytest.FixtureRequest
 ) -> None:
     """Field case 2026-11-24 (disk recovery, guard 0.112.7): another session's
     merged, clean worktree was held for ``__pycache__``/``.pytest_cache`` alone.
@@ -1836,6 +1845,11 @@ def test_content_verified_caches_shed_from_a_foreign_merged_tree(
         exclude.write("__pycache__/\n.pytest_cache/\n")
     _cache_payload(wt, payload)
     _record(home, wt, creator=DONE)
+    if payload == "tagged-unreadable":
+        hidden = wt / ".pytest_cache" / "v" / "hidden"
+        request.addfinalizer(lambda: hidden.chmod(0o755))
+        if os.access(hidden, os.R_OK):  # root ignores modes: nothing to prove
+            pytest.skip("directory modes are not enforced for this user")
     inventory = prov.plain_cleanup_ignored_inventory(str(wt))
     assert inventory is not None
     assert (inventory.unverified_ignored == 0) is shed, inventory

@@ -2558,12 +2558,39 @@ def _verified_cache_dir(real: str, entry: str) -> bool:
         tag = os.path.join(physical, "CACHEDIR.TAG")
         if not stat.S_ISREG(os.lstat(tag).st_mode):
             return False
-        with open(tag, "rb") as fh:
-            if fh.read(len(_CACHEDIR_TAG_SIGNATURE)) != _CACHEDIR_TAG_SIGNATURE:
+        # Non-blocking open plus fstat: a tag swapped for a FIFO after the
+        # lstat must not hang the guard (#4528 R1-m1).
+        fd = os.open(tag, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
                 return False
+            if os.read(fd, len(_CACHEDIR_TAG_SIGNATURE)) != _CACHEDIR_TAG_SIGNATURE:
+                return False
+        finally:
+            os.close(fd)
+        # uv tags every virtualenv it creates with CACHEDIR.TAG, but a venv
+        # can hold hand-installed packages: it stays held (#4528 R1-M1).
+        if os.path.lexists(os.path.join(physical, "pyvenv.cfg")):
+            return False
+        return _tagged_cache_has_no_repository(physical)
     except OSError:
         return False
-    return not _holds_git(physical)
+
+
+def _tagged_cache_has_no_repository(physical: str) -> bool:
+    """Walk a tagged cache; ``False`` on any ``.git``, unreadable directory or
+    overflow. :func:`_holds_git` skips unlistable directories, which would let
+    a repository hidden behind ``chmod 0`` pass as cache (#4528 R1-B1)."""
+    seen = 0
+
+    def _fail(err: OSError) -> None:
+        raise err
+
+    for _root, dirs, files in os.walk(physical, onerror=_fail):
+        seen += len(dirs) + len(files)
+        if seen > _PYCACHE_SCAN_LIMIT or ".git" in dirs or ".git" in files:
+            return False
+    return True
 
 
 def _strict_cleanup_status(real: str) -> str | None:
