@@ -10542,6 +10542,8 @@ class DesktopSessions:
         limit: int,
         status_stamps: tuple[str, dict[str, int]] | None = None,
         *,
+        workspace_rest_ids: frozenset[str] = frozenset(),
+        workspace_rest_epoch: str | None = None,
         include_archived: bool = False,
         include_temporary: bool = False,
         include_peers: bool = False,
@@ -10629,6 +10631,16 @@ class DesktopSessions:
             # not ask for peers must not pay for it (the same rule ``routes/auth.py``
             # states for its own lazy imports).
             from local_operator.server.utils.desktop_mesh import remote_session_rows
+
+            rest_fence = None
+            if workspace_rest_ids and workspace_rest_epoch:
+                from local_operator.server.utils.workspace_rest import (
+                    capture_veto_fence,
+                )
+
+                # Capture generations, not contents, before any permissive
+                # projection. Only an eligible on-page row justifies proof I/O.
+                rest_fence = capture_veto_fence(self.root)
 
             # ONE ``read_pins`` per request, and it is read BEFORE the catalogue
             # so the catalogue can resolve the pins the page will not carry.
@@ -10869,6 +10881,23 @@ class DesktopSessions:
                         row["status_epoch"] = epoch
                         row["status_revision"] = revision
                 projected[entry.id] = row
+            if rest_fence is not None and workspace_rest_epoch:
+                from local_operator.server.utils.workspace_rest import (
+                    decorate_workspace_rest,
+                )
+
+                # Probe only page rows: a caller-supplied id cannot widen the
+                # existing archive, draft, scope, pagination or peer policies.
+                decorate_workspace_rest(
+                    self.root,
+                    [
+                        projected[entry.id]
+                        for entry in page_entries
+                        if entry.id in workspace_rest_ids
+                    ],
+                    workspace_rest_epoch,
+                    rest_fence,
+                )
             return SessionPage(
                 rows=[projected[entry.id] for entry in page_entries],
                 off_page=[projected[entry.id] for entry in extra_entries],

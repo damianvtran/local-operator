@@ -3359,6 +3359,34 @@ to.
   `status_revision` is LOWER — the in-app marker effect triggers exactly the list
   refetch this frame speeds up, so without the guard that response clobbers the
   fresher frame. Differing epochs, or no stamp at all, means take the list's row.
+- **A headline revision is not a workspace-rest receipt.** Only a desktop
+  client that tracks unpinned workspace tabs requests that separate evidence.
+  It batches their IDs as repeated `workspace_rest_id` on the existing
+  `GET /v1/desktop/sessions` request (the same maximum as its 500-row page).
+  This does not change the requested scope, cursor, or which rows are
+  returned. Only requested local rows on the page itself can carry:
+
+  ```json
+  {"workspace_rest":{"version":1,"epoch":"<feed epoch>","revision":"<opaque equality token>"}}
+  ```
+
+  Version 1 is positive-only and cold-only: a settled, read completion;
+  no runtime owner or recovery in progress; no unsettled or unverifiable ask
+  journal. Unknown, remote or mesh-stamped rows, pins, archives and rows that
+  would require reading beyond the batch budget have no receipt. Normal
+  catalogue requests and the SSE stream do not run the probe, and no legacy
+  status/count value is changed.
+
+  Arm a tab's timer only from this opt-in response in the current connected
+  feed epoch. Treat an omission, unknown version, different revision, feed
+  gap/disconnect or epoch change as a reset. In-flight responses belong to the
+  connection and candidate set that requested them; discard obsolete replies
+  instead of merging these receipts into the normal rows. At expiry, coalesce
+  eligible IDs into one fresh catalogue request and compare the same epoch and
+  revision immediately before dropping a tab. Recheck local selection, pins,
+  drafts and queued input. A revision is an observation fence, not a lock:
+  even work that began and finished between samples can change it, and the
+  server neither closes a tab nor modifies a conversation.
 - **Neither `notification` nor `attention` is replayed.** The connection's first
   read is a BASELINE: it records the store's current revision and announces
   nothing that predates the connection. A reconnect therefore does not flood,
