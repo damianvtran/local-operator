@@ -1273,6 +1273,20 @@ class Target:
     #: (``A=<p> cmd``) or an ``env`` operand (``env A=<p> cmd``): that NAME.
     #: Told to the judge, never a ranking input (PR #3906 round 1, case C).
     assigned: str | None = None
+    #: A ``write`` (or ``bulk``) touch that lands a whole TREE under ``path``
+    #: (recursive ``cp``/``rsync``, ``ditto``, ``tar -x``/``unzip``, a git
+    #: work-tree write). ``classify._bulk_reason`` ranks one whose destination
+    #: is the state root, or an ancestor it could land a state root's children
+    #: through, CRITICAL (PR #4383 review S-12): such a copy can plant
+    #: ``team_bridge/responders.yaml`` or ``guardrails/`` without either name
+    #: ever appearing in the command.
+    bulk: bool = False
+    #: For a ``bulk`` touch: the names that land DIRECTLY in ``path``
+    #: (``rsync -a ~/x/team_bridge D`` → ``("team_bridge",)``), or ``None`` when
+    #: they cannot be known from the command (a trailing-slash/contents copy,
+    #: ``ditto``, an archive, a checkout, ``--parents``/``--relative`` with an
+    #: unknowable first component, or a destination that will BE the copy).
+    bulk_names: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -6315,12 +6329,34 @@ class _Walker:
         surface = _write_surface(name, args, st.home)
         if name in ("ln", "gln"):
             self._link_targets(args)
+        if name in ("cp", "gcp") and _has_flag(args, _CP_FLAGS, "l", ("--link",)):
+            # ``cp -l``/``--link``/``-al`` makes a HARDLINK, exactly like ``ln
+            # SRC DST``: the source inode gains a second, agent-writable name,
+            # so the source is touched the way ``_link_targets`` touches an
+            # ``ln`` source (PR #4383 review S-11). The responder policy handed
+            # to it ranks CRITICAL in classify; other evidence keeps the
+            # ask-liftable HIGH of a path handed to a program.
+            for w in _copy_sources(args, _CP_FLAGS):
+                if w.text and not w.vanished:
+                    self.result.touched.append(_target(w, "touch", name, st))
+        if name == "git":
+            # A tree-writing subcommand rewrites its whole work tree, which
+            # ``_git_writes`` names only through ``-C``/``--work-tree`` and as a
+            # plain write; the S-12 rule needs it as a bulk landing, cwd included.
+            for w in _git_work_trees(args):
+                if w.text and not w.vanished:
+                    tree = _target(w, "bulk", name, st)
+                    tree.bulk = True
+                    self.result.touched.append(tree)
         if surface is None:
             return set()
         dests, fully = surface
+        bulk, bulk_names = _bulk_landing(name, args, dests, st.cwd)
         for w in dests:
             if w.text and not w.vanished:
-                self.result.touched.append(_target(w, "write", name, st))
+                write = _target(w, "write", name, st)
+                write.bulk, write.bulk_names = bulk, bulk_names
+                self.result.touched.append(write)
                 if name == "curl" and not w.text.startswith("/dev/"):
                     # PR #4116 Q1: ``curl -o F`` truncates F exactly like
                     # ``> F``, but as a touch alone only session-state paths
@@ -7976,6 +8012,141 @@ def _copy_dest(args: list[Expanded], spec: _Flags) -> list[Expanded]:
         return target_dir
     operands = _plain_operands(args, spec)
     return operands[-1:] if len(operands) >= 2 else []
+
+
+#: git subcommands that rewrite files of the work tree they run in (``-C``,
+#: ``--work-tree`` or the cwd). ``worktree``/``clone`` are creations
+#: (``_git_tree``); ``clean`` deletes (its own target).
+_GIT_TREE_WRITERS = frozenset(
+    {
+        "am",
+        "apply",
+        "bisect",
+        "checkout",
+        "checkout-index",
+        "cherry-pick",
+        "merge",
+        "pull",
+        "read-tree",
+        "rebase",
+        "reset",
+        "restore",
+        "revert",
+        "sparse-checkout",
+        "stash",
+        "submodule",
+        "switch",
+    }
+)
+
+
+def _copy_sources(args: list[Expanded], spec: _Flags) -> list[Expanded]:
+    """The SOURCE operands of a ``cp``/``rsync``-shaped call (``-t`` aware)."""
+    operands = _plain_operands(args, spec)
+    if "-t" in spec.values and _cluster_value(args, "t", "--target-directory"):
+        return operands
+    return operands[:-1] if len(operands) >= 2 else []
+
+
+def _has_flag(args: list[Expanded], spec: _Flags, letters: str, longs: tuple[str, ...]) -> bool:
+    _, flags = _operands(args, spec.values)
+    return any(f in longs or any(_short_has(f, c, spec) for c in letters) for f in flags)
+
+
+def _landing_name(src: Expanded) -> str | None:
+    """The one name a recursive copy of ``src`` lands directly in its destination,
+    or ``None`` when that is the source's CONTENTS (``x/``, ``x/.``: BSD ``cp -R``
+    and ``rsync`` copy contents) or cannot be read from the word."""
+    text = src.text
+    if src.opaque or src.pattern is not None or not text or text.endswith("/"):
+        return None
+    name = os.path.basename(text)
+    return None if name in ("", ".", "..") else name
+
+
+def _parents_name(src: Expanded) -> str | None:
+    """``cp --parents a/b D`` lands ``D/a/b``: the first component of the word."""
+    if src.opaque or src.pattern is not None:
+        return None
+    parts = [c for c in src.text.split("/") if c not in ("", ".")]
+    return parts[0] if parts and parts[0] != ".." else None
+
+
+def _bulk_landing(
+    name: str, args: list[Expanded], dests: list[Expanded], cwd: str | None
+) -> tuple[bool, tuple[str, ...] | None]:
+    """``(is_bulk, names)`` for a writer's destinations (``Target.bulk_names``).
+
+    WHY (PR #4383 security round 2, S-12). A recursive copy, sync or extract
+    INTO the state root lands ``team_bridge/responders.yaml`` (or ``guardrails/``)
+    without naming it: the classifier saw only ``~/.local-operator`` as the
+    destination, which is not itself evidence, so every one of these ranked LOW.
+    Here the resolver says what lands directly in the destination — the
+    sources' basenames when they are knowable, else ``None`` (unknown, which
+    ``classify._bulk_reason`` reads as "could be anything").
+    """
+    if name == "ditto" or name == "unzip":
+        return True, None  # ditto copies CONTENTS; an archive's names are its own
+    if name in ("tar", "gtar", "bsdtar"):
+        if args and args[0].text.isalpha():
+            args = [Expanded(text="-" + args[0].text, empty=args[0].empty), *args[1:]]
+        return _tar_mode(args) == "extract", None
+    if name == "rsync":
+        if _has_flag(args, _RSYNC_FLAGS, "R", ("--relative",)):
+            return True, None
+        sources = _copy_sources(args, _RSYNC_FLAGS)
+        names = [_landing_name(s) for s in sources]
+        if not names or any(n is None for n in names):
+            return True, None
+        return True, tuple(n for n in names if n)
+    if name in ("cp", "gcp"):
+        sources = _copy_sources(args, _CP_FLAGS)
+        if _has_flag(args, _CP_FLAGS, "", ("--parents",)):
+            names = [_parents_name(s) for s in sources]
+        elif _has_flag(args, _CP_FLAGS, "Rra", ("--recursive", "--archive")):
+            # ``cp -R src D`` with no directory at D makes D the copy itself:
+            # src's CONTENTS land in D.
+            for d in dests:
+                path, _ = _absolute(d.text, cwd) if d.text and not d.opaque else (None, False)
+                if path is None or not os.path.isdir(path):
+                    return True, None
+            names = [_landing_name(s) for s in sources]
+        else:
+            return False, None
+        if not names or any(n is None for n in names):
+            return True, None
+        return True, tuple(n for n in names if n)
+    return False, None
+
+
+def _git_work_trees(args: list[Expanded]) -> list[Expanded]:
+    """The work tree a tree-writing git subcommand rewrites (S-12): the
+    ``--work-tree`` value, else the ``-C`` directory, else the cwd. Empty for
+    any other subcommand."""
+    work_tree: list[Expanded] = []
+    chdirs: list[str] = []
+    rest = list(args)
+    while rest and rest[0].text.startswith("-"):
+        t = rest[0].text
+        if t == "-C" and len(rest) > 1:
+            chdirs.append(rest[1].text)
+            rest = rest[2:]
+            continue
+        if t == "--work-tree" and len(rest) > 1:
+            work_tree = [rest[1]]
+            rest = rest[2:]
+            continue
+        if t.startswith("--work-tree="):
+            work_tree = [Expanded(text=t.split("=", 1)[1], empty=rest[0].empty)]
+        rest = rest[2:] if t in ("-c", "--git-dir", "--namespace") else rest[1:]
+    if not rest or rest[0].text not in _GIT_TREE_WRITERS:
+        return []
+    if work_tree:
+        return work_tree
+    if chdirs:
+        # ``-C a -C b`` composes like successive chdirs.
+        return [Expanded(text=os.path.join(*chdirs))]
+    return [Expanded(text=".")]
 
 
 def _sed_script_text(args: list[Expanded]) -> str | None:
