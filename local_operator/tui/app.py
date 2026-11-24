@@ -32055,6 +32055,16 @@ class OperatorApp(App[None]):
         self._close_aside()
         self._clear_transcript()
 
+    def action_approvals_ask(self) -> None:
+        """Click on the band's `!`: switch this session back to asking.
+
+        Exactly ``/approvals ask`` — the same handler, the same receipt — so a
+        click and the typed command cannot drift. Session scope only: the saved
+        default is a separate, deliberate ``/approvals default ask``, and a
+        click on a status glyph must not rewrite ``config.yml``.
+        """
+        self._cmd_approvals("ask", self._notice)
+
     def _cmd_approvals(self, arg: str, notice: NoticeFn) -> None:
         """``/approvals [default] [ask|auto]`` — the mode, and how long it lasts.
 

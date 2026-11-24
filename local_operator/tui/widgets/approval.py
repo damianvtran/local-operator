@@ -107,7 +107,7 @@ CHOICES: tuple[tuple[str, str], ...] = (
     ("n", "deny"),
     ("y", "allow"),
     ("esc", "stop"),
-    ("A", "allow all"),
+    ("A", "auto-approve"),
 )
 
 #: The hazard clause, in words rather than the parser's own bracket token.
@@ -324,7 +324,7 @@ class ApprovalBlock(TranscriptBlock):
     BINDINGS = [
         ("y", "answer('y')", "Allow"),
         ("n", "answer('n')", "Deny"),
-        ("A", "answer('a')", "Allow all"),
+        ("A", "answer('a')", "Auto-approve"),
     ]
 
     #: The answer keys, excluded from the typing passthrough below. Spelled out
@@ -966,7 +966,14 @@ PERSON_ONLY_CONSEQUENCE = "only you can approve this"
 APPROVAL_CHOICES: tuple[tuple[str, str, str], ...] = (
     ("Allow", "y", ALLOW_ASK_CONSEQUENCE),
     ("Deny", "n", "refuse this call; the turn continues"),
-    ("Allow all", "A", "stop asking for this session"),
+    # "Auto-approve", not "Allow all" (operator request, 2026-11-24): the row
+    # changes the SESSION's approval mode, and "allow all" read as "allow all
+    # of this batch". The consequence names the scope and the limit, because
+    # a user deciding to stop being asked needs to know what still protects
+    # them — guardrail refusals and the dangerous-delete review are enforced
+    # below this gate and auto does not disarm them. `/approvals ask` (or a
+    # click on the band's `!`) takes it back.
+    ("Auto-approve", "A", "this session; guardrails still apply"),
 )
 
 #: Answer key -> the label the picker hands back, so the two ways of answering
@@ -1780,9 +1787,9 @@ class ApprovalPrompt(AskPickerScreen):
         """
         if width >= self._HANDLES_FULL_MIN:
             parts = [
-                ("Set auto for this session [S]", "handle"),
+                ("Auto-approve this session [S]", "handle"),
                 ("  ·  ", "state"),
-                ("Set auto for all sessions [G]", "handle"),
+                ("Auto-approve all sessions [G]", "handle"),
             ]
         elif width >= self._HANDLES_MEDIUM_MIN:
             parts = [

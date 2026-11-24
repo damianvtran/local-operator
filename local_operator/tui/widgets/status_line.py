@@ -2978,7 +2978,17 @@ class StatusLine:
                 (
                     "",
                     ICON_APPROVALS,
-                    Style(color=theme_mod.semantic_color("danger"), bold=True),
+                    # CLICKABLE: the one-click way back to "ask" (operator
+                    # request, 2026-11-24 — "the mode should show somewhere
+                    # visible with a one-click way back"). The `!` is already
+                    # the band's only standing statement that the gate is
+                    # disarmed, so the route back lives on the thing that says
+                    # so rather than in a second segment the ladder would have
+                    # to budget. Tightening needs no authority (it is never
+                    # refused), so a stray click can only make the gate SAFER;
+                    # the action runs the same `/approvals ask` a typist would.
+                    Style(color=theme_mod.semantic_color("danger"), bold=True)
+                    + Style.from_meta({"@click": "app.approvals_ask"}),
                 )
             )
         if self._conversation_name and name_cells:

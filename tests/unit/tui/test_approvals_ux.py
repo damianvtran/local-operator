@@ -1353,3 +1353,44 @@ async def test_default_ask_clears_this_conversations_record(config_dir: Path) ->
         assert app._approve_all is False
         assert app._approvals_default_auto is False
         assert "this conversation follows it" in _notices(app)[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_the_bands_auto_mark_switches_the_session_back_to_ask(
+    config_dir: Path,
+) -> None:
+    """The one-click way back (operator request, 2026-11-24).
+
+    The band's `!` is the standing statement that no tool will ask; clicking it
+    must run the same `/approvals ask` a typist would — session scope only, so
+    the saved default on disk is untouched.
+    """
+    from local_operator.tui.app import Band
+
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/approvals auto")
+        assert app._approve_all is True
+        await pilot.pause()
+        band = app.query_one(Band)
+        strip = band.render_line(0)
+        x = 0
+        target = None
+        for segment in strip:
+            meta = segment.style.meta if segment.style else {}
+            if meta.get("@click") == "app.approvals_ask":
+                target = x
+                break
+            x += len(segment.text)
+        assert target is not None, "the band's `!` carries no click action"
+        # `render_line` is in CONTENT coordinates; the band carries a top inset
+        # row, so the click is offset by the content region's origin.
+        dx = band.content_region.x - band.region.x
+        dy = band.content_region.y - band.region.y
+        await pilot.click(Band, offset=(target + dx, dy))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app._approve_all is False
+        assert _saved_mode(config_dir) is None

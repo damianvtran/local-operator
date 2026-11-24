@@ -18,6 +18,8 @@ export type MessageParams = {
   "relay.agent_avatar.alt": { "name": string };
   "relay.agent_avatar.change": { "name": string };
   "relay.agent_avatar.desktop_hint": undefined;
+  "relay.approvals.card.always_ask": undefined;
+  "relay.approvals.card.guardrails_still_apply": undefined;
   "relay.approvals.card.notice_session_auto": undefined;
   "relay.approvals.card.request_needs_answer": undefined;
   "relay.approvals.card.set_auto_all": undefined;
