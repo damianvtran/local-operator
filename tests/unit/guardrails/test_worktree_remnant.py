@@ -280,3 +280,61 @@ async def test_timed_out_ask_does_not_hold_a_lossless_remnant(
     else:
         assert out is None or not out.blocked, out
         assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "remnant"),
+    [
+        ('{"version":"7.0.2","root":[1],"fileNames":["a.ts"]}', True),
+        ('{"version":"5.4.5","program":{"fileNames":[]}}', True),
+        ("my notes, not tsc state\n", False),
+        ('{"version":"5.4.5"}', False),
+        ('["version", "root"]', False),
+    ],
+    ids=["tsc7-root", "tsc5-program", "text", "json-no-program", "json-list"],
+)
+def test_tsbuildinfo_is_shed_only_by_content(repo: Path, payload: str, remnant: bool) -> None:
+    """Field case 2026-11-24 (UI leftovers, guard 0.112.10): a remnant holding
+    only committed blobs plus ``.cache/typecheck/node.tsbuildinfo``. The file
+    is lossless only when its CONTENT is tsc incremental state."""
+    from local_operator.guardrails.classify import _removed_worktree_remnant
+
+    wt = _committed_tree(repo, f"tsb-{remnant}-{abs(hash(payload))}")
+    (wt / ".cache" / "typecheck").mkdir(parents=True)
+    (wt / ".cache" / "typecheck" / "node.tsbuildinfo").write_text(payload)
+    shutil.rmtree(repo / ".git" / "worktrees" / wt.name)
+    assert _removed_worktree_remnant(str(wt)) is remnant
+
+
+def test_remnant_memo_skips_only_unchanged_hashing(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4545 R1-m2: a large lossless leftover is hashed once per checkpoint,
+    and ANY change to its files (new, edited) forces a fresh hash."""
+    import subprocess as sp
+
+    from local_operator.guardrails import classify as c
+
+    monkeypatch.setattr(c, "_REMNANT_MEMO", {})
+    gone = _committed_tree(repo, "memo")
+    shutil.rmtree(repo / ".git" / "worktrees" / "memo")
+    hashes: list[int] = []
+    real_run = sp.run
+
+    def counted(cmd, *a, **k):
+        if "hash-object" in cmd:
+            hashes.append(1)
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(c.subprocess, "run", counted)
+    assert c._removed_worktree_remnant(str(gone)) is True
+    assert c._removed_worktree_remnant(str(gone)) is True
+    assert len(hashes) == 1  # unchanged: reused
+    (gone / "draft.md").write_text("uncommitted\n")
+    assert c._removed_worktree_remnant(str(gone)) is False
+    assert len(hashes) == 2  # new file: re-hashed, and held
+    (gone / "draft.md").unlink()
+    assert c._removed_worktree_remnant(str(gone)) is True
+    monkeypatch.setattr(c, "_REMNANT_MEMO_TTL_S", 0.0)
+    assert c._removed_worktree_remnant(str(gone)) is True
+    assert len(hashes) == 4  # expired: re-hashed
