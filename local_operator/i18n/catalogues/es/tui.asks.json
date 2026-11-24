@@ -11,7 +11,7 @@
   "tui.asks.dismiss.notice_no_reply": "Descartada — no se envió respuesta",
   "tui.asks.dismiss.title": "Descartar esta pregunta",
   "tui.asks.list.copied_id": "Copiado: {ask_id}",
-  "tui.asks.list.copy_id_hint": "y copiar el id",
-  "tui.asks.list.no_such_ask": "No hay ninguna pregunta {ask_id} en esta conversación.",
-  "tui.asks.list.showing_all_settled": "Todas las preguntas: {ask_id} está resuelta."
+  "tui.asks.list.copy_id_hint": "y copiar id",
+  "tui.asks.list.no_such_ask": "La pregunta {ask_id} no está en esta conversación.",
+  "tui.asks.list.showing_all_settled": "Mostrando todas las preguntas: {ask_id} está atendida."
 }

@@ -5,7 +5,7 @@
   "wire.slash.analytics": "Consumo de tokens de todas las sesiones",
   "wire.slash.approvals": "Muestra o fija el modo de aprobación de esta sesión",
   "wire.slash.archive": "Ocúltala de las listas; aún se reanuda por id",
-  "wire.slash.ask": "Mostrar esa pregunta en la lista",
+  "wire.slash.ask": "Muestra esa pregunta en la lista",
   "wire.slash.btw": "Pregunta al margen, sin registro (esc la cierra)",
   "wire.slash.clear": "Limpia la transcripción (el historial no se toca)",
   "wire.slash.compact": "Compacta el contexto ahora",

@@ -10,8 +10,8 @@
   "tui.asks.dismiss.notice_moot": "Ignorée — plus nécessaire",
   "tui.asks.dismiss.notice_no_reply": "Ignorée — aucune réponse envoyée",
   "tui.asks.dismiss.title": "Ignorer cette question",
-  "tui.asks.list.copied_id": "Copié : {ask_id}",
-  "tui.asks.list.copy_id_hint": "y copier l'id",
+  "tui.asks.list.copied_id": "Copié : {ask_id}",
+  "tui.asks.list.copy_id_hint": "y copier id",
   "tui.asks.list.no_such_ask": "Aucune question {ask_id} dans cette conversation.",
-  "tui.asks.list.showing_all_settled": "Toutes les questions : {ask_id} est réglée."
+  "tui.asks.list.showing_all_settled": "Affichage de toutes les questions : {ask_id} est traitée."
 }

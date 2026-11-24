@@ -11,7 +11,7 @@
   "tui.asks.dismiss.notice_no_reply": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا",
   "tui.asks.dismiss.title": "یہ سوال خارج کریں",
   "tui.asks.list.copied_id": "{ask_id} کاپی ہو گئی",
-  "tui.asks.list.copy_id_hint": "y آئی ڈی کاپی کریں",
+  "tui.asks.list.copy_id_hint": "y ID کاپی",
   "tui.asks.list.no_such_ask": "اس گفتگو میں {ask_id} نام کا کوئی سوال نہیں۔",
-  "tui.asks.list.showing_all_settled": "تمام سوالات دکھائے جا رہے ہیں: {ask_id} طے ہو چکا ہے۔"
+  "tui.asks.list.showing_all_settled": "تمام سوالات دکھائے جا رہے ہیں: {ask_id} نمٹایا جا چکا ہے۔"
 }

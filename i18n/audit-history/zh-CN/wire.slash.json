@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.slash",
-  "history_sha256": "bba386fae41b5872781808185226e84c7699a9c2717528d6ff7dbc3c5178d609",
+  "history_sha256": "0f4e3160b419eec9a0521ae108ceb726117aeb9d1d97173167eb689f68342bf8",
   "entries": [
     {
       "locale": "zh-CN",
@@ -53,6 +53,36 @@
       },
       "status": "passed",
       "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source 4190e3ccb3e995361840fb424c770fdad3b0243f8b8c2416710740a7b3e2d98f and target a0a9b776811705f033e37d84bd2571e5b2edc52928c0cbe2239fe95845534747 recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/zh-CN/wire.slash/temporary-r3-5c6cf4252f37/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash",
+      "source_sha256": "b69095e7e4a5e89b06020119052bceeca3c95666a77de1e3ef94c46bce472c9b",
+      "context_sha256": "aca8b841a31f729f935cd4dfcfcae5a8bd85a1c2fc707cff8620de70c7b9ffd0",
+      "target_sha256": "35d7c8951abee5d41f3e9f05c617e9af6229b89756f0318fbe11cfb39b1d4409",
+      "translator": {
+        "agent": "coding agent (translator role, lane feat/tui-ask-ids); session id not supplied in the audit brief, not independently verified",
+        "model": "radient/auto (as stated in the brief; underlying served model not disclosed)",
+        "fallback": "none (as stated in the brief; not independently verified)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev task subagent, lane tui-ask-ids); not the translator, did not author these keys",
+        "session": "865c4179f846",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "fresh audit of the 1 new key(s) of wire.slash (wire.slash.ask); delta for the 53 earlier keys"
+      },
+      "status": "passed",
+      "note": "Independent audit 2026-11-23 of zh-CN wire.slash against en source b69095e7e4a5e89b06020119052bceeca3c95666a77de1e3ef94c46bce472c9b and sidecar aca8b841a31f729f935cd4dfcfcae5a8bd85a1c2fc707cff8620de70c7b9ffd0; target 35d7c8951abee5d41f3e9f05c617e9af6229b89756f0318fbe11cfb39b1d4409 recomputed from the file bytes after the audit edits. Delta: the diff against origin/main is purely additive (en and zh-CN each add exactly the new key(s); no earlier key value or sidecar entry changed), so the earlier keys' prior verdict stands, re-attested at the new hashes. New key(s): wire.slash.ask. Method: read docs/I18N.md, glossary, the zh-CN style guide and each key's sidecar (role, tone, maxCells, placeholder note); compared with the shipped neighbours (tui.asks.dismiss.*, relay.asks.*, wire.ask_receipts.*, wire.slash.*, relay.asks.sheet.settled for the Settled vocabulary); rendered every key through local_operator.i18n.messages.render with sample ask ids after regeneration; checked ICU argument parity ({ask_id}), NFC, script purity, no manual bidi/zero-width controls, no English word inside the sentence, and rich.cells.cell_len width against maxCells. Findings: none. Edits by the auditor are to this locale's catalogue only (translator of record unchanged); English copy untouched. Evidence is this auditor's own command output in the lane session, not an external report."
     }
   ]
 }

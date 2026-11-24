@@ -5,7 +5,7 @@
   "wire.slash.analytics": "Statistiques agrégées de tokens, toutes sessions",
   "wire.slash.approvals": "Voir ou régler le mode d’approbation des outils de cette session",
   "wire.slash.archive": "La masquer des listes ; toujours reprenable par id",
-  "wire.slash.ask": "Afficher la question dans la liste",
+  "wire.slash.ask": "Afficher cette question dans la liste",
   "wire.slash.btw": "Poser une question hors enregistrement (esc ferme)",
   "wire.slash.clear": "Vider la transcription (historique intact)",
   "wire.slash.compact": "Compacter le contexte maintenant",
