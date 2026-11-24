@@ -333,15 +333,11 @@ def _walk(config: Path, monkeypatch: pytest.MonkeyPatch, *, page: int = PAGE) ->
     # THE CLIENT'S OWN FIRST CURSOR. A projection at its cap pins the
     # conversation's opening user row ahead of a disjoint tail, and that pinned
     # row is not the tail's chronological neighbour — the web client pages from
-    # the row after it (``transcript.tsx``), and every fixture whose projection is
-    # UNDER the cap behaves identically either way.
-    cursor = (
-        seed_ids[1]
-        if len(seed_ids) >= PROJECTION_TRANSCRIPT_LIMIT
-        and seed_ids[1:]
-        and projection.transcript[0].kind == "user"
-        else seed_ids[0]
-    )
+    # the row after it (``transcript.tsx``). It reads that from the wire's
+    # ``transcript_head_pinned``, not from length, so neither does this: a
+    # compacted render at its cap is NOT pinned (PR #4521 R1-1), and an unpinned
+    # tail that happens to open on a user row must page from that row itself.
+    cursor = seed_ids[1] if projection.transcript_head_pinned and seed_ids[1:] else seed_ids[0]
     seen_more = True
     for _ in range(60):
         entries, has_more = _history_page(SESSION_ID, cursor, page)
@@ -1329,3 +1325,94 @@ def test_paging_a_heavily_compacted_session_reaches_every_turns_answer_once(
     assert observed == expected, "the merged rows are not in journal order"
     finals = [row for row in observed if row.startswith("final-")]
     assert len(finals) == 100
+
+
+def test_a_long_kept_window_pins_no_false_opener_and_still_reaches_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4521 review R1-1/R1-2, QA Q1: the render > 80 rows shape.
+
+    With the carried copies shed, a compacted render opens at the marker, and
+    its first user row is the first prompt of the KEPT window. The 80-row cap
+    used to pin that row as the conversation's "opening message" (QA saw
+    ``req-120`` pinned where the real opener was ``req-0``). The render holds no
+    opener, so the seed must not claim one: no pin, a plain tail, and the real
+    opener served once — at its journal position, as the walk's oldest row.
+    """
+    config = tmp_path / "config"
+    _build_many_preserved(config, kept_turns=60)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    projection = _durable_projection(SESSION_ID)
+    assert projection is not None
+    seed = [row.id for row in projection.transcript]
+    assert len(seed) == PROJECTION_TRANSCRIPT_LIMIT, "the fixture must sit AT the cap"
+    assert projection.transcript_head_pinned is False, f"pinned {seed[0]!r} as the opener"
+    assert "transcript_head_pinned" not in projection.to_json()
+    assert "transcript_opener_absent" not in projection.to_json(), "in-process fact leaked"
+    assert seed[0] != "kept-req-0", "the kept window's first prompt was pinned"
+    # A plain tail: exactly the render's newest 80 rows, nothing out of order.
+    render = _fold([m for m in _replay_history(config)])
+    assert seed == [row.id for row in render][-PROJECTION_TRANSCRIPT_LIMIT:]
+
+    walk = _walk(config, monkeypatch, page=50)
+    observed = _observed(walk)
+    expected = [row.id for row in _journal_rows(walk["directory"])]
+    assert walk["exhausted"], "the walk never reached the beginning of history"
+    assert len(observed) == len(set(observed)), "a row was served twice"
+    assert observed == expected, "the merged rows are not the whole journal in order"
+    assert observed[0] == "req-0" and observed.count("req-0") == 1
+    assert len([row for row in observed if row.startswith("final-")]) == 100
+
+
+def test_a_live_append_after_a_compacted_seed_does_not_pin_a_kept_prompt(
+    tmp_path: Path,
+) -> None:
+    """The no-pin decision has to OUTLIVE the trim that made it.
+
+    The seed's trim drops the compaction marker, so the next live append — or
+    the frame cap's tail tier halving the published frame — would see a kept-
+    window prompt as the first user row and pin it after all. The fold keeps
+    the fact (``SessionProjection.transcript_opener_absent``) for both.
+    """
+    from local_operator.mobile.projection import ProjectionFold, cap_projection_frame
+    from local_operator.mobile.types import SessionProjection
+    from local_operator.mobile.types import TranscriptEntry as Row
+
+    config = tmp_path / "config"
+    _build_many_preserved(config, kept_turns=60)
+    fold = ProjectionFold(SessionProjection(session_id=SESSION_ID, pid=0, kind="daemon"))
+    fold.fold_history(_replay_history(config))
+    assert fold.projection.transcript_head_pinned is False
+
+    for index in range(3):
+        fold._append(Row(id=f"live-{index}", kind="assistant", text="live work"))
+    ids = [row.id for row in fold.projection.transcript]
+    assert fold.projection.transcript_head_pinned is False, f"re-pinned {ids[0]!r}"
+    assert ids[-3:] == ["live-0", "live-1", "live-2"]
+    assert len(ids) == PROJECTION_TRANSCRIPT_LIMIT
+
+    frame, degraded = cap_projection_frame(fold.projection, cap_bytes=4_000)
+    assert degraded
+    capped = [row["id"] for row in frame["transcript"]]
+    assert "transcript_head_pinned" not in frame, f"the frame cap pinned {capped[0]!r}"
+    assert capped == ids[-len(capped) :], "the frame cap moved a row out of order"
+
+    # Control: a fold whose rows begin with a user row and no marker still pins
+    # it on both caps — the rule only stops claiming an opener the render lacks.
+    plain = ProjectionFold(SessionProjection(session_id="plain", pid=0, kind="daemon"))
+    plain._append(Row(id="opener", kind="user", text="the brief"))
+    for index in range(PROJECTION_TRANSCRIPT_LIMIT + 2):
+        plain._append(Row(id=f"row-{index}", kind="assistant", text="body"))
+    assert plain.projection.transcript_head_pinned is True
+    assert plain.projection.transcript[0].id == "opener"
+    plain_frame, _ = cap_projection_frame(plain.projection, cap_bytes=4_000)
+    assert plain_frame["transcript"][0]["id"] == "opener"
+    assert plain_frame["transcript_head_pinned"] is True
+
+
+def _replay_history(config: Path) -> list[AgentMessage]:
+    """The durable fold's replay (``history``) for the reach session."""
+    from local_operator.mobile.durable import _replay
+
+    history, _keep_start_id = _replay(_journal_entries(config / "sessions" / SESSION_ID))
+    return history

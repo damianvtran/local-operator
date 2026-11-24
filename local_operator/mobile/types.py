@@ -1285,6 +1285,16 @@ class SessionProjection:
     #: stated here. SPARSE: absent means false, which is what an older daemon
     #: and an uncapped projection both mean.
     transcript_head_pinned: bool = False
+    #: IN-PROCESS ONLY, never on the wire (popped in :meth:`to_json`): this
+    #: transcript's first user row is NOT the conversation's opener, so no cap
+    #: may pin it. Set by ``ProjectionFold._cap_tail`` when the folded render
+    #: opens at a compaction marker (``projection._opening_user_row``). It has
+    #: to outlive that one trim because the trim drops the marker itself: the
+    #: next live append, and every frame-cap tail tier after it, would otherwise
+    #: see a kept-window prompt as the first user row and pin it as the opener
+    #: (PR #4521 R1-1/Q1). A projection rebuilt from the wire defaults to
+    #: false; it was already capped by the process that folded it.
+    transcript_opener_absent: bool = False
     #: WHERE EACH DELIVERED PHONE STEER SITS IN THE JOURNAL: steer row id -> the
     #: id of the row it follows there. A phone steer is painted at SEND time
     #: (``ProjectionFold.note_user_message``) and upgraded in place when the
@@ -1415,6 +1425,7 @@ class SessionProjection:
             data["transcript"] = [row.to_json() for row in self.transcript]
         if not self.transcript_head_pinned:
             data.pop("transcript_head_pinned", None)
+        data.pop("transcript_opener_absent", None)
         if not self.steer_journal_order:
             data.pop("steer_journal_order", None)
         if self.peer_cycles is None:
