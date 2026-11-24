@@ -608,11 +608,11 @@ def ask_item(
         },
         # The reel never dismisses an open ask (§2.3); it offers Answer.
         "actions": {"dismiss": False, "answer": True, "read": True},
-        # Same contract as ``notify_item``. Reachable when a client still holds
-        # a row the index has since dropped (the reader sweeps an entry whose
-        # session directory is gone), and for an ask row built from a stale
-        # snapshot: its Dismiss/Decline settle locally on the answers route,
-        # and a plain answer is refused ``conversation_deleted``.
+        # Same contract as ``notify_item``. Set on a provably deleted
+        # conversation's ask, which ``open_asks`` keeps listing until it is
+        # settled or swept (round 1, Q-U1): its Dismiss/Decline settle locally
+        # on the answers route, and a plain answer is refused
+        # ``conversation_deleted``.
         **({"conversation_deleted": True} if sessions.deleted(session_id) else {}),
     }
 
