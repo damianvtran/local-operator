@@ -153,3 +153,40 @@ def test_rm_rf_rank_follows_the_remnant_rule(repo: Path) -> None:
     remnant = rank(gone)
     reasons = " ".join([t.reason for t in remnant.targets] + list(remnant.reasons))
     assert "a git repository root" not in reasons and "linked worktree" not in reasons, reasons
+
+
+@pytest.mark.parametrize("payload", ["pyc-only", "py-in-pycache"])
+def test_pointer_remnant_sheds_bytecode_by_content(repo: Path, payload: str) -> None:
+    """Pass-3 leftovers (2026-11-24) held only for ``__pycache__``: Git's
+    aborted walk never reached them, and bytecode is never committed."""
+    wt = _committed_tree(repo, f"pyc-{payload}")
+    pyc = wt / "pkg" / "__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "mod.cpython-313.pyc").write_bytes(b"\x00bytecode")
+    if payload == "py-in-pycache":
+        (pyc / "notes.py").write_text("hand-written\n")
+    shutil.rmtree(repo / ".git" / "worktrees" / f"pyc-{payload}")
+    assert _removed_worktree_remnant(str(wt)) is (payload == "pyc-only")
+
+
+@pytest.mark.parametrize("registered", [False, True], ids=["dropped", "still-registered"])
+def test_pointerless_folder_under_worktrees_needs_git_to_have_dropped_it(
+    repo: Path, registered: bool
+) -> None:
+    """Pass-3 (2026-11-24): Git deleted the pointer before failing. A folder at
+    ``<repo>/.worktrees/<name>`` with no ``.git`` is a remnant only when Git no
+    longer lists it and its content is already committed."""
+    wt = _committed_tree(repo, f"nopointer-{registered}")
+    (wt / ".git").unlink()
+    if not registered:
+        shutil.rmtree(repo / ".git" / "worktrees" / f"nopointer-{registered}")
+    assert _removed_worktree_remnant(str(wt)) is (not registered)
+
+
+def test_pointerless_folder_outside_worktrees_is_not_a_remnant(repo: Path, tmp_path: Path) -> None:
+    wt = _committed_tree(repo, "elsewhere")
+    (wt / ".git").unlink()
+    shutil.rmtree(repo / ".git" / "worktrees" / "elsewhere")
+    moved = tmp_path / "loose"
+    wt.rename(moved)
+    assert not _removed_worktree_remnant(str(moved))

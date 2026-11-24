@@ -1170,6 +1170,76 @@ def _git_env() -> dict[str, str]:
     return env
 
 
+def _former_worktree_repo(real: str) -> str | None:
+    """The repository a folder was a linked worktree of, if Git has DROPPED it.
+
+    Two shapes, both what a failed ``git worktree remove`` leaves (#4536):
+
+    - its ``.git`` pointer FILE survived: a one-line ``gitdir:`` resolving to
+      ``<repo>/.git/worktrees/<name>``, ``<repo>/.git`` a real directory, the
+      admin directory gone;
+    - Git already deleted the pointer (follow-up 2026-11-24, pass-3
+      leftovers ``guard-finder-metadata``/``quota-diagnostic``): no ``.git`` at
+      all, the folder sits at ``<repo>/.worktrees/<name>`` (this harness's
+      worktree layout), and ``git worktree list`` of ``<repo>`` does not list
+      it.
+
+    ``None`` for anything else, or on any read or git failure.
+    """
+    marker = os.path.join(real, ".git")
+    if not os.path.lexists(marker):
+        parent = os.path.dirname(real)
+        repo = os.path.dirname(parent)
+        common = os.path.join(repo, ".git")
+        if (
+            os.path.basename(parent) != ".worktrees"
+            or os.path.islink(common)
+            or not os.path.isdir(common)
+        ):
+            return None
+        try:
+            listed = subprocess.run(
+                ["git", "-C", repo, "worktree", "list", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=_git_env(),
+            )
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        if listed.returncode != 0:
+            return None
+        for row in listed.stdout.splitlines():
+            if row.startswith("worktree ") and os.path.realpath(row[9:]) == real:
+                return None
+        return repo
+    try:
+        if not stat.S_ISREG(os.lstat(marker).st_mode):
+            return None
+        with open(marker, encoding="utf-8") as fh:
+            text = fh.read(4097)
+    except (OSError, ValueError):
+        return None
+    lines = text.splitlines()
+    if len(text) > 4096 or len(lines) != 1 or not lines[0].startswith("gitdir: "):
+        return None
+    admin = lines[0][len("gitdir: ") :].strip()
+    if not os.path.isabs(admin):
+        admin = os.path.join(real, admin)
+    admin = os.path.normpath(admin)
+    worktrees = os.path.dirname(admin)
+    common = os.path.dirname(worktrees)
+    if (
+        os.path.basename(worktrees) != "worktrees"
+        or os.path.basename(common) != ".git"
+        or os.path.islink(common)
+        or not os.path.isdir(common)
+        or os.path.lexists(admin)
+    ):
+        return None
+    return os.path.dirname(common)
+
+
 def _removed_worktree_remnant(path: str) -> bool:
     """Is ``path`` a leftover of a FAILED ``git worktree remove`` that loses
     nothing when deleted?
@@ -1201,33 +1271,10 @@ def _removed_worktree_remnant(path: str) -> bool:
     Then the folder ranks as an ordinary path, the same as the remnant whose
     pointer Git already deleted. Any doubt keeps the repository rank.
     """
-    marker = os.path.join(path, ".git")
-    try:
-        if not stat.S_ISREG(os.lstat(marker).st_mode):
-            return False
-        with open(marker, encoding="utf-8") as fh:
-            text = fh.read(4097)
-    except (OSError, ValueError):
-        return False
-    lines = text.splitlines()
-    if len(text) > 4096 or len(lines) != 1 or not lines[0].startswith("gitdir: "):
-        return False
     real = os.path.realpath(path)
-    admin = lines[0][len("gitdir: ") :].strip()
-    if not os.path.isabs(admin):
-        admin = os.path.join(real, admin)
-    admin = os.path.normpath(admin)
-    worktrees = os.path.dirname(admin)
-    common = os.path.dirname(worktrees)
-    if (
-        os.path.basename(worktrees) != "worktrees"
-        or os.path.basename(common) != ".git"
-        or os.path.islink(common)
-        or not os.path.isdir(common)
-        or os.path.lexists(admin)
-    ):
+    repo = _former_worktree_repo(real)
+    if repo is None:
         return False
-    repo = os.path.dirname(common)
     files: list[str] = []
 
     def _fail(err: OSError) -> None:
@@ -1243,6 +1290,13 @@ def _removed_worktree_remnant(path: str) -> bool:
             for name in dirs:
                 if not stat.S_ISDIR(os.lstat(os.path.join(root, name)).st_mode):
                     return False  # a symlinked directory
+            # Bytecode and tagged caches Git's aborted walk never reached are
+            # never committed: shed them by CONTENT (#4528's witness), never by
+            # name (follow-up 2026-11-24, pass-3 leftovers held only for
+            # ``__pycache__``).
+            from local_operator.guardrails.provenance import _verified_cache_dir
+
+            dirs[:] = [d for d in dirs if not _verified_cache_dir(root, d)]
             for name in names:
                 full = os.path.join(root, name)
                 if root == real and name == ".git":
@@ -1850,6 +1904,17 @@ def _rank(
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     foreign_reason = _foreign_reason(target, path, foreign)
+    if (
+        foreign_reason is not None
+        and foreign_reason.startswith("created by another session (")
+        and ", worktree, " in foreign_reason
+        and _removed_worktree_remnant(path)
+    ):
+        # The other session's row records a WORKTREE at exactly this path
+        # (no "inside"/"holds" prefix), and Git has already dropped it with
+        # every leftover byte in the object store (follow-up 2026-11-24):
+        # deleting the folder loses none of that session's work.
+        foreign_reason = None
     if foreign_reason is not None:
         # Every LOW below is "nothing here is known to matter"; another
         # session's ledger row says otherwise (``ForeignCreations``). Placed
