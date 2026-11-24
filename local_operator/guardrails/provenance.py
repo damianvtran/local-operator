@@ -2512,6 +2512,60 @@ def _finder_metadata_file(real: str, entry: str) -> bool:
     return parent == real or parent.startswith(real + os.sep)
 
 
+#: The cachedir.org signature (https://bford.info/cachedir/): a directory whose
+#: ``CACHEDIR.TAG`` begins with these bytes declares itself disposable cache.
+#: pytest (``.pytest_cache``), cargo, many build tools write it.
+_CACHEDIR_TAG_SIGNATURE = b"Signature: 8a477f597d28d172789f06886806bc55"
+#: Bound on one ``__pycache__`` listing; a larger one is held (fail closed).
+_PYCACHE_SCAN_LIMIT = 20000
+
+
+def _verified_cache_dir(real: str, entry: str) -> bool:
+    """An ignored directory whose CONTENTS prove it is regenerable cache.
+
+    Why (field case 2026-11-24, guard 0.112.7, disk-recovery session): plain
+    ``git worktree remove`` of another session's merged, clean worktree was
+    held for "77 ignored entries the guard cannot prove regenerable", all of
+    them ``__pycache__/`` and ``.pytest_cache/``. While the disk fills, those
+    holds stop every cleanup of a finished tree. #4240's point stands: a NAME
+    is no witness for someone else's bytes. Contents are, so this applies to
+    any tree, whoever made it:
+
+    - ``__pycache__`` holding only regular ``*.pyc`` files (no subdirectory,
+      symlink or other name): bytecode the interpreter regenerates.
+    - a directory with a regular ``CACHEDIR.TAG`` starting with the cachedir.org
+      signature (pytest's ``.pytest_cache``), holding no nested repository.
+
+    Constraints: the entry itself must be a real directory (``lstat``) whose
+    realpath stays inside the tree; everything else (``.env``, ``build/``,
+    a ``.venv``) stays held. Unreadable or oversized fails closed.
+    """
+    physical = os.path.join(real, entry.rstrip("/"))
+    try:
+        if not stat.S_ISDIR(os.lstat(physical).st_mode):
+            return False
+        resolved = os.path.realpath(physical)
+        if not resolved.startswith(real + os.sep):
+            return False
+        if os.path.basename(physical) == "__pycache__":
+            with os.scandir(physical) as it:
+                for count, child in enumerate(it):
+                    if count >= _PYCACHE_SCAN_LIMIT:
+                        return False
+                    if not (child.name.endswith(".pyc") and child.is_file(follow_symlinks=False)):
+                        return False
+            return True
+        tag = os.path.join(physical, "CACHEDIR.TAG")
+        if not stat.S_ISREG(os.lstat(tag).st_mode):
+            return False
+        with open(tag, "rb") as fh:
+            if fh.read(len(_CACHEDIR_TAG_SIGNATURE)) != _CACHEDIR_TAG_SIGNATURE:
+                return False
+    except OSError:
+        return False
+    return not _holds_git(physical)
+
+
 def _strict_cleanup_status(real: str) -> str | None:
     return _git_quiet(
         [
@@ -2594,8 +2648,13 @@ def plain_cleanup_ignored_inventory(
         if entry is None:
             return None
         # Any tree (#4503): the shared ``node_modules`` link and a regular-file
-        # Finder ``.DS_Store`` are verified witnesses for plain removal.
-        if _shared_dependencies_link(real, entry) or _finder_metadata_file(real, entry):
+        # Finder ``.DS_Store`` are verified witnesses for plain removal, and so
+        # is a content-verified cache directory (``_verified_cache_dir``).
+        if (
+            _shared_dependencies_link(real, entry)
+            or _finder_metadata_file(real, entry)
+            or _verified_cache_dir(real, entry)
+        ):
             continue
         if own_regenerable and _own_tree_sheds(os.path.join(real, entry)):
             continue
