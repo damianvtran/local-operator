@@ -581,7 +581,8 @@ class TestAttestation:
         return PinnedCredentials("ASIAEXAMPLEKEY123456", "s", "t", "", arn)
 
     def test_a_missing_attestation_refuses(self) -> None:
-        assert attestation_refusal(None).startswith("isolation_missing")
+        refusal = attestation_refusal(None)
+        assert refusal is not None and refusal.startswith("isolation_missing")
 
     def test_a_complete_attestation_passes_and_holds_no_secret(
         self, fake_host: dict[str, Path]
