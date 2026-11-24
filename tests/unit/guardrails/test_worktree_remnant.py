@@ -190,3 +190,76 @@ def test_pointerless_folder_outside_worktrees_is_not_a_remnant(repo: Path, tmp_p
     moved = tmp_path / "loose"
     wt.rename(moved)
     assert not _removed_worktree_remnant(str(moved))
+
+
+def test_remnant_rank_carries_the_lossless_reason(repo: Path) -> None:
+    from local_operator.guardrails.classify import REMNANT_REASON, Risk, classify_bash
+
+    gone = _committed_tree(repo, "lossless")
+    shutil.rmtree(repo / ".git" / "worktrees" / "lossless")
+    v = classify_bash(
+        f"rm -rf {gone}",
+        cwd=str(repo),
+        env={"HOME": str(repo.parent)},
+        scratchpad=None,
+        session_id="aaaaaaaaaaa1",
+    )
+    assert v.risk is Risk.LOW and v.targets[0].reason == REMNANT_REASON, v.reasons
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lossless", [True, False], ids=["remnant", "uncommitted"])
+async def test_timed_out_ask_does_not_hold_a_lossless_remnant(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, lossless: bool
+) -> None:
+    """Field case 2026-11-24 (disk recovery, a-58df): the session that ASKED
+    about two leftovers could not delete them after the ask timed out, though
+    any other session could. An unanswered ask protects the operator's data;
+    a remnant whose every byte Git holds has none. An uncommitted file in the
+    same folder keeps the ordinary ask hold."""
+    from types import SimpleNamespace
+
+    from local_operator.guardrails import provenance as prov
+    from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
+
+    gone = _committed_tree(repo, f"asked-{lossless}")
+    if not lossless:
+        (gone / "notes.md").write_text("never committed\n")
+    shutil.rmtree(repo / ".git" / "worktrees" / f"asked-{lossless}")
+    real = os.path.realpath(gone)
+    asked = SimpleNamespace(
+        ask_id="a-58df",
+        session_id="aaaaaaaaaaa1",
+        status="timed_out",
+        label="TIMED OUT with no answer",
+        text=f"May I delete {real}?",
+        approved="",
+        created_at=0,
+        never_answered=True,
+        answer=None,
+        untrusted_yes=False,
+        answered_at=0,
+        has_answer=False,
+        expires_at=0,
+    )
+    monkeypatch.setattr(prov, "unanswered_asks", lambda sid, *a, **k: [asked])
+    calls: list[str] = []
+
+    async def judge(system: str, prompt: str) -> str:
+        calls.append(prompt)
+        return "BLOCK: judged"
+
+    ctx = CallContext(
+        cwd=str(repo),
+        env={"HOME": str(repo.parent), "PATH": os.environ.get("PATH", "")},
+        scratchpad=None,
+        session_id="aaaaaaaaaaa1",
+    )
+    out = await check_tool_call(
+        "bash", {"command": f"rm -rf {real}"}, ctx, settings=GuardSettings(), judge=judge
+    )
+    if lossless:
+        assert out is None or not out.blocked, out
+        assert calls == []
+    else:
+        assert out is not None and out.blocked
