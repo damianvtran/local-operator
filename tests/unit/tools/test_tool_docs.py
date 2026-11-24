@@ -837,7 +837,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # reference is where that contract belongs (the schema field stays one
     # clause). Measured through this test's own printed table; the ONLY entry
     # that moved.
-    "sessions": 915,
+    # RE-MEASURED for that PR's round-1 remediation (#4519, R2/U8): 915 -> 906.
+    # The stop row's `force` clause and refusal were tightened, and the
+    # `force`/`peer`/`include_stored` field clauses shortened (same meaning) to
+    # bring `scripts/bench_context_budget.py` back under its budget. The ONLY
+    # entry that moved.
+    "sessions": 906,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the

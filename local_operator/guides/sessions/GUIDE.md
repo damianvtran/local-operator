@@ -144,7 +144,7 @@ no such reason to override is the answer. A bare `kill` from `bash` is refused b
 the runtime itself (no marker sanctions it), so never reach for one instead.
 
 The wake supervisor also ends a runtime on its own when that runtime's OWN memory
-stays over `session.runtime_memory.limit_mb` (default 8192 MB) for about three
+stays over `session.runtime_memory.limit_mb` (default 8192 MiB) for about three
 minutes: its wakes and monitors go dormant, and the session reads why the next time
 it opens.
 

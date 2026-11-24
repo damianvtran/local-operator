@@ -3218,6 +3218,37 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
                         config_dir, SLICE_S, None, failure_check=sweeper.raise_if_failed
                     )
                     continue
+                # THE RUNTIME MEMORY GUARD HOLDS THE SUPERVISOR UP (QA round 1 on
+                # #4519, Q1). This process is the guard's only host, and "nothing
+                # fireable" is exactly the state the guard's own act leaves behind
+                # (it makes the stopped session's wakes dormant): retiring here left
+                # a second 1.2 GiB runaway unguarded for 12 minutes in QA, and a
+                # store with nothing scheduled had no guard at all. So while the
+                # guard is enabled and a guardable runtime is live, stay up and run
+                # ONLY the memory seat (its machine pass included) on its own 60 s
+                # interval. Re-decided every slice, so the moment the last runtime
+                # exits this falls through to the retirement below.
+                #
+                # The restart half is launchd's ``StartInterval`` self-heal (900 s):
+                # a supervisor that retired before a runtime started is relaunched
+                # within one interval, sees the live runtime here and stays. No new
+                # start path from the runtime itself: a fork per runtime boot would
+                # cost every session for a bound that one relaunch tick already
+                # provides.
+                from local_operator.session.runtime.runtime_memory import (
+                    holds_supervisor,
+                )
+
+                if await asyncio.to_thread(holds_supervisor, config_dir):
+                    memory_sweep.kick()
+                    await _sleep_in_slices(
+                        config_dir,
+                        SLICE_S,
+                        None,
+                        failure_check=sweeper.raise_if_failed,
+                        interrupt=move.due if move is not None else None,
+                    )
+                    continue
                 if await _should_retire(config_dir):
                     # LOGGED WITH THE REASON, because this is the transition
                     # that ends the process: a supervisor that is gone looks

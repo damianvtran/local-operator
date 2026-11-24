@@ -39,9 +39,9 @@ window. ``tests/unit/session/runtime/test_runtime_memory.py`` pins both halves.
    mechanism :data:`MECHANISM`) — the durable sanction the runtime's signal gate
    (``process._route_signal``) requires before it will honour a SIGTERM, and the
    incident the session renders on its next open;
-3. stamps the session's wakes and monitors DORMANT (``stopped_at``) — kept, never
-   deleted, but not re-armed (see :data:`GUARD_INDEX_MARKER` for why not
-   ``parked_at``);
+3. stamps the session's wakes and monitors DORMANT (``control.STOP_MARKER``,
+   ``stopped_at``) — kept, never deleted, but not re-armed (see
+   :func:`end_runaway_runtime` for why not ``parked_at``);
 4. SIGTERMs the exact pid, waits :data:`RUNTIME_GUARD_TERM_GRACE_S`, re-proves the
    birth, and SIGKILLs it if it is still there;
 5. writes one ``runtime memory guard:`` WARNING line to the supervisor log and
@@ -51,6 +51,20 @@ window. ``tests/unit/session/runtime/test_runtime_memory.py`` pins both halves.
 Unknown never acts — the per-command sampler's rule, kept here: a footprint the
 host cannot read resets the run of samples, and a birth or root that cannot be
 proved refuses the stop.
+
+**WHAT IT NEVER ENDS: THE OPERATOR'S TUI** (``kind == "tui"``, agent review round 1
+R5). The TUI publishes a registry record like any runtime, but that process is the
+operator's foreground window: ending it from a background pass would close the
+screen they are looking at, mid-keystroke, with no surface left to say why. An
+over-ceiling TUI gets ONE warning line per run in the supervisor log instead; the
+operator, who is by definition at it, decides. ``daemon`` and ``exec`` runtimes are
+background processes and are guarded.
+
+**IT KEEPS ITS HOST ALIVE** (QA round 1 Q1). The pass runs in the wake supervisor,
+which retires once nothing is fireable — including right after this guard made a
+session's wakes dormant, which left a second runaway unguarded for 12 minutes in
+QA. :func:`holds_supervisor` is the supervisor's reason to stay: while the guard
+is enabled and any guardable runtime of the store is live, it does not retire.
 """
 
 from __future__ import annotations
@@ -85,10 +99,18 @@ RUNTIME_MEMORY_ENABLED_DEFAULT = True
 RUNTIME_MEMORY_LIMIT_MB_PATH: tuple[str, ...] = ("session", "runtime_memory", "limit_mb")
 RUNTIME_MEMORY_LIMIT_MB_DEFAULT = 8192
 
-#: The lowest ceiling the guard will apply. A configured value below it is raised to
-#: it (and logged): the measured MEDIAN runtime is ~1 GiB, so a ceiling under that
-#: would end ordinary sessions on every pass — a typo must not become a fleet kill.
+#: The lowest ceiling the guard will accept. A configured value below it is INVALID
+#: and the DEFAULT applies (warned once per value), never the floor itself: the
+#: measured median runtime is ~1 GiB (p90 1,945 MiB), so clamping a units typo such
+#: as ``limit_mb: 8`` (meant as GiB) up to 1024 would still end about half the fleet
+#: every few minutes (agent review round 1 R3) — a typo must not become a fleet kill.
 RUNTIME_MEMORY_LIMIT_MB_FLOOR = 1024
+
+#: The below-floor values already warned about in this process, so a supervisor
+#: that re-reads the setting every pass logs a bad value ONCE rather than once a
+#: minute forever (QA round 1 Q2). Keyed by value: a different bad value is a new
+#: edit and earns its own line.
+_WARNED_LIMITS: set[int] = set()
 
 #: Consecutive over-ceiling passes before the guard acts. With the supervisor's
 #: 60 s cadence (``wakes.supervisor.MACHINE_MEMORY_INTERVAL_S``) three samples span
@@ -125,17 +147,6 @@ MECHANISM = "runtime-memory-guard"
 #: The acting component named on the marker and the notice.
 ACTOR = "runtime memory guard"
 
-#: Which index stamp the guard leaves on the session's wakes and monitors.
-#:
-#: ``stopped_at`` (DORMANT, kept), NOT ``parked_at`` (armed). A park re-arms the
-#: schedules so the wake supervisor cold-engages the session on its next due wake —
-#: and the incident this guard exists for WAS a wake cold-booting a runaway. A runtime
-#: that has held more than any measured session for minutes will do it again on the
-#: next engage, so re-arming would turn one stop into a kill loop on the wake's
-#: cadence. Dormant keeps every schedule (reopening the session restores them) and
-#: leaves the re-arm to a person who has read the notice.
-GUARD_INDEX_MARKER = "stopped_at"
-
 
 @dataclass(frozen=True)
 class RuntimeGuardSettings:
@@ -152,9 +163,9 @@ def read_settings(config_dir: Path) -> RuntimeGuardSettings:
 
     Config trouble falls back to the defaults rather than disabling the guard: an
     unreadable ``config.yml`` is not the operator saying "off". A ceiling below
-    :data:`RUNTIME_MEMORY_LIMIT_MB_FLOOR` is raised to the floor, and ``0`` or a
-    negative ceiling means the default (the off switch is ``enabled``, never a
-    magic number — the ``bash.memory.limit_mb`` rule).
+    :data:`RUNTIME_MEMORY_LIMIT_MB_FLOOR` is invalid and the default applies, and
+    ``0`` or a negative ceiling means the default too (the off switch is
+    ``enabled``, never a magic number — the ``bash.memory.limit_mb`` rule).
     """
     enabled: Any = RUNTIME_MEMORY_ENABLED_DEFAULT
     limit: Any = RUNTIME_MEMORY_LIMIT_MB_DEFAULT
@@ -173,13 +184,16 @@ def read_settings(config_dir: Path) -> RuntimeGuardSettings:
     if limit_mb <= 0:
         limit_mb = RUNTIME_MEMORY_LIMIT_MB_DEFAULT
     if limit_mb < RUNTIME_MEMORY_LIMIT_MB_FLOOR:
-        logger.warning(
-            "runtime memory guard: session.runtime_memory.limit_mb=%s is below the %s MiB "
-            "floor; using the floor",
-            limit_mb,
-            RUNTIME_MEMORY_LIMIT_MB_FLOOR,
-        )
-        limit_mb = RUNTIME_MEMORY_LIMIT_MB_FLOOR
+        if limit_mb not in _WARNED_LIMITS:
+            _WARNED_LIMITS.add(limit_mb)
+            logger.warning(
+                "runtime memory guard: session.runtime_memory.limit_mb=%s MiB is below the "
+                "%s MiB floor, so it is ignored; using the default %s MiB",
+                limit_mb,
+                RUNTIME_MEMORY_LIMIT_MB_FLOOR,
+                RUNTIME_MEMORY_LIMIT_MB_DEFAULT,
+            )
+        limit_mb = RUNTIME_MEMORY_LIMIT_MB_DEFAULT
     return RuntimeGuardSettings(enabled=enabled is not False, limit_mb=limit_mb)
 
 
@@ -205,6 +219,9 @@ class RuntimeGuardTracker:
     """
 
     runs: dict[tuple[int, float], _Run] = field(default_factory=dict)
+    #: Runs of a TUI already warned about as over the ceiling (see the module
+    #: docstring): one line per run, never one per pass.
+    tui_warned: set[tuple[int, float]] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -238,9 +255,13 @@ class RuntimeGuardReport:
             return "runtime memory guard: off (session.runtime_memory.enabled=false)"
         parts = [f"runtime memory guard: {self.runtimes} runtime(s), {self.unmeasured} unmeasured"]
         for pid, mb, streak in self.over:
-            parts.append(f"pid {pid} over the ceiling at {mb} MiB (sample {streak})")
+            parts.append(
+                f"pid {pid} over the ceiling at {mb} MiB (sample {streak})"
+            )  # i18n: ignore supervisor developer log line
         for act in self.acts:
-            parts.append(f"pid {act.pid} {act.method}{f' ({act.detail})' if act.detail else ''}")
+            parts.append(
+                f"pid {act.pid} {act.method}{f' ({act.detail})' if act.detail else ''}"
+            )  # i18n: ignore supervisor developer log line
         return "; ".join(parts)
 
 
@@ -249,6 +270,42 @@ def _live_records(config_dir: Path) -> list[Any]:
     from local_operator.session.runtime import registry
 
     return [rec for rec, state in registry.scan(config_dir, reap=False) if state != "stale"]
+
+
+#: The record kind the guard measures but never ends (module docstring, R5).
+OPERATOR_WINDOW_KIND = "tui"
+
+
+def _guardable(record: Any) -> bool:
+    """A record this guard could ever END: a real pid, not this process, not a TUI."""
+    pid = getattr(record, "pid", 0)
+    if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+        return False
+    return getattr(record, "kind", "") != OPERATOR_WINDOW_KIND
+
+
+def holds_supervisor(
+    config_dir: Path,
+    *,
+    records: Callable[[Path], list[Any]] | None = None,
+    settings: RuntimeGuardSettings | None = None,
+) -> bool:
+    """Whether the wake supervisor must stay up to keep this guard running (Q1).
+
+    True while the guard is enabled AND at least one guardable runtime of this
+    config root is live. The registry is read first because it is the cheap half
+    (a directory scan, no fork) and the common answer on an idle store is "none";
+    the settings are read only when there is something to guard. Never raises: a
+    failed read answers False, which leaves the supervisor's own retirement rule
+    exactly as it was before this guard existed.
+    """
+    try:
+        if not any(_guardable(rec) for rec in (records or _live_records)(config_dir)):
+            return False
+        return (settings or read_settings(config_dir)).enabled
+    except Exception:  # noqa: BLE001 — a hold question must never add a crash path
+        logger.debug("runtime memory guard: hold check failed", exc_info=True)
+        return False
 
 
 def _default_footprint_mb(pid: int) -> int | None:
@@ -301,15 +358,27 @@ def root_matches(record: Any, config_dir: Path) -> bool | None:
 
 
 def notice_text(act: GuardAct) -> str:
-    """What the session's model reads when it next opens. Model-facing, English."""
+    """The row the session shows when it next opens: operator first, model second.
+
+    WRITTEN FOR THE OPERATOR (UX round 1 U3): what happened, what was kept, how
+    to resume and which setting governs it, by its /settings label — the sender
+    is already named on the row, so the text does not shout it again. The units
+    are the setting's own (MiB, U5/N1), so the number told and the number
+    editable compare without a conversion. The last sentence is the model's: it
+    reads the same row, and without it would repeat the work that grew.
+
+    English by design: this is transcript CONTENT, persisted once and replayed
+    to every viewer and to the model, like every other peer row.
+    """
     return (
-        f"RUNTIME MEMORY GUARD: this session's runtime (pid {act.pid}) was ended because "
-        f"its own memory footprint stayed at {act.footprint_mb / 1024:.1f} GiB, over the "
-        f"{act.limit_mb / 1024:.1f} GiB per-runtime ceiling (session.runtime_memory.limit_mb), "
-        f"for several consecutive checks. Its wakes and monitors were made dormant, not "
-        f"deleted: reopening the session restores them. Before continuing, find what grew "
-        f"(a very large transcript or tool result held in memory is the usual cause) rather "
-        f"than repeating the work that preceded the stop."
+        f"The memory guard ended this session's runtime: it held {act.footprint_mb:,} MiB, "
+        f"over the {act.limit_mb:,} MiB ceiling (Settings → Session memory limit → "
+        f"Session ceiling (MiB)), for several consecutive checks. Its wakes and monitors "
+        f"were made dormant, not deleted, and reopening the session (resume it or open it "
+        f"from the session list) re-arms them. If the same load grows again, the guard "
+        f"ends it again. For the model: before continuing, find what grew (usually a very "
+        f"large transcript or tool result held in memory) instead of repeating the work "
+        f"that preceded the stop."
     )
 
 
@@ -395,13 +464,23 @@ def end_runaway_runtime(
     # The sanction FIRST: the runtime's signal gate refuses a SIGTERM no marker
     # covers, and the marker must be on disk before the signal can arrive.
     control.note_involuntary_stop(record, config_dir, mechanism=MECHANISM, actor=ACTOR)
+    # DORMANT (``control.STOP_MARKER``, ``stopped_at``: kept), NOT ``PARK_MARKER``
+    # (armed). A park re-arms the schedules so the wake supervisor cold-engages the
+    # session on its next due wake — and the incident this guard exists for WAS a
+    # wake cold-booting a runaway. A runtime that has held more than any measured
+    # session for minutes will do it again on the next engage, so re-arming would
+    # turn one stop into a kill loop on the wake's cadence. Dormant keeps every
+    # schedule (reopening the session restores them) and leaves the re-arm to a
+    # person who has read the notice. The ladder's own constant, never a second
+    # spelling: the copy-set guard classifies path-shaped literals per module.
+    marker = control.STOP_MARKER
     wakes = monitors = 0
     try:
-        wakes = control._mark_wakes_dormant(record, config_dir, GUARD_INDEX_MARKER)
+        wakes = control._mark_wakes_dormant(record, config_dir, marker)
     except Exception:  # noqa: BLE001 — the index is derived; the stop is not
         logger.warning("runtime memory guard: could not stamp wakes dormant", exc_info=True)
     try:
-        monitors = control._mark_monitors_dormant(record, config_dir, GUARD_INDEX_MARKER)
+        monitors = control._mark_monitors_dormant(record, config_dir, marker)
     except Exception:  # noqa: BLE001 — same
         logger.warning("runtime memory guard: could not stamp monitors dormant", exc_info=True)
     base.update(wakes_dormant=wakes, monitors_dormant=monitors)
@@ -483,6 +562,21 @@ def runtime_memory_pass(
             mb = read(pid)
         except Exception:  # noqa: BLE001 — a failed read is "unknown"
             mb = None
+        if not _guardable(record):
+            # The operator's own window: measured, warned once per run, never
+            # ended and never streaked (module docstring, R5).
+            if mb is not None and mb > conf.limit_mb and key not in tracker.tui_warned:
+                tracker.tui_warned.add(key)
+                logger.warning(
+                    "runtime memory guard: the TUI (pid %s, session %s) holds %s MiB, over "
+                    "the %s MiB ceiling; a TUI is the operator's own window and is never "
+                    "ended by this guard",
+                    pid,
+                    getattr(record, "session_id", ""),
+                    mb,
+                    conf.limit_mb,
+                )
+            continue
         run = tracker.runs.setdefault(key, _Run())
         if mb is None:
             # Unknown never acts — and never counts: a streak is CONSECUTIVE readings.
@@ -528,6 +622,7 @@ def runtime_memory_pass(
         tracker.runs.pop(key, None)
     for stale in set(tracker.runs) - seen:
         tracker.runs.pop(stale, None)
+    tracker.tui_warned &= seen
     state = "acted" if acts else ("watching" if over else "ok")
     return RuntimeGuardReport(
         state=state,
@@ -541,7 +636,7 @@ def runtime_memory_pass(
 def _log_act(act: GuardAct) -> None:
     """ONE grep-able line per act: who, what, how big, against which ceiling."""
     logger.warning(
-        "runtime memory guard: session=%s pid=%s method=%s footprint_mb=%s limit_mb=%s "
+        "runtime memory guard: session=%s pid=%s method=%s footprint_mib=%s limit_mib=%s "
         "wakes_dormant=%s monitors_dormant=%s notice=%s detail=%r",
         act.session_id,
         act.pid,

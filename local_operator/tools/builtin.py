@@ -18242,8 +18242,7 @@ class SessionsParams(BaseModel):
     peer: str | None = Field(
         default=None,
         description=(
-            "Remote (mesh): the device holding the session — a name or id; on `list`, "
-            "selects only that device's rows."
+            "Remote (mesh): the session's device, name or id; on `list`, selects only its rows."
         ),
     )
     scope: Literal["all", "local", "remote"] = Field(
@@ -18288,7 +18287,7 @@ class SessionsParams(BaseModel):
     dry_run: bool = Field(default=False, description="resume set: preview; starts nothing.")
     include_stored: bool = Field(
         default=False,
-        description="list: include stored (not running) sessions.",
+        description="list: also stored (not running) ones.",
     )
     limit: int = Field(
         default=20,
@@ -18317,10 +18316,16 @@ class SessionsParams(BaseModel):
     # refusal named no way forward. `force` is that way forward, kept OFF by
     # default so the tool's promise (never signals, never cuts work) holds
     # unless the caller says this is an operator-safety stop.
-    force: bool = Field(
-        default=False,
-        description="stop: operator-safety escalation (signals; cuts work).",
-    )
+    #
+    #
+    # ONE SHORT CLAUSE, ON PURPOSE (agent review round 1 on #4519, R2): the field
+    # ships in every request's start context and its first description put
+    # ``scripts/bench_context_budget.py`` 21 tokens over. The contract lives where
+    # a caller meets it: the stop op's reference (``sessions(op='help')``,
+    # ``_SESSIONS_OP_DOCS["stop"]``) and the refusal itself, which names
+    # ``force=true`` and when it is legitimate. The `peer`/`include_stored`
+    # descriptions were tightened (same meaning) to pay for the rest.
+    force: bool = Field(default=False, description="stop: signals even if busy.")
 
 
 #: The window fields, which only ``peek`` has a meaning for — ONE ordered
@@ -18581,21 +18586,18 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         " subagent or a job), or one due a wake inside the hold window, is refused"
         " with the reason. Its wakes and monitors go DORMANT until it is reopened —"
         " to free memory and keep them armed, use `park`. With `peer`, always"
-        " refused — an idle-only remote stop is not on the wire yet. `force=true`"
-        " is the operator-safety escalation (the operator asked for the session to"
-        " be ended, or it is a memory runaway): the CLI's `lop stop --force` ladder —"
-        " a stop marker the runtime's signal gate honours, an identity-checked"
-        " SIGTERM, the receiver's bounded drain, then SIGKILL of that exact process."
-        " It cuts the work in flight; never use it to tidy up.",
+        " refused — an idle-only remote stop is not on the wire yet. `force=true`:"
+        " operator-safety escalation, only when the operator asked for it to end or"
+        " it is a memory runaway — identity-checked SIGTERM, bounded drain, then"
+        " SIGKILL; cuts work in flight, never for tidying.",
         example="sessions(op='stop', session='a1b2c3d4e5f6')",
         refusals=(
             "needs an address; a stored (not running) session is refused; the"
             " calling session cannot stop itself; a working or wake-due session is"
             " refused; a remote (`peer`) target is always refused; an owner too old"
             " to promise an idle-only stop is refused; an owner that does not answer"
-            " is refused rather than signalled. `force=true` lifts the working,"
-            " wake-due, too-old and no-answer refusals (never the self, stored or"
-            " `peer` ones); a pid whose identity cannot be proven is still refused.",
+            " is refused rather than signalled. `force=true` lifts only the working,"
+            " wake-due, too-old and no-answer refusals; unproven identity stays refused.",
         ),
     ),
     "park": _SessionsOpDoc(
@@ -20643,6 +20645,13 @@ async def _sessions_stop(
     # interim step and has to expand to learn the result (design round 1 D4).
     if force:
         details["force"] = True
+        # The SIGTERM rung's pre-signal announcement (``control._wait_line``,
+        # "waiting up to … before SIGKILL") is for a front end that paints WHILE
+        # it waits. This result is rendered once, after the outcome, so the line
+        # under "stopped"/"killed" read as still pending (UX round 1 on #4519,
+        # U7). Only the forced path reaches that rung; the ladder's other
+        # announcements (a stalled drain's decision line) still explain the stop.
+        waited = [line for line in waited if not line.startswith("waiting up to ")]
     refused = outcome.method in ("refused", "busy", "draining")
     if refused and not force:
         # A REFUSAL IS NEVER A DEAD END (the 2026-11-24 runaway): the line names

@@ -3734,6 +3734,62 @@ async def test_stop_puts_the_outcome_above_the_wait_lines(
     assert "waiting up to" in lines[1]
 
 
+@pytest.mark.asyncio
+async def test_a_forced_stop_receipt_does_not_reprint_the_pre_signal_wait(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 1 on #4519, U7: the tool result is rendered once, AFTER the
+    outcome, so the SIGTERM rung's "waiting up to … before SIGKILL" announcement
+    under "killed" read as still pending. A forced receipt drops it and keeps the
+    ladder's other explanation lines.
+
+    Negative control: ``test_stop_puts_the_outcome_above_the_wait_lines`` — the
+    plain stop keeps its announcement lines unchanged.
+    """
+
+    class _Outcome:
+        pid = 4243
+        session_id = "aaaa00000002"
+        name = "runaway"
+        method = "sigkill"
+        reason = ""
+        wakes_dormant = 0
+        monitors_dormant = 0
+        line = 'killed "runaway"'
+
+    class _Record:
+        pid = 4243
+        session_id = "aaaa00000002"
+        conversation_name = "runaway"
+
+    seen: dict[str, Any] = {}
+
+    async def _stop(target: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        kwargs["on_wait"]('"runaway" (pid 4243) is leaving, but stalled; trying the ordinary stop')
+        kwargs["on_wait"]('waiting up to 2.5 min for "runaway" (pid 4243) to drain before SIGKILL')
+        return _Outcome()
+
+    monkeypatch.setattr(
+        builtin,
+        "_sessions_target",
+        AsyncMock(
+            return_value=builtin._SessionsTarget(
+                record=_Record(), session_id="", candidates=[], candidates_stored=False, error=""
+            )
+        ),
+    )
+    monkeypatch.setattr(control, "stop_session", _stop)
+    result = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000002", "force": True}, None, None, _context(root)
+    )
+    assert seen["force"] is True and seen["graceful_only"] is False
+    lines = result.text.splitlines()
+    assert lines[0] == 'killed "runaway"'
+    assert not any(line.startswith("waiting up to") for line in lines), lines
+    assert any("trying the ordinary stop" in line for line in lines), lines
+
+
 # ---------------------------------------------------------------------------
 # park — free a session's memory, keep its wakes and monitors armed
 # ---------------------------------------------------------------------------

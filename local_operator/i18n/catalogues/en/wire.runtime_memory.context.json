@@ -15,21 +15,22 @@
   "wire.runtime_memory.enabled.help": {
     "role": "setting help",
     "tone": "plain",
-    "note": "'dormant' matches the sessions tool's stop vocabulary (wakes/monitors kept, not firing until reopened)."
+    "note": "'dormant' matches the sessions tool's stop vocabulary (wakes/monitors kept, not firing until reopened). 'TUI window' is the terminal app the operator is using; it is never ended by this guard."
   },
   "wire.runtime_memory.enabled.label": {
     "role": "setting label",
-    "tone": "terse"
+    "tone": "terse",
+    "note": "Row label for the on/off switch; same words as the 'on' choice description, as an imperative."
   },
   "wire.runtime_memory.limit_mb.help": {
     "role": "setting help",
     "tone": "plain",
-    "note": "Keep 1024 and 0 as digits."
+    "note": "Keep 1024 and 0 as digits; MiB as in the label. A value below 1024 is ignored (the default applies), not raised."
   },
   "wire.runtime_memory.limit_mb.label": {
     "role": "setting label",
     "tone": "terse",
-    "note": "MB as in the existing 'Manual ceiling (MB)' label."
+    "note": "MiB (mebibytes), the unit the guard measures and reports in; use the locale's usual MiB symbol."
   },
   "wire.runtime_memory.section.description": {
     "role": "settings section description",

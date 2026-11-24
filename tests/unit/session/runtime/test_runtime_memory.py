@@ -203,13 +203,117 @@ def test_off_comes_from_config(tmp_path: Path) -> None:
     assert runtime_memory.read_settings(tmp_path).enabled is False
 
 
-def test_a_ceiling_below_the_floor_is_raised_to_it(tmp_path: Path) -> None:
-    (tmp_path / "config.yml").write_text(
-        "values:\n  session:\n    runtime_memory:\n      limit_mb: 10\n"
+def _write_limit(root: Path, value: int) -> None:
+    (root / "config.yml").write_text(
+        f"values:\n  session:\n    runtime_memory:\n      limit_mb: {value}\n"
     )
-    assert runtime_memory.read_settings(tmp_path).limit_mb == (
-        runtime_memory.RUNTIME_MEMORY_LIMIT_MB_FLOOR
+
+
+def test_a_ceiling_below_the_floor_is_invalid_and_the_default_applies(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3: a units typo (``8`` meant as GiB) must not become a 1 GiB fleet ceiling.
+
+    Q2: the supervisor re-reads every pass, so the warning is said ONCE per value.
+    Negative control: a valid value at or above the floor is used as written.
+    """
+    monkeypatch.setattr(runtime_memory, "_WARNED_LIMITS", set())
+    _write_limit(tmp_path, 8)
+    with caplog.at_level("WARNING", logger=runtime_memory.__name__):
+        first = runtime_memory.read_settings(tmp_path)
+        second = runtime_memory.read_settings(tmp_path)
+    assert first.limit_mb == second.limit_mb == runtime_memory.RUNTIME_MEMORY_LIMIT_MB_DEFAULT
+    warnings = [r for r in caplog.records if "below the" in r.getMessage()]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert "MiB" in warnings[0].getMessage()
+    # A different bad value is a new edit and earns its own line.
+    _write_limit(tmp_path, 512)
+    with caplog.at_level("WARNING", logger=runtime_memory.__name__):
+        runtime_memory.read_settings(tmp_path)
+    assert len([r for r in caplog.records if "below the" in r.getMessage()]) == 2
+    for valid in (runtime_memory.RUNTIME_MEMORY_LIMIT_MB_FLOOR, 2048):
+        _write_limit(tmp_path, valid)
+        assert runtime_memory.read_settings(tmp_path).limit_mb == valid
+
+
+# --- the operator's TUI is never ended (R5) --------------------------------------
+
+
+def test_an_over_ceiling_tui_is_warned_once_and_never_ended(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    tui = _record()
+    tui.kind = "tui"
+    with caplog.at_level("WARNING", logger=runtime_memory.__name__):
+        end, reports = _run_passes(tmp_path, [9000] * 5, settings=SETTINGS, record=tui)
+    assert end.calls == [], "the guard ended the operator's foreground TUI"
+    assert all(report.acts == () and report.over == () for report in reports)
+    lines = [r.getMessage() for r in caplog.records if "TUI" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "9000 MiB" in lines[0]
+
+
+def test_negative_control_the_same_load_in_a_daemon_runtime_is_ended(tmp_path: Path) -> None:
+    for kind in ("daemon", "exec"):
+        record = _record()
+        record.kind = kind
+        end, _ = _run_passes(tmp_path, [9000] * 3, settings=SETTINGS, record=record)
+        assert len(end.calls) == 1, kind
+
+
+# --- the supervisor hold (Q1) ------------------------------------------------------
+
+
+def test_the_guard_holds_the_supervisor_while_a_guardable_runtime_is_live(
+    tmp_path: Path,
+) -> None:
+    daemon = _record()
+    daemon.kind = "daemon"
+    tui = _record(pid=4343)
+    tui.kind = "tui"
+    on = RuntimeGuardSettings(enabled=True)
+    off = RuntimeGuardSettings(enabled=False)
+
+    def hold(records: list[Any], settings: RuntimeGuardSettings) -> bool:
+        return runtime_memory.holds_supervisor(
+            tmp_path, records=lambda _root: records, settings=settings
+        )
+
+    assert hold([daemon], on) is True
+    assert hold([daemon, tui], on) is True
+    # Negative controls: nothing live, only the operator's TUI, the guard off, and
+    # this process's own record each leave retirement to its old rule.
+    assert hold([], on) is False
+    assert hold([tui], on) is False
+    assert hold([daemon], off) is False
+    own = _record(pid=os.getpid())
+    own.kind = "daemon"
+    assert hold([own], on) is False
+
+
+def test_a_failing_hold_read_never_raises_and_never_holds(tmp_path: Path) -> None:
+    def boom(_root: Path) -> list[Any]:
+        raise OSError("registry unreadable")
+
+    assert runtime_memory.holds_supervisor(tmp_path, records=boom) is False
+
+
+# --- the notice (U3, U5/N1) --------------------------------------------------------
+
+
+def test_the_notice_speaks_to_the_operator_in_the_settings_unit() -> None:
+    text = runtime_memory.notice_text(
+        GuardAct(
+            session_id=SESSION_ID, pid=4242, footprint_mb=9400, limit_mb=8192, method="sigterm"
+        )
     )
+    assert "9,400 MiB" in text and "8,192 MiB" in text
+    assert "GiB" not in text
+    # The /settings route by its labels, never the raw config key.
+    assert "Session memory limit" in text and "Session ceiling (MiB)" in text
+    assert "session.runtime_memory.limit_mb" not in text
+    assert "dormant, not deleted" in text and "resume it" in text
+    assert "RUNTIME MEMORY GUARD" not in text
 
 
 def test_an_unproven_config_root_never_acts(tmp_path: Path) -> None:
@@ -322,6 +426,40 @@ def test_a_birth_mismatch_is_never_signalled(tmp_path: Path, child) -> None:
     assert registry.read_stop_marker(control.session_dir(root, SESSION_ID)) is None
 
 
+def test_a_birth_that_cannot_be_reproved_after_the_grace_withholds_sigkill(
+    tmp_path: Path, child
+) -> None:
+    """R4: the guard's ``withheld`` branch. A SIGTERM-ignoring runtime survives the
+    grace, and the second birth proof fails: SIGKILL is never sent on doubt, the
+    process is left alive, and the SIGTERM's marker stays.
+
+    Negative control: the same setup with a second proof that passes escalates
+    (``test_a_sigterm_ignoring_runtime_is_escalated_to_sigkill``).
+    """
+    root = _session_root(tmp_path)
+    proc = child(ignore_term=True)
+    answers = iter([True, False])
+    sent: list[int] = []
+
+    def send(pid: int, sig: int) -> None:
+        sent.append(sig)
+        os.kill(pid, sig)
+
+    act = runtime_memory.end_runaway_runtime(
+        root,
+        _record(pid=proc.pid),
+        footprint_mb=9000,
+        limit_mb=8192,
+        verify=lambda _r: next(answers),
+        send=send,
+        term_grace_s=0.5,
+    )
+    assert act.method == "withheld"
+    assert sent == [signal.SIGTERM]
+    assert proc.poll() is None, "a pid whose birth could not be re-proved was killed"
+    assert registry.read_stop_marker(control.session_dir(root, SESSION_ID)) is not None
+
+
 def test_the_schedules_go_dormant_not_deleted(tmp_path: Path, child) -> None:
     from local_operator.wakes import store as wake_store
 
@@ -365,4 +503,4 @@ def test_the_full_pass_ends_a_real_runaway_after_n_samples(tmp_path: Path, child
     assert reports[-1].acts[0].method == "sigkill"
     assert reports[-1].acts[0].notice == "spooled"
     inbox = (control.session_dir(root, SESSION_ID) / "inbox.jsonl").read_text()
-    assert "RUNTIME MEMORY GUARD" in inbox
+    assert "The memory guard ended this session" in inbox

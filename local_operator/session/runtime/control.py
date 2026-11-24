@@ -132,6 +132,22 @@ def _from_a_shell(command: str) -> bool:
     return not command.startswith("/")
 
 
+#: The ``_command`` the ``sessions`` tool stamps on its stops (``sessions tool``, or
+#: ``sessions tool --force`` for the escalation). Read by :func:`_force_flag`.
+_TOOL_COMMAND = "sessions tool"
+
+
+def _force_flag(command: str) -> str:
+    """How the CALLER spells the escalation, for a line it will read back.
+
+    The ``sessions`` tool's caller is a model that passes ``force=true`` and has
+    no ``--force`` to type; the CLI flag in its tool result was two spellings of
+    one control in one receipt (UX round 1 on #4519, U8). Every other front end
+    keeps the flag, byte-identical to before.
+    """
+    return "force=true" if command.startswith(_TOOL_COMMAND) else "--force"
+
+
 def _force_remedy(pid: int, from_a_shell: bool) -> str:
     """The one next step a refusal may name, in words the CALLER can act on.
 
@@ -976,6 +992,7 @@ def _stopped_line(
     forced: bool = False,
     monitors: int = 0,
     still_runs: str = "",
+    flag: str = "--force",
 ) -> str:
     """The one human receipt line every front end paints for one stop.
 
@@ -998,7 +1015,8 @@ def _stopped_line(
     name = record.conversation_name or record.session_id
     verb = "killed" if method == "sigkill" else "stopped"
     rung = " (sigterm)" if method == "sigterm" else ""
-    proof = " (--force: identity confirmed from its record)" if forced else ""
+    # ``flag``: the caller's own spelling of the escalation (:func:`_force_flag`).
+    proof = f" ({flag}: identity confirmed from its record)" if forced else ""
     items: list[str] = []
     if wakes:
         items.append(f"{wakes} wake{'s' if wakes != 1 else ''}")
@@ -1907,7 +1925,13 @@ async def stop_session(
             method=method,
             line=(
                 f'skipped "{name}" (pid {record.pid}) — a turn is in flight; '
-                "stop it again once the turn ends, or --force to signal it now"
+                "stop it again once the turn ends, or "
+                + (
+                    "stop it with force=true"
+                    if _force_flag(_command) == "force=true"
+                    else "--force"
+                )
+                + " to signal it now"
             ),
         )
 
@@ -2009,7 +2033,13 @@ async def stop_session(
             name=name,
             method=method,
             line=_stopped_line(
-                record, method, wakes, forced=forced, monitors=monitors, still_runs=still_runs
+                record,
+                method,
+                wakes,
+                forced=forced,
+                monitors=monitors,
+                still_runs=still_runs,
+                flag=_force_flag(_command),
             ),
             wakes_dormant=wakes,
             monitors_dormant=monitors,
@@ -2036,6 +2066,14 @@ async def stop_session(
     from local_operator.session.runtime.runtime_memory import birth_matches
 
     if await asyncio.to_thread(birth_matches, record) is False:
+        # The SESSION did stop (its runtime exited inside the grace), so it owes
+        # the same dormancy stamps the SIGTERM-success rung above writes: a stop
+        # that returned without them left the session's wakes and monitors armed
+        # for a cold-boot wake of the session the operator just ended (agent
+        # review round 1 on #4519, R4). The stamps touch only the session's own
+        # index entries, never the stranger now holding the pid.
+        wakes = await _park_wakes(record, root, mark)
+        monitors = await _park_monitors(record, root, mark)
         _recover_record(record, root)
         return StopOutcome(
             pid=record.pid,
@@ -2044,6 +2082,8 @@ async def stop_session(
             method="gone",
             line=f'"{name}" exited during the SIGTERM grace; its pid now belongs to '
             "another process, so no SIGKILL was sent",
+            wakes_dormant=wakes,
+            monitors_dormant=monitors,
         )
     _write_stop_marker(record, root, "sigkill", command=_command, sweep_id=_sweep_id)
     # ``hard_kill_signal()`` is SIGKILL on POSIX — the identical value this rung
@@ -2061,7 +2101,13 @@ async def stop_session(
         name=name,
         method=method,
         line=_stopped_line(
-            record, method, wakes, forced=forced, monitors=monitors, still_runs=still_runs
+            record,
+            method,
+            wakes,
+            forced=forced,
+            monitors=monitors,
+            still_runs=still_runs,
+            flag=_force_flag(_command),
         ),
         wakes_dormant=wakes,
         monitors_dormant=monitors,

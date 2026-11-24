@@ -1196,8 +1196,8 @@
  "wire.settings.session_runtime_memory_enabled.choice.false.label": "off",
  "wire.settings.session_runtime_memory_enabled.choice.true.description": "end runaway sessions",
  "wire.settings.session_runtime_memory_enabled.choice.true.label": "on",
- "wire.settings.session_runtime_memory_enabled.help": "End a session runtime whose own memory stays over the ceiling below for several consecutive checks (about three minutes). Its wakes and monitors are made dormant, not deleted, and the session is told why when it next opens.",
- "wire.settings.session_runtime_memory_enabled.label": "Session memory limit",
- "wire.settings.session_runtime_memory_limit_mb.help": "How much memory one session runtime may hold before the guard ends it. The default sits well above the largest session measured in normal use; values below 1024 are raised to 1024, and 0 means the default.",
- "wire.settings.session_runtime_memory_limit_mb.label": "Session ceiling (MB)"
+ "wire.settings.session_runtime_memory_enabled.help": "End a session runtime whose own memory stays over the ceiling below for several consecutive checks (about three minutes). Its wakes and monitors are made dormant, not deleted, and the session is told why when it next opens. The TUI window you are working in is never ended.",
+ "wire.settings.session_runtime_memory_enabled.label": "End runaway sessions",
+ "wire.settings.session_runtime_memory_limit_mb.help": "How much memory, in MiB, one session runtime may hold before the guard ends it. The default sits well above the largest session measured in normal use; a value below 1024, or 0, is ignored and the default applies.",
+ "wire.settings.session_runtime_memory_limit_mb.label": "Session ceiling (MiB)"
 }
