@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -192,10 +193,202 @@ def _write_local_binding(directory: Path, binding: Any) -> None:
 
 def inherit_fork_binding(parent: Path, child: Path) -> None:
     binding = _local_binding(parent)
+    if binding is None and _grandfather_fork(parent, child):
+        return
     if binding is None or binding is _UNREADABLE_STAMP:
         require_replica_reauthorization(child)
     else:
         _write_local_binding(child, binding)
+
+
+def _grandfather_fork(parent: Path, child: Path) -> bool:
+    """Bind a fork of a legacy-local parent to the parent's team, explicitly.
+
+    A fork of a session created here before bindings existed would otherwise be
+    journalled ``reauthorize`` and refuse every send, the same regression
+    :func:`is_legacy_local_attachment` exists to undo. The CHILD is bound (as an
+    explicit local attach under the parent's resolvable team); the parent is not
+    written, so forking never mutates the source conversation and the parent
+    grandfathers on its own next load. Any failure falls back to the
+    fail-closed reauthorize record.
+    """
+    from local_operator.resume import read_session_attachment_evidence
+
+    if not is_legacy_local_attachment(parent):
+        return False
+    try:
+        stored = read_session_attachment_evidence(parent)
+        if stored is None or not stored.team:
+            return False
+        authorize_named_team(
+            parent.parent.parent, child, stored.team
+        )  # parent = <root>/sessions/<id>
+    except Exception as error:  # noqa: BLE001 — any failure keeps the fail-closed record
+        logger.info("fork of legacy session %s not grandfathered: %s", parent.name, error)
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Legacy-local grandfathering (pre-binding sessions created on this device)
+# ---------------------------------------------------------------------------
+#
+# WHY. GHSA-wmg2-rrrj-p599: a session that ARRIVED from another mesh device
+# carried only a team NAME, and restore resolved it against this device's
+# registry, so a peer could get a same-name local team attached. The fix made
+# restore require ``LOCAL_BINDING_NAME`` (or a mesh stamp's team identity) —
+# but every team session created BEFORE bindings existed has neither, so all
+# of them refused every send ("The attached profile or team could not be
+# restored"); on the operator's Mac that was 755 sessions.
+#
+# The threat needs an ARRIVAL. Every arrival path leaves a marker this
+# predicate refuses on: move staging writes ``mesh.json``; replica recovery
+# writes ``fork-boundary.json``, a mesh origin stamp and a ``reauthorize``
+# binding; forks write ``fork-boundary.json`` and (since bindings) a binding;
+# a held replica lives under ``network/replicas/<id>``. A session with none
+# of them was, as far as this device can tell, created here, and binding it
+# to the team of that exact name in the local registry is what its user did.
+#
+# RESIDUAL (not a full preservation of the boundary). Pre-0.112.10 replica
+# recovery (33a57153babe ``network/sync.py`` 954-1013) copied a replica into
+# a FRESH id; an interrupted recovery could leave that copy without markers.
+# The transcript-head comparison against held replicas catches it while the
+# source replica is still held. A recovery whose source replica was later
+# deleted cannot be told apart from a local session and IS grandfathered.
+# Accepted per operator directive (2026-11-24): even then it binds only to a
+# team the local user defined, by exact name, never an alias.
+
+#: Bytes read from each transcript head to find its first non-empty line.
+_HEAD_BYTES = 64 * 1024
+
+
+def _first_line(directory: Path) -> bytes:
+    from local_operator.session.compression import read_head
+
+    for line in read_head(directory, _HEAD_BYTES).splitlines():
+        if line.strip():
+            return line
+    return b""
+
+
+def _matches_held_replica(root: Path, directory: Path) -> bool:
+    """Whether ``directory``'s transcript starts with a held replica's first line.
+
+    The first transcript row carries a random entry id and timestamp, so an
+    equal first line means a copy, not a coincidence. An unreadable replica is
+    non-matching (logged): it cannot be evidence either way, and refusing on it
+    would let one damaged replica re-break every legacy session.
+    """
+    from local_operator.network.sync import NETWORK_DIRNAME, REPLICA_DIRNAME
+
+    head = _first_line(directory)
+    if not head:
+        return False
+    replicas = root / NETWORK_DIRNAME / REPLICA_DIRNAME
+    try:
+        held = [entry for entry in replicas.iterdir() if entry.is_dir()]
+    except FileNotFoundError:
+        return False
+    for replica in held:
+        try:
+            if _first_line(replica) == head:
+                return True
+        except Exception as error:  # noqa: BLE001 — an unreadable replica is not a match
+            logger.warning("held replica %s unreadable for legacy check: %s", replica.name, error)
+    return False
+
+
+def is_legacy_local_attachment(directory: Path) -> bool:
+    """Whether ``directory`` is an unmarked team session created on this device.
+
+    True only when no binding file exists at all (an unreadable or
+    ``reauthorize`` binding is a deliberate denial), no mesh stamp or fork
+    boundary exists (readable or not), the id is not a held replica, the
+    transcript does not start like a held replica, and the attachment evidence
+    reads cleanly and names a team. Any error reading these is ``False``.
+    """
+    from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.network.sync import replica_dir
+    from local_operator.resume import read_session_attachment_evidence
+    from local_operator.session.placement import MESH_STAMP_NAME
+
+    directory = Path(directory)
+    root = directory.parent.parent  # <root>/sessions/<id>
+    try:
+        for marker in (LOCAL_BINDING_NAME, MESH_STAMP_NAME, FORK_BOUNDARY_NAME):
+            if os.path.lexists(directory / marker):
+                return False
+        if os.path.lexists(replica_dir(root, directory.name)):
+            return False
+        stored = read_session_attachment_evidence(directory)
+        if stored is None or not stored.team:
+            return False
+        return not _matches_held_replica(root, directory)
+    except Exception:  # noqa: BLE001 — unreadable evidence is no authority
+        return False
+
+
+def seal_unbound_arrival(directory: Path) -> None:
+    """Persist the fork boundary's "this arrived" fact before it is consumed.
+
+    ``fork-boundary.json`` is one-shot: ``Session`` construction unlinks it
+    before the attachment restore runs, so on its own it cannot keep
+    :func:`is_legacy_local_attachment` refusing. A boundary beside NO binding
+    is a fork or replica recovery that never committed authority (current
+    forks bind before writing it; current recovery writes ``reauthorize``
+    after it). Record the same fail-closed ``reauthorize`` denial recovery
+    would have, so every later load refuses too. A failed write is logged:
+    the directory is then unwritable, and the grandfather's own binding write
+    fails the same way, so nothing is authorized either.
+    """
+    from local_operator.fork import FORK_BOUNDARY_NAME
+
+    directory = Path(directory)
+    if not os.path.lexists(directory / FORK_BOUNDARY_NAME):
+        return
+    if os.path.lexists(directory / LOCAL_BINDING_NAME):
+        return
+    try:
+        require_replica_reauthorization(directory)
+    except Exception as error:  # noqa: BLE001 — construction must not fail on a seal
+        logger.warning("could not seal unbound arrival %s: %s", directory.name, error)
+
+
+def legacy_local_team(directory: Path, name: str, registry: TeamRegistry | None) -> Team | None:
+    """The exact local team a legacy session would be grandfathered to (read-only).
+
+    Shared by the warm grandfather and the cold preview so the two cannot
+    disagree. Writability is part of the answer: the warm path must write the
+    binding to attach, so a directory it cannot write into previews no team.
+    """
+    if registry is None or not is_legacy_local_attachment(directory):
+        return None
+    if not os.access(directory, os.W_OK):
+        return None
+    try:
+        return _resolve(registry, name)
+    except TeamIdentityRefused:
+        return None
+
+
+def grandfather_legacy_local(
+    directory: Path, name: str, registry: TeamRegistry | None, agents: Any
+) -> bool:
+    """Stamp a legacy-local session on first load as an explicit local attach.
+
+    Returns True only once the binding is written; the caller then runs the
+    normal bound restore against it. Any failure (team missing, alias, write
+    OSError) writes nothing and returns False, so the existing refusal stands.
+    """
+    team = legacy_local_team(directory, name, registry)
+    if team is None:
+        return False
+    try:
+        bind_runtime_authority(directory, team, registry, agents, restoring=False)
+    except Exception as error:  # noqa: BLE001 — no binding written means no authority
+        logger.warning("legacy session %s not grandfathered: %s", Path(directory).name, error)
+        return False
+    return True
 
 
 def require_replica_reauthorization(directory: Path) -> None:

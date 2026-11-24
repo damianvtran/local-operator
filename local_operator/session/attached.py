@@ -2481,14 +2481,23 @@ class AttachedSession:
         """
         from local_operator.network.move_team import (
             has_local_authority,
+            legacy_local_team,
             read_local_attachment,
         )
+        from local_operator.teams import TeamRegistry
 
         directory = self._config_dir / "sessions" / self._session_id
         try:
             stored = read_local_attachment(directory)
             team = stored.team if stored is not None else ""
-            return team if team and has_local_authority(directory, team) else ""
+            if not team:
+                return ""
+            if has_local_authority(directory, team):
+                return team
+            # A legacy-local session the warm restore will grandfather: same
+            # read-only predicate, nothing written from a cold preview.
+            resolved = legacy_local_team(directory, team, TeamRegistry(self._config_dir))
+            return team if resolved is not None else ""
         except Exception:  # noqa: BLE001 — unreadable evidence is no authority
             return ""
 

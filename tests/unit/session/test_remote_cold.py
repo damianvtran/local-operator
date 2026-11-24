@@ -2666,12 +2666,17 @@ async def test_a_name_only_team_reads_unattached_cold_and_warm_alike(
     from local_operator.harness.types import Message
     from local_operator.resume import write_session_attachment
     from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.placement import MeshStamp, write_stamp_into
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
     from local_operator.teams import TeamRegistry
     from tests.unit.session.test_session import MODEL, ScriptedStream
 
     write_session_attachment(directory, team="lopdev", agent="", goal="")
+    # A mesh stamp without team identity: the session ARRIVED name-only. An
+    # unmarked local journal is grandfathered instead (see the legacy test
+    # below), so the arrival marker is what makes this the refused shape.
+    write_stamp_into(directory, MeshStamp(session_id=SESSION_ID, origin={}))
     transcript = Transcript(directory)
     await transcript.append_message(Message.user("carry the roster"))
     await _checkpoint(
@@ -2709,6 +2714,65 @@ async def test_a_name_only_team_reads_unattached_cold_and_warm_alike(
     assert warm.effective_identity == empty
     assert (warm.active_team_name or "", warm.active_agent or "") == ("", "")
     assert warm.attachment_restore_notice
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_local_team_reads_attached_cold_and_warm_alike(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A pre-binding session created here is grandfathered; cold must agree.
+
+    v0.112.10 refused every such session. The warm restore now stamps it on
+    first load; the cold preview reports the same team WITHOUT writing.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _write_team(tmp_path, "lopdev", manager="manager")
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.harness.types import Message
+    from local_operator.network.move_team import LOCAL_BINDING_NAME
+    from local_operator.resume import write_session_attachment
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.teams import TeamRegistry
+    from tests.unit.session.test_session import MODEL, ScriptedStream
+
+    write_session_attachment(directory, team="lopdev", agent="", goal="")
+    await Transcript(directory).append_message(Message.user("carry the roster"))
+    await _checkpoint(
+        directory,
+        FrontendSessionState(
+            session_id=SESSION_ID,
+            epoch="previous-owner",
+            active_agent="manager",
+            active_team="lopdev",
+        ),
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        cold = viewer.frontend_state.effective_identity
+    finally:
+        await viewer.dispose()
+    assert cold["team"] == "lopdev"
+    assert not (directory / LOCAL_BINDING_NAME).exists(), "cold preview must not write"
+
+    warm = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[]]),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: [],
+        agent_registry=AgentRegistry(tmp_path),
+        team_registry=TeamRegistry(tmp_path),
+    )
+    assert warm.effective_identity == cold
+    assert warm.active_team_name == "lopdev"
+    assert (directory / LOCAL_BINDING_NAME).exists()
 
 
 @pytest.mark.asyncio
