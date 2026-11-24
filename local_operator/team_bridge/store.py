@@ -2029,6 +2029,60 @@ def _quarantine_feed_ref(conn: sqlite3.Connection, owner_key: str, raw: str) -> 
     )
 
 
+def _log_write_once_conflict(
+    message_id: str,
+    existing: Any,
+    receipt: Any,
+    *,
+    envelope_digest: str | None,
+    admission_revision: str | None,
+) -> None:
+    """Log WHICH replay-tuple fields differ on a ``write_once_conflict``.
+
+    WHY (diagnosis 2026-11-24). The refusal said only "conflict": telling a
+    served-model failover (the committed receipt names the model that
+    actually answered, the re-screen the live default) from a moved envelope
+    or a real verdict flip took a manual SQL spot check. Field NAMES are
+    enough to tell those apart and carry nothing a log reader should see.
+
+    NEVER VALUES: no model id, digest, hash, category, verdict, body or
+    message text is written — only the closed set of field names below and a
+    short one-way hash of the message id to correlate lines. Diagnostic
+    only: called just before the refusal is raised, it decides nothing.
+
+    ``admission_revision`` is not part of the replay comparison; it is
+    reported apart (``revision_moved``) because a stale revision is what
+    keeps the committed receipt from resolving the conflict on its own.
+    """
+
+    differing = [
+        name
+        for name, before, after in (
+            ("verdict", existing["verdict"], receipt.verdict),
+            ("model", existing["model"], receipt.model),
+            ("prompt_version", existing["prompt_version"], receipt.prompt_version),
+            ("template", existing["template_sha256"], receipt.template_sha256),
+            ("body_sha256", existing["body_sha256"], receipt.body_sha256),
+            (
+                "categories",
+                tuple(sorted(_decode_categories_text(existing["categories"]))),
+                tuple(sorted(receipt.categories)),
+            ),
+            ("envelope_digest", existing["envelope_digest"], envelope_digest),
+        )
+        if before != after
+    ]
+    revision_moved = (
+        admission_revision is not None and existing["admission_revision"] != admission_revision
+    )
+    logger.info(
+        "team bridge write_once_conflict: row_ref=%s differing=%s revision_moved=%s",
+        hashlib.sha256(str(message_id).encode("utf-8")).hexdigest()[:12],
+        ",".join(differing) or "none",
+        "yes" if revision_moved else "no",
+    )
+
+
 def _contentless_delivery_key(value: str) -> str:
     """Canonicalise only the declared conversation-ref namespace, without names.
 
@@ -9166,6 +9220,13 @@ class Store:
                     if not same:
                         # Write-once: a committed allow is never replaced by a
                         # reject (or any rewrite) through this path.
+                        _log_write_once_conflict(
+                            message_id,
+                            existing,
+                            receipt,
+                            envelope_digest=envelope_digest,
+                            admission_revision=admission_revision,
+                        )
                         raise StoreRefused("write_once_conflict", message_id)
                 else:
                     self._ensure_receipt_rendered_template_column(conn)

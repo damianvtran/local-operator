@@ -7467,7 +7467,10 @@ class SessionStreamFn:
         policy = getattr(root, "_request_admission", None)
         admission: tuple[str, AsyncExitStack] | None = None
         if policy is not None:
-            request_id = uuid.uuid4().hex
+            # An evidence companion pre-assigns its id and durably records it
+            # before dispatch; admission must reuse it rather than mint a second
+            # id, or the spend gate, the ledger row and that receipt disagree.
+            request_id = request._auxiliary_request_id or uuid.uuid4().hex
             finish = policy(request_id)
             exit_stack = AsyncExitStack()
             if finish is not None:
@@ -7620,6 +7623,7 @@ class SessionStreamFn:
                     session_id=self._session_id,
                 ),
                 admission,
+                signal=signal,
             ):
                 yield event
             return
@@ -7843,11 +7847,15 @@ class SessionStreamFn:
         request: ChatRequest,
         stream: AsyncIterator[StreamEvent],
         admission: tuple[str, AsyncExitStack] | None,
+        *,
+        signal: AbortSignal | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
+        # ``signal`` lets the recorder classify an aborted evidence companion
+        # as "aborted" (matching its durable receipt) on either path.
         if admission is None:
-            return self._record_stream(request, stream)
+            return self._record_stream(request, stream, signal=signal)
         request_id, exit_stack = admission
-        recorder = self._record_stream(request, stream, request_id=request_id)
+        recorder = self._record_stream(request, stream, request_id=request_id, signal=signal)
         # If the consumer closes at a yield, settle the existing observation
         # before the cleanup callback checks for a missing final. Also close
         # the upstream iterator on this owned path rather than relying on GC.
@@ -7863,6 +7871,7 @@ class SessionStreamFn:
         stream: AsyncIterator[StreamEvent],
         *,
         request_id: str | None = None,
+        signal: AbortSignal | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Forward a provider stream unchanged, then record its usage analytics.
 
@@ -7894,7 +7903,10 @@ class SessionStreamFn:
         sent.
         """
         started_at = time.monotonic()
-        request_id = request_id or uuid.uuid4().hex
+        # An admitted request's id is the spend gate's; otherwise an evidence
+        # companion's pre-assigned id keeps its durable receipt and this
+        # ledger row on the same request.
+        request_id = request_id or request._auxiliary_request_id or uuid.uuid4().hex
         # Resolved ONCE here, at request start (see
         # ``_request_observation_target``): the ordinary path pays two
         # attribute reads and a ``None`` check per REQUEST, never per delta.
@@ -8167,6 +8179,14 @@ class SessionStreamFn:
             outcome = type(exc).__name__
             raise
         finally:
+            if (
+                request._evidence_binding is not None
+                and request._evidence_binding.expected is not None
+                and (outcome == "CancelledError" or (signal is not None and signal.aborted))
+            ):
+                # The companion's durable receipt calls both cancellation
+                # paths aborted; keep the observer and ledger on that outcome.
+                ok, outcome = False, "aborted"
             if counted_child_request:
                 # Stop representing provider work before the separate analytics
                 # handoff; that bookkeeping must not widen the in-flight window.

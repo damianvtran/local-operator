@@ -4004,6 +4004,23 @@ if args[:2] == ["pr", "edit"]:
         handle.write(json.dumps(labels) + "\\n")
     raise SystemExit(0)
 
+if args[:2] == ["run", "rerun"]:
+    # Failed-only rerun (GH #4074 cut 2): refuse like the real API when asked.
+    if os.environ.get("STUB_RERUN_FAIL"):
+        answer(os.environ["STUB_RERUN_FAIL"], 1)
+    Path(os.environ["STUB_RERUN_DONE"]).write_text("1")
+    raise SystemExit(0)
+
+if args[:2] == ["run", "view"]:
+    # `--json attempt --jq .attempt`: the attempt moves only once a rerun was
+    # accepted, unless the case pins it (STUB_VIEW_ATTEMPT) to model a stall.
+    if os.environ.get("STUB_VIEW_ATTEMPT"):
+        print(os.environ["STUB_VIEW_ATTEMPT"])
+    else:
+        done = Path(os.environ["STUB_RERUN_DONE"]).exists()
+        print(int(os.environ.get("STUB_PREV_ATTEMPT", "1")) + (1 if done else 0))
+    raise SystemExit(0)
+
 if args[:2] == ["run", "list"]:
     if "--status" in args:
         if "--commit" not in args or "--event=pull_request" not in args:
@@ -4141,6 +4158,7 @@ def _arm_merge_gate(
         "STUB_ACTIVE_RESPONSE": active_response,
         "STUB_FAST_RC": str(fast_rc),
         "STUB_FAST_ARGV": str(tmp_path / "fast.argv"),
+        "STUB_RERUN_DONE": str(tmp_path / "rerun.done"),
         **(extra_env or {}),
     }
     proc = subprocess.run(
@@ -4540,6 +4558,162 @@ def test_merge_gate_completed_success_history_arms(tmp_path: Path) -> None:
     assert "WARNING" not in proc.stderr
     assert sum("--status" in call for call in calls) == 5
     assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic", "ready-to-merge"]
+
+
+def _gate_history(*runs: tuple[int, str, str, int], sha: str = _MERGE_GATE_SHA) -> str:
+    """Newest-first `gh run list --json databaseId,headSha,status,conclusion,attempt,url`."""
+    return json.dumps(
+        [
+            {
+                "databaseId": run_id,
+                "url": f"https://github.com/damianvtran/local-operator/actions/runs/{run_id}",
+                "headSha": sha,
+                "status": status,
+                "conclusion": conclusion,
+                "attempt": attempt,
+                "createdAt": _MERGE_GATE_BEFORE,
+            }
+            for run_id, status, conclusion, attempt in runs
+        ]
+    )
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out"])
+def test_merge_gate_reruns_only_failed_shards_of_a_red_gate_on_the_same_head(
+    tmp_path: Path, conclusion: str
+) -> None:
+    """GH #4074 cut 2: a red gate on the CURRENT head reruns failed jobs, not the suite.
+
+    The label dance starts a whole new run (every shard, both e2e OSes,
+    coverage); `gh run rerun <id> --failed` re-runs only the failed and
+    fail-fast-cancelled jobs plus their dependents on the same run, head and
+    gate base. Mutation that must fail this: drop `--failed`, rerun a run of
+    another head, or still touch the label after a successful rerun.
+    """
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="ready-to-merge synthetic",
+        prev_runs=_gate_history((4242, "completed", conclusion, 1)),
+        extra_env={"STUB_PREV_ATTEMPT": "1"},
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "run rerun 4242 --failed" in calls, calls
+    assert "path: RERUN-FAILED" in proc.stdout and "attempt 1 -> 2" in proc.stdout, proc.stdout
+    assert "gh run watch 4242 --exit-status" in proc.stdout
+    assert "actions/runs/4242" in proc.stdout
+    # Same run, so no label event: a label write here would ALSO start a fresh
+    # full run and double the spend the rerun exists to save.
+    assert not any(call.startswith(("pr edit", "label create")) for call in calls), calls
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["ready-to-merge", "synthetic"]
+
+
+@pytest.mark.parametrize(
+    "history,why",
+    [
+        ("[]", "no earlier gate run"),
+        (_gate_history((4242, "completed", "failure", 1), sha="f" * 40), "no earlier gate run"),
+        (_gate_history((4242, "completed", "success", 1)), "completed/success"),
+        (_gate_history((4242, "completed", "startup_failure", 1)), "completed/startup_failure"),
+        # Newest first: an OLDER red beside a newer green is not a red gate.
+        (
+            _gate_history((4343, "completed", "success", 1), (4242, "completed", "failure", 1)),
+            "completed/success",
+        ),
+    ],
+    ids=["no-run", "other-head", "green", "startup-failure", "older-red-newer-green"],
+)
+def test_merge_gate_takes_the_fresh_label_arm_when_there_is_no_red_run_to_rerun(
+    tmp_path: Path, history: str, why: str
+) -> None:
+    """A new head, a green, or a never-started run has nothing to rerun: label arm."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="ready-to-merge",
+        prev_runs=history,
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert not any(call.startswith("run rerun") for call in calls), calls
+    assert "path: FRESH" in proc.stdout and why in proc.stdout, proc.stdout
+    assert "gh run watch 5678 --exit-status" in proc.stdout
+    assert any("--remove-label" in c for c in calls) and any("--add-label" in c for c in calls)
+
+
+def test_merge_gate_falls_back_to_a_fresh_arm_when_the_rerun_is_refused(tmp_path: Path) -> None:
+    """GitHub refuses reruns (e.g. past its 30-day window): the label arm still gates."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="",
+        prev_runs=_gate_history((4242, "completed", "failure", 3)),
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+        extra_env={
+            "STUB_RERUN_FAIL": (
+                "HTTP 403: Unable to retry this workflow run "
+                "because it was created over a month ago"
+            )
+        },
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "run rerun 4242 --failed" in calls, calls
+    assert "path: FRESH (fallback)" in proc.stderr and "over a month ago" in proc.stderr
+    assert "gh run watch 5678 --exit-status" in proc.stdout
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["ready-to-merge"]
+
+
+def test_merge_gate_fresh_override_skips_the_rerun(tmp_path: Path) -> None:
+    """MERGE_GATE_FRESH=1: the owner wants today's main tip, not the run's old gate base."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="",
+        prev_runs=_gate_history((4242, "completed", "failure", 1)),
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+        extra_env={"MERGE_GATE_FRESH": "1"},
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert not any(call.startswith("run rerun") for call in calls), calls
+    assert "path: FRESH: MERGE_GATE_FRESH=1" in proc.stdout
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["ready-to-merge"]
+
+
+def test_merge_gate_rerun_that_never_starts_fails_without_a_label_arm(tmp_path: Path) -> None:
+    """Accepted but the attempt never moves: say so, and do not ALSO start a full run."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="",
+        prev_runs=_gate_history((4242, "completed", "failure", 2)),
+        extra_env={"STUB_VIEW_ATTEMPT": "2"},
+    )
+    # make reports a failed recipe as 2.
+    assert proc.returncode == 2, f"{proc.stdout}\n{proc.stderr}"
+    assert "did not move past 2" in proc.stderr and "MERGE_GATE_FRESH=1" in proc.stderr
+    assert sum(call.startswith("run view 4242") for call in calls) == 12
+    assert not any(call.startswith("pr edit") for call in calls), calls
+
+
+@pytest.mark.parametrize("blocker", ["fast-ci-red", "live-gate"])
+def test_merge_gate_prechecks_still_gate_the_rerun_path(tmp_path: Path, blocker: str) -> None:
+    """The fast-CI pre-check and the duplicate-arm advisory run BEFORE any rerun."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="",
+        prev_runs=_gate_history((4242, "completed", "failure", 1)),
+        fast_rc=1 if blocker == "fast-ci-red" else 0,
+        active_runs=json.dumps(
+            [
+                {
+                    "databaseId": 9999,
+                    "url": "https://example.test/runs/9999",
+                    "headSha": _MERGE_GATE_SHA,
+                    "status": "in_progress",
+                }
+            ]
+            if blocker == "live-gate"
+            else []
+        ),
+    )
+    # make reports a failed recipe as 2.
+    assert proc.returncode == 2, f"{proc.stdout}\n{proc.stderr}"
+    assert not any(call.startswith(("run rerun", "pr edit")) for call in calls), calls
 
 
 @pytest.mark.parametrize("failure", ["request timed out", "lookup unusable"])
@@ -5425,3 +5599,54 @@ def test_helpdesk_reconcile_sweep_timeout_is_bounded() -> None:
     missing = copy.deepcopy(doc)
     missing["jobs"]["reconcile"].pop("timeout-minutes", None)
     assert _helpdesk_reconcile_timeout_problems(missing) != []
+
+
+def _full_suite_uploads() -> list[tuple[str, dict[str, Any]]]:
+    """(job id, step) for every upload-artifact step in full-suite.yml."""
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    return [
+        (job_id, step)
+        for job_id, job in jobs.items()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    ]
+
+
+def test_full_suite_artifacts_survive_a_failed_only_rerun() -> None:
+    """GH #4074 cut 2: `make merge-gate` reruns failed jobs on the SAME run.
+
+    Artifacts are run-scoped and v4+ uploads are immutable: a re-run job that
+    uploads a name its earlier attempt already uploaded gets a 409 and goes red
+    on the upload, not on its tests, on every rerun. So an upload that can run
+    in a FAILED or cancelled attempt (`always()`) must carry the attempt in its
+    name; the coverage data, which coverage-report must find across attempts
+    under one pattern, stays unsuffixed and overwrites instead. Mutation that
+    must fail this: drop `-attempt-${{ github.run_attempt }}` from the e2e
+    junit name, or drop `overwrite: true` / add an attempt to coverage-data.
+    """
+    for job_id, step in _full_suite_uploads():
+        name = str(step["with"]["name"])
+        if str(step.get("if", "")).startswith("always()") and job_id != "coverage-report":
+            assert name.endswith("-attempt-${{ github.run_attempt }}"), (
+                f"{job_id}: always() upload {name!r} would collide with its own "
+                "earlier attempt on a failed-only rerun"
+            )
+    coverage = [
+        s for j, s in _full_suite_uploads() if str(s["with"]["name"]).startswith("coverage-data-")
+    ]
+    assert len(coverage) == 1, coverage
+    assert (
+        coverage[0]["with"]["name"]
+        == "coverage-data-${{ matrix.python-version }}-${{ matrix.shard }}"
+    )
+    assert coverage[0]["with"].get("overwrite") is True
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    downloads = [
+        s["with"]["pattern"]
+        for s in jobs["coverage-report"]["steps"]
+        if str(s.get("uses", "")).startswith("actions/download-artifact@")
+    ]
+    # The carried shards' attempt-1 data must still match the combine's pattern.
+    assert downloads == ["coverage-data-${{ matrix.python-version }}-*"], downloads
+    report = [s for j, s in _full_suite_uploads() if j == "coverage-report"]
+    assert all(s["with"].get("overwrite") is True for s in report), report

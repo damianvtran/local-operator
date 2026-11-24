@@ -264,14 +264,19 @@ def test_plain_exact_own_checkout_accepts_shared_link_witness(home: Path, repo: 
     command = f"git -C {repo} worktree remove -- {wt}"
     assert _rank(home, command).risk is Risk.LOW
 
+    # A lockfile mismatch breaks the shared-link witness, but this is the
+    # session's OWN tree: its ``node_modules`` is regenerable output it made
+    # (PR #4493), and removing a link deletes no bytes. Sibling and foreign
+    # trees still need the witness (test_family_delete_ownership).
     (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '8.0'\n")
     ranked = _rank(home, command)
-    assert ranked.risk is Risk.HIGH and ranked.targets[0].cleanup_hold, ranked.reasons
+    assert ranked.risk is Risk.LOW, ranked.reasons
 
 
+@pytest.mark.parametrize("creator", [ME, DONE], ids=["own", "foreign"])
 @pytest.mark.parametrize("deletion", [False, True], ids=["clean", "tracked-deletion"])
 def test_finder_witness_is_plain_only_force_keeps_base_hold(
-    home: Path, repo: Path, deletion: bool
+    home: Path, repo: Path, deletion: bool, creator: str
 ) -> None:
     """PR #4503 R1/Q1: the ``.DS_Store`` witness must not reach ``--force``.
 
@@ -296,13 +301,24 @@ def test_finder_witness_is_plain_only_force_keeps_base_hold(
     _git("merge", "--ff-only", "fix/finder", cwd=repo)
     _git("push", "-q", "origin", "main", cwd=repo)
     _git("fetch", "-q", "origin", cwd=repo)
-    _record(home, wt, creator=ME)
+    _record(home, wt, creator=creator)
     assert prov.plain_cleanup_ignored_inventory(str(wt)) == prov.IgnoredInventory(0, 0)
-    plain = _rank(home, f"git -C {repo} worktree remove -- {wt}")
-    assert plain.risk is Risk.LOW, plain.reasons
+    if creator == ME:
+        plain = _rank(home, f"git -C {repo} worktree remove -- {wt}")
+        assert plain.risk is Risk.LOW, plain.reasons
     if deletion:
         (wt / "a.txt").unlink()
     forced = _rank(home, f"git -C {repo} worktree remove --force -- {wt}")
+    if creator == ME:
+        # PR #4493 QA Q-R4-1: a ledger-proven OWN tree sheds regular-file
+        # ``.DS_Store`` on ``--force`` too, as on plain removal. A tracked
+        # deletion rewrites the root, and on Linux its ctime stamp then no
+        # longer matches the ledger row: strict attribution fails CLOSED
+        # (held), which is the safe direction, so only the clean row is LOW.
+        if not deletion:
+            assert forced.risk is Risk.LOW, forced.reasons
+        return
+    # #4503's pin, for a tree another session made: --force keeps base's hold.
     assert forced.risk is Risk.HIGH and forced.targets[0].cleanup_hold, forced.reasons
     assert "preservation check failed" in forced.targets[0].reason
 
@@ -342,6 +358,20 @@ async def test_plain_own_checkout_holds_unverified_payload(
     report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
     judge = _Judge("ALLOW: synthetic judge")
     result = await _check(home, command, judge)
+    if payload == "ignored-and-edit":
+        # The own ``.env`` is shed (PR #4493); only the uncommitted edit is
+        # left, which ranks HIGH on the ordinary dirty-tree path (plain Git
+        # itself refuses to remove a tree with changes).
+        assert ranked.risk is Risk.HIGH, ranked.reasons
+        assert wt.is_dir() and marker.read_text() == "synthetic local data\n"
+        return
+    if payload == "ignored":
+        # Operator directive 2026-11-23 (PR #4493): the owner sheds its own
+        # ignored ``.env``; no hold, no judge. Foreign trees still hold it.
+        assert ranked.risk is Risk.LOW and not ranked.targets[0].cleanup_hold, ranked.reasons
+        assert result is None or not result.blocked, result and result.text
+        assert not judge.prompts
+        return
     assert ranked.risk is Risk.HIGH and ranked.targets[0].cleanup_hold, ranked.reasons
     assert report.builtin_effect != BUILTIN_PASS, report.render()
     assert result.blocked and not judge.prompts, result
@@ -360,10 +390,6 @@ async def test_plain_own_checkout_holds_unverified_payload(
         assert "not an open PR or unpushed work" in text
         assert "commit or stash" not in text and "push commits" not in text
         assert ".env" not in text  # counted, never listed
-    elif payload == "ignored-and-edit":
-        assert "1 ignored entry" in text and "1 tracked or untracked change" in text
-        assert "ignored files (build output" in text and "commit or stash edits" in text
-        assert "not an open PR or unpushed work" not in text
     elif payload == "tracked-deletion":
         assert "tracked deletions remain" in text
         assert (home / "preserved-a.txt").read_text() == "a\n"
@@ -511,7 +537,11 @@ async def test_exact_cleanup_preserves_unverified_work(
     elif obstacle == "locked":
         _git("worktree", "lock", str(wt), cwd=repo)
     elif obstacle in ("ignored", "foreign-ignored", "stale-link"):
-        (home / "excludes").write_text("build/\nnode_modules\n")
+        # PR #4493: an OWN tree sheds regenerable names (``build``) and any
+        # ignored link on this route too, so the own-tree obstacle is an
+        # ignored name off that list, and the stale shared-link witness is
+        # exercised where it still decides: a tree another session made.
+        (home / "excludes").write_text("build/\nlocal-notes/\nnode_modules\n")
         _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
         (wt / "a.txt").unlink()
         if obstacle == "stale-link":
@@ -519,11 +549,14 @@ async def test_exact_cleanup_preserves_unverified_work(
             (wt / "node_modules").symlink_to("../../node_modules")
             (repo / "pnpm-lock.yaml").write_text("different bytes\n")
         else:
-            (wt / "build").mkdir()
-            (wt / "build" / "notes.txt").write_text("keep this local note\n")
+            kept = "local-notes" if obstacle == "ignored" else "build"
+            (wt / kept).mkdir()
+            (wt / kept / "notes.txt").write_text("keep this local note\n")
     elif obstacle == "missing-force":
         (wt / "a.txt").unlink()
-    if obstacle != "foreign-ignored":
+    # Operator directive 2026-11-23 (PR #4493): an OWN tree sheds every ignored
+    # entry, so the ignored obstacles are exercised on trees another session made.
+    if obstacle not in ("ignored", "foreign-ignored", "stale-link"):
         _record(home, wt, creator=ME)
     target = repo if obstacle == "primary" else wt
     if obstacle == "residue":

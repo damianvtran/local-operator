@@ -34,6 +34,12 @@ SAFE_DEFAULTS = {
         "HOME expands ~ while matching asks against delete targets; static resolution "
         "only, cwd passed through as-is, never a spawn cwd"
     ),
+    # Cleanup consent (PR 4493): HOME only expands ~ while matching an ask's
+    # exact paths against a delete target; ``ctx.cwd`` passes through as-is.
+    ("guardrails/check.py", "apply_cleanup_consent"): (
+        "HOME expands ~ while matching an approved ask's exact paths against delete "
+        "targets; static resolution only, cwd passed through as-is, never a spawn cwd"
+    ),
     ("guardrails/check.py", "evidence_write_verdict"): (
         "resolves a write/edit path exactly as the file tools do (base or process cwd) "
         "to refuse evidence writes; never a spawn cwd"

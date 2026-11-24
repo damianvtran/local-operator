@@ -94,6 +94,7 @@
   "tui.projects.start.filter_placeholder": "फ़िल्टर करने के लिए लिखें",
   "tui.projects.start.legend": "फ़िल्टर करने के लिए लिखें · ↑↓ खिसकाएँ · ↵ चुनें · esc बंद करें",
   "tui.projects.start.more": "+{count} और",
+  "tui.projects.start.team_detail": "{manager} · {count, plural, one {{shown} भूमिका} other {{shown} भूमिकाएँ}}",
   "tui.projects.notice_read_only": "केवल पढ़ने योग्य: इस बातचीत का रनटाइम किसी दूसरे डिवाइस पर है, इसलिए प्रोजेक्ट में बदलाव यहाँ उपलब्ध नहीं हैं।",
   "tui.projects.refusal_done_gate": "ये पड़ाव खुले रहते पूर्ण चिह्नित नहीं किया जा सकता: {names}"
 }

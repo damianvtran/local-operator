@@ -240,6 +240,27 @@ fast-gate: ## Check fast CI is green for PR=<number>'s head (no waiting)
 	python3 "$(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/fast_gate_check.py" --local \
 	  --event pull_request --repo "$$repo" --pr "$(PR)" --head-sha "$$1" --head-repo "$$2"
 
+# RERUN-FAILED FIRST (GH #4074, cut 2). When the newest full-suite
+# pull_request run for the PR's CURRENT head completed failure/cancelled/
+# timed_out, the ritual runs `gh run rerun <id> --failed` instead of the label
+# dance. Why: a red gate used to cost a whole new full run (190 of 539 gate
+# runs failed, Nov 17-23), usually for one red shard. A failed-only rerun
+# re-runs the failed and fail-fast-cancelled shards plus their dependents
+# (coverage-report, the aggregate) and keeps the passing shards, all on the
+# SAME run: same head SHA, same `changes` outputs (so the same `gate_base` merge
+# tree), same carried precondition. Measured on run 45325871121 (PR #4508):
+# attempt 1 had shard 3 failed and 0/2/4 cancelled; attempt 2 re-ran exactly
+# those four, listed shards 1/5 + tui-e2e as carried `success`, and
+# coverage-report combined attempt-1 coverage artifacts. The aggregate still
+# passes only when every needed job of the run is success/skipped (see
+# full-suite.yml `merge-gate`). Anything else takes the FRESH label arm below:
+# a new head (no run for this SHA), a green or still-active newest run, a
+# refused rerun (e.g. a run older than GitHub's 30-day rerun window), or
+# MERGE_GATE_FRESH=1 (the owner wants the PR re-tested on today's main tip:
+# a rerun keeps the original run's `gate_base`). The path taken is printed as
+# `path: RERUN-FAILED` / `path: FRESH ...`. The duplicate-arm advisory and the
+# fast-CI pre-check above run first on both paths, unchanged.
+MERGE_GATE_FRESH ?=
 merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	@set -e; \
 	if [ -z "$(PR)" ]; then echo "usage: make merge-gate PR=<number>" >&2; exit 2; fi; \
@@ -298,9 +319,42 @@ merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	  fi; \
 	done; \
 	fi; \
-	prev="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" --limit 20 \
-	  --json databaseId,headSha \
-	  | jq -r --arg sha "$$head_sha" '[.[] | select(.headSha == $$sha)] | .[0].databaseId // empty')" || prev=""; \
+	newest="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" --limit 20 \
+	  --json databaseId,headSha,status,conclusion,attempt,url \
+	  | jq -r --arg sha "$$head_sha" '[.[] | select(.headSha == $$sha)] | .[0] | select(. != null) | "\(.databaseId) \(.status // "-") \(.conclusion // "-") \(.attempt // 0) \(.url // "-")"')" || newest=""; \
+	prev="$${newest%% *}"; \
+	if [ -n "$$newest" ] && [ "$(MERGE_GATE_FRESH)" != "1" ]; then \
+	  set -- $$newest; rr_id="$$1"; rr_status="$$2"; rr_conclusion="$$3"; rr_attempt="$$4"; rr_url="$$5"; \
+	  if [ "$$rr_status" = completed ] && case "$$rr_conclusion" in failure|cancelled|timed_out) true;; *) false;; esac; then \
+	    if rr_err="$$(gh run rerun "$$rr_id" --failed 2>&1)"; then \
+	      rr_now=""; i=0; \
+	      while [ $$i -lt 12 ]; do \
+	        i=$$((i + 1)); \
+	        rr_now="$$(gh run view "$$rr_id" --json attempt --jq .attempt 2>/dev/null)" || rr_now=""; \
+	        if [ -n "$$rr_now" ] && [ "$$rr_now" -gt "$$rr_attempt" ] 2>/dev/null; then break; fi; \
+	        rr_now=""; sleep 5; \
+	      done; \
+	      if [ -z "$$rr_now" ]; then \
+	        echo "make merge-gate: gh accepted 'gh run rerun $$rr_id --failed' but the run's attempt did not move past $$rr_attempt within 60 s; no label changed" >&2; \
+	        echo "  check: gh run view $$rr_id; a fresh run instead: make merge-gate PR=$(PR) MERGE_GATE_FRESH=1" >&2; \
+	        exit 1; \
+	      fi; \
+	      echo "path: RERUN-FAILED (run $$rr_id was $$rr_conclusion on $$head_sha; attempt $$rr_attempt -> $$rr_now; passing shards kept, failed/cancelled shards and the aggregate re-run; no label changed)"; \
+	      echo "re-armed the merge gate on PR #$(PR) ($$head)"; \
+	      echo "  run:    $$rr_url"; \
+	      echo "  follow: gh run watch $$rr_id --exit-status"; \
+	      echo "  checks: gh pr checks $(PR)"; \
+	      exit 0; \
+	    fi; \
+	    echo "path: FRESH (fallback): 'gh run rerun $$rr_id --failed' refused: $$(printf '%s' "$$rr_err" | tr '\n' ' ')" >&2; \
+	  else \
+	    echo "path: FRESH: newest gate run $$rr_id on $$head_sha is $$rr_status/$$rr_conclusion, not a completed failure/cancel to re-run"; \
+	  fi; \
+	elif [ "$(MERGE_GATE_FRESH)" = "1" ]; then \
+	  echo "path: FRESH: MERGE_GATE_FRESH=1 asked for a whole new run"; \
+	else \
+	  echo "path: FRESH: no earlier gate run on $$head_sha (new head, or none listed)"; \
+	fi; \
 	since="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
 	gh label create ready-to-merge --color 0E8A16 \
 	  --description "Run the full-suite merge gate on this PR" 2>/dev/null || true; \

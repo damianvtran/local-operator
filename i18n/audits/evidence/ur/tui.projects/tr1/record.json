@@ -1,0 +1,76 @@
+{
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team)",
+    "session": "e1ac85590ece",
+    "model": "anthropic/claude-opus-5-5 (no fallback observed)",
+    "date": "2026-11-23",
+    "independent_from_translator": true,
+    "translator": "lopdev i18n-translator subagent (session 17b81fee8ed1 scratchpad), anthropic/claude-opus-5-5"
+  },
+  "repo": {
+    "worktree": "~/local-operator/.worktrees/i18n-model-persist-notice",
+    "head": "c3ba6a516c6a"
+  },
+  "audited_input": "~/.local-operator/sessions/17b81fee8ed1/scratchpad/i18n-settings-residual/translations/ur.json (sha256 bb64fafbde0bd7e8b993b91547d3473791a9f80803c5f31dd92c595290a35bd9); the briefed path sessions/eac1855834c5/... did not exist, so the file was located with the ls glob",
+  "source_sha256": {
+    "local_operator/i18n/catalogues/en/tui.app.json": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+    "local_operator/i18n/catalogues/en/tui.projects.json": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2",
+    "local_operator/i18n/catalogues/en/tui.app.context.json": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+    "local_operator/i18n/catalogues/en/tui.projects.context.json": "411f134fa0a8defb711623ab65ec90946fd5d92612d23c941ba3149a3dd529b0"
+  },
+  "per_namespace": {
+    "tui.app": {
+      "result": "findings",
+      "severity_counts": {
+        "blocker": 0,
+        "major": 1,
+        "minor": 0,
+        "nit": 0
+      },
+      "findings": [
+        {
+          "id": "U1",
+          "key": "tui.app.skills.team_aliases",
+          "severity": "MAJOR",
+          "current": "متبادل نام: {aliases}",
+          "problem": "The same field uses two different terms. The TUI team editor labels a team's aliases «عرفی نام» (ur/tui.team_authoring.aliases, and aliases_hint «… خالی سے عرفی نام ہٹ جائیں گے»). A user who sets «عرفی نام» in /team edit then sees «متبادل نام» for the same values on the settings facts line. The translator anchored on cli.*.status_alias and browser reconcile («X کا متبادل»), which is a different concept: a command that stands in for another command, not a team's extra names.",
+          "evidence": "ur/tui.team_authoring.json: aliases='عرفی نام'; aliases_hint='کاما سے الگ نام · خالی سے عرفی نام ہٹ جائیں گے'. The glossary has no alias row. notes.md: 'alias | cli.*.status_alias / browser reconcile | … ur متبادل نام'.",
+          "suggested": "عرفی نام: {aliases}",
+          "also": "The glossary proposal in notes.md should give ur «عرفی نام» for the team/entity-alias sense; «متبادل» stays for the CLI sense 'alias of <command>'. With aliases 'ops, pod-a' the suggested value is 18 cells; the current value is 22."
+        }
+      ],
+      "notes": "member_count matches led_by and tui.small.network_panel.member_count byte-for-byte (رکن/اراکین); count 0 selects other and renders '0 اراکین', which reads naturally. Counts 0-100 render in at most 10 cells against maxCells 14; only 1000000 reaches 14 (en: 15). no_description matches tui.library.detail_no_description verbatim at 15/30 cells, and dropping projects' «ابھی» is correct because en has no 'yet'. fallback 'ٹیم' matches the glossary. The Latin ':' matches led_by «قیادت:». The catalogues already split the member plural: اراکین (led_by, community, network_panel) vs ارکان (team_authoring.members, wire.tool_rows). The translation follows its same-line sibling; this split does not gate, but a glossary row would settle it."
+    },
+    "tui.projects": {
+      "result": "clean",
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "findings": [],
+      "notes": "«{shown} کردار» is the same in both arms, which is correct direct-case Urdu (کرداروں would be oblique). کردار matches TUI tui.authoring.role and wire.settings «بلٹ اِن کردار»; رول appears only in CLI help (cli.teams_help, cli.exec_help), so کردار is the right TUI choice. {manager} stays a Latin identifier in source order. Counts 0-100 render in 17-19 cells, the same as en; there is no maxCells. Bidi: no control characters. display.py wraps ur lines in RLI…PDI (not FSI, as the style guide says), so a leading LTR {manager} does not flip paragraph direction. No defect."
+    }
+  },
+  "mechanical": {
+    "log": "mechanical.log",
+    "method": "Run in-process and read-only: scripts/i18n/check.py::_arguments_problem and _check_plural_categories, plus local_operator.i18n.runtime.render_message for counts 0,1,2,5,21,100,1000000 measured with rich.cells.cell_len, against the worktree en catalogues and data/plural_rules.json (ur: one/other). Result: 0 problems, no bidi or format controls, valid JSON, and the key set equals the 5 briefed keys. The full check_catalogues() was NOT run, because the translations are not applied to a catalogue and the brief forbids copying the repo.",
+    "result": "pass"
+  },
+  "current_report_verdict": {
+    "tui.app": {
+      "status": "changes_requested",
+      "unresolved_blocker_major_count": 1,
+      "finding_ids": [
+        "U1"
+      ]
+    },
+    "tui.projects": {
+      "status": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": []
+    }
+  },
+  "ledger": "No ledger row written: the brief forbids repo edits. scripts/i18n/ledger.py is the recording step for whoever lands the catalogue change."
+}
