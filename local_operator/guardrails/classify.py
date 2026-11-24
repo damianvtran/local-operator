@@ -35,6 +35,7 @@ import os
 import re
 import sqlite3
 import stat
+import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -1296,7 +1297,11 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
         if os.path.dirname(path) == home and not os.path.isfile(path):
             return "a top-level directory of the home directory"
     try:
-        if os.path.isdir(path) and os.path.exists(os.path.join(path, ".git")):
+        if (
+            os.path.isdir(path)
+            and os.path.exists(os.path.join(path, ".git"))
+            and not _removed_worktree_remnant(path)
+        ):
             return "a git repository root"
         # The repository's history itself: deleting ``<repo>/.git`` loses every
         # unpushed commit, stash and linked-worktree record just as deleting
@@ -1307,6 +1312,196 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
     except OSError:
         return "an unreadable path"
     return None
+
+
+#: Bound on the files a remnant check hashes; more holds (fail closed).
+_REMNANT_FILE_LIMIT = 50_000
+#: Finder/Explorer per-folder metadata: a regular file under one of these
+#: names is view state, never in the object store and never work. The very
+#: ``.DS_Store`` whose mid-delete write made ``git worktree remove`` fail.
+_REMNANT_OS_METADATA = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+def _git_env() -> dict[str, str]:
+    """Environment for the guard's own read-only git calls: no inherited
+    repository overrides, no prompts, no optional locks (#4536 R1 m4)."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")
+    }
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    return env
+
+
+def _former_worktree_repo(real: str) -> str | None:
+    """The repository a folder was a linked worktree of, if Git has DROPPED it.
+
+    Two shapes, both what a failed ``git worktree remove`` leaves (#4536):
+
+    - its ``.git`` pointer FILE survived: a one-line ``gitdir:`` resolving to
+      ``<repo>/.git/worktrees/<name>``, ``<repo>/.git`` a real directory, the
+      admin directory gone;
+    - Git already deleted the pointer (follow-up 2026-11-24, pass-3
+      leftovers ``guard-finder-metadata``/``quota-diagnostic``): no ``.git`` at
+      all, the folder sits at ``<repo>/.worktrees/<name>`` (this harness's
+      worktree layout), and ``git worktree list`` of ``<repo>`` does not list
+      it.
+
+    ``None`` for anything else, or on any read or git failure.
+    """
+    marker = os.path.join(real, ".git")
+    if not os.path.lexists(marker):
+        parent = os.path.dirname(real)
+        repo = os.path.dirname(parent)
+        common = os.path.join(repo, ".git")
+        if (
+            os.path.basename(parent) != ".worktrees"
+            or os.path.islink(common)
+            or not os.path.isdir(common)
+        ):
+            return None
+        try:
+            listed = subprocess.run(
+                ["git", "-C", repo, "worktree", "list", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=_git_env(),
+            )
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        if listed.returncode != 0:
+            return None
+        for row in listed.stdout.splitlines():
+            if row.startswith("worktree ") and os.path.realpath(row[9:]) == real:
+                return None
+        return repo
+    try:
+        if not stat.S_ISREG(os.lstat(marker).st_mode):
+            return None
+        with open(marker, encoding="utf-8") as fh:
+            text = fh.read(4097)
+    except (OSError, ValueError):
+        return None
+    lines = text.splitlines()
+    if len(text) > 4096 or len(lines) != 1 or not lines[0].startswith("gitdir: "):
+        return None
+    admin = lines[0][len("gitdir: ") :].strip()
+    if not os.path.isabs(admin):
+        admin = os.path.join(real, admin)
+    admin = os.path.normpath(admin)
+    worktrees = os.path.dirname(admin)
+    common = os.path.dirname(worktrees)
+    if (
+        os.path.basename(worktrees) != "worktrees"
+        or os.path.basename(common) != ".git"
+        or os.path.islink(common)
+        or not os.path.isdir(common)
+        or os.path.lexists(admin)
+    ):
+        return None
+    return os.path.dirname(common)
+
+
+def _removed_worktree_remnant(path: str) -> bool:
+    """Is ``path`` a leftover of a FAILED ``git worktree remove`` that loses
+    nothing when deleted?
+
+    Field case 2026-11-24 (disk recovery, guard 0.112.8): a guard-allowed
+    ``git worktree remove`` of a clean, merged tree failed "Directory not
+    empty" because Finder wrote a ``.DS_Store`` mid-delete. Git had already
+    unregistered the tree and deleted its admin directory, leaving tracked
+    files behind. With its ``.git`` pointer FILE still present the folder ranked
+    "a git repository root" (judge); without it, an ordinary path. The rank
+    depended only on Git's deletion order.
+
+    The decision rests on what deletion would LOSE, not on how the folder got
+    there (#4536 R1-B1: a hand-moved tree that ``git worktree prune`` then
+    unregistered looks the same from its pointer and admin dir, but can hold
+    uncommitted files). All of these must hold:
+
+    - ``.git`` is a regular one-line ``gitdir:`` FILE resolving (from the real
+      path) to ``<repo>/.git/worktrees/<name>``, ``<repo>/.git`` is a real
+      directory, and that admin directory is GONE, so Git no longer tracks
+      this folder;
+    - EVERY remaining regular file is either a Finder/Explorer metadata file
+      or byte-identical to a blob already in ``<repo>``'s object store
+      (``git hash-object --stdin-paths`` then ``git cat-file
+      --batch-check``). Deleting it then loses no content Git does not
+      already hold. A symlink, special file, unreadable directory, more than
+      :data:`_REMNANT_FILE_LIMIT` files, or any git failure holds.
+
+    Then the folder ranks as an ordinary path, the same as the remnant whose
+    pointer Git already deleted. Any doubt keeps the repository rank.
+    """
+    real = os.path.realpath(path)
+    repo = _former_worktree_repo(real)
+    if repo is None:
+        return False
+    files: list[str] = []
+
+    def _fail(err: OSError) -> None:
+        raise err
+
+    try:
+        for root, dirs, names in os.walk(real, onerror=_fail):
+            # ``--stdin-paths`` is line-based and Git strips a trailing CR, so
+            # ``kept.txt\r`` would hash as its committed sibling ``kept.txt``
+            # (#4536 R2-M1). Any name with a line break holds.
+            if any("\n" in n or "\r" in n for n in (*dirs, *names)):
+                return False
+            for name in dirs:
+                if not stat.S_ISDIR(os.lstat(os.path.join(root, name)).st_mode):
+                    return False  # a symlinked directory
+            # Bytecode and tagged caches Git's aborted walk never reached are
+            # never committed: shed them by CONTENT (#4528's witness), never by
+            # name (follow-up 2026-11-24, pass-3 leftovers held only for
+            # ``__pycache__``).
+            from local_operator.guardrails.provenance import _verified_cache_dir
+
+            dirs[:] = [d for d in dirs if not _verified_cache_dir(root, d)]
+            for name in names:
+                full = os.path.join(root, name)
+                if root == real and name == ".git":
+                    continue
+                mode = os.lstat(full).st_mode
+                if not stat.S_ISREG(mode):
+                    return False
+                if name in _REMNANT_OS_METADATA:
+                    continue
+                files.append(full)
+                if len(files) > _REMNANT_FILE_LIMIT:
+                    return False
+    except (OSError, ValueError):
+        return False
+    if not files:
+        return True
+    env = _git_env()
+    try:
+        hashed = subprocess.run(
+            ["git", "-C", repo, "hash-object", "--no-filters", "--stdin-paths"],
+            input="\n".join(files) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        oids = hashed.stdout.split()
+        if hashed.returncode != 0 or len(oids) != len(files):
+            return False
+        checked = subprocess.run(
+            ["git", "-C", repo, "cat-file", "--batch-check=%(objecttype)"],
+            input="\n".join(oids) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    kinds = checked.stdout.split()
+    return checked.returncode == 0 and len(kinds) == len(oids) and set(kinds) == {"blob"}
 
 
 #: Programs that remove a symlink operand's ENTRY without following it. Not
@@ -1895,6 +2090,17 @@ def _rank(
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     foreign_reason = _foreign_reason(target, path, foreign)
+    if (
+        foreign_reason is not None
+        and foreign_reason.startswith("created by another session (")
+        and ", worktree, " in foreign_reason
+        and _removed_worktree_remnant(path)
+    ):
+        # The other session's row records a WORKTREE at exactly this path
+        # (no "inside"/"holds" prefix), and Git has already dropped it with
+        # every leftover byte in the object store (follow-up 2026-11-24):
+        # deleting the folder loses none of that session's work.
+        foreign_reason = None
     if foreign_reason is not None:
         # Every LOW below is "nothing here is known to matter"; another
         # session's ledger row says otherwise (``ForeignCreations``). Placed
