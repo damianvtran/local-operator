@@ -143,22 +143,30 @@ def _conversation_rows(store: Store, owner: Any) -> dict[str, dict[str, Any]]:
             continue
         seq: int | None = None
         conversation_id = ""
+        thread_root_id: str | None = None
         prefix = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
         if stored.startswith(prefix):
             ref = parse_conversation_ref_value(stored[len(prefix) :])
             if ref is not None:
                 seq = ref.conversation_seq
                 conversation_id = ref.conversation_id
+                # ``validated()`` (inside the parser) already refused any
+                # root that is not a ``bcmsg_`` id, so a damaged tag reads as
+                # an unparsed ref here, never as a malformed root.
+                thread_root_id = ref.thread_root_id
         prior = rows.get(bare)
         if prior is not None and float(prior["created_at"]) <= float(row["created_at"]):
             prior["seq"] = prior["seq"] if prior["seq"] is not None else seq
             prior["conversation_id"] = prior["conversation_id"] or conversation_id
+            prior["thread_root_id"] = prior["thread_root_id"] or thread_root_id
             continue
         rows[bare] = {
             "message_id": bare,
             "conversation_id": conversation_id
             or (prior["conversation_id"] if prior is not None else ""),
             "seq": seq if seq is not None else (prior["seq"] if prior is not None else None),
+            "thread_root_id": thread_root_id
+            or (prior["thread_root_id"] if prior is not None else None),
             "hold_code": str(row["hold_code"]),
             "created_at": float(row["created_at"]),
         }
@@ -212,7 +220,10 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
         held_at = float(decision["created_at"]) if decision is not None else row["created_at"]
         deliver_until = held_at + hr.DELIVER_WINDOW_S if eligible else None
         release = store.owner_release(owner, bare)
-        can_discard = eligible and code not in hr.DELIVER_ONLY_HOLD_CODES
+        # EVERY eligible hold can be discarded (operator report 2026-11-24):
+        # a write-once conflict's Discard settles locally in ``decide``
+        # (``hold_release.LOCAL_DISCARD_HOLD_CODES``) instead of being refused.
+        can_discard = eligible
         conversation_id = row["conversation_id"] or (
             str(decision.get("conversation_id") or "") if decision else ""
         )
@@ -236,6 +247,15 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
                 "message_id": bare,
                 "conversation_id": conversation_id,
                 "seq": row["seq"],
+                # The root a thread REPLY answers (``bcmsg_…``), or ``None`` for a
+                # channel-level message or a hold whose ref did not carry one.
+                # WHY (operator report 2026-11-24): the renderer joins sender and
+                # body from the owner-audit messages page, and the hub excludes
+                # thread replies from that page (agent-server
+                # bridge_conversation_repository.go), so a held reply always
+                # read "Unknown sender … could not be loaded". With the root the
+                # renderer can read the reply from its thread instead.
+                "thread_root_id": row["thread_root_id"],
                 "held_at": _iso(held_at),
                 # When the message was FIRST held (the hold row's own time).
                 # ``held_at`` is the decision time — the Deliver window's start —
@@ -378,11 +398,6 @@ def decide(
         # PR #4212 round 3 (S-13): every screener failed on THIS message while
         # others screened; nothing read it, so only Discard is offered.
         raise HoldRefused(409, "hold_not_releasable")
-    if word == "discard" and str(decision.get("hold_code") or "") in hr.DELIVER_ONLY_HOLD_CODES:
-        # A write-once conflict: a Discard would need a reject over the
-        # committed screener allow, which write-once refuses, so it could only
-        # ever sit refused (``hold_release.DELIVER_ONLY_HOLD_CODES``).
-        raise HoldRefused(409, "hold_not_releasable")
     if not hr.owner_reviewable(
         store,
         owner,
@@ -429,8 +444,17 @@ def decide(
     # from a missing record or a 404, and no hub call, delivery or sender
     # notice. Every owner/generation/decision/conversation check above runs
     # first, and the row is still signed like any Discard.
+    #
+    # The second local terminal: a Discard on a ``LOCAL_DISCARD_HOLD_CODES``
+    # hold (a write-once conflict), in or out of the window and whatever its
+    # binding. The connector could never apply it (write-once refuses a reject
+    # over the committed allow), so queueing it would be a word nothing
+    # settles; it is recorded under its own audit ``reason``.
     deliver_until = float(decision["created_at"]) + hr.DELIVER_WINDOW_S
-    settle_locally = word == "discard" and hold_receipt is not None and now > deliver_until
+    local_code = word == "discard" and str(decision["hold_code"]) in hr.LOCAL_DISCARD_HOLD_CODES
+    settle_locally = word == "discard" and (
+        local_code or (hold_receipt is not None and now > deliver_until)
+    )
     try:
         signature, key_id = hr.sign_release(config_dir, message)
     except hr.ReleaseSigningUnavailable:
@@ -467,7 +491,11 @@ def decide(
                 # shipped in #4371), so it is kept as written. Read it as "no hub
                 # confirmation was obtained", never "the hub was verified to have
                 # failed" (S-1 above).
-                reason="hub_unconfirmed_after_deliver_window",
+                reason=(
+                    "write_once_conflict_committed_allow"
+                    if local_code
+                    else "hub_unconfirmed_after_deliver_window"
+                ),
                 deliver_until=deliver_until,
                 now=now,
             )

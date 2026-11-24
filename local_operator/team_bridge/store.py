@@ -251,9 +251,11 @@ def state_db_path(config_dir: Path) -> Path:
 
 #: The ``owner_releases.outcome`` of a signed Discard settled on THIS machine
 #: only (:meth:`Store.record_owner_release_local_terminal`): the hub could not
-#: confirm the message, so nothing was posted, delivered or sent to anyone. A
-#: sibling of the connector's ``admitted``/``rejected``, deliberately named so
-#: it can never be read as a hub or sender outcome.
+#: confirm the message, or the connector could never apply the Discard (a
+#: write-once conflict; ``hold_release.LOCAL_DISCARD_HOLD_CODES``), so nothing
+#: was posted, delivered or sent to anyone. The audit row's ``reason`` says
+#: which. A sibling of the connector's ``admitted``/``rejected``, deliberately
+#: named so it can never be read as a hub or sender outcome.
 OWNER_RELEASE_LOCAL_TERMINAL = "discarded_local_unconfirmed"
 
 #: The same-account credential heal's audit receipt (``team_bridge.heal``): one

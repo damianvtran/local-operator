@@ -91,7 +91,7 @@ def _review_items(config_dir, owner) -> list[dict[str, Any]]:
     return [i for i in _items(config_dir, owner) if i["actionable"]]
 
 
-def test_a_stale_allow_conflict_is_one_deliver_only_review_item(
+def test_a_stale_allow_conflict_is_one_review_item_with_both_words(
     rig,  # noqa: F811 — imported fixture
 ) -> None:
     config_dir, store, owner = rig
@@ -105,8 +105,9 @@ def test_a_stale_allow_conflict_is_one_deliver_only_review_item(
     (item,) = _review_items(config_dir, owner)
     assert item["hold_code"] == CONFLICT and item["kind"] == "owner_decision"
     assert item["releasable"] and item["can_deliver"] and not item["unscreened"]
-    # Deliver-only: a Discard could only ever sit refused (write-once).
-    assert item["can_discard"] is False and item["discard_receipt"] is None
+    # Both words (operator report 2026-11-24): the Discard settles locally,
+    # and the receipt lets it work when the body cannot be loaded.
+    assert item["can_discard"] is True and item["discard_receipt"]
     # A review hold enters the long-hold rollup a day late (finding b); three
     # days on, the two spellings are still ONE held message.
     later = time.time() + 3 * 86400
@@ -137,15 +138,18 @@ def test_the_owner_deliver_rearms_the_hold_and_the_next_pass_delivers(
     assert [m for m, _c, _r in _hold_rows(config_dir)] == [_composite()]
 
 
-def test_a_discard_on_a_conflict_is_refused_before_signing(
+def test_a_discard_on_a_conflict_settles_locally_and_never_delivers(
     rig,  # noqa: F811 — imported fixture
 ) -> None:
     config_dir, store, owner = rig
     _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
-    with pytest.raises(holds.HoldRefused) as refused:
-        _decide(config_dir, owner, "discard")
-    assert refused.value.code == "hold_not_releasable"
-    assert store.owner_release(owner, MESSAGE_ID) is None
+    receipt = _decide(config_dir, owner, "discard")
+    assert receipt["state"] == "discarded"
+    assert receipt["outcome"] == "discarded_local_unconfirmed"
+    # Still held: the connector reads the Discard first and write-once refuses
+    # its reject, so even a fully-current allow cannot deliver it now.
+    out = _screen(config_dir, owner, Runner(DELIVER), policy=_live(store, owner))
+    assert out.disposition == "hold" and out.hold_code == CONFLICT
 
 
 def test_a_reject_backed_conflict_is_not_listed_and_deliver_is_refused(

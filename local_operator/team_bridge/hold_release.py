@@ -133,14 +133,26 @@ REVIEW_HOLD_CODES = frozenset(
 #: signed (the desktop decide route) AND where one is consumed (the connector),
 #: so a hand-written release row cannot deliver one either.
 DISCARD_ONLY_HOLD_CODES = frozenset({SCREENING_FAILED_HOLD})
-#: Review codes whose only word is Deliver. A write-once conflict's Discard
-#: would have to commit a REJECT over the committed screener allow, which
-#: write-once refuses by design (#4533 lets only an AGREEING Deliver move the
-#: head), so the signed word would sit ``refused:write_once_conflict`` forever
-#: and the badge with it. Refused where a Discard could be signed (the decide
-#: route); at the consumer the store's own write-once rule is the refusal. The
-#: message simply stays held, exactly as it did before it was reviewable.
-DELIVER_ONLY_HOLD_CODES = frozenset({WRITE_ONCE_CONFLICT_HOLD})
+#: Review codes whose Discard is ALWAYS settled as a local terminal
+#: (``Store.record_owner_release_local_terminal``), in or out of the Deliver
+#: window, body-bound or receipt-bound. A write-once conflict's Discard can
+#: never be applied by the connector: it would have to commit a REJECT over
+#: the committed screener allow, which write-once refuses by design (#4533
+#: lets only an AGREEING Deliver move the head), so a queued word would sit
+#: ``refused:write_once_conflict`` forever and the badge with it. An earlier
+#: revision of PR #4546 therefore offered Deliver only, which left a conflict
+#: whose body could not be loaded with NO working button (operator report
+#: 2026-11-24). Settling the Discard locally gives every reviewable hold an
+#: exit: nothing is delivered, nothing is posted or ACKed on the hub, and the
+#: ``owner_release_local_terminals`` audit row records it. If the hub serves
+#: the envelope again, the connector's ``_consume_owner_release`` reads this
+#: Discard first and its reject commit is refused by write-once, so the
+#: message stays HELD — the signed Discard keeps a later re-screen's allow
+#: from delivering it (``_consume_owner_release`` runs before the re-drive
+#: that #4546 keeps for undecided conflicts). Like every release row, this
+#: holds while the review setting is on: with it off a release row is inert
+#: by design (``enabled_for``).
+LOCAL_DISCARD_HOLD_CODES = frozenset({WRITE_ONCE_CONFLICT_HOLD})
 RELEASABLE_HOLD_CODES = frozenset({WORK_SCOPE_HOLD}) | REVIEW_HOLD_CODES
 
 #: The ONLY category tuple that may become a releasable hold (Amendment 1, D2).
