@@ -568,15 +568,21 @@ def test_the_stream_loop_gates_the_commit_on_the_diagnosis_not_a_response_id() -
         "_note_cache_start",
         "_note_cache_end",
     }, "both acceptance shapes reach the commit step"
-    enclosing = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If) and any(inner is calls[0] for inner in ast.walk(node))
-    ]
-    assert enclosing, "the commit step is guarded, not run on every event"
-    # EVERY guarding if, not just the outermost: a nested ``and event.response_id``
-    # passes an outermost-only check but re-introduces exactly QA's regression.
-    for guard in enclosing:
-        gate = ast.unparse(guard.test)
-        assert "response_id" not in gate, f"the Google-shaped regression is back: {gate}"
-    assert any("cache_diagnostics" in ast.unparse(guard.test) for guard in enclosing)
+    # PER CALL, not just the first: a dead second call would satisfy a
+    # name-only check while the live one was ungated (review round 6, MINOR).
+    for call in calls:
+        enclosing = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If) and any(inner is call for inner in ast.walk(node))
+        ]
+        assert enclosing, f"{_call_name(call)} is guarded, not run on every event"
+        # EVERY guarding if, not just the outermost: a nested ``and
+        # event.response_id`` passes an outermost-only check but re-introduces
+        # exactly QA's regression.
+        for guard in enclosing:
+            gate = ast.unparse(guard.test)
+            assert "response_id" not in gate, f"the Google-shaped regression is back: {gate}"
+        assert any(
+            "cache_diagnostics" in ast.unparse(guard.test) for guard in enclosing
+        ), f"{_call_name(call)} is reachable only behind the diagnostics gate"
