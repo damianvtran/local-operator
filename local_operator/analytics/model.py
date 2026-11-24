@@ -485,25 +485,49 @@ def _prefix_digest(value: Any) -> bytes:
 
 
 def message_kind(message: Any) -> str:
-    """A short, content-blind label for one rendered message: ``role[:name]``.
+    """A short, content-blind label for one rendered message: ``role[_name]``.
 
-    ``role`` is the model's own vocabulary (``user``/``assistant``/``tool``).
-    The name is the harness's: ``custom_type`` when the message still carries
-    it, else the custom type the renderer recorded on ``provider_payload``.
-    An unknown custom type adds nothing rather than a guess.
+    WHAT MAY NAME A MESSAGE, and nothing else may:
+
+    * ``role`` — the model's own vocabulary (``user``/``assistant``/``tool``);
+    * ``custom_type`` — present only on a real ``CustomMessage``, which the
+      renderer never hands to the wire (it renders one to ``Message``), so this
+      is the label a caller passing harness messages directly gets;
+    * ``injected`` — the renderer's own BOOLEAN marker that this user turn came
+      from a host-authored injection rather than from the operator
+      (``compaction.cutpoint.RENDERED_INJECTION_KEY``).
+
+    THE PAYLOAD RULE IS A PRIVACY RULE. An earlier draft also read a
+    ``custom_type`` out of ``provider_payload['details']``. That mapping is
+    harness bookkeeping on SOME rows and tool metadata on others, so any word a
+    tool result carried could have reached a log line through the label — a
+    review reproduced ``tool_secretpassword123`` from a synthetic secret. The
+    lookup is gone: a value becomes a name only if the harness TYPE owns it or
+    the renderer set a boolean, never because it was found in a payload.
     """
     role = _text_or_empty(getattr(message, "role", "")) or "message"
     custom = _text_or_empty(getattr(message, "custom_type", ""))
-    if not custom:
-        payload = getattr(message, "provider_payload", None)
-        details = payload.get("details") if isinstance(payload, dict) else None
-        if isinstance(details, dict):
-            custom = _text_or_empty(details.get("custom_type"))
+    if not custom and _rendered_injection(message):
+        custom = "injected"
     # Lower-cased BEFORE the substitution: ``_KIND_SAFE`` only keeps
     # ``[a-z0-9_]``, so an upper-case byte would otherwise survive as a
     # separator and turn ``Wake`` into ``_ake``.
     label = _KIND_SAFE.sub("_", (f"{role}_{custom}" if custom else role).lower()).strip("_")
     return label[:_MAX_KIND_CHARS] or "message"
+
+
+def _rendered_injection(message: Any) -> bool:
+    """Whether the renderer marked this row as a host-authored injection.
+
+    Read by KEY and accepted only as a strict ``True``: a payload carrying
+    anything else under the marker is not a claim this label will repeat.
+    """
+    payload = getattr(message, "provider_payload", None)
+    if not isinstance(payload, dict):
+        return False
+    from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+
+    return payload.get(RENDERED_INJECTION_KEY) is True
 
 
 def prefix_sections(request: Any) -> PrefixSections:
@@ -557,6 +581,15 @@ def first_prefix_divergence(previous: PrefixSections | None, current: PrefixSect
 
     The label is ``system[i]``, ``tools``, or ``messages[i]:<kind>``; every part
     is content-blind (see :func:`message_kind`).
+
+    WHAT IT CANNOT SEE, and it must not pretend otherwise: the canonical form
+    is :func:`request_fingerprint`'s, which covers each message's text blocks,
+    tool calls, part KINDS (so an added or removed image moves the digest) and
+    its bounded native-replay summary — but not media BYTES, and not
+    ``provider_payload`` beyond that summary. Two requests that differ only in
+    one image's pixels therefore compare equal here, exactly as they do in the
+    prompt hash; when such a call breaks the cache the provider's own section
+    label is the only diagnosis, and this field says ``-``.
     """
     if previous is None:
         return ""

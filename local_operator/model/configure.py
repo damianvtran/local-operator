@@ -8543,6 +8543,13 @@ class SessionStreamFn:
             self._cache_first_divergence = first_prefix_divergence(self._cache_prefix_last, current)
         except Exception:  # noqa: BLE001 — a diagnostic must never break a turn
             logger.debug("cache prefix snapshot failed", exc_info=True)
+            # THE BASELINE MUST NOT OUTLIVE ITS OWN FAILURE. The provider chain
+            # advances on an accepted response regardless of what happened here,
+            # so keeping an older snapshot would compare the NEXT turn against a
+            # request that is no longer the previous one — naming a divergence
+            # that is an artefact of the missing snapshot. Dropping it makes the
+            # next comparison answer "no baseline" (``-``), which is true.
+            self._cache_prefix_last = None
             return
         self._cache_prefix_pending = current
 
