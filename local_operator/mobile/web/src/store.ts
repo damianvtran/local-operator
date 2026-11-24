@@ -18,6 +18,7 @@ import { createLocaleBundleLoader } from "./i18n/locale-bundles";
 import type {
 	Capabilities,
 	NotificationsBlock,
+	PendingAsk,
 	SessionProjection,
 	SubagentRow,
 	TodoPhase,
@@ -408,6 +409,50 @@ export function useProjection(sessionId: string): ProjectionSlot {
     refresh — and without re-reading on every unrelated repaint. */
 export function useAsksRevision(): number {
 	return useSyncExternalStore(subscribe, () => asksRevision);
+}
+
+/* THE ASKS SHEET'S LAST SUCCESSFUL READ, as MODULE state.
+
+   WHY IT LIVES HERE. A chip in the agent's prose must say `withdrawn` for an
+   ask that has left the live frame — the one settled state with no transcript
+   receipt — and the only source that still knows it is the aggregate the asks
+   sheet reads. The sheet owns that read; the transcript owns the chip. Lifting
+   the rows into the store is what lets the two agree without the transcript
+   issuing a second read of the same index on every session view.
+
+   IT IS A CACHE, NOT A TRUTH: `null`/absent before the sheet has ever been
+   opened means "not read yet", which draws an id as plain rather than guessed.
+   The chip reads it filtered to its own session (ids repeat across sessions). */
+let askChipSettled: PendingAsk[] = [];
+let askChipSettledSignature = "";
+
+/** Order-insensitive, and per-ask: a re-rank is not new information, a state or
+    question change is. `askRowsSignature` is the same rule the sheet uses for
+    its own re-reads, extended with the head question the chip's label carries. */
+function askChipSettledSignatureOf(rows: readonly PendingAsk[]): string {
+	return rows
+		.map((row) =>
+			`${row?.session_id ?? ""}:${row?.ask_id ?? ""}:${row?.status ?? ""}:${
+				String(row?.questions?.[0]?.question ?? "")
+			}`,
+		)
+		.sort()
+		.join("|");
+}
+
+/** Remember the asks sheet's successful aggregate read for the chips. */
+export function rememberAskChipSettled(rows: PendingAsk[] | null | undefined): void {
+	const next = Array.isArray(rows) ? rows : [];
+	const signature = askChipSettledSignatureOf(next);
+	if (signature === askChipSettledSignature) return;
+	askChipSettledSignature = signature;
+	askChipSettled = next;
+	emit();
+}
+
+/** The last aggregate read, for chips that must name a settled ask. */
+export function useAskChipSettled(): PendingAsk[] {
+	return useSyncExternalStore(subscribe, () => askChipSettled);
 }
 
 /** Fold one list frame's per-session ask counts into a signature.

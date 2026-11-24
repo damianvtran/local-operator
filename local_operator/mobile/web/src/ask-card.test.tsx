@@ -1500,5 +1500,16 @@ describe("the bar after the remediation batch", () => {
 			else delete proto.scrollIntoView;
 		}
 	});
+
+	it("states its id at the foot with a copy control, and can hide it under a row that already says it", () => {
+		const { unmount } = renderCard(ask({ ask_id: "a-745e" }));
+		expect(screen.getByTestId("ask-id-foot").getAttribute("data-ask-id-copy")).toBe("a-745e");
+		expect(screen.getByRole("button", { name: "Copy ask id a-745e" })).toBeTruthy();
+		unmount();
+		render(
+			<AskCard row={ask({ ask_id: "a-745e" })} sessionId="s1" nowMs={Date.now()} hideId />,
+		);
+		expect(screen.queryByTestId("ask-id-foot")).toBeNull();
+	});
 });
 

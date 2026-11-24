@@ -85,5 +85,19 @@
   "relay.asks.card.progress_tally": "Отвечено или пропущено вопросов: {answered} из {total}",
   "relay.asks.card.progress_pick_or_type": "Выберите вариант или напишите свой ответ, чтобы отправить.",
   "relay.asks.card.progress_type": "Введите ответ или пропустите вопрос, чтобы отправить.",
-  "relay.asks.card.other_kept": "Ваш текст сохранён, но не отправлен"
+  "relay.asks.card.other_kept": "Ваш текст сохранён, но не отправлен",
+  "relay.asks.id.copy_label": "Скопировать id вопроса {id}",
+  "relay.asks.id.copied": "Скопировано",
+  "relay.asks.id.copied_named": "Скопировано {id}",
+  "relay.asks.id.copy_failed": "Не удалось скопировать — id выделен; скопируйте его оттуда",
+  "relay.asks.chip.open": "открыт",
+  "relay.asks.chip.answered": "отвечен",
+  "relay.asks.chip.declined": "отклонён",
+  "relay.asks.chip.timed_out": "время истекло",
+  "relay.asks.chip.late": "с опозданием",
+  "relay.asks.chip.dismissed": "скрыт",
+  "relay.asks.chip.withdrawn": "отозван",
+  "relay.asks.chip.expired": "устарел",
+  "relay.asks.chip.label": "Вопрос {id}, {state}: {question}. Активируйте, чтобы показать.",
+  "relay.asks.chip.label_bare": "Вопрос {id}, {state}. Активируйте, чтобы показать."
 }

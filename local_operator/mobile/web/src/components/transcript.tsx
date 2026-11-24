@@ -13,6 +13,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import type { AssistantPart, InlineUiMessages } from "../inline-ui-parts";
 import { AssistantContent } from "./inline-ui";
 import { AskRow } from "./ask-row";
+import { useAskChipHost } from "./ask-id";
 import { BridgeCardBodyPanel, isBridgeCardNotice } from "./bridge-card-body";
 import { AttachmentImage } from "./attachment-image";
 import { ImageGenCard } from "./image-gen-card";
@@ -162,6 +163,12 @@ function Entry({ entry, pid, condensed = false, liveText = false, overlay }: {
 	liveText?: boolean;
 	overlay?: readonly AssistantPart[];
 }) {
+	/* A CHIP NEEDS A SCREEN THAT OWNS ITS ASKS. The context is that screen's
+	   opt-in: the session route wraps its transcript in `AskChipHostProvider`, so
+	   an id here resolves against THIS conversation; a subagent transcript or any
+	   other caller has no provider, and the assistant row there stays plain text.
+	   The hook is unconditional — a branch would change the hook count. */
+	const askChips = useAskChipHost() !== null;
 	switch (entry.kind) {
 		case "user": {
 			/* The user's own words. Right-aligned like the desktop app's bubble,
@@ -274,7 +281,7 @@ function Entry({ entry, pid, condensed = false, liveText = false, overlay }: {
 			   report). */
 			return (
 				<div className="min-w-0 text-body leading-normal break-words">
-					<AssistantContent text={entry.text} overlay={overlay} live={liveText} />
+					<AssistantContent text={entry.text} overlay={overlay} live={liveText} askChips={askChips} />
 				</div>
 			);
 		case "tool":
