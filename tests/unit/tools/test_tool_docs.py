@@ -369,7 +369,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # ask_withdraw 378 -> 389 (+11, PR #4326 QA Q-F2): the two moot examples
     # system.md does not carry ("you found the answer yourself or the work moved
     # on") return to the description; same printed table, nothing else moved.
-    "ask": 1198,
+    "ask": 1222,
     "ask_withdraw": 389,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only

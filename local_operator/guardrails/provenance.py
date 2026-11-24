@@ -5254,10 +5254,13 @@ def unanswered_label(status: str) -> str:
 #: generic label made the agent tell the operator he had "no answer approving
 #: it" after he had answered. The fail-closed itself is deliberate and stays:
 #: the model's own ``bash`` can dial the socket with the 0600 control key and
-#: is indistinguishable from a proof-less window, and an unforgeable desktop
-#: credential (Electron fuse hardening + code-signature check) is an operator
-#: decision not yet taken. :func:`lapsed_refusal_reason` keys its recovery
-#: text on this exact string.
+#: is indistinguishable from a proof-less window. The unforgeable desktop
+#: credential (Electron fuse hardening + code-signature check) has since
+#: shipped as ``asks/app_attest.py`` (F2, 2026-11-16): the desktop app's main
+#: process attests an answer the operator confirms on its native sheet, and
+#: an attested answer is stamped ``desktop``, so this label now marks only
+#: answers no attestation or capability vouched for. :func:`lapsed_refusal_reason` keys
+#: its recovery text on this exact string.
 UNPROVEN_SURFACE_LABEL = (
     "answered from a surface that could not prove it is the operator's "
     "(it did not start this session's runtime)"
