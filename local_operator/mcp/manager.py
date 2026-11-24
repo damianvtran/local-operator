@@ -102,6 +102,10 @@ from local_operator.tools.result_normalize import (
     RESULT_NORMALIZATION_DEFAULT,
     RESULT_NORMALIZATION_MODES,
     RESULT_NORMALIZATION_PATH,
+    SEARCH_SNIPPET_CHARS_DEFAULT,
+    SEARCH_SNIPPET_CHARS_MAX,
+    SEARCH_SNIPPET_CHARS_PATH,
+    is_search_tool,
 )
 
 if TYPE_CHECKING:
@@ -987,6 +991,34 @@ def read_result_normalization_mode() -> str:
     return value if value in RESULT_NORMALIZATION_MODES else RESULT_NORMALIZATION_DEFAULT
 
 
+def read_search_snippet_chars() -> int:
+    """Read ``mcp.search_snippet_chars`` at CALL time; the default on any trouble.
+
+    Same contract as :func:`read_result_normalization_mode` (live per call,
+    never renames a broken config, never fails a result). A hand-typed bare
+    ``off``/``false`` (YAML boolean False) means 0, "keep snippets whole"; a
+    value that is not a whole number in ``0..SEARCH_SNIPPET_CHARS_MAX`` falls
+    back to the default.
+    """
+    try:
+        from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+        from local_operator.paths import config_dir
+        from local_operator.tools.shell_env import _config_file_is_unreadable
+
+        if _config_file_is_unreadable(config_dir() / CONFIG_FILE_NAME):
+            return SEARCH_SNIPPET_CHARS_DEFAULT
+        value = ConfigManager(config_dir()).get_nested_value(
+            SEARCH_SNIPPET_CHARS_PATH, SEARCH_SNIPPET_CHARS_DEFAULT
+        )
+    except Exception:  # noqa: BLE001 — config trouble must never fail a result
+        return SEARCH_SNIPPET_CHARS_DEFAULT
+    if value is False:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        return SEARCH_SNIPPET_CHARS_DEFAULT
+    return value if 0 <= value <= SEARCH_SNIPPET_CHARS_MAX else SEARCH_SNIPPET_CHARS_DEFAULT
+
+
 def _format_with_normalization_setting(
     result: Any,
     tool_call_id: str,
@@ -995,6 +1027,7 @@ def _format_with_normalization_setting(
     *,
     producer_scope: str | None,
     machine_read: bool,
+    mcp_tool_name: str = "",
 ) -> ToolResult:
     """``format_mcp_result`` under the live ``mcp.result_normalization`` mode.
 
@@ -1004,14 +1037,23 @@ def _format_with_normalization_setting(
     already-armed monitor stored, or ``json.loads``-ed by a built-in that
     renders its own output, so it must stay the server's bytes -- the same
     reason the dropped-argument note skips those calls.
+
+    ``mcp.search_snippet_chars`` is read only for a search tool under a
+    normalizing mode, so every other call keeps its single config read.
     """
+    normalization = "off" if machine_read else read_result_normalization_mode()
+    snippet_chars = 0
+    if normalization != "off" and is_search_tool(mcp_tool_name):
+        snippet_chars = read_search_snippet_chars()
     return format_mcp_result(
         result,
         tool_call_id,
         tool_label,
         context,
         producer_scope=producer_scope,
-        normalization="off" if machine_read else read_result_normalization_mode(),
+        normalization=normalization,
+        mcp_tool_name=mcp_tool_name,
+        search_snippet_chars=snippet_chars,
     )
 
 
@@ -4803,6 +4845,7 @@ class McpManager:
                 context,
                 producer_scope=producer_scope,
                 machine_read=machine_read,
+                mcp_tool_name=mcp_tool_name,
             )
         )
 

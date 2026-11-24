@@ -511,6 +511,8 @@ def format_mcp_result(
     *,
     producer_scope: str | None = None,
     normalization: str = RESULT_NORMALIZATION_DEFAULT,
+    mcp_tool_name: str = "",
+    search_snippet_chars: int = 0,
 ) -> ToolResult:
     """Flatten an MCP ``tools/call`` result into a harness ``ToolResult``.
 
@@ -527,6 +529,13 @@ def format_mcp_result(
     ``normalization`` is the ``mcp.result_normalization`` mode applied to a
     non-error result's text (see :mod:`local_operator.tools.result_normalize`).
     The caller reads the setting; this module stays pure.
+
+    ``mcp_tool_name`` is the tool's BARE name as its server lists it (not the
+    ``mcp__<server>_<tool>`` label in ``tool_name``, which a server named
+    ``research`` would make look like a search). When it names a search,
+    ``search_snippet_chars`` (``mcp.search_snippet_chars``; 0 = off) clips the
+    snippet fields of the JSON hit lists it returns, under the same gates as
+    ``normalization`` -- see ``result_normalize.clip_search_hits``.
 
     ``producer_scope`` is the harness-stamped identity of the ACTUAL producer
     (server+tool origin plus owning session -- see
@@ -580,7 +589,12 @@ def format_mcp_result(
             # the transcript (the de-duplication below exists to stop exactly
             # that). Rationale and measurement:
             # ``local_operator.tools.result_normalize``.
-            rendered = normalize_tool_text(rendered, normalization)
+            rendered = normalize_tool_text(
+                rendered,
+                normalization,
+                tool_name=mcp_tool_name,
+                search_snippet_chars=search_snippet_chars,
+            )
         parts.append(rendered)
 
     text = "\n\n".join(parts)

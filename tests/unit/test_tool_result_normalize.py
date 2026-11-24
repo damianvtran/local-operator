@@ -499,3 +499,130 @@ def test_deterministic_across_processes() -> None:
         for seed in ("1", "2")
     }
     assert runs == {normalize_tool_text(payload)}
+
+
+# --- search-hit snippet clipping (``mcp.search_snippet_chars``) -------------
+
+#: A provider snippet as long as the replayed run's average (1,098 chars), with
+#: the line breaks a page extract carries.
+_LONG_SNIPPET = ("Mark Sutcliffe was elected the 59th mayor of Ottawa in 2022.\n" * 18).strip()
+
+
+def _hit(n: int, **extra: Any) -> dict[str, Any]:
+    return {
+        "title": f"Mark Sutcliffe - result {n}",
+        "url": f"https://example.com/sutcliffe/{n}?utm_source=x&id={n}",
+        "snippet": _LONG_SNIPPET,
+        "published_date": None,
+        **extra,
+    }
+
+
+#: The Pergamon Forge ``search`` shape (Tavily basic):
+#: ``{query, results: [{title, url, snippet, published_date}]}``.
+_TAVILY_SHAPE = json.dumps({"query": "Mark Sutcliffe Ottawa", "results": [_hit(1), _hit(2)]})
+
+
+def _clip(text: str, tool_name: str = "search", chars: int = 400, mode: str = "prose-links") -> str:
+    return normalize_tool_text(text, mode, tool_name=tool_name, search_snippet_chars=chars)
+
+
+@pytest.mark.parametrize("mode", ["prose-links", "strip-links"])
+def test_search_hit_snippets_are_clipped_and_null_fields_dropped(mode: str) -> None:
+    out = json.loads(_clip(_TAVILY_SHAPE, mode=mode))
+    raw = json.loads(_TAVILY_SHAPE)
+    assert out["query"] == raw["query"]
+    for got, sent in zip(out["results"], raw["results"], strict=True):
+        assert got["url"] == sent["url"]  # the citation key, byte-equal
+        assert got["title"] == sent["title"]
+        assert "published_date" not in got  # null field dropped
+        assert len(got["snippet"]) <= 400 and got["snippet"].endswith("…")
+        assert got["snippet"].startswith("Mark Sutcliffe was elected the 59th mayor")
+        assert "\n" not in got["snippet"]
+
+
+def test_top_level_hit_list_is_clipped() -> None:
+    out = json.loads(_clip(json.dumps([_hit(1), _hit(2, content=_LONG_SNIPPET)])))
+    assert all(len(h["snippet"]) <= 400 for h in out)
+    assert len(out[1]["content"]) <= 400
+
+
+def test_snippet_clip_is_the_web_search_clipper() -> None:
+    """One clipper: built-in ``web_search`` (320) and MCP search (400) agree."""
+    from local_operator.tools.result_normalize import clip_snippet
+    from local_operator.web_search import tool as web_search_tool
+
+    assert web_search_tool._clip is clip_snippet
+    clipped = json.loads(_clip(_TAVILY_SHAPE, chars=320))["results"][0]["snippet"]
+    assert clipped == clip_snippet(_LONG_SNIPPET, 320)
+
+
+def test_short_snippet_keeps_its_exact_bytes() -> None:
+    short = "Ottawa mayor.\n  Elected 2022."
+    out = json.loads(_clip(json.dumps([_hit(1, snippet=short), _hit(2, snippet=short)])))
+    assert [h["snippet"] for h in out] == [short, short]
+
+
+def test_non_search_tool_is_untouched() -> None:
+    """A GitHub-issues-shaped list from a non-search tool keeps every byte."""
+    body = "Steps to reproduce:\n" + "the widget fails when resized. " * 40
+    issues = json.dumps(
+        [
+            {"title": "Crash", "html_url": "https://github.com/o/r/issues/1", "body": body},
+            {"title": "Hang", "html_url": "https://github.com/o/r/issues/2", "body": None},
+        ]
+    )
+    assert _clip(issues, tool_name="list_issues") == issues
+    # The Tavily shape itself is only clipped when a search returned it.
+    assert _clip(_TAVILY_SHAPE, tool_name="fetch") == _TAVILY_SHAPE
+
+
+def test_fetch_payload_is_untouched_even_from_a_search_tool() -> None:
+    """A page (one object, not a hit list) is never clipped."""
+    page = json.dumps({"url": "https://example.com/p", "content": _LONG_SNIPPET * 5})
+    assert _clip(page, tool_name="search") == normalize_tool_text(page, "prose-links")
+    assert len(json.loads(_clip(page))["content"]) > 4_000
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # no ``title``: links, not ranked hits
+        json.dumps([{"url": "https://a.example", "snippet": _LONG_SNIPPET}] * 2),
+        # mixed list: one item is not a hit
+        json.dumps([_hit(1), {"note": _LONG_SNIPPET}]),
+        # hits with no discovery text at all
+        json.dumps([{"title": "A", "url": "https://a.example", "score": None}]),
+        # plain-text search output
+        "1. Mark Sutcliffe - https://example.com/1\n" + _LONG_SNIPPET,
+    ],
+    ids=["no-title", "mixed", "no-snippet", "plain-text"],
+)
+def test_non_hit_shapes_are_untouched(payload: str) -> None:
+    assert _clip(payload) == normalize_tool_text(payload, "prose-links")
+
+
+def test_search_clip_is_idempotent() -> None:
+    once = _clip(_TAVILY_SHAPE)
+    assert once != _TAVILY_SHAPE
+    assert _clip(once) == once
+
+
+def test_zero_chars_is_byte_identical_to_plain_normalization() -> None:
+    for mode in ("prose-links", "strip-links"):
+        assert _clip(_TAVILY_SHAPE, chars=0, mode=mode) == normalize_tool_text(_TAVILY_SHAPE, mode)
+    assert _clip(_TAVILY_SHAPE, chars=0) == _TAVILY_SHAPE  # nothing else to normalize here
+
+
+def test_off_mode_is_byte_identical_even_for_a_search() -> None:
+    assert _clip(_TAVILY_SHAPE, mode="off") == _TAVILY_SHAPE
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("search", True), ("web_search_exa", True), ("SearchDocs", True), ("fetch", False)],
+)
+def test_is_search_tool(name: str, expected: bool) -> None:
+    from local_operator.tools.result_normalize import is_search_tool
+
+    assert is_search_tool(name) is expected

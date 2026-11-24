@@ -89,13 +89,41 @@ Constraints
 * **Errors are not normalized.** An error body is diagnostics, often small,
   and its exact text matters more than its size.
 
+Search-hit snippet clipping (``clip_search_hits``)
+--------------------------------------------------
+A *search* tool's hit list is the one place this module shortens text, and it
+is the only exception to "nothing truncates" above. Why: on the same paired
+run every search hit carried a provider snippet of 1,098 characters on
+average (median 1,161, max 1,510, 213 hits) and a ``published_date`` that was
+null on 213 of 213. Snippets exist to choose what to fetch, not to cite -- the
+built-in ``web_search`` tool has clipped them to 320 characters for exactly
+that reason -- yet the MCP path passed them whole, and each one is re-read on
+every later turn. Replayed through the real module, clipping hit snippets to
+400 characters re-priced the candidate arm from 0.864x to 0.707x Claude Code
+(``prose-links``; 0.806x to 0.648x in ``strip-links``) with every
+search-discovered cited URL still naming its subject in its title, clipped
+snippet or url (39/39 and 43/43 across the two arms). 320 lost one of 43, so
+the MCP default is 400. Fetched pages are never clipped, so every cited fact
+the page supports is still there.
+
+Constraints: it applies only to a tool whose bare MCP name contains
+``search`` (``is_search_tool``), only to a JSON list whose every item is a hit
+object (a ``title`` key plus a URL-shaped key, see ``_is_hit``), and inside a
+hit only to snippet-like string fields (``SNIPPET_KEYS``) and empty fields.
+URL-keyed and ``title`` values are never touched (citation-bound workflows
+compare the exact ``url`` they fetched). It runs inside the fixed-point loop,
+so it is idempotent: a clipped field is at most ``max_chars`` long and is
+never clipped again. ``0`` disables it, and ``off`` normalization disables it
+too (``off`` stays the byte-identical escape hatch).
+
 How to disable
 --------------
 ``/settings`` -> ``mcp.result_normalization`` (or ``lop config edit``;
 ``values.mcp.result_normalization`` in ``config.yml``): ``prose-links``
 (default), ``strip-links``, or ``off``. ``off`` is byte-identical to the
 behaviour before this module. Read per result, so an edit lands on the next
-MCP call.
+MCP call. ``mcp.search_snippet_chars`` (default 400; ``0`` = keep snippets
+whole) sets the hit-snippet clip on its own.
 """
 
 from __future__ import annotations
@@ -120,6 +148,51 @@ RESULT_NORMALIZATION_MODES: Final[tuple[NormalizationMode, ...]] = (
 #: ``config.yml`` path of the ``mcp.result_normalization`` setting. Read by
 #: ``mcp.manager.read_result_normalization_mode`` (this module does no I/O).
 RESULT_NORMALIZATION_PATH: Final = ("mcp", "result_normalization")
+
+#: Default for ``mcp.search_snippet_chars``: the longest a snippet-like field
+#: of a search hit may stay (``0`` = never clip). 400, not the built-in
+#: ``web_search`` tool's 320: on the replayed run 320 hid the subject name of
+#: one of 43 search-discovered cited URLs and 400 hid none (module docstring).
+SEARCH_SNIPPET_CHARS_DEFAULT: Final = 400
+#: ``config.yml`` path of ``mcp.search_snippet_chars``; read by
+#: ``mcp.manager.read_search_snippet_chars``.
+SEARCH_SNIPPET_CHARS_PATH: Final = ("mcp", "search_snippet_chars")
+#: The registry's upper bound. A cap above any measured snippet (max 1,510
+#: chars on the replayed run) is effectively "off"; the bound only stops a
+#: typo from becoming a multi-megabyte integer in the config.
+SEARCH_SNIPPET_CHARS_MAX: Final = 100_000
+
+#: Fields of a search hit that hold discovery text: provider snippets
+#: (Tavily ``snippet``/``content``, Exa ``text``/``summary``, Brave
+#: ``description``). Only these are clipped; every other field (ids, dates,
+#: scores, ``title``, any URL-shaped key) is copied as is.
+SNIPPET_KEYS: Final = frozenset({"snippet", "content", "description", "text", "summary"})
+_SEARCH_TOOL = re.compile(r"search", re.IGNORECASE)
+
+
+def clip_snippet(text: str, limit: int) -> str:
+    """Collapse whitespace and cut ``text`` to at most ``limit`` characters.
+
+    The one snippet clipper: the built-in ``web_search`` tool and the MCP
+    search-hit clip both use it, so a snippet looks the same whichever path
+    found it. A cut text ends with ``…`` and is exactly ``limit`` characters
+    or fewer, so clipping it again changes nothing.
+    """
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
+def is_search_tool(tool_name: str) -> bool:
+    """Whether an MCP tool's BARE name (as the server lists it) marks a search.
+
+    The bare name, never the harness label ``mcp__<server>_<tool>``: a server
+    called ``elasticsearch`` or ``research`` must not turn its fetch or
+    document-read tool into a "search" whose content gets clipped.
+    """
+    return bool(_SEARCH_TOOL.search(tool_name))
+
 
 #: A line with at least this many visible characters (links rendered as their
 #: anchor text) is prose; its absolute links are kept in ``prose-links`` mode.
@@ -563,7 +636,66 @@ def _walk(value: Any, keep_prose_links: bool, changed: list[bool], key: str | No
     return value
 
 
-def _normalize_once(text: str, keep_prose_links: bool) -> str:
+def _is_hit(item: Any) -> bool:
+    if not isinstance(item, dict) or "title" not in item:
+        return False
+    return any(isinstance(k, str) and _URLISH_KEY.search(k) for k in item)
+
+
+def _is_hit_list(value: list[Any]) -> bool:
+    # EVERY item must be a hit and at least one must carry discovery text: a
+    # mixed list, or a bare list of {title, url} links, is something other
+    # than a provider's ranked results and stays as the server sent it.
+    return (
+        bool(value)
+        and all(_is_hit(item) for item in value)
+        and any(isinstance(item.get(k), str) for item in value for k in SNIPPET_KEYS)
+    )
+
+
+def _protected(key: str) -> bool:
+    return key == "title" or bool(_URLISH_KEY.search(key))
+
+
+def _clip_hit(item: dict[str, Any], max_chars: int, changed: list[bool]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in item.items():
+        if _protected(key):
+            out[key] = value
+            continue
+        if value is None or value == "" or value == [] or value == {}:
+            # Empty fields carry nothing yet cost tokens on every later turn
+            # (``published_date: null`` on 213/213 replayed hits).
+            changed.append(True)
+            continue
+        if key in SNIPPET_KEYS and isinstance(value, str) and len(value) > max_chars:
+            # Only an OVER-long field is rewritten, so a short snippet keeps
+            # its exact bytes (``clip_snippet`` would also fold its spacing).
+            value = clip_snippet(value, max_chars)
+            changed.append(True)
+        out[key] = value
+    return out
+
+
+def clip_search_hits(value: Any, max_chars: int, changed: list[bool]) -> Any:
+    """Clip snippet fields and drop empty fields of every hit list in ``value``.
+
+    A hit list may sit anywhere in the payload: top level, a ``results``
+    array (Tavily, Exa) or deeper (Brave's ``web.results``). The caller gates
+    on the tool being a search (``is_search_tool``); see the module docstring
+    for the measurement and the constraints. Appends to ``changed`` when it
+    rewrites anything, the contract ``_walk`` uses.
+    """
+    if isinstance(value, dict):
+        return {k: clip_search_hits(v, max_chars, changed) for k, v in value.items()}
+    if isinstance(value, list):
+        if _is_hit_list(value):
+            return [_clip_hit(item, max_chars, changed) for item in value]
+        return [clip_search_hits(v, max_chars, changed) for v in value]
+    return value
+
+
+def _normalize_once(text: str, keep_prose_links: bool, search_snippet_chars: int = 0) -> str:
     head = text.lstrip()[:1]
     if head in ("{", "["):
         try:
@@ -580,6 +712,10 @@ def _normalize_once(text: str, keep_prose_links: bool) -> str:
         if isinstance(parsed, (dict, list)):
             changed: list[bool] = []
             walked = _walk(parsed, keep_prose_links, changed)
+            if search_snippet_chars > 0:
+                # After the markup walk, as the replay measured it: links and
+                # images leave a snippet first, so the cap keeps more words.
+                walked = clip_search_hits(walked, search_snippet_chars, changed)
             if not changed:
                 return text  # nothing to remove: keep the server's exact bytes
             out = json.dumps(walked, ensure_ascii=False, separators=(",", ":"))
@@ -587,7 +723,13 @@ def _normalize_once(text: str, keep_prose_links: bool) -> str:
     return normalize_markdown(text, keep_prose_links=keep_prose_links)
 
 
-def normalize_tool_text(text: str, mode: str = RESULT_NORMALIZATION_DEFAULT) -> str:
+def normalize_tool_text(
+    text: str,
+    mode: str = RESULT_NORMALIZATION_DEFAULT,
+    *,
+    tool_name: str = "",
+    search_snippet_chars: int = 0,
+) -> str:
     """Normalize one tool result's flattened text under ``mode``.
 
     ``off`` returns ``text`` unchanged (the identity, byte for byte). A JSON
@@ -597,15 +739,21 @@ def normalize_tool_text(text: str, mode: str = RESULT_NORMALIZATION_DEFAULT) -> 
     the markdown path. The transform is repeated to a fixed point (at most
     ``MAX_PASSES``), and an output that would not encode as UTF-8 falls back
     to ``text``.
+
+    ``tool_name`` is the tool's bare MCP name; when it names a search
+    (``is_search_tool``) and ``search_snippet_chars`` is positive, the JSON
+    hit lists it returns are clipped by ``clip_search_hits`` in the same pass.
+    ``off`` skips that too: it is the byte-identical escape hatch.
     """
     if mode == "off" or not text:
         return text
     if mode not in RESULT_NORMALIZATION_MODES:
         raise ValueError(f"unknown result normalization mode: {mode!r}")
     keep_prose_links = mode == "prose-links"
+    snippet_chars = search_snippet_chars if is_search_tool(tool_name) else 0
     current = text
     for _ in range(MAX_PASSES):
-        following = _normalize_once(current, keep_prose_links)
+        following = _normalize_once(current, keep_prose_links, snippet_chars)
         if following == current:
             break
         current = following
