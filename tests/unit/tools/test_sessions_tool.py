@@ -4835,6 +4835,7 @@ async def test_stop_force_runs_the_cli_escalation_ladder(
         "t", {"op": "stop", "session": "aaaa00000001", "force": True}, None, None, _context(root)
     )
     assert not result.is_error, result.text
+    assert ladder.await_args is not None
     kwargs = ladder.await_args.kwargs
     assert (kwargs["force"], kwargs["graceful_only"]) == (True, False)
     assert kwargs["_command"] == "sessions tool --force"
@@ -4844,6 +4845,7 @@ async def test_stop_force_runs_the_cli_escalation_ladder(
     await execute_sessions(
         "t", {"op": "stop", "session": "aaaa00000001"}, None, None, _context(root)
     )
+    assert ladder.await_args is not None
     kwargs = ladder.await_args.kwargs
     assert (kwargs["force"], kwargs["graceful_only"]) == (False, True)
     assert kwargs["_command"] == "sessions tool"

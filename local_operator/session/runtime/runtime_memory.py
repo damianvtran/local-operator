@@ -608,7 +608,11 @@ def runtime_memory_pass(
                 config_dir,
             )
             continue
-        act = (end or end_runaway_runtime)(
+        # Typed as the injectable ``end`` seam (``Callable[..., GuardAct]``) so
+        # pyright checks the optional ``verify`` splat against ``...`` rather
+        # than against every keyword of ``end_runaway_runtime``; same callee.
+        end_fn: Callable[..., GuardAct] = end or end_runaway_runtime
+        act = end_fn(
             config_dir,
             record,
             footprint_mb=mb,
