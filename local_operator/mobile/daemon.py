@@ -6741,14 +6741,15 @@ class MobileDaemon:
         effort: str | None = None,
         *,
         on_spawned: Callable[[int], None] | None = None,
-        ready_timeout_s: float = SESSION_START_TIMEOUT_S,
+        ready_timeout_s: float | None = None,
     ) -> int:
         """Start (or join the start of) a session's runtime; its pid once READY.
 
         ``on_spawned`` is told the child's pid as soon as the child process
         exists, before it has booted -- including for a caller that JOINS a
         start already in flight. ``ready_timeout_s`` bounds the wait for the
-        record and the relay's handshake; concurrent starts of one id share the
+        record and the relay's handshake (``None``: ``SESSION_START_TIMEOUT_S``,
+        resolved in ``_spawn_session``); concurrent starts of one id share the
         first caller's task and therefore its bound. See
         ``_resume_answering_on_spawn`` for the caller that uses both.
         """
@@ -6806,7 +6807,7 @@ class MobileDaemon:
         effort: str | None = None,
         *,
         on_spawned: Callable[[int], None] | None = None,
-        ready_timeout_s: float = SESSION_START_TIMEOUT_S,
+        ready_timeout_s: float | None = None,
     ) -> int:
         """Spawn a daemon-owned session in a supervised CHILD process and let
         discovery adopt it.
@@ -7000,6 +7001,12 @@ class MobileDaemon:
         started = time.monotonic()
         if on_spawned is not None:
             on_spawned(process.pid)
+        # Resolved here, at call time, not as a ``= SESSION_START_TIMEOUT_S``
+        # default: a default binds the constant's value when the method is
+        # defined, so the module constant would stop being the single knob for
+        # the start deadline (tests and operators patch it on the module).
+        if ready_timeout_s is None:
+            ready_timeout_s = SESSION_START_TIMEOUT_S
         try:
             async with asyncio.timeout(ready_timeout_s):
                 done, _ = await asyncio.wait(
