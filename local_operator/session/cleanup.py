@@ -2576,6 +2576,7 @@ def delete_session(
 
     children = _subagent_child_count(directory)
     clock = time.time() if now is None else now
+    rehearsed_owner_gone = False
     reason = _guard(directory, config_dir, clock)
     if reason is not None and reason in _KEEP_ALIVE_PREEMPTABLE_GUARDS:
         from local_operator.session.runtime import registry
@@ -2615,6 +2616,7 @@ def delete_session(
         resident = _keep_alive_resident(directory, config_dir)
         if resident is not None:
             if dry_run:
+                rehearsed_owner_gone = True
                 reason = _guard(directory, config_dir, clock, live_owner_gone=True)
             elif _ask_keep_alive_to_leave(resident, directory, actor=actor):
                 reason = _guard(directory, config_dir, clock)
@@ -2628,16 +2630,25 @@ def delete_session(
                     # request's own freshness window, and still not a thing to
                     # leave behind (see ``registry.EXIT_REQUEST_NAME``).
                     registry.remove_exit_request(directory)
-    if reason == _ARMED_WAKE_GUARD:
-        # The armed wake may be nothing but the asks' own hidden deadline rows;
-        # then it is the same open question, settled the same way below.
-        from local_operator.asks.orphans import only_ask_deadline_wakes
-
-        try:
-            if only_ask_deadline_wakes(config_dir, session_id):
-                reason = _OPEN_ASK_GUARD
-        except Exception:  # noqa: BLE001 -- unprovable keeps the refusal
-            logger.debug("session delete: wake probe failed", exc_info=True)
+    if reason in (_ARMED_WAKE_GUARD, _OPEN_ASK_GUARD):
+        # SETTLE THE ASKS ONLY WHEN THE DELETE WILL PROCEED (review round 1,
+        # R1/Q1). ``_guard`` stops at its FIRST refusal, and the armed-wake probe
+        # sits before the monitor and spooled-mail probes, so "has an armed wake"
+        # (the asks' own deadline rows) or "has an open ask" says nothing about
+        # the guards behind it. Withdrawing on that alone wrote withdrawals for a
+        # delete that then refused on unread mail -- a kept conversation whose
+        # live question was gone. So every guard EXCEPT the asks' own is
+        # evaluated first (``settling_asks``), with the same owner-gone premise
+        # the rehearsal used above, and a remaining obstacle is the refusal --
+        # for the rehearsal too, so both report one verdict.
+        remaining = _guard(
+            directory,
+            config_dir,
+            clock,
+            live_owner_gone=rehearsed_owner_gone,
+            settling_asks=True,
+        )
+        reason = remaining if remaining is not None else _OPEN_ASK_GUARD
     if reason == _OPEN_ASK_GUARD:
         # AN EXPLICIT DELETE SETTLES ITS OWN OPEN QUESTIONS (operator report
         # 2026-11-24). The guard exists so an AUTOMATIC pass never destroys a
@@ -2659,12 +2670,24 @@ def delete_session(
                 withdraw_open_asks,
             )
 
-            try:
-                withdraw_open_asks(directory, by=actor or "delete")
-                drop_ask_deadline_wakes(config_dir, session_id)
-            except Exception:  # noqa: BLE001 -- the re-check below decides
-                logger.warning("session delete: could not withdraw open asks", exc_info=True)
-            reason = _guard(directory, config_dir, clock)
+            # THE LAST MOMENT A RUNTIME COULD HAVE CLAIMED IT (review round 1,
+            # R3). A runtime engaging between the guard read above and the
+            # appends below (a phone answer, a wake firing) would otherwise get
+            # withdrawals written behind it and the delete refused afterwards.
+            # There is no engage lock to take from here, so the claim and lease
+            # probes are read once more as close to the write as possible; this
+            # narrows the window to the appends themselves.
+            if _claimed(directory, clock):
+                reason = "claimed by a live process"
+            elif _lease_runtime_alive(directory):
+                reason = "leased by a live process"
+            else:
+                try:
+                    withdraw_open_asks(directory, by=actor or "delete")
+                    drop_ask_deadline_wakes(config_dir, session_id)
+                except Exception:  # noqa: BLE001 -- the re-check below decides
+                    logger.warning("session delete: could not withdraw open asks", exc_info=True)
+                reason = _guard(directory, config_dir, clock)
     if reason is not None:
         return DeleteOutcome(
             session_id=session_id,
@@ -2940,6 +2963,21 @@ def _lease_runtime_alive(directory: Path) -> bool | None:
     return _process_alive(pid)
 
 
+def _only_ask_deadline_wakes(config_dir: Path, session: str) -> bool:
+    """Whether the armed wake is nothing but open asks' deadline rows.
+
+    Imported lazily because ``asks.orphans`` sits above this module; any failure
+    answers ``False`` so the armed-wake refusal stands (unprovable keeps).
+    """
+    from local_operator.asks.orphans import only_ask_deadline_wakes
+
+    try:
+        return only_ask_deadline_wakes(config_dir, session)
+    except Exception:  # noqa: BLE001 -- unprovable keeps the refusal
+        logger.debug("session delete: wake probe failed", exc_info=True)
+        return False
+
+
 def _has_armed_wake(config_dir: Path, session: str) -> bool:
     """Whether a wake for this session can still FIRE (U2).
 
@@ -3098,7 +3136,12 @@ def _has_open_asks(directory: Path) -> bool:
 
 
 def _transcript_write_guard(
-    directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False
+    directory: Path,
+    config_dir: Path,
+    now: float,
+    *,
+    live_owner_gone: bool = False,
+    settling_asks: bool = False,
 ) -> str | None:
     """The hazards that make REWRITING this session's transcript unsafe.
     Returns the hazard's name, ``None`` when a writer may proceed.
@@ -3148,7 +3191,9 @@ def _transcript_write_guard(
                 return "claimed by a live process"
             if _lease_runtime_alive(directory):
                 return "leased by a live process"
-        if _has_armed_wake(config_dir, directory.name):
+        if _has_armed_wake(config_dir, directory.name) and not (
+            settling_asks and _only_ask_deadline_wakes(config_dir, directory.name)
+        ):
             return "has an armed wake"
         if _has_armed_monitor(config_dir, directory.name):
             return "has an armed monitor"
@@ -3159,7 +3204,12 @@ def _transcript_write_guard(
 
 
 def _guard(
-    directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False
+    directory: Path,
+    config_dir: Path,
+    now: float,
+    *,
+    live_owner_gone: bool = False,
+    settling_asks: bool = False,
 ) -> str | None:
     """The hard guards for DELETION, in one place. Returns the guard's name
     when the directory must be kept, ``None`` when the policy may consider it.
@@ -3182,14 +3232,26 @@ def _guard(
     Everything above the content probes is :func:`_transcript_write_guard`; the
     composition keeps one definition per probe and keeps ``live_owner_gone``
     meaning the same thing to both callers.
+
+    ``settling_asks`` answers "what ELSE refuses?" for the one caller about to
+    withdraw this session's asks itself (``delete_session``'s explicit delete):
+    it skips the open-ask probe and an armed wake made only of those asks'
+    hidden deadline rows, and reads every other guard as it stands. No policy
+    pass passes it; they keep a session with an answerable question.
     """
-    reason = _transcript_write_guard(directory, config_dir, now, live_owner_gone=live_owner_gone)
+    reason = _transcript_write_guard(
+        directory,
+        config_dir,
+        now,
+        live_owner_gone=live_owner_gone,
+        settling_asks=settling_asks,
+    )
     if reason is not None:
         return reason
     try:
         if _has_spooled_mail(directory):
             return "has unread spooled mail"
-        if _has_open_asks(directory):
+        if not settling_asks and _has_open_asks(directory):
             return _OPEN_ASK_GUARD
     except Exception as exc:  # noqa: BLE001 — a guard that cannot answer keeps
         logger.warning("session cleanup: guard failed for %s (%r); keeping it", directory.name, exc)

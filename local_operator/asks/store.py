@@ -1369,13 +1369,26 @@ def read_entry(config_dir: Path | str, session_id: str) -> dict[str, Any] | None
     return data
 
 
-def read_index(config_dir: Path | str, *, now: int | None = None) -> dict[str, dict[str, Any]]:
+def read_index(
+    config_dir: Path | str, *, now: int | None = None, include_orphans: bool = False
+) -> dict[str, dict[str, Any]]:
     """Every readable entry keyed by session id, with the TTL sweep applied.
 
     A missing directory is an empty index — the ordinary state of a machine
-    that has no queued asks. The sweep (see :func:`entry_is_stale`) unlinks an
-    orphaned entry best-effort; a failure to unlink is not reported, because
+    that has no queued asks. The sweep (see :func:`entry_is_stale`) unlinks a
+    stale entry best-effort; a failure to unlink is not reported, because
     the next read sweeps again and the file is derived in any case.
+
+    AN ENTRY WHOSE SESSION DIRECTORY IS MISSING IS SKIPPED, NOT UNLINKED
+    (orphan-ask review round 1, Q-U1). Unlinking it here made a deleted
+    conversation's ask vanish from the Notifications list on the first read,
+    and its detail answer 404, so the row could never carry its "conversation
+    deleted" label; and "no directory" is not "deleted" (a hand-off or a move
+    to another device also leaves none). Removing it is now the job of the
+    bounded orphan sweep (``asks/orphans.sweep``), which acts only on a
+    PROVABLY gone session. ``include_orphans`` returns such entries (still
+    subject to the age rule) for the one reader that labels them: the
+    Notifications inbox (``notifications.items.open_asks``).
     """
     root = Path(config_dir)
     directory = asks_dir(root)
@@ -1396,6 +1409,11 @@ def read_index(config_dir: Path | str, *, now: int | None = None) -> dict[str, d
         if entry is None:
             continue
         exists = session_dir(root, session_id).is_dir()
+        if not exists:
+            if include_orphans and not entry_is_stale(entry, stamp, session_exists=True):
+                entry["session_id"] = session_id
+                index[session_id] = entry
+            continue
         if entry_is_stale(entry, stamp, session_exists=exists):
             logger.debug("ask index: sweeping stale entry %s", name)
             try:
@@ -1416,6 +1434,7 @@ def index_asks(
     *,
     now: int | None = None,
     lapsed_visible_ms: int = DEFAULT_LAPSED_VISIBLE_MS,
+    include_orphans: bool = False,
 ) -> list[dict[str, Any]]:
     """Every ask worth showing across sessions, newest-first within each status.
 
@@ -1436,6 +1455,8 @@ def index_asks(
     stdlib-only. Applied here at READ time rather than by the index writer, so
     a changed setting moves every reader at once — a stopped session never
     writes again, and a writer-side filter could not bring its rows back.
+
+    ``include_orphans``: see :func:`read_index`.
     """
     stamp = now if now is not None else now_ms()
     #: NO CROSS-SESSION CAP, deliberately (review round 1, NIT 9). The population
@@ -1447,7 +1468,8 @@ def index_asks(
     #: into a push, add the cap here (newest first, open-first) rather than in
     #: each caller.
     rows: list[dict[str, Any]] = []
-    for session_id, entry in (read_index(config_dir, now=stamp) or {}).items():
+    index = read_index(config_dir, now=stamp, include_orphans=include_orphans) or {}
+    for session_id, entry in index.items():
         rows.extend(_shown_rows(session_id, entry, stamp, lapsed_visible_ms))
     rows.sort(key=lambda row: (row.get("status") != STATUS_OPEN, -int(row.get("created_at") or 0)))
     return rows

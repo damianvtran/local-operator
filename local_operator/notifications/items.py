@@ -67,8 +67,40 @@ def open_asks(
     kwargs: dict[str, Any] = {}
     if lapsed_visible_ms is not None:
         kwargs["lapsed_visible_ms"] = lapsed_visible_ms
-    rows = ask_store.index_asks(config_dir, **kwargs)
-    return [row for row in rows if ask_store.is_outstanding(row.get("status"))]
+    rows = ask_store.index_asks(config_dir, include_orphans=True, **kwargs)
+    return [
+        row
+        for row in rows
+        if ask_store.is_outstanding(row.get("status")) and _owner_present_or_gone(config_dir, row)
+    ]
+
+
+def _owner_present_or_gone(config_dir: Path | str, row: Mapping[str, Any]) -> bool:
+    """Keep an ask whose conversation is here, or PROVABLY deleted; drop the rest.
+
+    WHY (orphan-ask review round 1, Q-U1). The index reader used to unlink an
+    entry the moment its session directory was missing, so a deleted
+    conversation's ask left the list (and its detail 404'd) before any surface
+    could label it "Conversation deleted" -- the operator could not tell why a
+    question had vanished. It is now listed, flagged by ``ask_item``, and
+    actionable (Dismiss/Decline settle locally on the answers route) until it is
+    settled or the orphan sweep removes it. A missing directory that is NOT
+    provably gone (a hand-off, a conversation moved to another device) is
+    hidden exactly as before: it is not this device's question to show, and
+    "deleted" would be false. The verdict is the shared ``session_gone``.
+    """
+    from local_operator.asks import store as ask_store
+
+    session_id = str(row.get("session_id") or "")
+    if ask_store.session_dir(Path(config_dir), session_id).is_dir():
+        return True
+    from local_operator.asks.orphans import session_gone
+
+    try:
+        return session_gone(config_dir, session_id)
+    except Exception:  # noqa: BLE001 -- unknown hides it, as before this change
+        logger.debug("notifications: orphan verdict unavailable", exc_info=True)
+        return False
 
 
 def _ask_dismissible(row: Mapping[str, Any]) -> bool:

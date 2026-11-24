@@ -38,9 +38,11 @@ its asks reached its deadline.
 
 WHAT "GONE" MEANS (the invariant every leg shares): no ``sessions/<id>``
 directory, no ``sessions/handed-away/<id>`` (a conversation mid-hand-off is not
-deleted), and no CACHED peer row for the id (``peer_rows.peer_session_row``,
-which never dials). A conversation moved to another device and still listed
-there is therefore never swept; a peer-mirrored inbox row (``remote-*`` key) is
+deleted), no CACHED peer row for the id (``peer_rows.peer_session_row``,
+which never dials), and no peer-mirrored inbox row for it
+(:func:`has_peer_mirrored_rows`: a moved conversation's new holder reports
+it). A conversation moved to another device and still listed there is
+therefore never swept; a peer-mirrored inbox row (``remote-*`` key) is
 never even a candidate (``notifications.items.is_remote_key``).
 
 EXPIRY. A past-deadline ``open`` ask is already re-derived ``timed_out`` by every
@@ -96,6 +98,9 @@ SWEEP_MAX_SETTLES = 200
 #: pseudo-sessions with no directory by design (``notifications.store.
 #: PSEUDO_SESSION_IDS``: ``network-credentials``, measured with 9 live rows on
 #: the reference store) and a sweep keyed on "no directory" would delete them.
+#: Deliberately conservative: legacy-shaped conversation ids (e.g.
+#: ``20260222-143817-92cd26``, still present on old stores) are never judged gone,
+#: so a row of a deleted legacy conversation is neither flagged nor swept (R5).
 _CONVERSATION_ID = re.compile(r"^[a-f0-9]{12}$")
 
 
@@ -131,7 +136,41 @@ def session_gone(config_dir: Path | str, session_id: str) -> bool:
     except Exception:  # noqa: BLE001 -- unprovable is "not gone"
         logger.debug("orphans: peer cache unreadable for %s", session_id, exc_info=True)
         return False
+    try:
+        if has_peer_mirrored_rows(root, session_id):
+            return False
+    except sqlite3.Error:  # unprovable is "not gone"
+        logger.debug("orphans: inbox store unreadable for %s", session_id, exc_info=True)
+        return False
     return True
+
+
+def has_peer_mirrored_rows(config_dir: Path | str, session_id: str) -> bool:
+    """Whether the inbox holds any peer-mirrored (``remote-*``) row for this session.
+
+    WHY THIS IS PART OF "GONE" (review round 1, Q2). A conversation MOVED to
+    another device keeps its pre-move LOCAL rows here beside the ``remote-*``
+    rows its new holder mirrors back (measured: ``ce6fcb93c28a``, two of each,
+    ``policy: mesh-move``). With a cold peer cache that mirror is the only local
+    evidence the conversation still exists. The sweep already read it as
+    "moved"; the row flag did not, and labelled a live conversation "deleted".
+    Living inside :func:`session_gone` makes it ONE predicate for both.
+
+    One indexed probe (``items_session``), read-only; called only once the
+    cheaper directory and peer-cache checks found nothing.
+    """
+    path = Path(config_dir) / "notifications.db"
+    if not path.exists():
+        return False
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM items WHERE session_id = ? AND key LIKE 'remote-%' LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +331,7 @@ def drop_ask_deadline_wakes(config_dir: Path, session_id: str) -> int:
     ]
     if len(kept) == len(rows):
         return 0
-    write_entry(
-        root, session_id, cwd=str(entry.get("cwd") or ""), schedules=kept, preserve=entry
-    )
+    write_entry(root, session_id, cwd=str(entry.get("cwd") or ""), schedules=kept, preserve=entry)
     return len(rows) - len(kept)
 
 
@@ -568,6 +605,20 @@ def sweep_with_peers(config_dir: Path | str, **kwargs: Any) -> SweepReport:
     return sweep(config_dir, **kwargs)
 
 
+def surface_settle_log() -> None:
+    """Let this module's one INFO line (``orphans: settled ...``) reach the serve log.
+
+    WHY (QA round 1, Q3). ``lop serve`` floors the root logger at WARNING
+    (``serve_logging``), so the backstop settled rows with no trace in the
+    daemon log, and an operator could not tell it had acted. The pattern is the
+    push worker's (``mobile/service.py``): raise this ONE logger, whose only INFO
+    record is that line -- at most one per pass, and only when a pass wrote.
+    Never LOWERS a level: a DEBUG-configured process keeps its debug lines.
+    """
+    if logger.getEffectiveLevel() > logging.INFO:
+        logger.setLevel(logging.INFO)
+
+
 async def run_forever(
     config_dir: Path | str, *, interval_s: float = SWEEP_INTERVAL_S, first_delay_s: float = 5.0
 ) -> None:
@@ -578,6 +629,7 @@ async def run_forever(
     badge wrong for long. Never raises out: a failed pass is logged and the next
     one runs on schedule.
     """
+    surface_settle_log()
     await asyncio.sleep(first_delay_s)
     while True:
         try:
@@ -594,10 +646,12 @@ __all__ = [
     "SWEEP_MAX_SETTLES",
     "WITHDRAW_REASON_DELETED",
     "drop_ask_deadline_wakes",
+    "has_peer_mirrored_rows",
     "is_conversation_id",
     "only_ask_deadline_wakes",
     "SweepReport",
     "run_forever",
+    "surface_settle_log",
     "session_gone",
     "settle_deleted_ask",
     "prime_peer_rows",

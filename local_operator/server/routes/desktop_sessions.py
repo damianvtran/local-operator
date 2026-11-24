@@ -5511,9 +5511,11 @@ async def _answer_deleted_owner(
 
     Dismiss and Decline are the operator putting a row away, and there is no
     agent left to tell, so both succeed HERE: the ask is dropped from the index
-    entry (if the reader's sweep has not already dropped it) and its deadline
-    wake is disarmed, exactly the two out-of-directory records the cold dismiss
-    door keeps in step. Idempotent: a second tap on a stale row is the same 200.
+    entry (if the reader's sweep has not already dropped it) and its inbox read
+    mark is removed. Its deadline wake row is NOT touched: the wake supervisor
+    already skips a session whose directory is gone (``_session_exists``), and
+    the wake entry goes with the conversation's other records. Idempotent: a
+    second tap on a stale row is the same 200.
 
     A plain answer (or a revision) is REFUSED 409 ``conversation_deleted``: an
     answer is addressed to an agent, and claiming it was delivered would be a
@@ -5522,9 +5524,7 @@ async def _answer_deleted_owner(
     from local_operator.asks import orphans
 
     if not (body.dismiss is True or body.decline is True):
-        raise HTTPException(
-            409, _wd.conversation_deleted().envelope(code="conversation_deleted")
-        )
+        raise HTTPException(409, _wd.conversation_deleted().envelope(code="conversation_deleted"))
     word = "dismissed" if body.dismiss is True else "declined"
     await orphans.settle_deleted_ask(store_root(request), session_id, str(body.ask_id or ""))
     return reply({"detail": word, "consent_bearing": None})
@@ -5545,6 +5545,16 @@ async def _answer_delegated_ask(
       so the answer lands in the subagent's own log and its runtime delivers it
       as a turn -- the same "late answer arrives as a turn" contract as any ask.
 
+    POLICY DIFFERENCE FROM THE PHONE (review round 1, R2; deliberate, recorded
+    here). The phone's cold ask route refuses a non-user session outright
+    (``mobile/daemon.py`` ``_durable_user_session_dir`` -> 409
+    ``ask_session_gone``); this desktop arm instead lets the operator settle a
+    subagent's indexed ask. The cost: Decline on a COLD subagent boots its
+    runtime and spends one turn whose output reaches no parent if the parent run
+    has finished. There is no cold decline door to use instead -- a decline is
+    addressed to the agent (``AskQueue.decline`` notifies it), unlike a dismiss,
+    which ``dismiss_cold`` can record bootlessly. A user who only wants the row
+    gone has Dismiss, which never boots.
     """
     from local_operator.asks.dismiss import dismiss_cold
     from local_operator.mobile.attach_client import engage_session_client
