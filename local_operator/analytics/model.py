@@ -489,26 +489,27 @@ def message_kind(message: Any) -> str:
 
     WHAT MAY NAME A MESSAGE, and nothing else may:
 
-    * ``role`` — the model's own vocabulary (``user``/``assistant``/``tool``);
-    * ``custom_type`` — present only on a real ``CustomMessage``, which the
-      renderer never hands to the wire (it renders one to ``Message``), so this
-      is the label a caller passing harness messages directly gets;
+    * ``role`` — the model's own vocabulary (``user``/``assistant``/``tool``,
+      a ``Literal`` on ``Message``), or the neutral ``message`` when there is
+      none;
     * ``injected`` — the renderer's own BOOLEAN marker that this user turn came
       from a host-authored injection rather than from the operator
-      (``compaction.cutpoint.RENDERED_INJECTION_KEY``).
+      (``compaction.cutpoint.RENDERED_INJECTION_KEY``); accepted only as
+      ``is True``.
 
-    THE PAYLOAD RULE IS A PRIVACY RULE. An earlier draft also read a
-    ``custom_type`` out of ``provider_payload['details']``. That mapping is
-    harness bookkeeping on SOME rows and tool metadata on others, so any word a
-    tool result carried could have reached a log line through the label — a
-    review reproduced ``tool_secretpassword123`` from a synthetic secret. The
-    lookup is gone: a value becomes a name only if the harness TYPE owns it or
-    the renderer set a boolean, never because it was found in a payload.
+    TWO PRIVACY ROUNDS, BOTH SETTLED THE SAME WAY: nothing found in DATA may
+    become a name. Round 1 reproduced ``tool_secretpassword123`` from
+    ``provider_payload['details']['custom_type']``, which is tool metadata on
+    some rows. Round 2 pointed out that ``CustomMessage.custom_type`` is an
+    unrestricted ``str`` too, so "the harness type owns it" was never the same
+    claim as "the value is trusted" — a caller can construct one carrying any
+    word. That branch is gone as well. The wire path always renders to
+    ``Message`` and never carries a custom type, so the cost of dropping it is
+    a slightly less specific label, and the gain is that no value from any data
+    source can reach a log line here.
     """
     role = _text_or_empty(getattr(message, "role", "")) or "message"
-    custom = _text_or_empty(getattr(message, "custom_type", ""))
-    if not custom and _rendered_injection(message):
-        custom = "injected"
+    custom = "injected" if _rendered_injection(message) else ""
     # Lower-cased BEFORE the substitution: ``_KIND_SAFE`` only keeps
     # ``[a-z0-9_]``, so an upper-case byte would otherwise survive as a
     # separator and turn ``Wake`` into ``_ake``.
@@ -528,6 +529,45 @@ def _rendered_injection(message: Any) -> bool:
     from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 
     return payload.get(RENDERED_INJECTION_KEY) is True
+
+
+def _media_digests(message: Any) -> list[str]:
+    """Hex digests of every NON-TEXT content part, in order.
+
+    WHY THIS EXISTS HERE AND NOT IN THE PROMPT HASH. ``_fingerprint_message``
+    covers a non-text part by its KIND alone, which is the right trade for a
+    digest that is also an analytics column: media bytes are large and that
+    digest is stored forever. This comparison is different — it is asked "which
+    message first differed", and a kind-only answer can blame a LATER message
+    for an image that changed earlier (review round 2 reproduced exactly that).
+    So the media is digested here, once per diagnosed turn, and never stored: a
+    hash is O(n) over bytes already held in memory and copies nothing.
+
+    A part whose payload cannot be hashed contributes its type name, the same
+    collision-over-instability trade ``_non_json_placeholder`` makes. The result
+    is one-way and content-blind, so it is safe to compare and useless to
+    reconstruct.
+    """
+    digests: list[str] = []
+    for part in getattr(message, "content", None) or []:
+        if isinstance(getattr(part, "text", None), str):
+            continue
+        payload = getattr(part, "data", None)
+        if payload is None:
+            payload = getattr(part, "value", None)
+        if payload is None:
+            digests.append(_prefix_digest(getattr(part, "type", "") or "").hex())
+            continue
+        if isinstance(payload, (bytes, bytearray, memoryview)):
+            digests.append(hashlib.sha256(bytes(payload)).hexdigest())
+            continue
+        digests.append(_prefix_digest(payload).hex())
+    return digests
+
+
+def _message_with_media(message: Any) -> Any:
+    """``_fingerprint_message``'s record plus the media digests beside it."""
+    return [_fingerprint_message(message), _media_digests(message)]
 
 
 def prefix_sections(request: Any) -> PrefixSections:
@@ -558,7 +598,7 @@ def prefix_sections(request: Any) -> PrefixSections:
                 for tool in tools
             ]
         ),
-        messages=tuple(_prefix_digest(_fingerprint_message(message)) for message in messages),
+        messages=tuple(_prefix_digest(_message_with_media(message)) for message in messages),
         kinds=tuple(message_kind(message) for message in messages),
     )
 
@@ -582,14 +622,14 @@ def first_prefix_divergence(previous: PrefixSections | None, current: PrefixSect
     The label is ``system[i]``, ``tools``, or ``messages[i]:<kind>``; every part
     is content-blind (see :func:`message_kind`).
 
-    WHAT IT CANNOT SEE, and it must not pretend otherwise: the canonical form
-    is :func:`request_fingerprint`'s, which covers each message's text blocks,
-    tool calls, part KINDS (so an added or removed image moves the digest) and
-    its bounded native-replay summary — but not media BYTES, and not
-    ``provider_payload`` beyond that summary. Two requests that differ only in
-    one image's pixels therefore compare equal here, exactly as they do in the
-    prompt hash; when such a call breaks the cache the provider's own section
-    label is the only diagnosis, and this field says ``-``.
+    WHAT IT SEES. Each message's digest is the prompt hash's canonical record
+    (text blocks, tool calls, part kinds, the bounded native-replay summary)
+    WITH the media payloads hashed beside it (:func:`_media_digests`). The
+    prompt hash itself still excludes media bytes — it is a stored column and
+    the trade there is different — so the two diagnostics answer different
+    questions by design; this one must not blame a later message for an image
+    that changed earlier. ``provider_payload`` beyond the native-replay summary
+    is still not covered, and a change that lives only there reads ``-``.
     """
     if previous is None:
         return ""

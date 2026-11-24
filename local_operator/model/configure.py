@@ -4026,6 +4026,9 @@ class SessionStreamFn:
     #: without ``__init__`` (the recording cells construct one that way), and a
     #: missing attribute there would break a turn over a diagnostic.
     _cache_first_divergence: str = ""
+    #: True when THIS call's snapshot could not be taken. The accepted or absent
+    #: start decides whether the older baseline survives (``_note_cache_start``).
+    _cache_prefix_failed: bool = False
 
     # -- cache affinity retirement ------------------------------------------
     #: Consecutive warm turns with no prefix reuse before a host is retired.
@@ -7827,19 +7830,14 @@ class SessionStreamFn:
                 # entry, and the worst case is a benign
                 # ``previous_message_not_found`` on the next turn.
                 self._cache_diagnostics_previous_id = event.response_id
-                # The request was ACCEPTED, so its prefix is what the next turn
-                # will be compared with. Committing it here rather than when the
-                # request was built is what keeps a failed attempt from
-                # becoming a baseline nothing was cached against.
-                if self._cache_prefix_pending is not None:
-                    self._cache_prefix_last = self._cache_prefix_pending
-                    self._cache_prefix_pending = None
                 # The resolve that served this response re-pinned the session
                 # to its credential, so the sticky names the account holding
                 # the fingerprint (read once per diagnosed response).
                 self._cache_diagnostics_credential_id = self._auth_store.session_credential_id(
                     request.model.provider, self._session_id
                 )
+            if request.cache_diagnostics and isinstance(event, StreamStartEvent):
+                self._note_cache_start(event)
             if (
                 request.cache_diagnostics
                 and usage is not None
@@ -8507,6 +8505,33 @@ class SessionStreamFn:
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: usage record failed", exc_info=True)
 
+    def _note_cache_start(self, event: Any) -> None:
+        """Commit the in-flight prefix snapshot when a start means ACCEPTANCE.
+
+        THE CONDITION IS THE DIAGNOSIS, NOT ``response_id``. Google's stream
+        carries no native response id (see ``StreamStartEvent``), so an earlier
+        cut that gated this on one left every Google chain uncommitted: each
+        break then read ``first_divergence=-`` because there was never a
+        baseline (QA round 2 reproduced it against a warm Google cache).
+
+        ``cache_miss_type is None`` means the request was not diagnosed at all —
+        a helper turn, the latch off, or a fallback served without the key — and
+        then nothing is committed: the provider stored no fingerprint for it, so
+        it cannot be the previous request the next turn is compared against.
+        """
+        if getattr(event, "cache_miss_type", None) is None:
+            return
+        if self._cache_prefix_failed:
+            # This request WAS accepted, and its own snapshot is missing: the
+            # baseline it would have replaced now describes a non-adjacent
+            # request. Drop it so the next comparison answers "-" (no
+            # comparison), which is the only true statement left.
+            self._cache_prefix_last = None
+            self._cache_prefix_failed = False
+        elif self._cache_prefix_pending is not None:
+            self._cache_prefix_last = self._cache_prefix_pending
+        self._cache_prefix_pending = None
+
     def _note_cache_prefix(self, request: ChatRequest) -> None:
         """Compare THIS request's context with the last one the provider ACCEPTED.
 
@@ -8531,6 +8556,7 @@ class SessionStreamFn:
         """
         self._cache_first_divergence = ""
         self._cache_prefix_pending = None
+        self._cache_prefix_failed = False
         if not getattr(request, "cache_diagnostics", False):
             return
         try:
@@ -8543,13 +8569,14 @@ class SessionStreamFn:
             self._cache_first_divergence = first_prefix_divergence(self._cache_prefix_last, current)
         except Exception:  # noqa: BLE001 — a diagnostic must never break a turn
             logger.debug("cache prefix snapshot failed", exc_info=True)
-            # THE BASELINE MUST NOT OUTLIVE ITS OWN FAILURE. The provider chain
-            # advances on an accepted response regardless of what happened here,
-            # so keeping an older snapshot would compare the NEXT turn against a
-            # request that is no longer the previous one — naming a divergence
-            # that is an artefact of the missing snapshot. Dropping it makes the
-            # next comparison answer "no baseline" (``-``), which is true.
-            self._cache_prefix_last = None
+            # WHETHER THE OLD BASELINE SURVIVES DEPENDS ON THE ACCEPT (see
+            # ``_note_cache_start``): this request's own snapshot is lost, but
+            # the provider has not yet said whether it took the request. If it
+            # never does, the previous accepted request is still the previous
+            # one and the old baseline is the truth (review round 2, R2-3); if
+            # it does, that baseline describes a request that is no longer
+            # adjacent, so it is dropped there.
+            self._cache_prefix_failed = True
             return
         self._cache_prefix_pending = current
 

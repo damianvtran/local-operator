@@ -76,7 +76,7 @@ def test_a_changed_message_is_named_by_index_and_kind() -> None:
     current = prefix_sections(
         _request(_message("user", "one"), _message("user", "two EDITED", custom_type="wake_prompt"))
     )
-    assert first_prefix_divergence(previous, current) == "messages[1]:user_wake_prompt"
+    assert first_prefix_divergence(previous, current) == "messages[1]:user"
 
 
 def test_an_inserted_message_shifts_the_index_to_the_first_difference() -> None:
@@ -88,7 +88,12 @@ def test_an_inserted_message_shifts_the_index_to_the_first_difference() -> None:
             _message("assistant", "two"),
         )
     )
-    assert first_prefix_divergence(previous, current) == "messages[1]:user_session_state"
+    injected = _message("user", "injected")
+    injected.provider_payload = {"harness_injected": True}
+    current = prefix_sections(
+        _request(_message("user", "one"), injected, _message("assistant", "two"))
+    )
+    assert first_prefix_divergence(previous, current) == "messages[1]:user_injected"
 
 
 def test_a_changed_system_block_is_named_before_tools_and_messages() -> None:
@@ -130,21 +135,45 @@ def test_a_tool_message_is_named_as_a_tool() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_a_kind_is_the_role_and_harness_name_only() -> None:
-    secret = "sk-live-DO-NOT-LOG"
-    assert message_kind(_message("user", secret, custom_type="team_bridge_message")) == (
-        "user_team_bridge_message"
-    )
-    assert secret not in message_kind(_message("user", secret))
+def test_a_kind_is_the_role_only() -> None:
+    """No value from any data source names a message: role, or role_injected."""
+    message = _message("user", "an ordinary sent message")
+    assert message_kind(message) == "user"
+    assert "ordinary" not in message_kind(message)
 
 
 def test_a_custom_type_with_punctuation_is_normalised_not_echoed() -> None:
-    label = message_kind(_message("user", "x", custom_type="Weird Type!\nwith:specials"))
-    assert label == "user_weird_type_with_specials"
+    label = message_kind(_CustomTypeHolder("Weird Type!\nwith:specials", role="user"))
+    assert label == "user"
 
 
-def test_a_very_long_custom_type_is_capped() -> None:
-    assert len(message_kind(_message("user", "x", custom_type="t" * 500))) <= 48
+def test_a_very_long_type_value_is_not_echoed_at_all() -> None:
+    assert message_kind(_CustomTypeHolder("t" * 500, role="user")) == "user"
+
+
+class _CustomTypeHolder:
+    """A message-shaped object whose ``custom_type`` carries arbitrary text."""
+
+    def __init__(self, custom_type: str, *, role: str = "message") -> None:
+        self.custom_type = custom_type
+        self.role = role
+        self.content = []
+        self.tool_calls = []
+        self.is_error = False
+        self.provider_payload = None
+
+
+def test_a_custom_type_the_type_owns_never_reaches_the_label() -> None:
+    """R2-1: an unrestricted ``str`` on a harness type is still DATA.
+
+    ``CustomMessage.custom_type`` is not an enum, so "the type owns it" was
+    never the same claim as "the value is trusted". The branch is gone; the
+    reviewer's exact repro now yields the neutral label.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    message = CustomMessage(custom_type="SecretPassword123", details={"text": "x"})
+    assert message_kind(message) == "message"
 
 
 def test_a_custom_type_in_a_payload_never_reaches_the_label() -> None:
@@ -229,16 +258,41 @@ def _stream_stub() -> Any:
     stub._cache_first_divergence = ""
     stub._cache_prefix_last = None
     stub._cache_prefix_pending = None
+    stub._cache_prefix_failed = False
     return stub
 
 
 def _commit(stub: Any) -> None:
-    """The accepted-response step: pending becomes the baseline."""
-    stub._cache_prefix_last = stub._cache_prefix_pending
-    stub._cache_prefix_pending = None
+    """The accepted-response step: a diagnosed start commits the baseline."""
+    stub._note_cache_start(SimpleNamespace(cache_miss_type="unchanged", response_id="r"))
 
 
-def test_a_failed_snapshot_drops_the_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_failed_snapshot_that_is_never_accepted_keeps_the_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-3: a request the provider never took did not become the previous one."""
+    import local_operator.analytics as analytics
+
+    stub = _stream_stub()
+    stub._note_cache_prefix(_request(_message("user", "one")))
+    stub._note_cache_start(SimpleNamespace(cache_miss_type="unchanged", response_id="r1"))
+    assert stub._cache_prefix_last is not None
+
+    def _boom(_request: Any) -> Any:
+        raise RuntimeError("snapshot failed")
+
+    monkeypatch.setattr(analytics, "prefix_sections", _boom)
+    stub._note_cache_prefix(_request(_message("user", "one"), _message("user", "two")))
+    assert stub._cache_prefix_last is not None, "not accepted yet: the baseline still holds"
+
+    monkeypatch.undo()
+    stub._note_cache_prefix(_request(_message("user", "one")))
+    assert stub._cache_first_divergence == "", "an unchanged prefix compared against r1"
+
+
+def test_a_failed_snapshot_that_is_accepted_drops_the_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """MAJOR (review round 1): a missing snapshot must not leave an older one.
 
     The provider chain advances on an accepted response whatever happens here,
@@ -257,7 +311,10 @@ def test_a_failed_snapshot_drops_the_baseline(monkeypatch: pytest.MonkeyPatch) -
         raise RuntimeError("snapshot failed")
 
     monkeypatch.setattr(analytics, "prefix_sections", _boom)
-    stub._note_cache_prefix(_request(_message("user", "two")))
+    stub._note_cache_prefix(_request(_message("user", "one"), _message("user", "two")))
+    # Accepted, and its own snapshot is missing: the old baseline is no longer
+    # adjacent to anything the provider holds.
+    stub._note_cache_start(SimpleNamespace(cache_miss_type="messages_changed", response_id="r2"))
     assert stub._cache_prefix_last is None
     assert stub._cache_first_divergence == ""
 
@@ -273,31 +330,49 @@ def test_a_turn_that_did_not_opt_in_costs_nothing() -> None:
     stub = _stream_stub()
     stub._note_cache_prefix(_request(_message("user", "one"), diagnostics=False))
     assert stub._cache_prefix_pending is None
+    assert stub._cache_prefix_failed is False
     assert stub._cache_first_divergence == ""
 
 
-def test_media_bytes_are_outside_the_comparison_by_contract() -> None:
-    """Documented limitation, pinned: an image's pixels are not in the digest.
+def test_a_changed_image_is_named_before_a_later_text_change() -> None:
+    """R2-2: inherited kind-only media coverage would have blamed message 1.
 
-    The canonical form is the prompt hash's, which deliberately excludes media
-    bytes (they would be copied on the event loop). A changed image therefore
-    compares equal; the provider's own section label is the only diagnosis for
-    that break, and this field says ``-`` rather than guessing. An image ADDED
-    or REMOVED still moves the digest, because the part markers are covered.
+    The prompt hash leaves media bytes out on purpose (it is a stored column);
+    this comparison must not, or an image that changed in message 0 lets a text
+    edit in message 1 be reported as the FIRST divergence — a false accusation
+    the review reproduced.
     """
     one = _message("user", "look")
     one.content.append(SimpleNamespace(type="image", data=b"pixels-A"))
-    two = _message("user", "look")
-    two.content.append(SimpleNamespace(type="image", data=b"pixels-B"))
-    assert (
-        first_prefix_divergence(prefix_sections(_request(one)), prefix_sections(_request(two)))
-        == ""
-    )
+    two = _message("assistant", "answer one")
+    three = _message("assistant", "answer TWO")
 
-    three = _message("user", "look")
-    three.content.append(SimpleNamespace(type="image", data=b"pixels-A"))
-    three.content.append(SimpleNamespace(type="image", data=b"second"))
+    before = prefix_sections(_request(one, two))
+    after = prefix_sections(_request(_with_pixels(b"pixels-B"), three))
+    assert first_prefix_divergence(before, after) == "messages[0]:user"
+
+
+def _with_pixels(pixels: bytes) -> Any:
+    message = _message("user", "look")
+    message.content.append(SimpleNamespace(type="image", data=pixels))
+    return message
+
+
+def test_an_added_image_moves_the_digest() -> None:
+    one = _with_pixels(b"pixels-A")
+    both = _message("user", "look")
+    both.content.append(SimpleNamespace(type="image", data=b"pixels-A"))
+    both.content.append(SimpleNamespace(type="image", data=b"second"))
     assert (
-        first_prefix_divergence(prefix_sections(_request(one)), prefix_sections(_request(three)))
+        first_prefix_divergence(prefix_sections(_request(one)), prefix_sections(_request(both)))
         == "messages[0]:user"
     )
+
+
+def test_a_media_payload_is_never_written_anywhere_readable() -> None:
+    """The digest is one-way; the label carries no pixel and no byte count."""
+    message = _with_pixels(b"SECRET-PIXELS")
+    label = message_kind(message)
+    assert "secret" not in label.lower()
+    snapshot = prefix_sections(_request(message))
+    assert b"SECRET-PIXELS" not in snapshot.messages[0]
