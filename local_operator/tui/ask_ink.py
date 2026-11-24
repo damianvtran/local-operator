@@ -281,7 +281,7 @@ def without_marks(row: str, *, start: int, end: int, previous_row: str | None = 
 
     ``end`` follows the caller's convention: ``-1`` means end of row.
     """
-    limit = len(row) if end < 0 else end
+    limit = cell_len(row) if end < 0 else end
     removed: list[tuple[int, int]] = []
     for match in _MARKED_RE.finditer(row):
         # The pair starts at the NO-BREAK SPACE, one cell before the mark the
@@ -289,19 +289,35 @@ def without_marks(row: str, *, start: int, end: int, previous_row: str | None = 
         # inside a drag that crossed it (``a-745e\xa0,``).
         mark_cell = cell_len(row[: match.start(2)])
         removed.append((mark_cell - 1, mark_cell + cell_len(row[match.start(2) : match.end(2)])))
+    # ``rstrip(" ")`` and not a bare ``rstrip()``: NBSP IS whitespace to
+    # ``str.rstrip``, so the bare form ate the very cell it was looking for and
+    # a wrapped pair was never recognised (review N-1).
     if (
         previous_row is not None
         and row[:1] in MARKS.values()
-        and previous_row.rstrip().endswith(NBSP)
+        and previous_row.rstrip(" ").endswith(NBSP)
     ):
         removed.append((0, 1))
-    if not removed:
-        return row[start:limit]
+    # A row that ENDS in the no-break space is the other half of a folded pair:
+    # the decoration always inserts NBSP + mark together, so a trailing NBSP at
+    # end-of-row has no mark after it in this row, and the reader did not type
+    # it either (review N-1, the ``id ends the row`` position).
+    trimmed_row = row.rstrip(" ")
+    if trimmed_row.endswith(NBSP):
+        tail = cell_len(trimmed_row) - 1
+        removed.append((tail, tail + 1))
     out: list[str] = []
     cell = 0
     for char in row:
         width = cell_len(char)
-        if start <= cell < limit and not any(low <= cell < high for low, high in removed):
+        # CELL columns throughout (review minor): a char slice read a wide
+        # glyph's 2 cells as one, so a CJK prefix shifted every later column.
+        # A glyph is kept when its span meets the selection's.
+        if (
+            cell + width > start
+            and cell < limit
+            and not any(low <= cell < high for low, high in removed)
+        ):
             out.append(char)
         cell += width
         if cell >= limit:

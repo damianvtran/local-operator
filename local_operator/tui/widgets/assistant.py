@@ -1138,10 +1138,17 @@ class AssistantBlock(TranscriptBlock):
         states = dict(states)
         if states == self._ask_states:
             return
+        before = self._ask_states
         self._ask_states = states
         if not self._full_text:
             return
-        if not any(ask_id in self._full_text for ask_id in states):
+        # BOTH MAPS, not just the new one (QA Q5): an id that LEFT the map —
+        # one ask withdrawn, the queue emptied, the flag turned off — is a
+        # block that may be carrying that id's stale mark. Testing only
+        # ``states`` meant the block that cited it was never repainted, and
+        # ``_sync_ask_surface`` promises the opposite ("never a stale mark over
+        # a queue that is gone").
+        if not any(ask_id in self._full_text for ask_id in (*before, *states)):
             # Nothing this block can cite: the caches hold no mark, so there is
             # nothing to invalidate and nothing to repaint.
             return

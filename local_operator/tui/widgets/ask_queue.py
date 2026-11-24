@@ -1990,27 +1990,41 @@ class AskQueueList(Widget):
         # IS the accent — so the dark ramp is unchanged.
         atoms = [HeaderAtom(f"{ASK_MARKER} ", "chip-live")]
         subject = SCOPE_SUBJECTS[self._scope] if self._scope == SCOPE_FLEET else ""
-        segments: list[HeaderAtom] = []
-        if self._rows:
-            # Drawn only when there is something to filter (the desktop's rule):
-            # three segments over an empty queue would be a control for nothing.
-            for index, value in enumerate(FILTER_ORDER):
-                if index:
-                    segments.append(HeaderAtom("  ", "muted"))
-                segments.append(
+
+        def _segment_grade(*, with_counts: bool, only_active: bool = False) -> list[HeaderAtom]:
+            """The control's chips, at one of the grades the ladder can drop to.
+
+            Drawn only when there is something to filter (the desktop's rule):
+            three segments over an empty queue would be a control for nothing.
+            The grades exist for the collapsed id column, which needs the room
+            more than the numbers do (review N-3 / design D-8).
+            """
+            grade: list[HeaderAtom] = []
+            if not self._rows:
+                return grade
+            for value in FILTER_ORDER:
+                if only_active and value != self._filter:
+                    continue
+                if grade:
+                    grade.append(HeaderAtom("  ", "muted"))
+                grade.append(
                     HeaderAtom(
-                        filter_label(value, counts[value]),
+                        filter_label(value, counts[value]) if with_counts else FILTER_LABELS[value],
                         "active" if value == self._filter else "muted",
                         value,
                     )
                 )
+            return grade
 
-        def _seg_block(with_head: bool) -> list[HeaderAtom]:
+        segments = _segment_grade(with_counts=True)
+
+        def _seg_block(with_head: bool, grade: list[HeaderAtom] | None = None) -> list[HeaderAtom]:
             """The control, with the gap it only needs when something precedes it."""
-            if not segments:
+            chosen = segments if grade is None else grade
+            if not chosen:
                 return []
             gap = [HeaderAtom(self.SEGMENT_GAP, "muted")] if with_head else []
-            return [*gap, *segments]
+            return [*gap, *chosen]
 
         # THE HEAD'S OWN TWO-RUNG LADDER. The subject is kept only when the row
         # can also carry the CONTROL — the filter is a live destination and a
@@ -2029,6 +2043,7 @@ class AskQueueList(Widget):
         # dock prints the same sentence in full one line away, so the clause is
         # the thing that goes; the hints are what the ladder exists to keep.
         hints = self.header_hints()
+        cue: str | None = None
         if not self.choosing and not self._ids_fit(self.visible_rows, width):
             # THE COLLAPSED COLUMN'S ID GOES IN THE HEADER (design round 1,
             # D-2). When the eight cells cannot be paid on every row, the column
@@ -2038,7 +2053,8 @@ class AskQueueList(Widget):
             # copy hint give way first.
             current = self.current()
             if current is not None:
-                hints = (f"{COLLAPSED_ID_CUE}{current.ask_id}", *hints)
+                cue = f"{COLLAPSED_ID_CUE}{current.ask_id}"
+                hints = (cue, *hints)
         # THE COPY HINT IS WEIGHED OUT of the clause's own bargain (§3): it is the
         # hint that gives way first, so it must not be what pushes the drawer's
         # sentence off a header that could carry it plus every key a reader
@@ -2055,7 +2071,31 @@ class AskQueueList(Widget):
             if _atoms_width([*atoms, *candidate, *_seg_block(True), *live_hints]) <= width:
                 head = candidate
         atoms.extend(head)
-        atoms.extend(_seg_block(bool(head)))
+        # THE CUE OUTBIDS THE COUNTS (review N-3 / design D-8). The id is the one
+        # thing on this header that a reader cannot recover from anywhere else
+        # once the column has collapsed — the chips' numbers repeat what the
+        # dock says one line below, and ``y`` still names the id in its toast —
+        # so the collapse downgrades the control instead of leaving the id off
+        # screen: counts first, then the halves the reader is not looking at,
+        # keeping the ACTIVE chip because it is what says which half this is
+        # (a view whose filter cannot be seen is a view that lies). Below the
+        # 44-cell content width even the active chip cannot spare the room and
+        # the cue is dropped by the hint ladder like any other.
+        block = _seg_block(bool(head))
+        if cue is not None:
+            cue_atom = HeaderAtom(self.SEGMENT_GAP + cue, "muted")
+            for grade in (
+                _segment_grade(with_counts=True),
+                _segment_grade(with_counts=False),
+                _segment_grade(with_counts=False, only_active=True),
+            ):
+                candidate = _seg_block(bool(head), grade)
+                if _atoms_width([*atoms, *candidate, cue_atom]) <= width:
+                    block = candidate
+                    break
+            else:
+                block = _seg_block(bool(head), _segment_grade(with_counts=False, only_active=True))
+        atoms.extend(block)
 
         def shed(
             prefix: str, order: tuple[str, ...], *, key_fallback: bool = False

@@ -2290,6 +2290,57 @@ async def test_a_narrow_list_collapses_the_id_column_on_every_row():
         assert f"{COLLAPSED_ID_CUE}a-e53b" in header, header
 
 
+async def test_the_cursor_id_outbids_the_counts_in_the_header():
+    """Review N-3 / design D-8: the collapsed column's id survives the ladder.
+
+    A collapsed id column makes the header the ONLY place the id appears, so
+    the header's chips yield to it rather than the other way round: counts
+    first, then the halves the reader is not on, keeping the ACTIVE chip — a
+    filtered view whose filter cannot be seen is a view that lies. Measured at
+    five widths; the floor in the spec is 60x20, and 44/46 are below it, so the
+    test only pins that they DEGRADE by dropping the counts first.
+    """
+    from local_operator.tui.widgets.ask_queue import COLLAPSED_ID_CUE
+
+    session = _AskSession()
+    for size, want_counts, want_active_only in (
+        ((44, 20), False, False),
+        ((46, 20), False, False),
+        ((50, 20), True, False),
+        ((54, 20), True, False),
+        ((60, 20), False, False),
+    ):
+        app = _app(session)
+        async with app.run_test(size=size) as pilot:
+            await await_booted(app, pilot)
+            app._sync_ask_surface(
+                ask_rows(
+                    [
+                        _row("a-e53b", _TWIN_QUESTIONS[0]),
+                        _row("a-9f20", "Rotate the relay token now?"),
+                        _row("a-745e", "Ship the relay fix tonight?", status="withdrawn"),
+                        _row("a-1c09", "Run the relay smoke first?", status="answered"),
+                    ]
+                )
+            )
+            await _settle(pilot)
+            app._expand_asks()
+            await _settle(pilot)
+            listing = app.query_one(AskQueueList)
+            header = listing.render().plain.splitlines()[0]
+            if size[0] == 60:
+                # The column fits: no cue needed and none painted.
+                assert f"{COLLAPSED_ID_CUE}a-" not in header, (size, header)
+                continue
+            assert f"{COLLAPSED_ID_CUE}a-e53b" in header, (size, header)
+            if want_counts:
+                assert "Settled · 1" in header, (size, header)
+            else:
+                assert "Settled · " not in header, (size, header)
+            # The active chip is the one the header never gives up.
+            assert "All" in header, (size, header)
+
+
 async def test_the_id_column_comes_back_when_every_row_can_afford_it():
     """The other half of D-2: at 60 cols every id paints and the header does not."""
     from local_operator.tui.widgets.ask_queue import COLLAPSED_ID_CUE

@@ -716,3 +716,119 @@ async def test_ask_zzz_reports_the_id_as_typed(enabled):
         assert app.query(NoticeBlock)[-1].text() == tr("tui.asks")(
             ask_keys.list_no_such_ask(ask_id="zzz")
         )
+
+
+# -- round 2 remediation -----------------------------------------------------
+
+
+def test_a_wrapped_pair_drops_its_orphan_mark():
+    """N-1: the orphan check used a bare ``rstrip()``, and NBSP is whitespace.
+
+    Rich may fold between the no-break space and the mark, leaving the mark at
+    column 0 of the next row. The check that recognises it looked for a row
+    ending in NBSP — through ``str.rstrip``, which strips NBSP itself, so it
+    never fired and a wrapped id still copied its mark.
+    """
+    from local_operator.tui.ask_ink import without_marks
+
+    # Every position the fold can land in for one pair.
+    assert without_marks("x a-745e", start=0, end=-1) == "x a-745e"
+    assert without_marks("x a-745e\u00a0", start=0, end=-1) == "x a-745e"
+    assert without_marks("● tail", start=0, end=-1, previous_row="x a-745e\u00a0") == " tail"
+    assert without_marks("● tail", start=0, end=-1, previous_row="x a-745e\u00a0 ") == " tail"
+    # A row that merely ENDS in padding is not an orphan: the mark is the row's
+    # own text and is kept.
+    assert without_marks("● tail", start=0, end=-1, previous_row="plain row") == "● tail"
+
+
+async def test_a_drag_on_a_wrapped_pair_copies_no_decoration(enabled):
+    """The integration half of N-1, over a real rich fold.
+
+    ``refit_width`` publishes the lane, so the rows below are rich's own fold at
+    50 cells — one where the no-break space ends a row and the mark opens the
+    next (measured; the pair rides the fold at exactly this width).
+    """
+    from textual.geometry import Offset
+
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a-745e", "Ship it?", status="withdrawn"), _row("a-e53b", "x")])
+        )
+        await pilot.pause()
+        prose = AssistantBlock()
+        prose.update_text(
+            "The old one, a-745e, is withdrawn and the relay smoke has already "
+            "run; the new question is a-e53b and it is still open."
+        )
+        app._append_block(prose)
+        await pilot.pause()
+        prose.refit_width(50)
+        rendered = prose._render()
+        assert isinstance(rendered, Content)
+        rows = rendered.plain.split("\n")
+        # The fold this test exists for: NBSP ends one row, the mark opens the next.
+        fold = next(
+            i for i in range(len(rows) - 1) if rows[i].endswith(NBSP) and rows[i + 1][:1] in "●✓○"
+        )
+        got = prose.get_selection(Selection.from_offsets(Offset(0, fold + 1), Offset(12, fold + 1)))
+        assert got is not None
+        assert got[0].strip().startswith("and it is"), got
+        # A drag that sweeps both rows stays clean too.
+        got = prose.get_selection(Selection.from_offsets(Offset(0, fold), Offset(12, fold + 1)))
+        assert got is not None
+        assert NBSP not in got[0] and got[0][:1] not in "●✓○", got
+
+
+def test_without_marks_slices_cells_not_characters():
+    """Minor: a wide glyph's two cells were read as one character."""
+    from local_operator.tui.ask_ink import without_marks
+
+    # 日本語 is six cells, then a space: cell 7 is the `a`.
+    assert without_marks("日本語 a x", start=7, end=-1) == "a x"
+    assert without_marks("日本語 a x", start=8, end=-1) == " x"
+    # ...and the removal path stays consistent with it.
+    assert without_marks("日本語 a-745e\u00a0○ tail", start=9, end=-1) == "745e tail"
+
+
+async def test_an_id_leaving_the_map_clears_its_mark(enabled):
+    """N-2/Q5: the pre-check read the NEW map only, so a leaving id kept its mark."""
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a-e53b", "Ship it?"), _row("a-745e", "Old?", status="withdrawn")])
+        )
+        await pilot.pause()
+        citing = AssistantBlock()
+        citing.update_text("cites a-745e only")
+        silent = AssistantBlock()
+        silent.update_text("nothing cites an id here")
+        app._append_block(citing)
+        app._append_block(silent)
+        await pilot.pause()
+        assert f"a-745e{NBSP}○" in citing._flat_whole(120).plain
+        calls = {"silent": 0}
+        real = silent._flat_whole
+
+        def counting(width=None):
+            calls["silent"] += 1
+            return real(width)
+
+        silent._flat_whole = counting  # type: ignore[method-assign]
+        # The id LEAVES the map: the block that cited it must repaint without it.
+        app._sync_ask_surface(ask_rows([_row("a-e53b", "Ship it?")]))
+        await pilot.pause()
+        assert f"a-745e{NBSP}○" not in citing._flat_whole(120).plain
+        assert calls["silent"] == 0, "a block citing no id was re-rendered"
+        # ...and so must every block when the queue empties.
+        app._sync_ask_surface(ask_rows([]))
+        await pilot.pause()
+        assert NBSP not in citing._flat_whole(120).plain
