@@ -791,9 +791,41 @@ class TestDroppedArgumentNote:
 
     #: The shape ``monitors.diff.unpack_records`` exists for: one JSON object
     #: whose payload string holds blank-line-separated records.
+    #: Compact separators: a fixed point of ``mcp.result_normalization``, so
+    #: the model-call control below is byte-identical too (the machine-read
+    #: calls are never normalized: ``test_machine_read_results_are_never_normalized``).
     RECORD_ENVELOPE = (
-        '{"messages": "=== Message from a ===\\nhello\\n\\n=== Message from b ===\\nhi"}'
+        '{"messages":"=== Message from a ===\\nhello\\n\\n=== Message from b ===\\nhi"}'
     )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "machine_read",
+        [{"monitor_check": True}, {"result_parsed_by_harness": True}],
+        ids=["monitor-tick", "harness-parsed-delegate"],
+    )
+    async def test_machine_read_results_are_never_normalized(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, machine_read: dict[str, bool]
+    ) -> None:
+        """A monitor tick is compared against a baseline an already-armed
+        monitor stored before ``mcp.result_normalization`` existed, and a
+        delegate's text is ``json.loads``-ed by the built-in: both keep the
+        server's bytes, while the model's own call is normalized."""
+        page = "Body line with an icon ![](https://px.example/1.gif) and   spaces.\\n" * 10
+        raw = '{"messages": "' + page + '"}'
+        session = FakeSession(
+            call_result=CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False)
+        )
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        model_call = await tool.execute("c0", {"command": "read"}, None, None, ToolContext())
+        assert "px.example" not in model_call.text  # control: normalization is on
+        machine = await tool.execute(
+            "c1", {"command": "read"}, None, None, ToolContext().model_copy(update=machine_read)
+        )
+        assert machine.text == raw
+        await manager.disconnect_all()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

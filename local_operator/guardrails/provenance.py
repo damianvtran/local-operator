@@ -1514,7 +1514,16 @@ _REGENERABLE = frozenset(
 #: bundles local-operator-ui tests write beside themselves and unlink
 #: (``scripts/_*.bundle.mjs``; a killed run leaves them behind — that repo's
 #: ``.gitignore`` documents the convention).
-_REGENERABLE_GLOBS = ("*.pyc", "*.egg-info", "._*", "_*.bundle.mjs", "_*.bundle.cjs")
+_REGENERABLE_GLOBS = (
+    "*.pyc",
+    "*.egg-info",
+    "._*",
+    "_*.bundle.mjs",
+    "_*.bundle.cjs",
+    # TypeScript ``--incremental`` state, rewritten by every ``tsc -b`` (fleet
+    # census 2026-11-24: held 3 finished local-operator-ui trees).
+    "*.tsbuildinfo",
+)
 
 
 def _regenerable(name: str) -> bool:
@@ -1547,6 +1556,69 @@ def _own_tree_sheds(physical: str) -> bool:
     if stat.S_ISLNK(st.st_mode):
         return True
     return not _holds_git(physical)
+
+
+def _merged_tree_sheds(real: str, entry: str) -> bool:
+    """May plain removal of a FINISHED tree (any creator) take this ignored entry?
+
+    Field case 2026-11-24 (guard 0.112.7, disk-full crashes): a read-only census
+    of ~200 worktrees found 62 finished trees held only for ignored build
+    output under regenerable names (``node_modules`` 41, ``.cache/typecheck``
+    29, ``*.egg-info`` 9, ``.venv`` 5). Operator directive: agents remove
+    finished trees without asking. Name-only shedding is NOT a witness on its
+    own (#4240); the caller pairs it with :func:`finished_foreign_worktree`'s
+    proof (clean, merged on origin, no open PR, no running owner, no live cwd).
+
+    Yes when the entry is an ignored symlink (Git removes the link), a regular
+    OS-metadata file, or when the entry or ANY ancestor component inside the
+    tree has a :data:`_REGENERABLE` name (``.cache/typecheck``) and it holds no
+    nested repository. Everything else (``.env*``, keys, logs, test outputs)
+    stays held. Unreadable is no."""
+    physical = os.path.join(real, entry.rstrip("/"))
+    try:
+        st = os.lstat(physical)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    name = os.path.basename(physical)
+    if name in _OS_METADATA_FILES or name.startswith("._"):
+        return stat.S_ISREG(st.st_mode)
+    parts = [p for p in entry.rstrip("/").split("/") if p]
+    if not any(_regenerable(p) for p in parts):
+        return False
+    return _no_repository_below(physical) if stat.S_ISDIR(st.st_mode) else True
+
+
+#: Bound on :func:`_no_repository_below` (a real ``node_modules`` runs to tens
+#: of thousands of entries); over it the entry is held (fail closed).
+_MERGED_WALK_ENTRIES = 300_000
+
+
+def _no_repository_below(physical: str) -> bool:
+    """Full-depth walk: ``False`` on any ``.git``, unreadable directory or
+    overflow. Stricter than :func:`_holds_git` (depth 4, skips unlistable
+    directories), because name-only shedding reaches other sessions' trees."""
+    seen = 0
+    stack = [physical]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            return False
+        seen += len(entries)
+        if seen > _MERGED_WALK_ENTRIES:
+            return False
+        for child in entries:
+            if child.name == ".git":
+                return False
+            try:
+                if child.is_dir(follow_symlinks=False):
+                    stack.append(child.path)
+            except OSError:
+                return False
+    return True
 
 
 #: Bound on ONE process-cwd inventory (``lsof -a -u <uid> -d cwd -Fn -w``).
@@ -2640,7 +2712,7 @@ class IgnoredInventory:
 
 
 def plain_cleanup_ignored_inventory(
-    real: str, *, own_regenerable: bool = False
+    real: str, *, own_regenerable: bool = False, merged_regenerable: bool = False
 ) -> IgnoredInventory | None:
     """Count unverified ignored entries and other changes; ``None`` = unreadable.
 
@@ -2684,6 +2756,10 @@ def plain_cleanup_ignored_inventory(
         ):
             continue
         if own_regenerable and _own_tree_sheds(os.path.join(real, entry)):
+            continue
+        # ``merged_regenerable``: the caller ALSO holds a finished-tree proof
+        # (``classify``; see :func:`_merged_tree_sheds`).
+        if merged_regenerable and _merged_tree_sheds(real, entry):
             continue
         unverified += 1
     return IgnoredInventory(unverified, changes)
@@ -3874,6 +3950,7 @@ def finished_foreign_worktree(
     activity: WorktreeActivity | None = None,
     interrupted_cleanup: bool = False,
     identity: CleanupIdentity | None = None,
+    ignored_verified: bool = False,
 ) -> FinishedForeign:
     """Prove a worktree another (finished) session made is safe to remove, or say why not.
 
@@ -3929,7 +4006,10 @@ def finished_foreign_worktree(
         return no(f"state-{state}", state)
     if state not in states:
         return unknown("state-unknown", state)
-    if not interrupted_cleanup and facts.get("ignored", True):
+    # ``ignored_verified`` (2026-11-24): the plain-removal caller already showed
+    # every ignored entry is regenerable build output (``_merged_tree_sheds``);
+    # the remaining facts below must still all hold.
+    if not interrupted_cleanup and not ignored_verified and facts.get("ignored", True):
         return no("ignored-content", state)
     ref = (_git(["symbolic-ref", "--quiet", "HEAD"], real) or "").strip()
     if not ref.startswith("refs/heads/"):
@@ -3948,7 +4028,18 @@ def finished_foreign_worktree(
     ):
         return unknown("registration-or-ref-moved", state)
     try:
-        owners = _running_owners(real, session_id, strict=True)
+        # ``ignored_verified`` (plain removal of a merged tree that holds only
+        # regenerable-named build output) takes the Q-R2-1 waiver: a tree
+        # whose ctime stamp drifted after ``npm install``/``.DS_Store`` writes
+        # has no current-generation creator row (the 2026-11-24 census: 20 of
+        # 22 such trees), so the owner left to find is a live session whose cwd
+        # is inside it, which the strict registry scan still finds. Plain
+        # removal keeps the branch; the most an absent creator loses is a
+        # rebuild. An unreadable ledger or registry still fails.
+        # Keyword only on this route, so existing callers (and their test
+        # doubles) keep the exact strict call.
+        waiver = {"allow_unattributed": True} if ignored_verified else {}
+        owners = _running_owners(real, session_id, strict=True, **waiver)
     except Exception:  # noqa: BLE001 — incomplete owner facts are unknown, not idle
         return unknown("owner-unknown", state)
     if owners:
@@ -4046,7 +4137,13 @@ def finished_foreign_worktree(
     again: dict[str, bool] = {}
     if worktree_state(
         real, facts=again, hidden_blocks=True, interrupted_cleanup=interrupted_cleanup
-    ) not in states or (not interrupted_cleanup and again.get("ignored", True)):
+    ) not in states or (
+        not interrupted_cleanup
+        and again.get("ignored", True)
+        and not (ignored_verified and again == facts)
+    ):
+        # ``ignored_verified``: ignored entries were present and caller-checked
+        # at the start; the payload facts must simply not have changed since.
         return unknown("state-moved", state)
     if (_git(["rev-parse", "--verify", "HEAD"], real) or "").strip() != head:
         return unknown("head-moved", state)

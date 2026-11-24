@@ -28,6 +28,7 @@
   "wire.errors.desktop.claim_origin_outside_configured": "Une revendication ne peut pas définir d’origine hors des origines de bureau configurées.",
   "wire.errors.desktop.claim_origin_wildcard": "Une origine générique ne peut pas être revendiquée.",
   "wire.errors.desktop.claim_origins_not_list": "Le champ 'origins' du corps de la demande doit être une liste.",
+  "wire.errors.desktop.conversation_deleted": "Cette conversation a été supprimée : il n’est plus possible de répondre à cette question. Ignorez-la ou refusez-la plutôt.",
   "wire.errors.desktop.conversations_unreadable": "Les conversations n’ont pas pu être lues pour le moment. Cela se rétablit tout seul ; réessayez dans un instant.",
   "wire.errors.desktop.credential_operation_failed": "L’opération sur les identifiants n’a pas abouti",
   "wire.errors.desktop.cwd_marker_read_failed": "impossible de lire le marqueur de répertoire de travail de la session : {error}",

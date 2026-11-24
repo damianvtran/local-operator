@@ -5214,6 +5214,38 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         help=(_t(_ws.tools_defer_help())),
     ),
+    # LIVE: ``mcp.manager.read_result_normalization_mode`` reads a fresh
+    # ConfigManager per MCP result. Path and default mirror
+    # ``tools.result_normalize.RESULT_NORMALIZATION_{PATH,DEFAULT}`` (not
+    # imported, to keep this module cheap; pinned by the consumer-defaults
+    # test). ``off`` is the byte-identical escape hatch for a server whose
+    # exact markup matters, and the A/B switch for cost benchmarks.
+    Setting(
+        key="mcp.result_normalization",
+        path=("mcp", "result_normalization"),
+        section="tools",
+        label=_t(_ws.mcp_result_normalization_label()),
+        kind=Kind.ENUM,
+        default="prose-links",
+        help=_t(_ws.mcp_result_normalization_help()),
+        choices=(
+            Choice(
+                "prose-links",
+                _t(_ws.mcp_result_normalization_choice_prose_links_label()),
+                _t(_ws.mcp_result_normalization_choice_prose_links_description()),
+            ),
+            Choice(
+                "strip-links",
+                _t(_ws.mcp_result_normalization_choice_strip_links_label()),
+                _t(_ws.mcp_result_normalization_choice_strip_links_description()),
+            ),
+            Choice(
+                "off",
+                _t(_ws.mcp_result_normalization_choice_off_label()),
+                _t(_ws.mcp_result_normalization_choice_off_description()),
+            ),
+        ),
+    ),
     # -- memory_guard -------------------------------------------------------
     # ``path`` mirrors ``memory_guard.BASH_MEMORY_*_PATH``; the four are pinned
     # together by ``test_memory_guard_rows_share_the_consumer_paths`` rather than

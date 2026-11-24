@@ -655,6 +655,175 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
         )
 
 
+#: The ``screening_receipts`` columns a history row copies VERBATIM, in one
+#: fixed order shared by the DDL and the ``INSERT ... SELECT`` that fills it.
+_RECEIPT_HISTORY_COPIED = (
+    "body_sha256",
+    "template_sha256",
+    "prompt_version",
+    "model",
+    "verdict",
+    "categories",
+    "envelope_digest",
+    "admission_revision",
+    "policy_epoch",
+    "creator_generation",
+    "created_at",
+    "rendered_template_sha256",
+    "screener_preferred",
+)
+
+#: The closed set of reasons a receipt head may move (write-once fix, PR-2).
+RECEIPT_SUPERSEDED_LIVE_ALLOW = "live_allow_supersedes_stale_allow"
+RECEIPT_SUPERSEDED_OWNER_DELIVER = "owner_release_deliver"
+
+
+def _ensure_receipt_history_table(conn: sqlite3.Connection) -> None:
+    """Create the append-only ``screening_receipt_history`` on a store that predates it.
+
+    WHY (write-once fix PR-2, diagnosis 2026-11-24). ``screening_receipts`` is
+    write-once per message, but two transitions must be able to move its head:
+    a STALE screener allow superseded by a fully-current preferred allow (the
+    screening model failed over between two approved ids and the admission
+    revision moved, so the old row can never satisfy the live fences again),
+    and a screener allow agreed with by the owner's verified Deliver. Both are
+    allow -> allow; a reject is never superseded. The audit promise "a
+    receipt is never rewritten" is kept by copying the prior row here
+    VERBATIM, inside the same write transaction, before the head moves.
+
+    APPEND-ONLY BY CONSTRUCTION. Triggers abort any UPDATE or DELETE, and any
+    INSERT naming a ``history_id`` that already exists. The INSERT one is
+    needed because ``INSERT OR REPLACE`` / ``REPLACE INTO`` resolves the key
+    conflict by an implicit delete that does NOT fire DELETE triggers
+    (``recursive_triggers`` is off), so without it a REPLACE rewrote a row in
+    place (PR #4533 round 1, S-1 / Q-1). The only shipped writer,
+    :func:`_supersede_receipt`, never names a ``history_id``. Within SQL these
+    are the statements that can change a row; removing a trigger takes a
+    deliberate migration. They bind statements, not the file: anyone who can
+    write the database file can still rewrite it.
+
+    LIFETIME. No purge or re-enrolment sweep deletes ``screening_receipts``
+    (re-enrolment invalidates receipts through ``creator_generation``). The one
+    ``DELETE FROM screening_receipts`` is :meth:`Store.retire_unsent_fallback_allow`,
+    a targeted retirement of a NON-preferred allow whose template is not the
+    owner-release template, and only while no handoff exists. A head that has
+    history was put there by a supersession, which writes only a
+    ``screener_preferred = 1`` allow or the owner-release template, so that
+    retirement can never delete a head with history and orphan its rows.
+
+    ADDITIVE, NOT IN ``_V3_TABLES``. Registering it there would make every
+    existing stamped store "damaged" (the V3 floor refuses before any DDL) and
+    lock the operator out of their own state. Like the answer cache, it is
+    created ``IF NOT EXISTS`` inside the caller's write transaction; a store
+    without it simply has no supersession history yet. It holds no authority:
+    nothing reads it to admit or refuse.
+    """
+
+    copied = ", ".join(
+        f"{name} {kind}"
+        for name, kind in zip(
+            _RECEIPT_HISTORY_COPIED,
+            (
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "INTEGER NOT NULL",
+                "INTEGER NOT NULL",
+                "REAL NOT NULL",
+                "TEXT",
+                "INTEGER",
+            ),
+        )
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_receipt_history ("
+        "history_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
+        f"{copied}, "
+        "reason TEXT NOT NULL, attempt_id TEXT, "
+        "new_model TEXT NOT NULL, new_template_sha256 TEXT NOT NULL, "
+        "new_admission_revision TEXT NOT NULL, new_policy_epoch INTEGER NOT NULL, "
+        "superseded_at REAL NOT NULL)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screening_receipt_history_message "
+        "ON screening_receipt_history (owner_key, message_id)"
+    )
+    for verb in ("UPDATE", "DELETE"):
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS screening_receipt_history_no_{verb.lower()} "
+            f"BEFORE {verb} ON screening_receipt_history "
+            "BEGIN SELECT RAISE(ABORT, 'screening_receipt_history is append-only'); END"
+        )
+    # ``IF NOT EXISTS`` on its own statement, so a table created by an earlier
+    # head of this PR (UPDATE/DELETE triggers only) gains it on the next call.
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS screening_receipt_history_no_replace "
+        "BEFORE INSERT ON screening_receipt_history "
+        "WHEN NEW.history_id IS NOT NULL AND EXISTS ("
+        "SELECT 1 FROM screening_receipt_history WHERE history_id = NEW.history_id) "
+        "BEGIN SELECT RAISE(ABORT, 'screening_receipt_history is append-only'); END"
+    )
+
+
+def _supersede_receipt(
+    conn: sqlite3.Connection,
+    *,
+    key: str,
+    message_id: str,
+    reason: str,
+    attempt_id: str | None,
+    head: Mapping[str, Any],
+) -> None:
+    """Copy the current head to history VERBATIM, then move the head to ``head``.
+
+    The copy is an ``INSERT ... SELECT`` from the live row, so its bytes are
+    the row's own (no Python round-trip can coerce a value). Caller holds the
+    write transaction and has already decided the transition is allowed.
+    """
+
+    _ensure_receipt_history_table(conn)
+    columns = ", ".join(_RECEIPT_HISTORY_COPIED)
+    copied = conn.execute(
+        f"INSERT INTO screening_receipt_history (owner_key, message_id, {columns}, "
+        "reason, attempt_id, new_model, new_template_sha256, new_admission_revision, "
+        "new_policy_epoch, superseded_at) "
+        f"SELECT owner_key, message_id, {columns}, ?, ?, ?, ?, ?, ?, ? "
+        "FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+        (
+            reason,
+            attempt_id,
+            head["model"],
+            head["template_sha256"],
+            head["admission_revision"],
+            int(head["policy_epoch"]),
+            time.time(),
+            key,
+            message_id,
+        ),
+    ).rowcount
+    if copied != 1:
+        raise StoreRefused("state_unavailable", "receipt head vanished before supersession")
+    conn.execute(
+        "UPDATE screening_receipts SET body_sha256 = ?, template_sha256 = ?, "
+        "prompt_version = ?, model = ?, verdict = ?, categories = ?, envelope_digest = ?, "
+        "admission_revision = ?, policy_epoch = ?, creator_generation = ?, created_at = ?, "
+        "rendered_template_sha256 = ?, screener_preferred = ? "
+        "WHERE owner_key = ? AND message_id = ?",
+        (*(head[name] for name in _RECEIPT_HISTORY_COPIED), key, message_id),
+    )
+    logger.info(
+        "team bridge receipt superseded: row_ref=%s reason=%s",
+        hashlib.sha256(str(message_id).encode("utf-8")).hexdigest()[:12],
+        reason,
+    )
+
+
 def _ensure_aged_hold_table(conn: sqlite3.Connection) -> None:
     """Create the hold-clock stamps on a store that predates them (PR #4212, S-5).
 
@@ -1312,6 +1481,50 @@ def is_owner_principal(owner: OwnerSnapshot, sender_account: str, sender_kind: s
     )
 
 
+def receipt_integrity(receipt: Mapping[str, Any]) -> tuple[list[str] | None, str]:
+    """The INTEGRITY half of :func:`receipt_authority`, independent of currency.
+
+    ``(decoded_categories, "")`` for a row whose own bytes are well formed, or
+    ``(None, note)`` for damage: a non-numeric epoch or creator generation,
+    categories that do not decode to a list from the closed set, an unknown
+    verdict, or an ``allow`` carrying categories.
+
+    WHY SEPARATE (PR #4533 round 1, m2). ``receipt_authority`` answers STALE
+    before it reaches these checks, which is right for admission (a stale row
+    admits nothing either way) but wrong for the two write-once supersession
+    paths, whose subject IS a stale row: "a damaged row never supersedes"
+    needs the damage checks on a stale row too. ``receipt_authority`` calls
+    this for its own tail, so there is ONE copy of the checks.
+    """
+
+    if (
+        _receipt_int(receipt.get("policy_epoch"), -1) is None
+        or _receipt_int(receipt.get("creator_generation"), -1) is None
+    ):
+        return None, "epoch or creator generation is not a number"
+    try:
+        decoded = _decode_categories_text(receipt.get("categories"))
+    except StoreRefused as refusal:
+        # The decoder's own sentence ("empty categories text" / "categories
+        # decode failed" / "categories not a list"): unchanged from before the
+        # refactor, when it propagated straight out of the consume path.
+        return None, str(refusal)
+    if (
+        not isinstance(decoded, list)
+        or not all(isinstance(item, str) for item in decoded)
+        or not set(decoded) <= _CLOSED_CATEGORIES
+    ):
+        # Unknown category strings (or wrong shapes) can never be handed to a
+        # receipt: typed uncertainty, zero spend.
+        return None, "categories failed validation"
+    verdict = receipt.get("verdict")
+    if verdict not in ("allow", "reject"):
+        return None, "unknown verdict"
+    if verdict == "allow" and decoded:
+        return None, "allow verdict with categories"
+    return decoded, ""
+
+
 def receipt_authority(
     owner: OwnerSnapshot,
     policy: Mapping[str, Any],
@@ -1422,26 +1635,10 @@ def receipt_authority(
         epoch_bound and policy_epoch != receipt_epoch
     ) or creator_generation != owner.enrollment_generation:
         return None, RECEIPT_STALE, ""
-    try:
-        decoded = _decode_categories_text(receipt.get("categories"))
-    except StoreRefused as refusal:
-        # The decoder's own sentence ("empty categories text" / "categories
-        # decode failed" / "categories not a list"): unchanged from before the
-        # refactor, when it propagated straight out of the consume path.
-        return None, RECEIPT_CORRUPT, str(refusal)
-    if (
-        not isinstance(decoded, list)
-        or not all(isinstance(item, str) for item in decoded)
-        or not set(decoded) <= _CLOSED_CATEGORIES
-    ):
-        # Unknown category strings (or wrong shapes) can never be handed to a
-        # receipt: typed uncertainty, zero spend.
-        return None, RECEIPT_CORRUPT, "categories failed validation"
+    decoded, note = receipt_integrity(receipt)
+    if decoded is None:
+        return None, RECEIPT_CORRUPT, note
     verdict = receipt.get("verdict")
-    if verdict not in ("allow", "reject"):
-        return None, RECEIPT_CORRUPT, "unknown verdict"
-    if verdict == "allow" and decoded:
-        return None, RECEIPT_CORRUPT, "allow verdict with categories"
     return (
         {
             "verdict": verdict,
@@ -2036,6 +2233,7 @@ def _log_write_once_conflict(
     *,
     envelope_digest: str | None,
     admission_revision: str | None,
+    path: str = "screening",
 ) -> None:
     """Log WHICH replay-tuple fields differ on a ``write_once_conflict``.
 
@@ -2053,33 +2251,58 @@ def _log_write_once_conflict(
     ``admission_revision`` is not part of the replay comparison; it is
     reported apart (``revision_moved``) because a stale revision is what
     keeps the committed receipt from resolving the conflict on its own.
+
+    ``receipt`` is a :class:`ScreeningReceipt` or a stored row mapping (the
+    cached-adoption source); categories are compared decoded either way.
+
+    NEVER CHANGES THE REFUSAL (PR #4517 review m1/S-1). It runs on rows that may
+    be damaged — a corrupt ``categories`` text made the unconditional decode
+    raise ``proof_corrupt`` here, which turned the caller's
+    ``write_once_conflict`` into ``retry_later``. Any failure while computing
+    the diff logs ``differing=unreadable`` and returns; the caller raises its
+    own code regardless.
     """
 
-    differing = [
-        name
-        for name, before, after in (
-            ("verdict", existing["verdict"], receipt.verdict),
-            ("model", existing["model"], receipt.model),
-            ("prompt_version", existing["prompt_version"], receipt.prompt_version),
-            ("template", existing["template_sha256"], receipt.template_sha256),
-            ("body_sha256", existing["body_sha256"], receipt.body_sha256),
-            (
-                "categories",
-                tuple(sorted(_decode_categories_text(existing["categories"]))),
-                tuple(sorted(receipt.categories)),
-            ),
-            ("envelope_digest", existing["envelope_digest"], envelope_digest),
+    def field(source: Any, name: str) -> Any:
+        if isinstance(source, Mapping) or hasattr(source, "keys"):
+            return source[name]
+        return getattr(source, name)
+
+    def categories(source: Any) -> tuple[str, ...]:
+        raw = field(source, "categories")
+        return tuple(sorted(_decode_categories_text(raw) if isinstance(raw, str) else raw))
+
+    try:
+        differing = [
+            name
+            for name, column in (
+                ("verdict", "verdict"),
+                ("model", "model"),
+                ("prompt_version", "prompt_version"),
+                ("template", "template_sha256"),
+                ("body_sha256", "body_sha256"),
+            )
+            if field(existing, column) != field(receipt, column)
+        ]
+        if categories(existing) != categories(receipt):
+            differing.append("categories")
+        if field(existing, "envelope_digest") != envelope_digest:
+            differing.append("envelope_digest")
+        summary = ",".join(differing) or "none"
+        revision_moved = (
+            "yes"
+            if admission_revision is not None
+            and field(existing, "admission_revision") != admission_revision
+            else "no"
         )
-        if before != after
-    ]
-    revision_moved = (
-        admission_revision is not None and existing["admission_revision"] != admission_revision
-    )
+    except Exception:  # noqa: BLE001 — a diagnostic must never decide the refusal
+        summary, revision_moved = "unreadable", "unknown"
     logger.info(
-        "team bridge write_once_conflict: row_ref=%s differing=%s revision_moved=%s",
+        "team bridge write_once_conflict: row_ref=%s path=%s differing=%s revision_moved=%s",
         hashlib.sha256(str(message_id).encode("utf-8")).hexdigest()[:12],
-        ",".join(differing) or "none",
-        "yes" if revision_moved else "no",
+        path,
+        summary,
+        revision_moved,
     )
 
 
@@ -7132,6 +7355,14 @@ class Store:
                     )
                 )
                 if not same:
+                    _log_write_once_conflict(
+                        str(message_id),
+                        existing,
+                        source,
+                        envelope_digest=source["envelope_digest"],
+                        admission_revision=source["admission_revision"],
+                        path="cached_adoption",
+                    )
                     raise StoreRefused("write_once_conflict", "this message has another verdict")
             else:
                 conn.execute(
@@ -8962,6 +9193,101 @@ class Store:
         except StoreRefused:
             raise
 
+    @staticmethod
+    def _write_once_transition(
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        key: str,
+        *,
+        existing: Mapping[str, Any],
+        receipt: ScreeningReceipt,
+        envelope_digest: str | None,
+        fresh_revision: str,
+        expected_epoch: int,
+    ) -> str | None:
+        """How a fresh receipt that does NOT replay the committed one exactly may proceed.
+
+        WHY (write-once fix PR-2, diagnosis 2026-11-24). 27 messages screening
+        ALLOWED sat in ``write_once_conflict``: the committed receipt names the
+        model that served it (``anthropic/claude-sonnet-5.5``), a re-screen is
+        served by the other approved, preferred id (``claude-sonnet-5-5``), and
+        the exact replay tuple demands equal models. The committed rows are also
+        at an old admission revision, which every later fence
+        (:meth:`write_screened_request_delivery`'s ``stale_proof``,
+        :meth:`verify_original_envelope_current`) re-checks against the live
+        one — so tolerating the model alone would still deliver nothing.
+
+        Returns, for the caller holding the write transaction:
+
+        * ``"replay"`` — the committed receipt is CURRENT under the live policy
+          (``receipt_authority``, epoch waived as in
+          :meth:`write_once_resolution`) and equal in every field but the
+          served model, and both models are in the published serving set. Two
+          approved hops agreeing is the same verdict; nothing is written.
+        * ``"supersede"`` — the committed receipt is a STALE ``allow`` (not
+          damaged) and the fresh one is a PREFERRED ``allow`` that is fully
+          current: live revision, the epoch the caller already fenced, the live
+          template, an approved serving model, the live enrollment generation,
+          and the privacy proof ``finish_screening`` demanded before this
+          point. Same body and envelope. The old row goes to history.
+        * ``None`` — a conflict, exactly as before: any reject on either side
+          (a reject is never overridden), a non-preferred allow, another
+          envelope or body, an unapproved model, a damaged committed row.
+
+        ALLOW -> ALLOW ONLY. This is the invariant reviewers should check
+        first: nothing here can turn a recorded reject into a delivery.
+        """
+
+        policy = conn.execute(
+            "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+        ).fetchone()
+        if policy is None:
+            return None
+        policy_row = dict(policy)
+        serving = policy_serving_models(policy_row)
+        if (
+            envelope_digest is None
+            or existing["body_sha256"] != receipt.body_sha256
+            or existing["envelope_digest"] != envelope_digest
+            or receipt.model not in serving
+        ):
+            return None
+        decoded, damage, _note = receipt_authority(
+            owner, policy_row, dict(existing), epoch_bound=False
+        )
+        if damage == RECEIPT_CORRUPT:
+            return None
+        if decoded is not None:
+            if (
+                decoded["verdict"] == receipt.verdict
+                and decoded["prompt_version"] == receipt.prompt_version
+                and decoded["template_sha256"] == receipt.template_sha256
+                and tuple(sorted(decoded["categories"])) == tuple(sorted(receipt.categories))
+                and decoded["model"] in serving
+            ):
+                return "replay"
+            return None
+        # STALE. Integrity of the committed row still matters: receipt_authority
+        # answers STALE before its damage checks, so run them here (all of
+        # them, m2 — not only categories): a damaged "allow" is never
+        # something to supersede quietly.
+        committed_categories, _damage_note = receipt_integrity(dict(existing))
+        if committed_categories is None:
+            return None
+        if (
+            existing["verdict"] == "allow"
+            and committed_categories == []
+            and existing["template_sha256"] not in (_owner_release_sha256(), OWNER_PRINCIPAL_SHA256)
+            and receipt.verdict == "allow"
+            and not receipt.categories
+            and receipt.screener_preferred is True
+            and receipt.template_sha256 == policy_row.get("template_sha256")
+            and fresh_revision == policy_row.get("revision")
+            and int(policy_row.get("epoch") or -1) == int(expected_epoch)
+        ):
+            return "supersede"
+        return None
+
     def finish_screening(
         self,
         owner: OwnerSnapshot,
@@ -9200,12 +9526,18 @@ class Store:
                 # A policy published after dispatch invalidates this proof.
                 raise StoreRefused("policy_stale", "accepted policy changed during the run")
             if receipt is not None:
+                self._ensure_receipt_rendered_template_column(conn)
                 existing = conn.execute(
-                    "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
-                    "categories, envelope_digest, admission_revision "
-                    "FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
                     (key, message_id),
                 ).fetchone()
+                fresh_revision = admission_revision or _fingerprint_revision(fingerprint)
+                fresh_rendered = (
+                    rendered_template_sha256
+                    if isinstance(rendered_template_sha256, str)
+                    and _HEX64.fullmatch(rendered_template_sha256)
+                    else None
+                )
                 if existing is not None:
                     same = (
                         existing["verdict"] == receipt.verdict
@@ -9217,7 +9549,45 @@ class Store:
                         == tuple(sorted(receipt.categories))
                         and existing["envelope_digest"] == envelope_digest
                     )
-                    if not same:
+                    # Classified even when the replay tuple matches: that tuple
+                    # omits the admission revision, so an identical allow under
+                    # a MOVED revision used to "replay" onto a row every later
+                    # fence refuses as stale_proof. A damaged row that matches
+                    # still replays exactly as before (``transition`` None).
+                    transition = self._write_once_transition(
+                        conn,
+                        owner,
+                        key,
+                        existing=existing,
+                        receipt=receipt,
+                        envelope_digest=envelope_digest,
+                        fresh_revision=fresh_revision,
+                        expected_epoch=expected_epoch,
+                    )
+                    if transition == "supersede":
+                        _supersede_receipt(
+                            conn,
+                            key=key,
+                            message_id=message_id,
+                            reason=RECEIPT_SUPERSEDED_LIVE_ALLOW,
+                            attempt_id=attempt_id,
+                            head={
+                                "body_sha256": receipt.body_sha256,
+                                "template_sha256": receipt.template_sha256,
+                                "prompt_version": receipt.prompt_version,
+                                "model": receipt.model,
+                                "verdict": receipt.verdict,
+                                "categories": json.dumps(sorted(receipt.categories)),
+                                "envelope_digest": envelope_digest,
+                                "admission_revision": fresh_revision,
+                                "policy_epoch": expected_epoch,
+                                "creator_generation": owner.enrollment_generation,
+                                "created_at": time.time(),
+                                "rendered_template_sha256": fresh_rendered,
+                                "screener_preferred": 1,
+                            },
+                        )
+                    elif not same and transition != "replay":
                         # Write-once: a committed allow is never replaced by a
                         # reject (or any rewrite) through this path.
                         _log_write_once_conflict(
@@ -9229,7 +9599,6 @@ class Store:
                         )
                         raise StoreRefused("write_once_conflict", message_id)
                 else:
-                    self._ensure_receipt_rendered_template_column(conn)
                     conn.execute(
                         "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
                         "template_sha256, prompt_version, model, verdict, categories, "
@@ -9253,16 +9622,11 @@ class Store:
                             # parse (R5), and a receipt must store the
                             # snapshot's own revision so cache consumption
                             # matches on it.
-                            admission_revision or _fingerprint_revision(fingerprint),
+                            fresh_revision,
                             expected_epoch,
                             owner.enrollment_generation,
                             time.time(),
-                            (
-                                rendered_template_sha256
-                                if isinstance(rendered_template_sha256, str)
-                                and _HEX64.fullmatch(rendered_template_sha256)
-                                else None
-                            ),
+                            fresh_rendered,
                             1 if receipt.screener_preferred is True else 0,
                         ),
                     )
@@ -10746,9 +11110,45 @@ class Store:
             self._require_live(conn, owner)
             self._ensure_work_scope_tables(conn)
             existing = self._existing_owner_release(conn, owner, row)
+            if row.get("word") == "deliver":
+                self._rearm_write_once_conflict(conn, _owner_key(owner), str(row["message_id"]))
             if existing is not None:
                 return existing
             return self._insert_owner_release(conn, owner, row, outcome="pending", outcome_at=None)
+
+    @staticmethod
+    def _rearm_write_once_conflict(conn: sqlite3.Connection, key: str, message_id: str) -> None:
+        """Make this message's ``write_once_conflict`` hold due NOW after an owner Deliver.
+
+        WHY (PR #4517 review n2, write-once fix PR-2). That code is re-driven a
+        fixed day out, and the connector's ``_hold_due`` deliberately ignores
+        any caller ``retry_at`` for it (a restart must not pull the day back to
+        a minute). An owner Deliver is exactly the event that can now commit
+        (:meth:`_owner_deliver_supersedes`), so the person should not wait up
+        to 24 h to see it go out. The re-arm writes the ROW's ``retry_at``,
+        which is what ``due_screening_holds`` reads — not ``_hold_due``'s
+        input — so that rule stays intact: if the commit still conflicts the
+        re-hold is scheduled a day out again. Only this code is touched, and
+        both spellings of the hold key (bare id and composite feed ref).
+        """
+
+        rows = conn.execute(
+            "SELECT message_id FROM screening_holds WHERE owner_key = ? AND hold_code = ?",
+            (key, "write_once_conflict"),
+        ).fetchall()
+        now = time.time()
+        for held in rows:
+            stored = str(held["message_id"])
+            try:
+                bare = screening_hold_message_id(stored)
+            except Exception:  # noqa: BLE001 — a malformed key matches its raw spelling only
+                bare = stored
+            if message_id in (stored, bare):
+                conn.execute(
+                    "UPDATE screening_holds SET retry_at = ? WHERE owner_key = ? "
+                    "AND message_id = ? AND hold_code = ?",
+                    (now, key, stored, "write_once_conflict"),
+                )
 
     def record_owner_release_local_terminal(
         self,
@@ -10931,6 +11331,77 @@ class Store:
                 ),
             )
 
+    def _owner_deliver_supersedes(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        key: str,
+        message_id: str,
+        existing: Mapping[str, Any],
+        receipt: ScreeningReceipt,
+        envelope_digest: str,
+    ) -> bool:
+        """May the owner's Deliver move a committed SCREENER allow's head?
+
+        WHY (write-once fix PR-2, Group B). An owner-release receipt carries
+        :data:`hold_release.OWNER_RELEASE_SHA256` as its template, which no
+        screener receipt can ever equal, so a Deliver on a message that already
+        had a screener allow was refused ``write_once_conflict`` forever — the
+        person agreed with the screener and still nothing went out.
+
+        Allowed only when the two AGREE (allow -> allow, same body), the
+        committed row is an ordinary screener allow (not an owner-principal or
+        owner-release one) with readable empty categories, and the signed
+        release is re-verified HERE, in this write transaction, against the
+        operator anchor — never a stored flag. The committed envelope may
+        differ (an old ref shape): the person approved the exact body and
+        envelope this commit names, which is what the signature binds. A
+        release that does not verify refuses ``proof_corrupt``: a row claiming
+        to be the owner's decision without the owner's signature is damage.
+        A reject on either side stays a conflict.
+        """
+
+        if not (
+            receipt.verdict == "allow"
+            and receipt.template_sha256 == _owner_release_sha256()
+            and existing["verdict"] == "allow"
+            and existing["body_sha256"] == receipt.body_sha256
+            and existing["template_sha256"] not in (_owner_release_sha256(), OWNER_PRINCIPAL_SHA256)
+        ):
+            return False
+        # A DAMAGED committed row never supersedes (PR #4533 round 1, m2): the
+        # same two checks the screener path makes (``_write_once_transition``):
+        # ``receipt_authority`` (epoch waived) must not say CORRUPT, and, since
+        # it answers STALE before its damage checks, ``receipt_integrity`` on
+        # the row itself. Categories alone missed a malformed generation or
+        # epoch. STALE is fine: the owner's verified Deliver is exactly what
+        # replaces a stale allow.
+        committed_categories, _damage_note = receipt_integrity(dict(existing))
+        if committed_categories != []:
+            return False
+        policy = conn.execute(
+            "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+        ).fetchone()
+        if policy is None:
+            return False
+        _decoded, damage, _note = receipt_authority(
+            owner, dict(policy), dict(existing), epoch_bound=False
+        )
+        if damage == RECEIPT_CORRUPT:
+            return False
+        self._ensure_work_scope_tables(conn)
+        release = self._verified_release(conn, key, message_id)
+        if not (
+            release is not None
+            and release.get("verified") is True
+            and release.get("word") == "deliver"
+            and release.get("body_sha256") == receipt.body_sha256
+            and release.get("envelope_digest") == envelope_digest
+            and _receipt_int(release.get("creator_generation"), -1) == owner.enrollment_generation
+        ):
+            raise StoreRefused("proof_corrupt", "owner Deliver without a verified release")
+        return True
+
     def commit_owner_release(
         self,
         owner: OwnerSnapshot,
@@ -10965,9 +11436,9 @@ class Store:
             ).fetchone()
             if policy is None or int(policy["epoch"]) != int(expected_epoch):
                 raise StoreRefused("policy_stale", "accepted policy changed before the release")
+            self._ensure_receipt_rendered_template_column(conn)
             existing = conn.execute(
-                "SELECT verdict, template_sha256, body_sha256 FROM screening_receipts "
-                "WHERE owner_key = ? AND message_id = ?",
+                "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
                 (key, message_id),
             ).fetchone()
             if existing is not None:
@@ -10976,7 +11447,42 @@ class Store:
                     or existing["template_sha256"] != receipt.template_sha256
                     or existing["body_sha256"] != receipt.body_sha256
                 ):
-                    raise StoreRefused("write_once_conflict", message_id)
+                    if not self._owner_deliver_supersedes(
+                        conn, owner, key, message_id, existing, receipt, envelope_digest
+                    ):
+                        _log_write_once_conflict(
+                            message_id,
+                            existing,
+                            receipt,
+                            envelope_digest=envelope_digest,
+                            admission_revision=str(policy["revision"]),
+                            path="owner_release",
+                        )
+                        raise StoreRefused("write_once_conflict", message_id)
+                    _supersede_receipt(
+                        conn,
+                        key=key,
+                        message_id=message_id,
+                        reason=RECEIPT_SUPERSEDED_OWNER_DELIVER,
+                        attempt_id=None,
+                        head={
+                            "body_sha256": receipt.body_sha256,
+                            "template_sha256": receipt.template_sha256,
+                            "prompt_version": receipt.prompt_version,
+                            "model": receipt.model,
+                            "verdict": receipt.verdict,
+                            "categories": json.dumps(sorted(receipt.categories)),
+                            "envelope_digest": envelope_digest,
+                            "admission_revision": str(policy["revision"]),
+                            "policy_epoch": int(expected_epoch),
+                            "creator_generation": owner.enrollment_generation,
+                            "created_at": time.time(),
+                            # As a first-time owner-release INSERT writes them:
+                            # no prompt was rendered and no model answered.
+                            "rendered_template_sha256": None,
+                            "screener_preferred": None,
+                        },
+                    )
             else:
                 conn.execute(
                     "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
