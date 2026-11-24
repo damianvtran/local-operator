@@ -641,10 +641,20 @@ async def test_a_worker_of_a_settled_override_pinned_manager_takes_the_pin(tmp_p
     after = RecordingStream()
     revived = make_session(tmp_path, registry, after, team="teamwork")
     try:
+        # ORPHAN-GENERIC RULE (branch fix/mobility-team-identity, 9497ea72f).
+        # This worker is a GENERIC child born at depth 2 under the lead, whose
+        # tool ceiling was the lead's narrower inventory. After the restart the
+        # lead is gone and only the root can resume it -- and a root cannot
+        # rebuild a missing parent's narrower tool limit, so resuming here would
+        # run the worker on the ROOT's tools: a silent widening. The branch
+        # deliberately removed that resume path; the remedy is an explicit
+        # re-attach (and a fresh launch under the lead), not a widened resume.
+        # The pre-branch tier assertion (``model_for(RESUME_PROMPT) == HI``)
+        # is replaced by the rule it now encodes: a named refusal, no request.
         text = await hub_resume(revived, worker_id)
-        new_id = resumed_id(revived, text)
-        await wait_for(lambda: completed(revived, new_id))
-        assert after.model_for(RESUME_PROMPT) == HI
+        assert "recorded delegation does not match; re-attach via /team" in text, text
+        assert "resumed as job " not in text, text
+        assert after.requests_for(RESUME_PROMPT) == []
     finally:
         await revived.dispose()
 
@@ -1196,10 +1206,20 @@ async def test_a_worker_of_a_settled_team_launch_manager_takes_the_managers_row_
     after = RecordingStream()
     revived = make_session(tmp_path, registry, after, team="org", agents=agents)
     try:
+        # ORPHAN-GENERIC RULE (branch fix/mobility-team-identity, 9497ea72f).
+        # This worker is a GENERIC child born at depth 2 under the lead, whose
+        # tool ceiling was the lead's narrower inventory. After the restart the
+        # lead is gone and only the root can resume it -- and a root cannot
+        # rebuild a missing parent's narrower tool limit, so resuming here would
+        # run the worker on the ROOT's tools: a silent widening. The branch
+        # deliberately removed that resume path; the remedy is an explicit
+        # re-attach (and a fresh launch under the lead), not a widened resume.
+        # The pre-branch tier assertion (``model_for(RESUME_PROMPT) == HI``)
+        # is replaced by the rule it now encodes: a named refusal, no request.
         text = await hub_resume(revived, worker_id)
-        new_id = resumed_id(revived, text)
-        await wait_for(lambda: completed(revived, new_id))
-        assert after.model_for(RESUME_PROMPT) == HI
+        assert "recorded delegation does not match; re-attach via /team" in text, text
+        assert "resumed as job " not in text, text
+        assert after.requests_for(RESUME_PROMPT) == []
     finally:
         await revived.dispose()
 
