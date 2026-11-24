@@ -301,24 +301,55 @@ class TestReadRootRefusal:
         assert zshrc.read_bytes() == before
 
 
-class TestPackagePrefixes:
-    """S-16: Homebrew/usr-local prefixes are granted child by child, minus state."""
+def _covered(path: str, reads: tuple[str, ...]) -> list[str]:
+    """The grants that cover ``path`` (equal or ancestor): ``subpath`` semantics."""
 
-    def test_var_and_etc_are_omitted_and_the_whole_prefix_is_not_granted(
+    return [r for r in reads if path == r or path.startswith(r.rstrip("/") + "/")]
+
+
+class TestPackagePrefixes:
+    """S-16: package prefixes are granted child by child, minus their state."""
+
+    _LISTINGS = {
+        "/Library": ["Developer", "Keychains", "Logs", ".localized"],
+        "/usr": ["bin", "lib", "libexec", "local", "sbin", "share"],
+        "/opt/homebrew": ["Cellar", "bin", "etc", "lib", "opt", "share", "var", ".git"],
+        "/usr/local": ["bin", "etc", "lib", "var"],
+    }
+
+    def test_no_grant_covers_an_omitted_path(
         self, fake_host: dict[str, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        listings = {
-            "/Library": ["Developer", "Keychains", "Logs"],
-            "/opt/homebrew": ["Cellar", "bin", "etc", "lib", "opt", "share", "var"],
-            "/usr/local": ["bin", "etc", "lib", "var"],
-        }
-        monkeypatch.setattr(jail_module.os, "listdir", lambda path: listings[path])
+        """Coverage, not string membership (review R2-1): ``/usr`` once re-granted
+        ``/usr/local/var`` while ``"/usr/local/var" not in reads`` still passed."""
+
+        monkeypatch.setattr(jail_module.os, "listdir", lambda path: self._LISTINGS[path])
         reads = _jail(fake_host["run_home"]).read_subpaths()
-        for prefix in ("/opt/homebrew", "/usr/local"):
-            assert prefix not in reads
-            assert f"{prefix}/bin" in reads and f"{prefix}/lib" in reads
-            assert f"{prefix}/var" not in reads and f"{prefix}/etc" not in reads
-        assert "/Library/Logs" not in reads and "/Library/Keychains" not in reads
+        for omitted in (
+            "/usr/local/var/x",
+            "/usr/local/etc/x",
+            "/opt/homebrew/var/x",
+            "/opt/homebrew/etc/x",
+            "/Library/Logs/x",
+            "/Library/Keychains/x",
+            "/private/var/folders/x",
+        ):
+            assert _covered(omitted, reads) == [], omitted
+        # Controls: the toolchain trees ARE covered.
+        for needed in ("/usr/bin/git", "/usr/lib/x", "/opt/homebrew/bin/aws", "/usr/local/bin/x"):
+            assert _covered(needed, reads), needed
+        assert "/opt/homebrew/.git" not in reads  # R2-3
+
+    def test_an_ancestor_grant_fails_closed(
+        self, fake_host: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the system list ever re-adds an ancestor, the jail refuses to build."""
+
+        monkeypatch.setattr(jail_module.os, "listdir", lambda path: self._LISTINGS[path])
+        widened = tuple(p for p in jail_module._REPLACED_SYSTEM_ROOTS if p != "/usr")
+        monkeypatch.setattr(jail_module, "_REPLACED_SYSTEM_ROOTS", frozenset(widened))
+        with pytest.raises(JailUnavailable, match="covers omitted /usr/local"):
+            _jail(fake_host["run_home"]).read_subpaths()
 
 
 class TestChildEnvironment:
@@ -757,6 +788,20 @@ class TestMaterialize:
         with pytest.raises(MaterializeError, match="symlink"):
             materialize_repo("radient-ml/agent-server", tmp_path / "dest", clone_root=clone_root)
 
+    @pytest.mark.parametrize("redirect", ["commondir", "objects/info/alternates"])
+    def test_a_redirecting_git_dir_is_refused(self, tmp_path: Path, redirect: str) -> None:
+        """R2-2: a real ``.git`` that borrows another repository is not followed."""
+
+        elsewhere = _planted_clone(tmp_path / "minervaai", tmp_path / "unused-canary")
+        clone_root = tmp_path / "radient-ml"
+        _planted_clone(clone_root, tmp_path / "unused-canary-2")
+        # _planted_clone names its repo agent-server under each root.
+        target = clone_root / "agent-server" / ".git" / redirect
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"{elsewhere / '.git'}\n")
+        with pytest.raises(MaterializeError, match="redirects"):
+            materialize_repo("radient-ml/agent-server", tmp_path / "dest", clone_root=clone_root)
+
     def test_a_gitfile_clone_is_refused(self, tmp_path: Path) -> None:
         """R1-4: a ``.git`` FILE redirecting to another repository is not followed."""
 
@@ -1004,3 +1049,18 @@ class TestKernelBoundary:
         assert b"SENT" in control.stdout
         jailed = _run(jail.wrap(probe), env=jail.child_env(), cwd=jail.home)
         assert jailed.returncode != 0 and b"SENT" not in jailed.stdout
+
+    def test_usr_local_is_eperm_while_the_toolchain_runs(self, fake_host: dict[str, Path]) -> None:
+        """S-16 / R2-1: ``/usr`` no longer covers ``/usr/local``."""
+
+        if not Path("/usr/local").is_dir():
+            pytest.skip("no /usr/local on this host")
+        jail = _jail(fake_host["run_home"])
+        probe = ["/bin/ls", "/usr/local"]
+        control = _run(probe, env=os.environ, cwd=jail.home)
+        assert control.returncode == 0
+        jailed = _run(jail.wrap(probe), env=jail.child_env(), cwd=jail.home)
+        assert jailed.returncode != 0 and not jailed.stdout
+        for tool in (["/usr/bin/git", "--version"], ["/usr/bin/python3", "-V"]):
+            ran = _run(jail.wrap(tool), env=jail.child_env(), cwd=jail.home)
+            assert ran.returncode == 0, (tool, ran.stderr[-200:])

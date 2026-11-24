@@ -143,6 +143,17 @@ GUARD_TESTS: tuple[str, ...] = (
     "tests/unit/team_bridge/test_responders.py"
     "::test_nothing_wires_the_responder_runner_before_gate_r3_hash",
     "tests/unit/team_bridge/test_responders.py::test_the_gate_r3_hash_tripwire_fires",
+    # GATE S17-UID (PR #4549 security round 2), PERMANENT until its own removal
+    # condition holds: a seatbelt jail under the operator's uid exposes every
+    # same-uid process's argv and environment (KERN_PROCARGS2, measured, not
+    # closable in the profile). Remove these two only in the PR that runs
+    # responder children under a distinct uid AND adds the macOS kernel test
+    # proving a jailed child reads no canary from an operator-uid non-platform
+    # process, with its own security round. Removing GATE R3-HASH, or the
+    # TEMPORARY whole-file entry below, does not lift this gate.
+    "tests/unit/team_bridge/test_responders.py"
+    "::test_nothing_uses_the_responder_jail_before_gate_s17_uid",
+    "tests/unit/team_bridge/test_responders.py::test_the_gate_s17_uid_tripwire_fires",
     # TEMPORARY, behavioural (an exception to the membership rule above, ~12 s
     # measured on a Linux node): the responder jail/credential/materializer
     # pins for an UNWIRED security boundary (PR #4549, QA r1 Q-1). Nothing

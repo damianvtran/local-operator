@@ -187,6 +187,13 @@ def materialize_repo(
         raise MaterializeError(f"{clone} does not resolve inside {root}")
     if not (clone / ".git").is_dir():
         raise MaterializeError(f"{clone} has no .git directory (gitfiles are not followed)")
+    # A real ``.git`` can still redirect (review R2-2): ``commondir`` makes refs
+    # and objects come from another repository, and ``objects/info/alternates``
+    # borrows another repository's objects. Either would serve a non-radient
+    # tree under a radient name; a materialized clone may use neither.
+    for redirect in ("commondir", "objects/info/alternates", "objects/info/http-alternates"):
+        if (clone / ".git" / redirect).exists():
+            raise MaterializeError(f"{clone} redirects its repository through .git/{redirect}")
     dest = dest_root / name
     if dest.exists() or dest.is_symlink():
         raise MaterializeError(f"{dest} already exists")

@@ -76,17 +76,22 @@ A host-allowlisting egress proxy (allow only ``localhost:<proxy>``; the proxy
 admits ``*.amazonaws.com`` and the EKS endpoint) is the real fix and is a
 follow-up slice, not this one.
 
-PROCESS ARGUMENTS (security round 1, S-17), MEASURED, NOT CLOSED HERE. A
-jailed child can read another same-uid process's argv AND environment through
-the numeric ``sysctl({CTL_KERN, KERN_PROCARGS2, pid})``. Six profile variants
-were measured on macOS 27.2.1 and none blocks it: removing ``sysctl-read``
-entirely, a ``sysctl-name`` allowlist, a trailing ``(deny sysctl-read
-(sysctl-name "kern.procargs2"))``, and three ``process-info*`` target filters
-(a bare ``(deny process-info*)`` kills the child itself). The name-based
-sysctl filter is consulted on the by-name path only. ``(allow sysctl-read)``
-therefore stays as it is (narrowing it buys nothing measurable), and the
-exposure is escalated as a design decision for C2 (a dedicated uid for
-responder runs is the candidate), recorded on the PR.
+PROCESS ARGUMENTS (security rounds 1-2, S-17) -- A RECORDED C1 RESIDUAL,
+GATED. A jailed child can read another same-uid process's argv AND
+environment through the numeric ``sysctl({CTL_KERN, KERN_PROCARGS2, pid})``.
+Six profile variants were measured on macOS 27.2.1 and none blocks it:
+removing ``sysctl-read`` entirely, a ``sysctl-name`` allowlist, a trailing
+``(deny sysctl-read (sysctl-name "kern.procargs2"))``, and three
+``process-info*`` target filters (a bare ``(deny process-info*)`` kills the
+child itself); security round 2 corroborated it independently. The kernel's
+procargs check is uid-based, so the boundary is a DISTINCT UID, not this
+profile. ``(allow sysctl-read)`` therefore stays (narrowing it buys nothing
+measurable). Security accepted this as a C1 residual only because GATE
+S17-UID (``test_nothing_uses_the_responder_jail_before_gate_s17_uid``, a
+permanent PR guard) fails any production import of this module or
+``isolation`` until the PR that runs responder children under a separate uid
+and proves, from the real spawn path, that a jailed child reads no canary from
+an operator-uid non-platform process. Removing GATE R3-HASH does not lift it.
 
 MACH. The two opendirectory names every confined child needs plus the DNS
 resolver. No securityd, so the keychain CLIs fail; no pasteboard.
@@ -137,7 +142,14 @@ _LIBRARY_OMITTED: frozenset[str] = frozenset({"Keychains", "Logs"})
 #: ``redis.conf``, ``gnupg``). The toolchain needs neither: git, python3,
 #: aws, kubectl and curl were measured working without them; TLS uses the
 #: run home's own bundle (``CA_BUNDLE_NAME``), not ``etc/openssl@3``.
+#:
+#: ``/usr`` is in this map too (review R2-1 / security r2 S-16): seatbelt's
+#: ``subpath`` covers every descendant, so a whole ``/usr`` grant silently
+#: re-granted ``/usr/local/{var,etc}`` (the Intel/migrated Homebrew layout)
+#: no matter what the ``/usr/local`` row omitted. ``/usr`` is therefore granted
+#: child by child WITHOUT ``local``, and ``/usr/local`` by its own row.
 _PREFIX_OMITTED: Mapping[str, frozenset[str]] = {
+    "/usr": frozenset({"local"}),
     "/opt/homebrew": frozenset({"var", "etc"}),
     "/usr/local": frozenset({"var", "etc"}),
 }
@@ -229,6 +241,15 @@ class JailUnavailable(RuntimeError):
     """The jail cannot be built safely here; the caller must not spawn (§4)."""
 
 
+def forbidden_read_roots() -> tuple[str, ...]:
+    """Every path the allowlist deliberately omits; no grant may cover one."""
+
+    omitted = [f"/Library/{name}" for name in sorted(_LIBRARY_OMITTED)]
+    omitted += [f"{p}/{name}" for p, names in _PREFIX_OMITTED.items() for name in sorted(names)]
+    omitted.append("/private/var/folders")
+    return tuple(omitted)
+
+
 def _library_children() -> tuple[str, ...]:
     """``/Library``'s children minus :data:`_LIBRARY_OMITTED`."""
 
@@ -250,7 +271,10 @@ def _children(root: str, omitted: frozenset[str]) -> tuple[str, ...]:
         return ()
     children: list[str] = []
     for name in entries:
-        if name in omitted:
+        # Dot-entries (Homebrew's own ``.git``, ``.github``…) are skipped
+        # (review R2-3): nothing a run executes lives there, and they made the
+        # profile -- and its attested hash -- longer and less stable.
+        if name in omitted or name.startswith("."):
             continue
         path = f"{root}/{name}"
         if _confinement.profile_path_refusal(path) is not None:
@@ -395,7 +419,7 @@ class ResponderJail:
             for path in _confinement._SYSTEM_READ_SUBPATHS
             if path not in _REPLACED_SYSTEM_ROOTS
         )
-        return (
+        reads = (
             str(self.home),
             *(str(path) for path in self.machinery),
             *system,
@@ -406,6 +430,15 @@ class ResponderJail:
                 for child in _children(prefix, omit)
             ),
         )
+        # COVERAGE, not membership (review R2-1): ``subpath`` grants every
+        # descendant, so an omission only holds if no grant is the omitted path
+        # or an ANCESTOR of it. A future edit to the system list that re-adds
+        # an ancestor fails closed here instead of silently re-granting.
+        for omitted in forbidden_read_roots():
+            covering = [r for r in reads if omitted == r or omitted.startswith(r.rstrip("/") + "/")]
+            if covering:
+                raise JailUnavailable(f"read grant {covering[0]} covers omitted {omitted}")
+        return reads
 
     def profile(self) -> str:
         """The seatbelt profile text (``sandbox-exec -p``). See the module docstring."""
@@ -571,6 +604,7 @@ __all__ = [
     "ENV_ALLOWLIST",
     "JailUnavailable",
     "ResponderJail",
+    "forbidden_read_roots",
     "machinery_root_refusal",
     "read_root_refusal",
     "responder_web_fetch_settings",
