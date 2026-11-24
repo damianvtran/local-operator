@@ -498,7 +498,11 @@ _MEDIA_CHUNK_BYTES = 1 << 20
 #: Wire-relevant metadata beside an attachment's bytes. The provider encodes
 #: these into the part it sends, so a part whose bytes match but whose MIME
 #: differs is a different request (``providers/clients.py`` image parts).
-_MEDIA_WIRE_FIELDS = ("type", "mime_type", "filename")
+#: ``bytes`` is the extracted size a provider's FALLBACK text names when a
+#: document cannot be inlined (``providers/documents.py::_reference_text``), so
+#: two documents with identical bytes otherwise-rendered are still different
+#: requests when that size moves.
+_MEDIA_WIRE_FIELDS = ("type", "mime_type", "filename", "bytes")
 
 
 def message_kind(message: Any) -> str:
@@ -607,6 +611,11 @@ def _media_digests(message: Any) -> list[str]:
                 digest.update(wire_field.encode("ascii"))
                 digest.update(b"=")
                 digest.update(value.encode("utf-8", "surrogatepass"))
+                digest.update(b"\0")
+            elif isinstance(value, int) and not isinstance(value, bool):
+                digest.update(wire_field.encode("ascii"))
+                digest.update(b"#")
+                digest.update(str(value).encode("ascii"))
                 digest.update(b"\0")
         payload = getattr(part, "data", None)
         if payload is None:

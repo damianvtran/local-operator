@@ -378,6 +378,38 @@ def test_hashing_a_large_attachment_does_not_copy_it_whole() -> None:
     finally:
         tracemalloc.stop()
     assert peak < 4 * 1024 * 1024, f"peak {peak} bytes is an encoded copy, not a chunk"
+    # A small peak alone could come from a digest that does nothing, so the
+    # chunked path is proved to be reading the payload: one byte changed at the
+    # far end of a 10 MB string must move the message digest.
+    other = _message("user", "look")
+    other.content.append(SimpleNamespace(type="image", data="A" * (10 * 1024 * 1024 - 1) + "B"))
+    assert (
+        prefix_sections(_request(message)).messages[0]
+        != prefix_sections(_request(other)).messages[0]
+    )
+
+
+def test_a_documents_extracted_size_is_part_of_the_comparison() -> None:
+    """R3-1 (round 4): the fallback text names the size, so it is wire context.
+
+    Built from the REAL ``DocumentContent`` class rather than a duck type: the
+    review reproduced identical payload, MIME and filename with ``bytes=3`` vs
+    ``999`` rendering different wire text and comparing equal.
+    """
+    from local_operator.harness.types import DocumentContent
+
+    small = _message("user", "see file")
+    small.content.append(
+        DocumentContent(data="", mime_type="application/pdf", filename="a.pdf", bytes=3)
+    )
+    large = _message("user", "see file")
+    large.content.append(
+        DocumentContent(data="", mime_type="application/pdf", filename="a.pdf", bytes=999)
+    )
+    assert (
+        first_prefix_divergence(prefix_sections(_request(small)), prefix_sections(_request(large)))
+        == "messages[0]:user"
+    )
 
 
 def test_a_document_filename_is_part_of_the_comparison() -> None:
@@ -502,6 +534,9 @@ def test_the_stream_loop_gates_the_commit_on_the_diagnosis_not_a_response_id() -
         if isinstance(node, ast.If) and any(inner is calls[0] for inner in ast.walk(node))
     ]
     assert enclosing, "the commit step is guarded, not run on every event"
-    gate = ast.unparse(enclosing[0].test)
-    assert "cache_diagnostics" in gate
-    assert "response_id" not in gate, f"the Google-shaped regression is back: {gate}"
+    # EVERY guarding if, not just the outermost: a nested ``and event.response_id``
+    # passes an outermost-only check but re-introduces exactly QA's regression.
+    for guard in enclosing:
+        gate = ast.unparse(guard.test)
+        assert "response_id" not in gate, f"the Google-shaped regression is back: {gate}"
+    assert any("cache_diagnostics" in ast.unparse(guard.test) for guard in enclosing)
