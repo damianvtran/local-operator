@@ -40,8 +40,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
-import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -150,7 +148,8 @@ def materialize_repo(
 
     ``dest_root`` is the run home's ``repos/`` directory; the destination must
     not exist (a run home is fresh per alert). Raises :class:`RepoNotAllowed`
-    or :class:`MaterializeError`; never leaves a partial tree behind.
+    or :class:`MaterializeError`; on failure the (read-only) partial tree is left
+    for the run home's own disposal and the caller must not spawn.
     """
 
     name = pinned_repo_name(entry)
@@ -180,10 +179,15 @@ def materialize_repo(
             continue
         blobs.append((path, mode, sha))
 
-    staging = dest_root / f".{name}.partial"
-    if staging.exists():
-        _make_writable_and_remove(staging)
-    staging.mkdir(parents=True)
+    # Written straight into a FRESH destination: no staging rename and no
+    # cleanup delete, because the destination lives inside a session directory
+    # and removing anything there belongs to ``session/cleanup.py`` alone
+    # (tests/unit/session/test_no_session_deletion.py). A failure raises; the
+    # spawner then does not spawn, and the partial tree goes with the run home.
+    try:
+        dest.mkdir(parents=False, exist_ok=False)
+    except OSError as exc:
+        raise MaterializeError(f"cannot create {dest} ({exc.strerror})") from None
     try:
         payload = _git(
             clone, "cat-file", "--batch", stdin="".join(f"{sha}\n" for _, _, sha in blobs).encode()
@@ -196,30 +200,22 @@ def materialize_repo(
                 raise MaterializeError(f"{entry}: object stream out of order at {path}")
             start = header_end + 1
             end = start + int(size)
-            target = staging.joinpath(*path.parts)
+            target = dest.joinpath(*path.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload[start:end])
             target.chmod(0o555 if mode == "100755" else 0o444)
             offset = end + 1  # the LF cat-file writes after each object
-        for directory, _dirs, _files in os.walk(staging, topdown=False):
-            os.chmod(directory, 0o555)
-        os.chmod(staging, 0o755)
-        staging.rename(dest)
-        os.chmod(dest, 0o555)
-    except BaseException:
-        _make_writable_and_remove(staging)
+    except MaterializeError:
         raise
+    except (OSError, ValueError) as exc:
+        raise MaterializeError(f"{entry}: could not copy the tree ({type(exc).__name__})") from None
+    finally:
+        # Read-only even on failure, so a half tree is never a writable one.
+        for directory, _dirs, _files in os.walk(dest, topdown=False):
+            os.chmod(directory, 0o555)
     return MaterializedRepo(
         entry=entry, commit=commit_sha, path=dest, files=len(blobs), skipped=skipped
     )
-
-
-def _make_writable_and_remove(tree: Path) -> None:
-    """Remove a staging tree this module created (read-only dirs need u+w first)."""
-
-    for directory, _dirs, _files in os.walk(tree):
-        os.chmod(directory, stat.S_IRWXU)
-    shutil.rmtree(tree, ignore_errors=True)
 
 
 __all__ = [
