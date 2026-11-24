@@ -705,7 +705,12 @@ def test_read_index_sweeps_an_entry_whose_session_directory_is_gone(tmp_path: Pa
     assert "s1" in store.read_index(tmp_path)
     session.rmdir()
     assert store.read_index(tmp_path) == {}
-    assert not store.entry_path(tmp_path, "s1").exists()
+    # Skipped, NOT unlinked (orphan-ask review round 1, Q-U1): "no directory"
+    # is not "deleted" (a hand-off or a move leaves none), and the Notifications
+    # inbox must still list a deleted conversation's ask with its label. The
+    # bounded orphan sweep (``asks/orphans.sweep``) removes a provably gone one.
+    assert store.entry_path(tmp_path, "s1").exists()
+    assert list(store.read_index(tmp_path, include_orphans=True)) == ["s1"]
 
 
 def test_read_index_sweeps_an_entry_whose_asks_are_all_old_and_terminal(tmp_path: Path):

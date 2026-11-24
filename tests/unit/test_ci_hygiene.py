@@ -3759,11 +3759,210 @@ def test_every_heavy_full_suite_job_is_gated_on_the_precondition() -> None:
     assert {"changes", "precondition"} <= set(jobs["merge-gate"]["needs"])
 
 
-def test_nightly_schedule_has_its_own_concurrency_group() -> None:
-    """A push must never replace a pending nightly (full coverage backstop)."""
-    group = yaml.safe_load(FULL_SUITE_YML.read_text())["concurrency"]["group"]
-    assert "github.event_name == 'schedule' && 'full-suite-nightly'" in group
-    assert group.index("full-suite-nightly") < group.index("full-suite-main")
+def _full_suite_group(**kw: Any) -> tuple[str, bool]:
+    concurrency = yaml.safe_load(FULL_SUITE_YML.read_text())["concurrency"]
+    return _eval_ci_concurrency(concurrency, workflow="Main Full Suite", **kw)
+
+
+def test_full_suite_concurrency_groups_by_role() -> None:
+    """GH #4074 cut 1, evaluated, not string-matched.
+
+    * the NIGHTLY keeps its own group (never replaced by a push or the hourly);
+    * the HOURLY batch and main dispatches share `full-suite-main` (newest tip
+      pending, cancel-in-progress false);
+    * every main PUSH is isolated per SHA, so a pending RELEASE push run -- the
+      run `make release-check` needs on that exact SHA -- can never be replaced
+      by a later merge or the next hourly;
+    * a PR gate keeps exactly its old per-ref group.
+    """
+    from scripts.fast_gate_check import HOURLY_CRON
+
+    main = {"ref": "refs/heads/main"}
+    assert _full_suite_group(event_name="schedule", sha="a1", schedule="17 7 * * *", **main) == (
+        "full-suite-nightly",
+        False,
+    )
+    assert _full_suite_group(event_name="schedule", sha="a1", schedule=HOURLY_CRON, **main) == (
+        "full-suite-main",
+        False,
+    )
+    assert (
+        _full_suite_group(event_name="workflow_dispatch", sha="a1", **main)[0] == "full-suite-main"
+    )
+    release = _full_suite_group(
+        event_name="push",
+        sha="cccc3333",
+        commit_message="chore(release): bump version to 1.0.0",
+        **main,
+    )
+    ordinary = _full_suite_group(event_name="push", sha="dddd4444", **main)
+    assert release[1] is False and "cccc3333" in release[0] and "dddd4444" in ordinary[0]
+    assert len({release[0], ordinary[0], "full-suite-main", "full-suite-nightly"}) == 4
+    assert _full_suite_group(
+        ref="refs/pull/7/merge", event_name="pull_request", sha="eeee5555"
+    ) == ("full-suite-refs/pull/7/merge", False)
+    assert _full_suite_group(ref="refs/heads/train/x", event_name="workflow_dispatch", sha="f")[
+        0
+    ] == ("full-suite-refs/heads/train/x")
+
+
+def test_hourly_cron_is_the_one_the_helper_gates() -> None:
+    """The cron string is the ONLY hourly-vs-nightly discriminator: pin the pair."""
+    from scripts.fast_gate_check import HOURLY_CRON
+
+    full = yaml.safe_load(FULL_SUITE_YML.read_text())
+    crons = [entry["cron"] for entry in full.get("on", full.get(True))["schedule"]]
+    assert sorted(crons) == sorted(["17 7 * * *", HOURLY_CRON]), crons
+    minute = HOURLY_CRON.split()[0]
+    assert minute not in ("0", "17") and HOURLY_CRON.split()[1:] == ["*"] * 4
+    step = next(st for st in full["jobs"]["precondition"]["steps"] if st.get("id") == "gate")
+    assert step["env"]["SCHEDULE"] == "${{ github.event.schedule }}"
+    assert '--schedule "$SCHEDULE"' in step["run"] and '--run-id "$GITHUB_RUN_ID"' in step["run"]
+
+
+def _base_helper_source() -> str | None:
+    """The trusted base's fast_gate_check.py: origin/main locally; HEAD^1 in CI.
+
+    CI checks out the PR merge ref with fetch-depth 2 and no origin/main, and
+    a merge ref's first parent IS the base tip the precondition fetches from.
+    """
+    for rev in ("origin/main", "HEAD^1"):
+        proc = subprocess.run(
+            ["git", "show", f"{rev}:scripts/fast_gate_check.py"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return proc.stdout
+    return None
+
+
+def _precondition_argv(tmp_path: Path, event: str) -> list[str]:
+    """Execute the precondition step's real `run:` script with python3 stubbed."""
+    full = yaml.safe_load(FULL_SUITE_YML.read_text())
+    step = next(st for st in full["jobs"]["precondition"]["steps"] if st.get("id") == "gate")
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir(exist_ok=True)
+    argv_file = tmp_path / f"argv-{event}"
+    stub = stub_dir / "python3"
+    stub.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        f"open({str(argv_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+    )
+    stub.chmod(0o755)
+    env = {
+        "PATH": f"{stub_dir}:/usr/bin:/bin",
+        "EVENT": event,
+        "PR_NUMBER": "4527" if event == "pull_request" else "",
+        "PR_HEAD_SHA": "a" * 40 if event == "pull_request" else "",
+        "PR_HEAD_REPO": "damianvtran/local-operator" if event == "pull_request" else "",
+        "SCHEDULE": "41 * * * *" if event == "schedule" else "",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_REPOSITORY": "damianvtran/local-operator",
+        "GITHUB_REF": "refs/pull/4527/merge" if event == "pull_request" else "refs/heads/main",
+        "GITHUB_REF_NAME": "4527/merge" if event == "pull_request" else "main",
+        "GITHUB_SHA": "b" * 40,
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_OUTPUT": str(tmp_path / "out"),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "sum"),
+    }
+    # Actions' default `run` shell on ubuntu-latest: bash -e.
+    subprocess.run(["bash", "-e", "-c", step["run"]], env=env, check=True, timeout=30)
+    argv = json.loads(argv_file.read_text())
+    assert argv[0] == f"{tmp_path}/fast_gate_check.py"
+    return argv[1:]
+
+
+def test_pr_path_argv_parses_under_the_base_helper(tmp_path: Path) -> None:
+    """PR #4527 QA Q1: the PR-path precondition argv must parse under main's helper.
+
+    On `pull_request` the precondition runs the TRUSTED BASE helper while the
+    workflow comes from the PR, so a new flag on the PR path makes the old
+    argparse exit 2 and turns the required `Merge gate (full suite)` red. New
+    flags belong on the non-PR path only (where the helper is the run's own).
+    """
+    import importlib.util
+
+    pr_argv = _precondition_argv(tmp_path, "pull_request")
+    assert "--schedule" not in pr_argv and "--run-id" not in pr_argv, pr_argv
+    source = _base_helper_source()
+    if source is None:
+        pytest.skip("no base revision (origin/main or HEAD^1) to read the helper from")
+    base = tmp_path / "base_fast_gate_check.py"
+    base.write_text(source)
+    spec = importlib.util.spec_from_file_location("base_fast_gate_check", base)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    parsed = module._parse(pr_argv)  # argparse raises SystemExit(2) on an unknown flag
+    assert parsed.event == "pull_request" and parsed.pr == 4527
+
+    # Off pull_request the run's own helper gets the batching inputs.
+    from scripts.fast_gate_check import _parse
+
+    sched = _parse(_precondition_argv(tmp_path, "schedule"))
+    assert sched.schedule == "41 * * * *" and sched.run_id == 123
+
+
+def test_release_check_axes_match_the_non_pr_matrix() -> None:
+    """`make release-check` requires these axes; they must be what main runs."""
+    from scripts.fast_gate_check import RELEASE_OSES, RELEASE_PYTHONS
+
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    for event in ("push", "schedule", "workflow_dispatch"):
+        for job in ("test", "coverage-report"):
+            raw = jobs[job]["strategy"]["matrix"]["python-version"]
+            assert tuple(_eval_pr_conditional_matrix(raw, event)) == RELEASE_PYTHONS, job
+        raw_os = jobs["tui-e2e"]["strategy"]["matrix"]["os"]
+        assert tuple(_eval_pr_conditional_matrix(raw_os, event)) == RELEASE_OSES
+    makefile = (REPO / "Makefile").read_text()
+    assert "release-check:" in makefile and "--release-check" in makefile
+    agents = (REPO / "AGENTS.md").read_text()
+    # QA Q4: the runbook runs origin/main's helper, never the shared
+    # checkout's (whatever branch or dirty state it is in), right before the cut.
+    check = (
+        "git -C ~/local-operator show origin/main:scripts/fast_gate_check.py | python3 - --local"
+    )
+    assert check in agents and "--release-check" in agents[agents.index(check) :][:200]
+    assert "make -C ~/local-operator release-check" not in agents
+    assert agents.index(check) < agents.index("gh release create vX.Y.Z --target")
+
+
+def test_pr_merge_gate_path_still_runs_every_shard() -> None:
+    """Cut 1 must not touch the labeled-PR gate: every shard, same conditions.
+
+    The heavy jobs' `if:` texts are pinned to their pre-cut form (no hourly,
+    batched or schedule clause may leak into the PR path), the shard lists
+    stay literal and complete, and the red-range step is a failure-only,
+    main-only, continue-on-error step after the verdict.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    gate = (
+        "!cancelled() && needs.precondition.result == 'success' && "
+        "needs.precondition.outputs.ok == 'true' && needs.changes.outputs.{} != 'false'"
+    )
+    assert " ".join(jobs["test"]["if"].split()) == gate.format("unit")
+    assert " ".join(jobs["tui-e2e"]["if"].split()) == gate.format("tui")
+    assert jobs["test"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3, 4, 5]
+    assert jobs["tui-e2e"]["strategy"]["matrix"]["shard"] == [0, 1]
+    for job in ("test", "coverage-report"):
+        raw = jobs[job]["strategy"]["matrix"]["python-version"]
+        assert _eval_pr_conditional_matrix(raw, "pull_request") == ["3.13"]
+    raw_os = jobs["tui-e2e"]["strategy"]["matrix"]["os"]
+    assert _eval_pr_conditional_matrix(raw_os, "pull_request") == ["ubuntu-latest"]
+    steps = jobs["merge-gate"]["steps"]
+    names = [st.get("name") for st in steps]
+    red = steps[names.index("Name the merge range of a red main run")]
+    assert names.index("Fail unless every needed job succeeded or was skipped") < names.index(
+        red["name"]
+    )
+    assert red["if"] == "failure() && github.ref == 'refs/heads/main'"
+    assert red["continue-on-error"] is True
+    assert "--red-range" in red["run"] and "|| true" in red["run"]
+    assert jobs["merge-gate"]["permissions"] == {"contents": "read", "actions": "read"}
 
 
 def test_merge_gate_aggregates_every_full_suite_job() -> None:
@@ -3791,7 +3990,8 @@ def test_merge_gate_aggregates_every_full_suite_job() -> None:
     assert not gate.get(
         "continue-on-error"
     ), "continue-on-error makes a required check report success for a red run"
-    _assert_gate_allowlists_results(gate["steps"][-1]["run"])
+    # The verdict step by name: the fail-soft red-range step follows it.
+    _assert_gate_allowlists_results(_gate_step_runs()["merge-gate"])
 
 
 def test_no_merge_gate_job_is_conditional_on_the_label_name() -> None:
@@ -4023,6 +4223,23 @@ if args[:2] == ["pr", "edit"]:
         handle.write(json.dumps(labels) + "\\n")
     raise SystemExit(0)
 
+if args[:2] == ["run", "rerun"]:
+    # Failed-only rerun (GH #4074 cut 2): refuse like the real API when asked.
+    if os.environ.get("STUB_RERUN_FAIL"):
+        answer(os.environ["STUB_RERUN_FAIL"], 1)
+    Path(os.environ["STUB_RERUN_DONE"]).write_text("1")
+    raise SystemExit(0)
+
+if args[:2] == ["run", "view"]:
+    # `--json attempt --jq .attempt`: the attempt moves only once a rerun was
+    # accepted, unless the case pins it (STUB_VIEW_ATTEMPT) to model a stall.
+    if os.environ.get("STUB_VIEW_ATTEMPT"):
+        print(os.environ["STUB_VIEW_ATTEMPT"])
+    else:
+        done = Path(os.environ["STUB_RERUN_DONE"]).exists()
+        print(int(os.environ.get("STUB_PREV_ATTEMPT", "1")) + (1 if done else 0))
+    raise SystemExit(0)
+
 if args[:2] == ["run", "list"]:
     if "--status" in args:
         if "--commit" not in args or "--event=pull_request" not in args:
@@ -4160,6 +4377,7 @@ def _arm_merge_gate(
         "STUB_ACTIVE_RESPONSE": active_response,
         "STUB_FAST_RC": str(fast_rc),
         "STUB_FAST_ARGV": str(tmp_path / "fast.argv"),
+        "STUB_RERUN_DONE": str(tmp_path / "rerun.done"),
         **(extra_env or {}),
     }
     proc = subprocess.run(
@@ -4561,6 +4779,162 @@ def test_merge_gate_completed_success_history_arms(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic", "ready-to-merge"]
 
 
+def _gate_history(*runs: tuple[int, str, str, int], sha: str = _MERGE_GATE_SHA) -> str:
+    """Newest-first `gh run list --json databaseId,headSha,status,conclusion,attempt,url`."""
+    return json.dumps(
+        [
+            {
+                "databaseId": run_id,
+                "url": f"https://github.com/damianvtran/local-operator/actions/runs/{run_id}",
+                "headSha": sha,
+                "status": status,
+                "conclusion": conclusion,
+                "attempt": attempt,
+                "createdAt": _MERGE_GATE_BEFORE,
+            }
+            for run_id, status, conclusion, attempt in runs
+        ]
+    )
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out"])
+def test_merge_gate_reruns_only_failed_shards_of_a_red_gate_on_the_same_head(
+    tmp_path: Path, conclusion: str
+) -> None:
+    """GH #4074 cut 2: a red gate on the CURRENT head reruns failed jobs, not the suite.
+
+    The label dance starts a whole new run (every shard, both e2e OSes,
+    coverage); `gh run rerun <id> --failed` re-runs only the failed and
+    fail-fast-cancelled jobs plus their dependents on the same run, head and
+    gate base. Mutation that must fail this: drop `--failed`, rerun a run of
+    another head, or still touch the label after a successful rerun.
+    """
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="ready-to-merge synthetic",
+        prev_runs=_gate_history((4242, "completed", conclusion, 1)),
+        extra_env={"STUB_PREV_ATTEMPT": "1"},
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "run rerun 4242 --failed" in calls, calls
+    assert "path: RERUN-FAILED" in proc.stdout and "attempt 1 -> 2" in proc.stdout, proc.stdout
+    assert "gh run watch 4242 --exit-status" in proc.stdout
+    assert "actions/runs/4242" in proc.stdout
+    # Same run, so no label event: a label write here would ALSO start a fresh
+    # full run and double the spend the rerun exists to save.
+    assert not any(call.startswith(("pr edit", "label create")) for call in calls), calls
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["ready-to-merge", "synthetic"]
+
+
+@pytest.mark.parametrize(
+    "history,why",
+    [
+        ("[]", "no earlier gate run"),
+        (_gate_history((4242, "completed", "failure", 1), sha="f" * 40), "no earlier gate run"),
+        (_gate_history((4242, "completed", "success", 1)), "completed/success"),
+        (_gate_history((4242, "completed", "startup_failure", 1)), "completed/startup_failure"),
+        # Newest first: an OLDER red beside a newer green is not a red gate.
+        (
+            _gate_history((4343, "completed", "success", 1), (4242, "completed", "failure", 1)),
+            "completed/success",
+        ),
+    ],
+    ids=["no-run", "other-head", "green", "startup-failure", "older-red-newer-green"],
+)
+def test_merge_gate_takes_the_fresh_label_arm_when_there_is_no_red_run_to_rerun(
+    tmp_path: Path, history: str, why: str
+) -> None:
+    """A new head, a green, or a never-started run has nothing to rerun: label arm."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="ready-to-merge",
+        prev_runs=history,
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert not any(call.startswith("run rerun") for call in calls), calls
+    assert "path: FRESH" in proc.stdout and why in proc.stdout, proc.stdout
+    assert "gh run watch 5678 --exit-status" in proc.stdout
+    assert any("--remove-label" in c for c in calls) and any("--add-label" in c for c in calls)
+
+
+def test_merge_gate_falls_back_to_a_fresh_arm_when_the_rerun_is_refused(tmp_path: Path) -> None:
+    """GitHub refuses reruns (e.g. past its 30-day window): the label arm still gates."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="",
+        prev_runs=_gate_history((4242, "completed", "failure", 3)),
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+        extra_env={
+            "STUB_RERUN_FAIL": (
+                "HTTP 403: Unable to retry this workflow run "
+                "because it was created over a month ago"
+            )
+        },
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "run rerun 4242 --failed" in calls, calls
+    assert "path: FRESH (fallback)" in proc.stderr and "over a month ago" in proc.stderr
+    assert "gh run watch 5678 --exit-status" in proc.stdout
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["ready-to-merge"]
+
+
+def test_merge_gate_fresh_override_skips_the_rerun(tmp_path: Path) -> None:
+    """MERGE_GATE_FRESH=1: the owner wants today's main tip, not the run's old gate base."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="",
+        prev_runs=_gate_history((4242, "completed", "failure", 1)),
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+        extra_env={"MERGE_GATE_FRESH": "1"},
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert not any(call.startswith("run rerun") for call in calls), calls
+    assert "path: FRESH: MERGE_GATE_FRESH=1" in proc.stdout
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["ready-to-merge"]
+
+
+def test_merge_gate_rerun_that_never_starts_fails_without_a_label_arm(tmp_path: Path) -> None:
+    """Accepted but the attempt never moves: say so, and do not ALSO start a full run."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="",
+        prev_runs=_gate_history((4242, "completed", "failure", 2)),
+        extra_env={"STUB_VIEW_ATTEMPT": "2"},
+    )
+    # make reports a failed recipe as 2.
+    assert proc.returncode == 2, f"{proc.stdout}\n{proc.stderr}"
+    assert "did not move past 2" in proc.stderr and "MERGE_GATE_FRESH=1" in proc.stderr
+    assert sum(call.startswith("run view 4242") for call in calls) == 12
+    assert not any(call.startswith("pr edit") for call in calls), calls
+
+
+@pytest.mark.parametrize("blocker", ["fast-ci-red", "live-gate"])
+def test_merge_gate_prechecks_still_gate_the_rerun_path(tmp_path: Path, blocker: str) -> None:
+    """The fast-CI pre-check and the duplicate-arm advisory run BEFORE any rerun."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="",
+        prev_runs=_gate_history((4242, "completed", "failure", 1)),
+        fast_rc=1 if blocker == "fast-ci-red" else 0,
+        active_runs=json.dumps(
+            [
+                {
+                    "databaseId": 9999,
+                    "url": "https://example.test/runs/9999",
+                    "headSha": _MERGE_GATE_SHA,
+                    "status": "in_progress",
+                }
+            ]
+            if blocker == "live-gate"
+            else []
+        ),
+    )
+    # make reports a failed recipe as 2.
+    assert proc.returncode == 2, f"{proc.stdout}\n{proc.stderr}"
+    assert not any(call.startswith(("run rerun", "pr edit")) for call in calls), calls
+
+
 @pytest.mark.parametrize("failure", ["request timed out", "lookup unusable"])
 def test_merge_gate_override_skips_unreachable_advisory_lookup(
     tmp_path: Path, failure: str
@@ -4838,7 +5212,14 @@ def _assert_gate_allowlists_results(run: str) -> None:
 def _gate_step_runs() -> dict[str, str]:
     ci = yaml.safe_load(CI_YML.read_text())["jobs"]["ci-gate"]
     full = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]["merge-gate"]
-    return {"ci-gate": ci["steps"][-1]["run"], "merge-gate": full["steps"][-1]["run"]}
+    # By NAME for merge-gate: the fail-soft red-range step now follows the
+    # verdict step, so "last step" would test the wrong script.
+    (verdict,) = [
+        step["run"]
+        for step in full["steps"]
+        if step.get("name") == "Fail unless every needed job succeeded or was skipped"
+    ]
+    return {"ci-gate": ci["steps"][-1]["run"], "merge-gate": verdict}
 
 
 @pytest.mark.skipif(
@@ -5001,6 +5382,7 @@ def _eval_ci_concurrency(
     sha: str,
     commit_message: str = "feat(cli): ordinary merge (#4200)",
     workflow: str = "Pre-release CI Testing",
+    schedule: str = "",
 ) -> tuple[str, bool]:
     """Evaluate ci.yml's concurrency `group` and `cancel-in-progress` expressions.
 
@@ -5026,6 +5408,7 @@ def _eval_ci_concurrency(
         "github.sha": sha,
         "github.event.head_commit.message": commit_message,
         "github.workflow": workflow,
+        "github.event.schedule": schedule,
     }
 
     # Translate the Actions subset (`&&`, `||`, `==`, `!=`, string literals,
@@ -5444,3 +5827,54 @@ def test_helpdesk_reconcile_sweep_timeout_is_bounded() -> None:
     missing = copy.deepcopy(doc)
     missing["jobs"]["reconcile"].pop("timeout-minutes", None)
     assert _helpdesk_reconcile_timeout_problems(missing) != []
+
+
+def _full_suite_uploads() -> list[tuple[str, dict[str, Any]]]:
+    """(job id, step) for every upload-artifact step in full-suite.yml."""
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    return [
+        (job_id, step)
+        for job_id, job in jobs.items()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    ]
+
+
+def test_full_suite_artifacts_survive_a_failed_only_rerun() -> None:
+    """GH #4074 cut 2: `make merge-gate` reruns failed jobs on the SAME run.
+
+    Artifacts are run-scoped and v4+ uploads are immutable: a re-run job that
+    uploads a name its earlier attempt already uploaded gets a 409 and goes red
+    on the upload, not on its tests, on every rerun. So an upload that can run
+    in a FAILED or cancelled attempt (`always()`) must carry the attempt in its
+    name; the coverage data, which coverage-report must find across attempts
+    under one pattern, stays unsuffixed and overwrites instead. Mutation that
+    must fail this: drop `-attempt-${{ github.run_attempt }}` from the e2e
+    junit name, or drop `overwrite: true` / add an attempt to coverage-data.
+    """
+    for job_id, step in _full_suite_uploads():
+        name = str(step["with"]["name"])
+        if str(step.get("if", "")).startswith("always()") and job_id != "coverage-report":
+            assert name.endswith("-attempt-${{ github.run_attempt }}"), (
+                f"{job_id}: always() upload {name!r} would collide with its own "
+                "earlier attempt on a failed-only rerun"
+            )
+    coverage = [
+        s for j, s in _full_suite_uploads() if str(s["with"]["name"]).startswith("coverage-data-")
+    ]
+    assert len(coverage) == 1, coverage
+    assert (
+        coverage[0]["with"]["name"]
+        == "coverage-data-${{ matrix.python-version }}-${{ matrix.shard }}"
+    )
+    assert coverage[0]["with"].get("overwrite") is True
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    downloads = [
+        s["with"]["pattern"]
+        for s in jobs["coverage-report"]["steps"]
+        if str(s.get("uses", "")).startswith("actions/download-artifact@")
+    ]
+    # The carried shards' attempt-1 data must still match the combine's pattern.
+    assert downloads == ["coverage-data-${{ matrix.python-version }}-*"], downloads
+    report = [s for j, s in _full_suite_uploads() if j == "coverage-report"]
+    assert all(s["with"].get("overwrite") is True for s in report), report

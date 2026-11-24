@@ -53,6 +53,7 @@ from typing import (
 from local_operator.asks.surfaces import UNVERIFIED as UNVERIFIED_SURFACE
 from local_operator.buildwatch import UpdateLock
 from local_operator.buildwatch import wake_within_window as _wake_within_window
+from local_operator.harness.approval import AUTO_MODE_EFFECT as _AUTO_MODE_EFFECT
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
 )
@@ -2222,7 +2223,7 @@ class ServingSessionHandle(SessionHandle):
 
         The receipt goes out as a :class:`NoticeEvent` from THIS process, the
         one that owns the gate, so every attached viewer and the phone see
-        the effect ("every tool runs without asking"). It is now the ONLY
+        the effect (AUTO_MODE_EFFECT). It is now the ONLY
         receipt for the event: the TUI no longer prints a value clause when a
         runtime is attached (design round 1, D1), on the same "the process that
         decided is the one the user should read" rule the ``model`` section
@@ -2324,7 +2325,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         self._emit_notice(
             (
-                "tool approvals: auto — config.yml changed; every tool runs without asking"
+                f"tool approvals: auto — config.yml changed; {_AUTO_MODE_EFFECT}"
                 if wanted_auto
                 else "tool approvals: ask — config.yml changed; write and command tools "
                 "prompt again"
@@ -12050,7 +12051,7 @@ class ServingSessionHandle(SessionHandle):
         if not argument:
             live = "auto" if self._auto_approve else "ask"
             effect = (
-                "every tool runs without asking"
+                _AUTO_MODE_EFFECT
                 if self._auto_approve
                 else "write and command tools prompt before running"
             )
@@ -12199,8 +12200,7 @@ class ServingSessionHandle(SessionHandle):
         return SlashResult(
             kind="notice",
             text=(
-                "tool approvals: auto — every tool runs without asking (this session)"
-                + _GATE_MARKER_CLAUSE
+                f"tool approvals: auto — {_AUTO_MODE_EFFECT} (this session)" + _GATE_MARKER_CLAUSE
                 if wanted_auto
                 else "tool approvals: ask — write and command tools prompt before running "
                 "(this session)"

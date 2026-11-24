@@ -3,7 +3,8 @@
 The helper is the cost gate in front of the ~380-runner-minute full suite, so
 the cases that matter are the ones where a WRONG green would spend money or
 a wrong red would block a merge: stale attempts, other heads/branches, other
-workflows, fork runs, API failures, and main supersession. Each test starts the
+workflows, fork runs, API failures, main-push batching, the hourly batch's dedup, the
+release pre-cut check and the fail-soft red-range report. Each test starts the
 script as a subprocess (the same entry point the workflow runs) against a local
 HTTP server that serves canned JSON; nothing touches the network or `gh`.
 """
@@ -14,6 +15,7 @@ import json
 import subprocess
 import sys
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -125,8 +127,6 @@ def cli(api: Api, tmp_path: Path, *args: str) -> tuple[int, str, dict[str, str]]
             str(out),
             "--summary",
             str(tmp_path / "sum"),
-            "--settle",
-            "0",
             *args,
         ],
         capture_output=True,
@@ -360,47 +360,350 @@ def tag_obj(target_type: str, target_sha: str) -> dict[str, Any]:
     return {"object": {"type": target_type, "sha": target_sha}}
 
 
-def push_routes(*, tip=TIP, subject="feat: x", tags=(), status="ahead", tip_runs=None):
+def push_routes(*, subject="feat: x", tags=()):
+    """A main push: only the commit message and the tag refs are ever read."""
     return {
         f"/repos/{REPO}/commits/{SHA}": {"commit": {"message": subject}},
-        f"/repos/{REPO}/git/ref/heads/main": {"object": {"sha": tip}},
         REFS: [lightweight(t, f"v{i}") for i, t in enumerate(tags)],
-        f"/repos/{REPO}/compare/{SHA}...{tip}": {"status": status},
-        FULL: {
-            "workflow_runs": (
-                tip_runs if tip_runs is not None else [{"head_sha": tip, "conclusion": None}]
-            )
-        },
     }
 
 
-def test_push_superseded_by_tested_newer_tip(serve, tmp_path):
-    code, out, o = cli(serve(push_routes()), tmp_path, *PUSH)
-    assert (code, o["ok"], o["superseded"]) == (0, "false", "true") and "SUPERSEDED" in out
+def test_ordinary_push_is_batched_without_any_settle_or_run_lookup(serve, tmp_path):
+    """Cut 1: an ordinary merge defers to the hourly batch, immediately."""
+    api = serve(push_routes())
+    code, out, o = cli(api, tmp_path, *PUSH)
+    assert (code, o["ok"], o["superseded"]) == (0, "false", "true") and "BATCHED" in out
+    assert not any("/actions/" in p for p in api.seen), api.seen
 
 
 @pytest.mark.parametrize(
     "routes",
     [
-        push_routes(tip=SHA),  # we ARE the tip
         push_routes(subject="chore(release): bump version to 1.2.3"),
-        push_routes(tags=[TIP]),
+        # 0.112.1-0.112.4 landed as merge commits: the PR title is on line 3.
+        push_routes(
+            subject=(
+                "Merge pull request #4460 from o/release/w32\n\n"
+                "chore(release): bump version to 0.112.4"
+            )
+        ),
         push_routes(tags=[SHA]),
-        push_routes(status="diverged"),
-        push_routes(tip_runs=[]),
-        push_routes(tip_runs=[{"head_sha": TIP, "conclusion": "cancelled"}]),
-        {},  # API down: unknown tip -> full
+        {},  # API down: cannot classify -> full
     ],
 )
-def test_push_runs_in_full_unless_supersession_is_proved(serve, tmp_path, routes):
+def test_release_tagged_or_unknown_push_runs_in_full(serve, tmp_path, routes):
     code, _, o = cli(serve(routes), tmp_path, *PUSH)
     assert (code, o["ok"], o["superseded"]) == (0, "true", "false")
 
 
-def test_schedule_is_never_gated_or_superseded(serve, tmp_path):
+def test_merge_commit_of_an_ordinary_pr_is_still_batched(serve, tmp_path):
+    routes = push_routes(
+        subject="Merge pull request #4493 from o/fix\n\nfix: x (chore(release) later)"
+    )
+    code, _, o = cli(serve(routes), tmp_path, *PUSH)
+    assert (code, o["superseded"]) == (0, "true")
+
+
+NIGHTLY = (
+    "--event",
+    "schedule",
+    "--schedule",
+    "17 7 * * *",
+    "--ref",
+    "refs/heads/main",
+    "--sha",
+    SHA,
+)
+HOURLY = (
+    "--event",
+    "schedule",
+    "--schedule",
+    "41 * * * *",
+    "--ref",
+    "refs/heads/main",
+    "--sha",
+    SHA,
+)
+FULL_PATH = ".github/workflows/full-suite.yml"
+ME = 500
+
+
+def test_nightly_is_never_gated_or_superseded(serve, tmp_path):
     api = serve({})
-    code, _, o = cli(api, tmp_path, "--event", "schedule", "--ref", "refs/heads/main", "--sha", SHA)
+    code, _, o = cli(api, tmp_path, *NIGHTLY)
     assert (code, o["ok"], o["superseded"]) == (0, "true", "false") and api.seen == []
+
+
+def full_run(
+    rid, *, status="completed", conclusion="success", event="schedule", msg="feat: x", **kw
+):
+    run = run_obj(rid, event=event, branch="main", status=status, path=FULL_PATH, prs=(), **kw)
+    run["conclusion"] = conclusion if status == "completed" else None
+    run["head_commit"] = {"message": msg}
+    return run
+
+
+def attempt(rid):
+    return f"/repos/{REPO}/actions/runs/{rid}/attempts/1/jobs"
+
+
+GREEN_FULL = jobs(
+    ("changes", "success"),
+    ("precondition", "success"),
+    ("test (3.12, 0)", "success"),
+    ("test (3.13, 0)", "success"),
+    ("coverage-report (3.12)", "success"),
+    ("coverage-report (3.13)", "success"),
+    ("tui-e2e (ubuntu-latest, 0)", "success"),
+    ("tui-e2e (macos-latest, 0)", "success"),
+    ("Merge gate (full suite)", "success"),
+)
+#: What a BATCHED/HOURLY-SKIP run looks like: run-level success, nothing ran.
+BATCHED = jobs(
+    ("changes", "success"),
+    ("precondition", "success"),
+    ("test", "skipped"),
+    ("coverage-report", "skipped"),
+    ("tui-e2e", "skipped"),
+    ("Merge gate (full suite)", "skipped"),
+)
+RED_FULL = jobs(
+    ("precondition", "success"),
+    ("test (3.12, 0)", "failure"),
+    ("test (3.13, 0)", "success"),
+    ("Merge gate (full suite)", "failure"),
+)
+IN_FLIGHT = jobs(("precondition", "success"), ("test (3.12, 0)", None))
+
+
+def hourly(serve, tmp_path, runs, job_map=None):
+    routes = {FULL: {"workflow_runs": runs}}
+    for rid, body in (job_map or {}).items():
+        routes[attempt(rid)] = body
+    code, out, o = cli(serve(routes), tmp_path, *HOURLY, "--run-id", str(ME))
+    assert code == 0, out
+    return o["superseded"], out
+
+
+@pytest.mark.parametrize(
+    ("runs", "job_map"),
+    [
+        ([full_run(1)], {1: GREEN_FULL}),
+        (
+            [full_run(1, conclusion="failure")],
+            {1: RED_FULL},
+        ),  # a red verdict is not re-proved hourly
+        ([full_run(1, status="in_progress")], {1: IN_FLIGHT}),
+        ([full_run(1, status="queued")], {1: jobs()}),  # older schedule run still deciding
+        ([full_run(1, status="queued", event="push", msg="chore(release): bump")], {1: jobs()}),
+    ],
+)
+def test_hourly_skips_a_tip_already_covered(serve, tmp_path, runs, job_map):
+    superseded, out = hourly(serve, tmp_path, runs, job_map)
+    assert superseded == "true" and "HOURLY SKIP" in out
+
+
+@pytest.mark.parametrize(
+    ("runs", "job_map"),
+    [
+        ([], {}),
+        ([full_run(1, event="push")], {1: BATCHED}),  # batched push: success, nothing ran
+        ([full_run(1)], {1: BATCHED}),  # an earlier hourly that itself skipped
+        ([full_run(1, conclusion="cancelled")], {1: RED_FULL}),  # cancelled is no verdict
+        (
+            [full_run(ME + 1, status="queued")],
+            {ME + 1: jobs()},
+        ),  # NEWER deciding run: no mutual wait
+        ([full_run(1, status="queued", event="push")], {1: jobs()}),  # ordinary push will batch
+        ([full_run(1, event="pull_request")], {1: GREEN_FULL}),  # a PR run tests a merge ref
+        ([full_run(ME)], {ME: GREEN_FULL}),  # never counts itself
+        ([full_run(1)], {}),  # jobs API 404: unknown -> full
+    ],
+)
+def test_hourly_runs_in_full_unless_coverage_is_proved(serve, tmp_path, runs, job_map):
+    assert hourly(serve, tmp_path, runs, job_map)[0] == "false"
+
+
+RELEASE = ("--event", "release-check", "--release-check", "--sha", SHA)
+
+
+@pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch"])
+def test_release_check_passes_on_a_green_full_matrix_run(serve, tmp_path, event):
+    routes = {FULL: {"workflow_runs": [full_run(1, event=event)]}, attempt(1): GREEN_FULL}
+    code, out, _ = cli(serve(routes), tmp_path, *RELEASE)
+    assert code == 0 and "RELEASE CHECK OK" in out, out
+
+
+def _drop(body, name):
+    return {"jobs": [j for j in body["jobs"] if j["name"] != name]}
+
+
+@pytest.mark.parametrize(
+    ("runs", "job_map", "needle"),
+    [
+        ([], {}, "no full-suite run"),
+        ([full_run(1)], {1: BATCHED}, "never ran for 3.12"),  # run-level success, matrix skipped
+        ([full_run(1, conclusion="failure")], {1: RED_FULL}, "failure"),
+        ([full_run(1, status="in_progress")], {1: IN_FLIGHT}, "in_progress"),
+        ([full_run(1)], {1: _drop(GREEN_FULL, "tui-e2e (macos-latest, 0)")}, "macos-latest"),
+        ([full_run(1)], {1: _drop(GREEN_FULL, "test (3.12, 0)")}, "test never ran for 3.12"),
+        ([full_run(1)], {1: _drop(GREEN_FULL, "coverage-report (3.13)")}, "coverage-report"),
+        ([full_run(1)], {1: _drop(GREEN_FULL, "Merge gate (full suite)")}, "Merge gate"),
+        ([full_run(1, event="pull_request")], {1: GREEN_FULL}, "no full-suite run"),
+    ],
+)
+def test_release_check_refuses_anything_short_of_a_full_green_run(
+    serve, tmp_path, runs, job_map, needle
+):
+    routes = {FULL: {"workflow_runs": runs}, **{attempt(r): b for r, b in job_map.items()}}
+    code, out, _ = cli(serve(routes), tmp_path, *RELEASE)
+    assert code == 1 and "RELEASE CHECK FAILED" in out and needle in out, out
+
+
+def test_release_check_needs_a_full_sha_and_fails_closed_on_api_errors(serve, tmp_path):
+    # QA Q3: a malformed SHA is a usage error (exit 2), not "wait for its run".
+    for bad in ("abc123", "NOTASHA", "A" * 40, ""):
+        code, out, _ = cli(serve({}), tmp_path, "--event", "x", "--release-check", "--sha", bad)
+        assert code == 2 and "usage: make release-check SHA=<40-hex" in out, (bad, out)
+        assert "gh run list" not in out
+    code, out, _ = cli(serve({}), tmp_path, *RELEASE)
+    assert code == 3 and "UNKNOWN" in out
+
+
+GREEN = "9" * 40
+MID = "8" * 40
+RED_ARGS = (
+    "--event",
+    "schedule",
+    "--ref",
+    "refs/heads/main",
+    "--sha",
+    SHA,
+    "--run-id",
+    str(ME),
+    "--red-range",
+)
+
+
+def commit(sha, parent, message):
+    return {"sha": sha, "parents": [{"sha": parent}], "commit": {"message": message}}
+
+
+def red_routes():
+    return {
+        FULL: {
+            "workflow_runs": [
+                full_run(3, event="push", sha=OTHER),  # newer success, but batched
+                full_run(2, sha=GREEN),
+            ]
+        },
+        attempt(3): BATCHED,
+        attempt(2): GREEN_FULL,
+        f"/repos/{REPO}/compare/{GREEN}...{SHA}": {
+            "status": "ahead",
+            "total_commits": 3,
+            "commits": [
+                commit(MID, GREEN, "fix(cli): squash merged (#4501)"),
+                commit("7" * 40, MID, "side-branch commit inside a merge"),
+                {
+                    "sha": SHA,
+                    "parents": [{"sha": MID}, {"sha": "7" * 40}],
+                    "commit": {
+                        "message": "Merge pull request #4502 from o/feat\n\nfeat(tui): batched"
+                    },
+                },
+            ],
+        },
+    }
+
+
+def test_red_run_names_the_range_and_its_merged_prs(serve, tmp_path):
+    code, out, _ = cli(serve(red_routes()), tmp_path, *RED_ARGS)
+    summary = (tmp_path / "sum").read_text()
+    assert code == 0
+    assert f"RED BATCH RANGE: {GREEN}..{SHA} (2 first-parent commits" in out
+    assert "#4502 feat(tui): batched" in out and "#4501 fix(cli): squash merged" in out
+    assert "side-branch" not in out  # first-parent only: PRs, not their inner commits
+    assert f"git log --first-parent --oneline {GREEN}..{SHA}" in summary
+
+
+def _stamped(run, created, seconds):
+    """A run created at ``created`` that took ``seconds`` (the API's timing fields)."""
+    run.update(created_at=created, run_started_at=created)
+    ts = datetime.fromisoformat(created.replace("Z", "+00:00")) + timedelta(seconds=seconds)
+    run["updated_at"] = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return run
+
+
+def _history(n_batched, green_age_hours, *, unstamped=()):
+    """Newest-first main success history: ``n_batched`` no-op runs, then GREEN.
+
+    Batched pushes and hourly skips finish in about a minute (PR #4527 R1/Q2:
+    ~70/day once batching ships); ``unstamped`` ids lack timing fields, so the
+    scan must read their jobs to learn they ran nothing.
+    """
+    now = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+    runs = []
+    for i in range(n_batched):
+        rid = 10_000 - i
+        created = (now - timedelta(minutes=10 * i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        run = full_run(rid, event="push" if i % 3 else "schedule", sha=OTHER)
+        runs.append(run if rid in unstamped else _stamped(run, created, 60))
+    green_at = (now - timedelta(hours=green_age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    runs.append(_stamped(full_run(2, sha=GREEN), green_at, 2400))
+    routes = red_routes()
+    for page in range(0, len(runs), 100):
+        routes[f"{FULL}?&page={page // 100 + 1}"] = {"workflow_runs": runs[page : page + 100]}
+    del routes[FULL]
+    for rid in unstamped:
+        routes[attempt(rid)] = BATCHED
+    return routes
+
+
+def test_red_range_walks_past_hundreds_of_batched_successes(serve, tmp_path):
+    """R1/Q2/R3: >300 no-op successes ahead of the real green, across 4 pages."""
+    api = serve(_history(330, green_age_hours=60, unstamped=(10_000, 9_999, 9_998)))
+    code, out, _ = cli(api, tmp_path, *RED_ARGS)
+    assert code == 0 and f"RED BATCH RANGE: {GREEN}..{SHA}" in out, out
+    assert "unavailable" not in out
+    pages = [p for p in api.seen if p.startswith(FULL)]
+    assert len(pages) == 4 and pages[-1].endswith("&page=4"), pages
+    # Quick runs are skipped without a jobs call; only unstamped ones + GREEN are read.
+    job_calls = sorted(p.split("?")[0] for p in api.seen if "/attempts/" in p)
+    assert job_calls == sorted([attempt(2), *(attempt(r) for r in (10_000, 9_999, 9_998))])
+
+
+def test_red_range_stops_at_the_age_bound_instead_of_crawling(serve, tmp_path):
+    """No green within RED_RANGE_MAX_AGE_DAYS: a clear fail-soft line, bounded reads."""
+    api = serve(_history(150, green_age_hours=15 * 24))
+    code, out, _ = cli(api, tmp_path, *RED_ARGS)
+    assert code == 0 and "RED BATCH RANGE unavailable" in out and "14 days" in out, out
+    assert "--status success" not in out and "release-check SHA=" in out  # R2 guidance
+    assert attempt(2) not in api.seen  # the too-old green is never inspected
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        RED_ARGS,  # API down
+        ("--event", "pull_request", "--ref", "refs/pull/7/merge", "--sha", SHA, "--red-range"),
+    ],
+)
+def test_red_range_is_fail_soft(serve, tmp_path, args):
+    code, out, _ = cli(serve({}), tmp_path, *args)
+    assert code == 0 and ("unavailable" in out or "not a main run" in out), out
+
+
+def test_red_range_without_a_token_still_exits_zero(tmp_path):
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--repo", REPO, *RED_ARGS],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0 and "unavailable" in proc.stdout
 
 
 # --- tag resolution (QA Q1): every tag, annotated ones peeled, bounded --------
@@ -425,7 +728,7 @@ def test_tag_beyond_the_first_hundred_refs_is_found(serve, tmp_path):
 def test_annotated_tag_on_the_commit_is_found(serve, tmp_path):
     routes = push_routes()
     routes[REFS] = [annotated("1" * 40)]
-    routes[f"/repos/{REPO}/git/tags/{'1' * 40}"] = tag_obj("commit", TIP)
+    routes[f"/repos/{REPO}/git/tags/{'1' * 40}"] = tag_obj("commit", SHA)
     assert _full(routes, tmp_path, serve)[0] == "false"
 
 
@@ -443,11 +746,11 @@ def test_match_on_a_later_link_page_is_found(serve, tmp_path):
         [lightweight(OTHER)],
         f'<{{api}}{REFS}?page=2>; rel="next", <{{api}}{REFS}?page=9>; rel="last"',
     )
-    routes[f"{REFS}?page=2"] = [lightweight(TIP, "late")]
+    routes[f"{REFS}?page=2"] = [lightweight(SHA, "late")]
     assert _full(routes, tmp_path, serve)[0] == "false"
 
 
-def test_unrelated_complete_tag_set_still_supersedes(serve, tmp_path):
+def test_unrelated_complete_tag_set_still_batches(serve, tmp_path):
     routes = push_routes()
     routes[REFS] = [lightweight(OTHER), annotated("1" * 40, "v2")]
     routes[f"/repos/{REPO}/git/tags/{'1' * 40}"] = tag_obj("commit", OTHER)

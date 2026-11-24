@@ -1830,6 +1830,12 @@ class _MachineMemorySweep:
         #: same reason.
         self.last_key: tuple[str, int | None] | None = None
         self._task: "asyncio.Task[Any] | None" = None
+        #: The per-runtime guard's streaks (``runtime_memory.RuntimeGuardTracker``),
+        #: built lazily so this module still starts without the runtime stack.
+        self._runtime_tracker: Any = None
+        #: The per-runtime guard's last structural key, for the same INFO/DEBUG
+        #: split as :attr:`last_key`.
+        self.last_runtime_key: tuple[str, tuple[int, ...]] | None = None
 
     def seconds_until(self, now: float | None = None) -> float:
         """How long the loop may sleep before this pass is due again."""
@@ -1916,6 +1922,13 @@ class _MachineMemorySweep:
             park_idle_sessions_sync,
         )
 
+        # THE PER-RUNTIME GUARD RUNS FIRST, on the same cadence and thread: it is
+        # the one bound on a runtime's OWN memory (the machine pass below never
+        # ends a runtime), it reads only syscalls, and a runaway it ends is memory
+        # the fleet sum below no longer has to account for. Its failure is logged
+        # and never costs the machine pass (see :mod:`runtime_memory`).
+        self.sweep_runtimes(apply=apply)
+
         def _relieve(reason: str) -> int:
             # The fleet guard's first rung: park idle sessions before ending a
             # fragment (see ``park_pressure``). Runs on this worker thread.
@@ -1939,6 +1952,25 @@ class _MachineMemorySweep:
             self._ended.append(
                 (time.monotonic(), frozenset(getattr(report, "killed_lineage", frozenset())))
             )
+        return report
+
+    def sweep_runtimes(self, *, apply: bool = True) -> Any:
+        """One per-runtime guard pass; never raises (a guard must not add a crash path)."""
+        try:
+            from local_operator.session.runtime import runtime_memory
+
+            if self._runtime_tracker is None:
+                self._runtime_tracker = runtime_memory.RuntimeGuardTracker()
+            report = runtime_memory.runtime_memory_pass(
+                self.config_dir, self._runtime_tracker, apply=apply
+            )
+        except Exception:  # noqa: BLE001 — the machine pass still runs
+            logger.warning("the runtime memory guard failed; runtimes are unbounded", exc_info=True)
+            return None
+        key = (report.state, tuple(sorted(pid for pid, _mb, _n in report.over)))
+        changed = key != self.last_runtime_key
+        self.last_runtime_key = key
+        (logger.info if changed or report.acts else logger.debug)("%s", report.summary())
         return report
 
     def in_cooldown(self, lineage: "frozenset[tuple[str, int]]", now: float | None = None) -> bool:
@@ -3184,6 +3216,37 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
                 if sweeper.in_flight or rescue_seat.in_flight:
                     await _sleep_in_slices(
                         config_dir, SLICE_S, None, failure_check=sweeper.raise_if_failed
+                    )
+                    continue
+                # THE RUNTIME MEMORY GUARD HOLDS THE SUPERVISOR UP (QA round 1 on
+                # #4519, Q1). This process is the guard's only host, and "nothing
+                # fireable" is exactly the state the guard's own act leaves behind
+                # (it makes the stopped session's wakes dormant): retiring here left
+                # a second 1.2 GiB runaway unguarded for 12 minutes in QA, and a
+                # store with nothing scheduled had no guard at all. So while the
+                # guard is enabled and a guardable runtime is live, stay up and run
+                # ONLY the memory seat (its machine pass included) on its own 60 s
+                # interval. Re-decided every slice, so the moment the last runtime
+                # exits this falls through to the retirement below.
+                #
+                # The restart half is launchd's ``StartInterval`` self-heal (900 s):
+                # a supervisor that retired before a runtime started is relaunched
+                # within one interval, sees the live runtime here and stays. No new
+                # start path from the runtime itself: a fork per runtime boot would
+                # cost every session for a bound that one relaunch tick already
+                # provides.
+                from local_operator.session.runtime.runtime_memory import (
+                    holds_supervisor,
+                )
+
+                if await asyncio.to_thread(holds_supervisor, config_dir):
+                    memory_sweep.kick()
+                    await _sleep_in_slices(
+                        config_dir,
+                        SLICE_S,
+                        None,
+                        failure_check=sweeper.raise_if_failed,
+                        interrupt=move.due if move is not None else None,
                     )
                     continue
                 if await _should_retire(config_dir):

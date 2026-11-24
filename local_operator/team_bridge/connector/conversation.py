@@ -85,6 +85,7 @@ from .batch_screen import (
     allocation_for,
     came_from_void_batch,
     take_fetched,
+    take_prior_hold,
     take_result,
 )
 from .coalesce import CARD_COALESCED, card_is_buffered
@@ -216,6 +217,13 @@ class ConversationCardMetadata:
     #: B4b: the screener HELD this message and the owner chose to let the agent
     #: read it (``hold_release.py``). Drives ONE provenance line; never persisted.
     owner_released: bool = False
+    #: Seconds this message sat in a screening hold before THIS delivery, set only
+    #: when the delivery came out of a ``write_once_conflict`` hold (a stale allow
+    #: superseded by a live one) or an owner Deliver; ``0`` says nothing. Derived
+    #: locally (hold ``created_at`` -> now). Recorded in the card record only when
+    #: nonzero (see :func:`_card_record`), so every ordinary card's record is
+    #: byte-identical to an older build's. See :func:`delayed_delivery_line`.
+    held_for_s: int = 0
     #: Messages in this conversation that were NOT delivered to the receiving
     #: session since the last one that was, other than its own posts (see
     #: :func:`_messages_since_last_delivery`). Zero = say nothing.
@@ -235,6 +243,73 @@ class ConversationCardMetadata:
     # Appended for positional compatibility. Ephemeral post-allow display only,
     # never a routing/allocation identity or a durable card-record field.
     session_agent_display: str | None = None
+
+
+#: Below this a hold is ordinary screening latency, not a delay worth a billed line.
+DELAYED_DELIVERY_MIN_S = 60
+
+
+def _held_duration(seconds: int) -> str:
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} min"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours} h {minutes % 60} min" if minutes % 60 else f"{hours} h"
+    return f"{hours // 24} days"
+
+
+def delayed_delivery_line(held_for_s: int) -> str | None:
+    """The ONE quiet card line for a message delivered long after it was sent.
+
+    WHY (operator via Aida, 2026-11-24, write-once fix PR-2). Messages screening
+    allowed sat for days in ``write_once_conflict`` holds; when they finally go
+    out, an agent reading "Ok can you send that…" with no context would treat a
+    days-old request as fresh. The SENT time is already the hub's own: the card
+    carries no timestamp and ``channel_history`` rows are the hub's rows
+    unchanged (only ``body_hash``/``sender_delivery_summary`` are dropped), so
+    the original time is what the agent reads there. This line only says the
+    delivery itself was late and why, in closed words: no hold code, no
+    screener detail. ``None`` below :data:`DELAYED_DELIVERY_MIN_S`.
+    """
+
+    if held_for_s < DELAYED_DELIVERY_MIN_S:
+        return None
+    return (
+        f"delivered late — held {_held_duration(held_for_s)} by screening; "
+        "its sent time in channel_history is the original"
+    )
+
+
+def prior_delay_hold(store: Any, owner: Any, message_id: str) -> tuple[float, bool] | None:
+    """``(earliest created_at, was_write_once_conflict)`` of this message's holds, or ``None``.
+
+    Read BEFORE screening, because a committed receipt deletes the hold rows.
+    Both key spellings count (the screener's bare id and the connector's
+    composite feed ref). Read-only and best-effort: a failure means no marker.
+    """
+
+    from ..store import screening_hold_message_id
+
+    try:
+        rows = store.screening_hold_rows(owner)
+    except Exception:  # noqa: BLE001 — a marker never blocks a delivery
+        return None
+    earliest: float | None = None
+    conflict = False
+    for row in rows or ():
+        stored = str(row.get("message_id") or "")
+        try:
+            bare = screening_hold_message_id(stored)
+        except Exception:  # noqa: BLE001 — a malformed key matches its raw spelling only
+            bare = stored
+        if message_id not in (stored, bare):
+            continue
+        created = row.get("created_at")
+        if isinstance(created, (int, float)) and not isinstance(created, bool):
+            earliest = float(created) if earliest is None else min(earliest, float(created))
+        conflict = conflict or row.get("hold_code") == "write_once_conflict"
+    return None if earliest is None else (earliest, conflict)
 
 
 def card_directed(metadata: ConversationCardMetadata) -> str:
@@ -402,6 +477,9 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # the line names disclosure as well as action. Billed only on a wake
         # for a released message.
         lines.append(OWNER_RELEASED_CARD_LINE)
+    delayed = delayed_delivery_line(metadata.held_for_s)
+    if delayed:
+        lines.append(delayed)
     if len(metadata.coalesced_message_ids) > 1:
         # One card for several messages that landed inside the coalescing
         # window: each was screened and admitted on its own, and the agent
@@ -1912,6 +1990,11 @@ def _card_record(metadata: ConversationCardMetadata) -> str:
     for name in (*_CARD_RECORD_LABELS, *_CARD_RECORD_LIVE):
         raw.pop(name, None)
     raw["sender_several"] = metadata.sender_label == _SEVERAL_SENDERS
+    if not raw.get("held_for_s"):
+        # Absent unless a delayed-delivery line rides this card: an older build
+        # refuses a record with a key it does not know (rollback safety), and
+        # the replay of a delayed card must render the same line it minted.
+        raw.pop("held_for_s", None)
     return json.dumps(raw, sort_keys=True, separators=(",", ":"))
 
 
@@ -3318,6 +3401,10 @@ async def handle_conversation_available(
         # A batch screen of THIS body hash in this pass is this message's own
         # verdict (one call, one verdict per message); anything else screens
         # here, unchanged.
+        # A batch pass may already have committed this message's receipt and
+        # deleted its hold (M1), so its pre-batch capture wins; otherwise the
+        # hold rows are still here to read.
+        prior_hold = take_prior_hold(ref) or prior_delay_hold(store, owner, message_id)
         result = take_result(ref, body_hash) or await screen_item(
             owner, item, config_dir=config_dir, auth_store=auth_store, settings=settings
         )
@@ -3425,6 +3512,11 @@ async def handle_conversation_available(
             # Nothing is granted: ``admitted_files_hash`` stays ``None``, so the hub
             # keeps the files withheld from this endpoint.
             metadata = replace(metadata, owner_released=True)
+        if prior_hold is not None and (released or prior_hold[1]):
+            # Delayed delivery marker: only after an owner Deliver or a
+            # write-once supersession, the two paths that can release a message
+            # days after it was sent.
+            metadata = replace(metadata, held_for_s=max(0, int(time.time() - prior_hold[0])))
 
         async def _admit(*, files_hash: str | None, template: str | None) -> None:
             await client.conversation_admit(

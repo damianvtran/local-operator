@@ -2968,6 +2968,68 @@ def _last_block(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
+#: Minimum character count of a split initial-user preamble before placing a
+#: render-only cache breakpoint on it (~1,024 tokens at ~3.5 chars/token,
+#: clearing Anthropic and Bedrock's 1,024-token cache minimum cleanly).
+_REUSABLE_PREFIX_MIN_CHARS = 3600
+
+
+def _split_reusable_prefix(text: str) -> tuple[str, str] | None:
+    """Split a long initial user prompt at its last top-level ``\\n---\\n``.
+
+    Batch, eval, and team-brief prompts frequently share a large static
+    preamble (rubric, context, schema) followed by ``\\n---\\n`` and a small
+    per-task suffix. Splitting strictly at render time lets Anthropic/Bedrock
+    place a cache breakpoint at the end of the shared preamble without ever
+    mutating the stored :class:`Message`.
+
+    Tracks CommonMark fenced code blocks (backticks and tildes, matching fence
+    character and length >= 3) so a ``---`` inside a code block is never
+    matched. The delimiter stays in ``prefix`` and exact bytes are preserved
+    (``prefix + suffix == text``).
+    """
+    if len(text) <= _REUSABLE_PREFIX_MIN_CHARS or "\n---\n" not in text:
+        return None
+    fence_char: str | None = None
+    fence_len = 0
+    split_at: int | None = None
+    offset = 0
+    # Split strictly on '\n' (not str.splitlines(), which splits on Unicode
+    # line separators) so exact '\n---\n' boundaries are matched unambiguously.
+    lines = text.split("\n")
+    last_index = len(lines) - 1
+    for index, line in enumerate(lines):
+        next_offset = offset + len(line) + (1 if index < last_index else 0)
+        line_no_cr = line[:-1] if line.endswith("\r") else line
+        stripped = line_no_cr.lstrip(" ")
+        if fence_char is not None:
+            if stripped.startswith(fence_char * fence_len):
+                after_fence = stripped.lstrip(fence_char)
+                if after_fence.strip(" \t") == "":
+                    fence_char = None
+                    fence_len = 0
+        else:
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                ch = stripped[0]
+                run = len(stripped) - len(stripped.lstrip(ch))
+                # CommonMark: a backtick fence info string cannot contain backticks.
+                if ch == "~" or "`" not in stripped[run:]:
+                    fence_char = ch
+                    fence_len = run
+            elif line == "---" and index > 0 and index < last_index:
+                # Exact '\n---\n': index > 0 guarantees the preceding '\n' and
+                # index < last_index guarantees the trailing '\n' in next_offset.
+                split_at = next_offset
+        offset = next_offset
+    if split_at is None or split_at < _REUSABLE_PREFIX_MIN_CHARS:
+        return None
+    prefix = text[:split_at]
+    suffix = text[split_at:]
+    if not suffix.strip():
+        return None
+    return prefix, suffix
+
+
 def _targets_cover(targets: list[dict[str, Any]], block: dict[str, Any]) -> bool:
     """Whether ``block`` is already in ``targets`` -- by IDENTITY, not equality.
 
@@ -5489,23 +5551,33 @@ class AnthropicClient:
 
     @classmethod
     def _system_blocks(
-        cls, blocks: Sequence[str], *, ttl: str | None = None
+        cls, blocks: Sequence[str], *, ttl: str | None = None, frozen: bool = False
     ) -> list[dict[str, Any]]:
         """System blocks → Anthropic ``system`` array with cache breakpoints.
 
-        The harness sends [instructions, tool inventory, skills, env/date];
-        the trailing blocks are VOLATILE (skills change per turn, env/date
-        changes per day) and must stay breakpoint-free so the prompt-cache
-        prefix covers only the stable head. Generic for any block count:
-        every block except the last two gets an ephemeral breakpoint, CAPPED
-        at ``MAX_CACHE_BREAKPOINTS`` — Anthropic rejects requests carrying
-        more than 4 ``cache_control`` markers, so surplus stable blocks keep
-        the cache prefix intact without adding markers.
+        When ``frozen=True`` (explicitly signalled by ``Session`` when its
+        prefix epoch freezes every system block including ``env``, ``<skills/>``
+        and any ``OutputContract``), emit marker-free entries for
+        ``blocks[:-1]`` and ONE ``cache_control`` marker on ``rendered[-1]``.
+        That caches ``tools + system[0..N]`` in a single breakpoint instead of
+        spending 2-3 slots on the head and leaving trailing frozen blocks
+        uncached across turns/sessions.
+
+        When ``frozen=False`` (standalone callers whose trailing blocks may
+        change per call), preserve the existing policy: every block except the
+        last two gets an ephemeral breakpoint, CAPPED at
+        ``MAX_CACHE_BREAKPOINTS`` (Anthropic rejects >4 markers).
 
         ``ttl`` is the request-wide TTL from ``_cache_ttl_for``; every marker
         placed here carries it, because a 1h marker may not follow a 5m one.
         """
         rendered: list[dict[str, Any]] = []
+        if frozen:
+            for block in blocks:
+                rendered.append({"type": "text", "text": block})
+            if rendered:
+                rendered[-1]["cache_control"] = cls._cache_control(ttl)
+            return rendered
         stable_count = min(cls.MAX_CACHE_BREAKPOINTS, max(0, len(blocks) - 2))
         for index, block in enumerate(blocks):
             entry: dict[str, Any] = {"type": "text", "text": block}
@@ -5515,13 +5587,22 @@ class AnthropicClient:
         return rendered
 
     @staticmethod
-    def _message_blocks(
+    def _render_message_blocks(
         message: Message,
         document_form_: DocumentForm | None = None,
         document_budget_: DocumentBudget | None = None,
         document_text_cap_: int | None = None,
-    ) -> list[dict[str, Any]]:
+        *,
+        split_reusable_prefix: bool = False,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         """Render one message's content blocks for the Anthropic wire.
+
+        When ``split_reusable_prefix=True``, the first ordinary
+        :class:`TextContent` block that matches :func:`_split_reusable_prefix`
+        is replaced IN PLACE by two rendered text blocks ``[prefix, suffix]``
+        and the ``prefix`` dict is returned as the cache-breakpoint target.
+        The stored :class:`Message` is never mutated, and non-text / document
+        fallback blocks are never split.
 
         An empty or whitespace-only text block is DROPPED, never shipped:
         Anthropic refuses the whole request with "messages: text content
@@ -5540,10 +5621,19 @@ class AnthropicClient:
         like an empty one and carries nothing a model can read.
         """
         blocks: list[dict[str, Any]] = []
+        static_prefix_block: dict[str, Any] | None = None
         for block in message.content:
             if isinstance(block, TextContent):
                 if not block.text.strip():
                     continue
+                if split_reusable_prefix and static_prefix_block is None:
+                    split = _split_reusable_prefix(block.text)
+                    if split is not None:
+                        prefix, suffix = split
+                        static_prefix_block = {"type": "text", "text": prefix}
+                        blocks.append(static_prefix_block)
+                        blocks.append({"type": "text", "text": suffix})
+                        continue
                 blocks.append({"type": "text", "text": block.text})
             elif isinstance(block, ImageContent):
                 blocks.append(
@@ -5585,6 +5675,19 @@ class AnthropicClient:
                     "The Anthropic messages API cannot carry audio input; "
                     "route the recording through speech-to-text instead."
                 )
+        return blocks, static_prefix_block
+
+    @staticmethod
+    def _message_blocks(
+        message: Message,
+        document_form_: DocumentForm | None = None,
+        document_budget_: DocumentBudget | None = None,
+        document_text_cap_: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Render one message's content blocks for the Anthropic wire."""
+        blocks, _ = AnthropicClient._render_message_blocks(
+            message, document_form_, document_budget_, document_text_cap_
+        )
         return blocks
 
     @staticmethod
@@ -5614,6 +5717,7 @@ class AnthropicClient:
         *,
         ttl: str | None = None,
         frozen_block: dict[str, Any] | None = None,
+        static_prefix_block: dict[str, Any] | None = None,
         ephemeral_indices: Collection[int] | None = None,
     ) -> None:
         """Place cache_control on the conversation, not just the system head.
@@ -5635,10 +5739,17 @@ class AnthropicClient:
         in the history the previous persistent user turn is marked instead,
         the historical layout for text-only sessions.
 
-        Budget: MAX_CACHE_BREAKPOINTS total. System markers are counted
-        first; when the sum would exceed the cap the LOWEST-value system
-        breakpoint (the last stable block) is dropped in favour of the
-        message markers, which cover far more tokens.
+        Centralized budget (``MAX_CACHE_BREAKPOINTS`` = 4 across ``system`` +
+        ``messages``, deduplicated by object identity):
+          1. Persistent rolling tail (``tail_msg["content"][-1]``)
+          2. Settled / Saver ``frozen_block``
+          3. ``static_prefix_block`` (render-only split of a reusable preamble
+             on the first persistent user message)
+          4. System breakpoints (preserving at least one system marker when
+             present — notably the single frozen ``system[-1]`` marker — while
+             dropping surplus trailing legacy system markers first)
+          5. ``prev_user`` fallback (omitted if adding it would exceed 4 or
+             force evicting the last remaining system marker)
 
         ``ttl`` must be the SAME value the system markers were rendered with:
         Anthropic rejects a 1h marker that follows a 5m one, and the message
@@ -5655,8 +5766,8 @@ class AnthropicClient:
         system_markers = [i for i, entry in enumerate(system) if "cache_control" in entry]
         ephemeral = ephemeral_indices if ephemeral_indices is not None else frozenset()
         message_targets: list[dict[str, Any]] = []
-        # Prefer the last persistent (non-ephemeral) message so the tail
-        # breakpoint survives after an ephemeral PendingTurn frame disappears.
+        # 1. Persistent rolling tail: skip trailing ephemeral frames so the
+        #    cache entry survives once the frame disappears.
         tail_msg: dict[str, Any] | None = None
         for idx in range(len(messages) - 1, -1, -1):
             if idx not in ephemeral:
@@ -5666,22 +5777,25 @@ class AnthropicClient:
             tail_msg = messages[-1]
         if tail_msg is not None:
             if isinstance(tail_msg.get("content"), list) and tail_msg["content"]:
-                message_targets.append(tail_msg["content"][-1])
+                tail_block = tail_msg["content"][-1]
+                if isinstance(tail_block, dict):
+                    message_targets.append(tail_block)
+
         settled_pair = _settled_cache_target_with_index(messages, ("image",))
         user_indices = [
             i for i, m in enumerate(messages) if m.get("role") == "user" and i not in ephemeral
         ]
         prev_user_idx = user_indices[-2] if len(user_indices) >= 2 else None
-
-        def _append_prev_user() -> None:
-            if prev_user_idx is None:
-                return
+        prev_user_block: dict[str, Any] | None = None
+        if prev_user_idx is not None:
             prev_user = messages[prev_user_idx]
             if isinstance(prev_user.get("content"), list) and prev_user["content"]:
-                block = prev_user["content"][-1]
-                if not _targets_cover(message_targets, block):
-                    message_targets.append(block)
+                candidate = prev_user["content"][-1]
+                if isinstance(candidate, dict):
+                    prev_user_block = candidate
 
+        # 2. Settled / Saver frozen_block.
+        allow_prev_user = False
         if frozen_block is not None:
             if not _targets_cover(message_targets, frozen_block):
                 message_targets.append(frozen_block)
@@ -5690,10 +5804,30 @@ class AnthropicClient:
             if not _targets_cover(message_targets, settled_block):
                 message_targets.append(settled_block)
             if prev_user_idx is not None and prev_user_idx > settled_idx:
-                _append_prev_user()
+                allow_prev_user = True
         else:
             # Second-to-last persistent USER turn keeps the previous request's prefix warm.
-            _append_prev_user()
+            allow_prev_user = True
+
+        # 3. Render-only static prefix block on the first persistent user turn.
+        if static_prefix_block is not None:
+            if not _targets_cover(message_targets, static_prefix_block):
+                message_targets.append(static_prefix_block)
+
+        # 5. prev_user fallback — lower priority than the last remaining system
+        #    marker (priority 4), so omit it if adding it would exceed the cap
+        #    or force dropping the sole remaining system breakpoint.
+        min_system_markers = 1 if system_markers else 0
+        if (
+            allow_prev_user
+            and prev_user_block is not None
+            and not _targets_cover(message_targets, prev_user_block)
+            and len(message_targets) + 1 + min_system_markers <= self.MAX_CACHE_BREAKPOINTS
+        ):
+            message_targets.append(prev_user_block)
+
+        if len(message_targets) > self.MAX_CACHE_BREAKPOINTS:
+            message_targets = message_targets[: self.MAX_CACHE_BREAKPOINTS]
         if not message_targets:
             return
         budget = max(0, self.MAX_CACHE_BREAKPOINTS - len(message_targets))
@@ -5740,6 +5874,8 @@ class AnthropicClient:
         epoch_ids = _frozen_prefix_ids(request)
         epoch_block: dict[str, Any] | None = None
         ephemeral_indices: set[int] = set()
+        seen_first_persistent_user = False
+        static_prefix_block: dict[str, Any] | None = None
         for message in _without_unrenderable_tool_calls(wire_messages):
             # Anthropic 400s on an assistant message whose content array is
             # empty, which is exactly what an errored/aborted model turn
@@ -5747,6 +5883,16 @@ class AnthropicClient:
             # `_is_empty_assistant`.
             if _is_empty_assistant(message):
                 continue
+            # Identify the FIRST original persistent user message BEFORE
+            # tool-result/user coalescing so a leading or merged tool_result
+            # never shifts or masks the initial user prompt's static preamble.
+            is_first_persistent_user = (
+                not seen_first_persistent_user
+                and message.role == "user"
+                and not getattr(message, "_ephemeral", False)
+            )
+            if is_first_persistent_user:
+                seen_first_persistent_user = True
             native = _anthropic_native_blocks(message, request.model, self._base_url, scope)
             if native is not None:
                 # The model's own content array, thinking first and in its
@@ -5788,7 +5934,16 @@ class AnthropicClient:
                 else:
                     messages.append({"role": "user", "content": content})
             else:
-                blocks = self._message_blocks(message, doc_form, doc_budget, doc_text_cap)
+                if is_first_persistent_user and request.cache_markers == "auto":
+                    blocks, static_prefix_block = self._render_message_blocks(
+                        message,
+                        doc_form,
+                        doc_budget,
+                        doc_text_cap,
+                        split_reusable_prefix=True,
+                    )
+                else:
+                    blocks = self._message_blocks(message, doc_form, doc_budget, doc_text_cap)
                 if not blocks:
                     # Every block was blank, so there is no content left to
                     # send — but the message still OCCUPIES A ROLE, and that is
@@ -5863,7 +6018,9 @@ class AnthropicClient:
                 system_rows[-1]["cache_control"] = self._cache_control(ttl)
         else:
             if blocks:
-                body["system"] = self._system_blocks(blocks, ttl=ttl)
+                body["system"] = self._system_blocks(
+                    blocks, ttl=ttl, frozen=request.system_blocks_frozen
+                )
             # System-only breakpoints stop the cached prefix before the first
             # message: the entire growing conversation would be re-processed at
             # full price on every request. Mark the last content block of the
@@ -5877,6 +6034,7 @@ class AnthropicClient:
                 body,
                 ttl=ttl,
                 frozen_block=epoch_block,
+                static_prefix_block=static_prefix_block,
                 ephemeral_indices=ephemeral_indices,
             )
         # An ephemeral frame belongs beyond all original cache points. Keep a
@@ -6012,7 +6170,12 @@ class AnthropicClient:
     # ``tests/unit/providers/bedrock/test_client.py`` T4 regression cells).
 
     async def _messages_request(
-        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        api_key: str | None,
+        *,
+        evidence_binding: Any = None,
     ) -> tuple[str, bytes, dict[str, str]]:
         """``(url, exact body bytes, headers)`` for one Messages POST.
 
@@ -6043,7 +6206,12 @@ class AnthropicClient:
 
     @contextlib.asynccontextmanager
     async def _open_messages_stream(
-        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None = None
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        api_key: str | None = None,
+        *,
+        evidence_binding: Any = None,
     ) -> AsyncIterator[httpx.Response]:
         """Open the Messages stream, shedding a refused ``diagnostics`` key once.
 
@@ -6054,7 +6222,12 @@ class AnthropicClient:
         identical request is sent again. Nothing has been streamed yet, so the
         retry is invisible to the turn; every other status passes through.
         """
-        url, content, sent_headers = await self._messages_request(body, headers, api_key)
+        evidence_kwargs = (
+            {"evidence_binding": evidence_binding} if evidence_binding is not None else {}
+        )
+        url, content, sent_headers = await self._messages_request(
+            body, headers, api_key, **evidence_kwargs
+        )
         async with self._http.stream(
             "POST", url, content=content, headers=sent_headers
         ) as response:
@@ -6067,7 +6240,9 @@ class AnthropicClient:
             "anthropic: cache diagnostics refused by the API (HTTP 400); "
             "disabled for this process"
         )
-        url, content, sent_headers = await self._messages_request(body, headers, api_key)
+        url, content, sent_headers = await self._messages_request(
+            body, headers, api_key, **evidence_kwargs
+        )
         async with self._http.stream(
             "POST", url, content=content, headers=sent_headers
         ) as response:
@@ -6094,7 +6269,15 @@ class AnthropicClient:
         oauth_access: "OAuthAccess | None",
         sent: dict[str, Any],
     ) -> AsyncIterator[StreamEvent]:
-        stop_reason = "stop"
+        # The companion may replace raw evidence, so it cannot use the legacy
+        # EOF-as-stop behavior. Leave existing primary Anthropic turns alone.
+        strict_completion = (
+            request.model.provider == "bedrock"
+            and request._evidence_binding is not None
+            and request._evidence_binding.expected is not None
+        )
+        stop_reason = "incomplete" if strict_completion else "stop"
+        terminal = False
         # Stamped at construction, before the request goes out: the ``Usage`` is
         # filled in as the stream arrives, and a call's time-of-use window is a
         # property of the call (seconds of skew across a stream boundary cannot
@@ -6145,6 +6328,11 @@ class AnthropicClient:
                 ),
             ),
             api_key,
+            **(
+                {"evidence_binding": request._evidence_binding}
+                if request._evidence_binding is not None and request.model.provider == "bedrock"
+                else {}
+            ),
         ) as response:
             if overage_account:
                 # Before the status check: a 429 carries the same headers, and
@@ -6284,8 +6472,16 @@ class AnthropicClient:
                     if "output_tokens" in raw_usage:
                         output_reported = _reported_token_count(raw_usage, "output_tokens")
                         usage.output_tokens = int(raw_usage["output_tokens"])
+                elif event_type == "message_stop":
+                    terminal = stop_reason != "incomplete"
                 elif event_type == "error":
                     raise _anthropic_stream_error(event.get("error") or {})
+
+        if strict_completion and not (terminal and input_reported and output_reported):
+            # Never emit the provisional Usage: a missing counter is not zero,
+            # and downstream would otherwise price it in analytics and receipts.
+            yield StreamEndEvent(stop_reason="incomplete", served_model=served_model)
+            return
 
         mapped = {
             "end_turn": "stop",

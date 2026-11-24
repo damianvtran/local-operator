@@ -134,6 +134,7 @@ from local_operator.harness.wake import (
 )
 from local_operator.harness.wake_types import WakeOrigin
 from local_operator.i18n.keys import cli_failures as _cli_failures
+from local_operator.i18n.keys import wire_runtime_memory as _rmw
 from local_operator.i18n.keys import wire_sessions as _ws
 from local_operator.i18n.text import tr
 from local_operator.imaging import (
@@ -18241,8 +18242,7 @@ class SessionsParams(BaseModel):
     peer: str | None = Field(
         default=None,
         description=(
-            "Remote (mesh): the device holding the session — a name or id; on `list`, "
-            "selects only that device's rows."
+            "Remote (mesh): the session's device, name or id; on `list`, selects only its rows."
         ),
     )
     scope: Literal["all", "local", "remote"] = Field(
@@ -18287,7 +18287,7 @@ class SessionsParams(BaseModel):
     dry_run: bool = Field(default=False, description="resume set: preview; starts nothing.")
     include_stored: bool = Field(
         default=False,
-        description="list: include stored (not running) sessions.",
+        description="list: also stored (not running) ones.",
     )
     limit: int = Field(
         default=20,
@@ -18310,6 +18310,22 @@ class SessionsParams(BaseModel):
     )
     regex: bool = Field(default=False, description="peek: `query` is a regex.")
     digest: bool = Field(default=False, description="peek: compact fold instead of steps.")
+    # --- stop escalation (runtime memory-runaway incident, 2026-11-24) -------
+    # The idle-only stop refused a runaway that was "working" (its wake turn
+    # had been open since boot) while it drove the host into swap, and the
+    # refusal named no way forward. `force` is that way forward, kept OFF by
+    # default so the tool's promise (never signals, never cuts work) holds
+    # unless the caller says this is an operator-safety stop.
+    #
+    #
+    # ONE SHORT CLAUSE, ON PURPOSE (agent review round 1 on #4519, R2): the field
+    # ships in every request's start context and its first description put
+    # ``scripts/bench_context_budget.py`` 21 tokens over. The contract lives where
+    # a caller meets it: the stop op's reference (``sessions(op='help')``,
+    # ``_SESSIONS_OP_DOCS["stop"]``) and the refusal itself, which names
+    # ``force=true`` and when it is legitimate. The `peer`/`include_stored`
+    # descriptions were tightened (same meaning) to pay for the rest.
+    force: bool = Field(default=False, description="stop: signals even if busy.")
 
 
 #: The window fields, which only ``peek`` has a meaning for — ONE ordered
@@ -18359,7 +18375,7 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
             "peer",
         }
     ),
-    "stop": frozenset({"op", "session", "target", "pid", "peer"}),
+    "stop": frozenset({"op", "session", "target", "pid", "peer", "force"}),
     # ``park`` takes the stop's addresses, all OPTIONAL: no address parks the
     # calling session once its turn ends (``_sessions_park``), which is why it
     # is not in ``_SESSIONS_TARGET_OPS`` (that set REQUIRES an address).
@@ -18570,14 +18586,18 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         " subagent or a job), or one due a wake inside the hold window, is refused"
         " with the reason. Its wakes and monitors go DORMANT until it is reopened —"
         " to free memory and keep them armed, use `park`. With `peer`, always"
-        " refused — an idle-only remote stop is not on the wire yet.",
+        " refused — an idle-only remote stop is not on the wire yet. `force=true`:"
+        " operator-safety escalation, only when the operator asked for it to end or"
+        " it is a memory runaway — identity-checked SIGTERM, bounded drain, then"
+        " SIGKILL; cuts work in flight, never for tidying.",
         example="sessions(op='stop', session='a1b2c3d4e5f6')",
         refusals=(
             "needs an address; a stored (not running) session is refused; the"
             " calling session cannot stop itself; a working or wake-due session is"
             " refused; a remote (`peer`) target is always refused; an owner too old"
             " to promise an idle-only stop is refused; an owner that does not answer"
-            " is refused rather than signalled.",
+            " is refused rather than signalled. `force=true` lifts only the working,"
+            " wake-due, too-old and no-answer refusals; unproven identity stays refused.",
         ),
     ),
     "park": _SessionsOpDoc(
@@ -19076,6 +19096,10 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
             # prompt says that instead of asking the operator to approve an act
             # that will not happen (UX round 1 U3, design round 1 D5).
             return _sessions_copy(_ws.approval_stop_peer(address=address, peer=peer))
+        if args.get("force") is True:
+            # The escalation SIGNALS and can cut a turn, so the prompt must not
+            # carry the idle-only promise the plain stop's prompt makes.
+            return _runtime_memory_copy(_rmw.approval_stop_local_force(address=address))
         # The idle-only precondition is the promise now: a working session is
         # refused, so "ends its current run" over-promised (design round 1 D5,
         # UX round 1 U5).
@@ -20496,6 +20520,10 @@ async def _sessions_stop_mesh(
 #: shape of an independently-owned namespace, so adding these receipts could not
 #: move any already-audited locale's bytes (agent review round 1 R2).
 _sessions_copy = tr("wire.sessions")
+#: The force-stop escalation's copy (runtime memory-runaway incident). Its own
+#: namespace, shared with the guard's settings rows, so adding it could not move
+#: the audited ``wire.sessions`` bytes.
+_runtime_memory_copy = tr("wire.runtime_memory")
 
 
 def _sessions_receipt(outcome: Any, timeout_s: float) -> str:
@@ -20533,11 +20561,21 @@ def _sessions_receipt(outcome: Any, timeout_s: float) -> str:
 async def _sessions_stop(
     tool_call_id: str, params: SessionsParams, context: "ToolContext | None" = None
 ) -> ToolResult:
-    """End an idle owner without inheriting the CLI's signal escalation.
+    """End an idle owner without inheriting the CLI's signal escalation — unless asked.
 
     ``force=False`` alone still permits SIGKILL in the legacy ladder. The
     explicit graceful-only mode also requires an owner-side idle latch, so
     pending work is refused rather than discarded by a cooperative socket stop.
+
+    ``params.force`` is the operator-safety escalation: the CLI's own ladder
+    (``control.stop_session(force=True)``, exactly ``lop stop --force``), which
+    stages the stop marker ``process._route_signal`` requires before it honours
+    a SIGTERM, waits out the receiver's bounded drain and then SIGKILLs the
+    identity-proven pid. WHY THE TOOL GROWS IT: on 2026-11-24 a runaway runtime
+    (2+ GB, wake turn open since boot) answered every idle-only stop with
+    "working right now", and the only signal anyone then sent was a bare SIGTERM
+    with no marker, which the gate rightly refused — so the session that was
+    taking the host into swap could not be stopped by the agent asked to stop it.
     """
     if str(params.peer or "").strip():
         # The remote transport does not yet carry the idle-only capability.
@@ -20567,12 +20605,14 @@ async def _sessions_stop(
         return _error(tool_call_id, "sessions", _sessions_copy(_ws.stop_self_refused()))
 
     waited: list[str] = []
+    force = params.force is True
     outcome = await control.stop_session(
         target.record,
         timeout_s=control.DEFAULT_TIMEOUT_S,
-        force=False,
-        graceful_only=True,
-        _command="sessions tool",
+        force=force,
+        graceful_only=not force,
+        # The marker names its author: the escalation is a distinct request.
+        _command="sessions tool --force" if force else "sessions tool",
         on_wait=waited.append,
     )
     # SAY WHAT THE STOP COST, AND OFFER PARK. The 2026-11-12 field gap: an agent
@@ -20603,7 +20643,23 @@ async def _sessions_stop(
     # the wait lines describe an attempt while ``outcome.line`` describes what
     # happened — the headline has to be the outcome, or the reader sees the
     # interim step and has to expand to learn the result (design round 1 D4).
-    render = _error if outcome.method in ("refused", "busy", "draining") else _text
+    if force:
+        details["force"] = True
+        # The SIGTERM rung's pre-signal announcement (``control._wait_line``,
+        # "waiting up to … before SIGKILL") is for a front end that paints WHILE
+        # it waits. This result is rendered once, after the outcome, so the line
+        # under "stopped"/"killed" read as still pending (UX round 1 on #4519,
+        # U7). Only the forced path reaches that rung; the ladder's other
+        # announcements (a stalled drain's decision line) still explain the stop.
+        waited = [line for line in waited if not line.startswith("waiting up to ")]
+    refused = outcome.method in ("refused", "busy", "draining")
+    if refused and not force:
+        # A REFUSAL IS NEVER A DEAD END (the 2026-11-24 runaway): the line names
+        # the escalation and when it is legitimate, so a caller holding an
+        # operator-safety reason knows the next call, and one without it knows
+        # this refusal is the answer.
+        waited.append(_runtime_memory_copy(_rmw.stop_force_hint()))
+    render = _error if refused else _text
     return render(
         tool_call_id,
         "sessions",

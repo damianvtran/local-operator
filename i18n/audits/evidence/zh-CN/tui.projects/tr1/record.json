@@ -1,0 +1,26 @@
+{
+  "auditor": {"agent": "i18n-auditor (lopdev team)", "session": "c9af56dcefc3", "model": "anthropic/claude-opus-5-5 (no fallback observed)", "date": "2026-11-23", "independent_from_translator": true},
+  "repo": {"worktree": "~/local-operator/.worktrees/i18n-model-persist-notice", "head": "c3ba6a516c6a"},
+  "audited_input": "~/.local-operator/sessions/17b81fee8ed1/scratchpad/i18n-settings-residual/translations/zh-CN.json (sha256 964df3d91ac1f132da3e67c1e24234d410d872670a38dac2ded3bb3cb2a55766; translator: separate lopdev i18n-translator session, anthropic/claude-opus-5-5; brief named eac1855834c5, file actually found under 17b81fee8ed1)",
+  "source_sha256": {
+    "local_operator/i18n/catalogues/en/tui.app.json": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+    "local_operator/i18n/catalogues/en/tui.projects.json": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2"
+  },
+  "context_sha256": {
+    "local_operator/i18n/catalogues/en/tui.app.context.json": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+    "local_operator/i18n/catalogues/en/tui.projects.context.json": "411f134fa0a8defb711623ab65ec90946fd5d92612d23c941ba3149a3dd529b0"
+  },
+  "validator": "scripts/i18n/check.py::check_catalogues() run in-process against the worktree with load_catalogue patched to merge the zh-CN input (no repo writes, PYTHONDONTWRITEBYTECODE=1). Control (unpatched): 35 problems, 5 of them zh-CN missing-key for exactly these keys. Patched: 30 problems, 0 for zh-CN. Output in audit.log alongside this record.",
+  "per_namespace": {
+    "tui.app": {"result": "clean", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [],
+      "notes": "member_count '{count, plural, other {{shown}名成员}}': args (count plural, shown simple) = en; other-only per glossary/style guide; 名 is the people classifier and matches led_by and tui.small.network_panel.member_count verbatim. Rendered 0/1/2/5/21/100 -> 7/7/7/7/8/9 cells, 10^6 -> 13, all <= maxCells 14. team_aliases '别名：{aliases}': full-width colon, no space before the Latin list, same as cli.*status_alias/browser reconcile and tui.team_authoring.aliases '别名'; {aliases} untouched. team_no_description '暂无描述' (8 cells <= 30) = tui.projects.detail.no_description; idiomatic empty-state form. team_fallback_facts '团队' = glossary 'team' and every zh-CN team label."},
+    "tui.projects": {"result": "clean", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [],
+      "notes": "start.team_detail '{manager} · {count, plural, other {{shown}个角色}}': args = en; {manager} identifier untouched; ' · ' separator kept; 角色 = tui.authoring.role, 个 default classifier. Rendered 17/17/17/17/18/19 cells for 0/1/2/5/21/100 (no maxCells; column dropped at narrow widths per sidecar). Non-gating source observation: the count is member copies (projects_start._team_roles sums count, manager excluded) while en says 'roles' and member_count's sidecar says never 'roles'; zh faithfully mirrors en. Pre-existing en wording, not a translation finding."}
+  },
+  "conventions_confirmed": {
+    "measure_words": "名 for members (people, matches 3 existing zh-CN member counts), 个 for roles (style guide default classifier); no space between digit and classifier, matching tui.app.parked.* and led_by.",
+    "full_width_colon": "别名： uses U+FF1A followed directly by the Latin alias list, consistent with existing 别名： copy; the code-side ', ' alias join is ASCII and appropriate for Latin identifiers."
+  },
+  "artifacts": {"audit.log": "b28ab5c8b53a8e0ff6e2950f4646369ab965067c96656bb690bff10341870eea"},
+  "current_report_verdict": {"status": "passed", "unresolved_blocker_major_count": 0, "finding_ids": []}
+}

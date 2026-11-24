@@ -660,8 +660,12 @@ async def test_unsettled_asks_still_go_to_the_judge(home: Path) -> None:
     judge = _TimedOutJudge()
     outcome = await _check(home, rm, PARENT, [], judge)
     assert outcome is not None and outcome.blocked
-    assert judge.calls == 1
-    assert "judge unavailable" in outcome.text
+    # PR #4493: the lineage's DECLINE (a-0003) is not reopened by an approval
+    # from an OLDER ask (a-0004) or by a partial pick (a-0002), so it now
+    # refuses deterministically instead of after a judge call. Still blocked;
+    # only the route changed. A typed operator turn would still reach the judge.
+    assert judge.calls == 0
+    assert "a-0003" in outcome.text and "NOT consent" in outcome.text
 
 
 # -- 5. negative controls: real deletes and overwrites ----------------------------------

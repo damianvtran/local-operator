@@ -62,6 +62,17 @@ class _Prescreened:
     #: Messages whose batch this pass VOIDED (``batch_unresolved``). The
     #: handler reads it to mark the hold row ``no_batch`` (#3400 round 2).
     voided: set[tuple[str, str]] = field(default_factory=set)
+    #: ``prior_delay_hold`` of each batched message, read BEFORE any batch call.
+    #: WHY (PR #4533 round 1, M1): a batch verdict commits its receipt inside
+    #: ``finish_screening``, which deletes the message's hold row, all before
+    #: the handler runs. Measured on the retry pass today, the handler still
+    #: finds the connector's COMPOSITE-ref row (the commit deletes only the
+    #: bare-id spelling, which the pass already retired), so the line survives
+    #: by that accident alone; a commit that deleted every spelling (the
+    #: pre-existing two-spelling deletion, fixed) would silently drop it from
+    #: a message delivered days late. The age captured here, consumed by the
+    #: handler (:func:`take_prior_hold`), does not depend on which row survives.
+    prior_holds: dict[tuple[str, str], tuple[float, bool]] = field(default_factory=dict)
 
 
 _ACTIVE: contextvars.ContextVar["_Prescreened | None"] = contextvars.ContextVar(
@@ -88,6 +99,19 @@ def take_fetched(ref: ConversationFeedRef) -> Any:
     if state is None:
         return None
     return state.fetched.pop((ref.conversation_id, ref.message_id), None)
+
+
+def take_prior_hold(ref: ConversationFeedRef) -> tuple[float, bool] | None:
+    """The hold age this pass captured for ``ref`` before batching (consumed once).
+
+    ``None`` when no batch pass covered ``ref`` or it had no hold; the handler
+    then reads the store itself (its hold rows are still there in that case).
+    """
+
+    state = _ACTIVE.get()
+    if state is None:
+        return None
+    return state.prior_holds.pop((ref.conversation_id, ref.message_id), None)
 
 
 def take_result(ref: ConversationFeedRef, body_hash: str) -> Any:
@@ -239,6 +263,12 @@ async def prescreen_conversation_refs(
         candidates.append((ref, fetched, item))
     if len(candidates) < 2:
         return 0
+    # Every candidate's hold age, read before the FIRST batch call can commit a
+    # receipt and delete a hold (M1; see ``_Prescreened.prior_holds``).
+    for ref, _fetched, _item in candidates:
+        prior = _conversation.prior_delay_hold(store, owner, ref.message_id)
+        if prior is not None:
+            state.prior_holds[(ref.conversation_id, ref.message_id)] = prior
 
     from ..screening import plan_screening_batches
 
@@ -285,5 +315,6 @@ __all__ = [
     "prescreen_conversation_refs",
     "prescreen_scope",
     "take_fetched",
+    "take_prior_hold",
     "take_result",
 ]

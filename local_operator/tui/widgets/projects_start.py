@@ -177,8 +177,15 @@ def _team_roles(row: dict[str, Any]) -> int:
 
 def _team_detail(row: dict[str, Any]) -> str:
     roles = _team_roles(row)
-    manager = str(row.get("manager") or "manager").strip() or "manager"
-    return f"{manager} · {roles} role" + ("" if roles == 1 else "s")
+    # The fallback is the default manager ROLE identifier, not prose, so it is
+    # passed through as data and never translated. Bound on its own line so the
+    # pragma sits on the literal's line within the 100-column limit (`black`
+    # would otherwise wrap the expression and strand the comment after a `)`).
+    fallback = "manager"  # i18n: ignore role identifier
+    manager = str(row.get("manager") or fallback).strip() or fallback
+    # ICU plural instead of the old hand-rolled `role` + `s`, which could not
+    # serve any locale whose plural rules differ from English.
+    return _t(_x.start_team_detail(manager=manager, count=roles, shown=str(roles)))
 
 
 def start_targets(

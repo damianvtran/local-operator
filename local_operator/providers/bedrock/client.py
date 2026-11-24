@@ -268,11 +268,39 @@ class BedrockAnthropicClient(AnthropicClient):
         return ttl
 
     async def _messages_request(
-        self, body: dict[str, Any], headers: dict[str, str], api_key: str | None
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        api_key: str | None,
+        *,
+        evidence_binding: Any = None,
     ) -> tuple[str, bytes, dict[str, str]]:
         assert self._region is not None  # only regional instances send
         resolved = await self._resolve(api_key)
-        url = invoke_url(self._region, str(body.get("model") or ""))
+        model_id = str(body.get("model") or "")
+        url = invoke_url(self._region, model_id)
+        if evidence_binding is not None:
+            from local_operator.research_evidence import bedrock_wire_identity
+
+            creds = resolved.credentials
+            identity = bedrock_wire_identity(
+                model_id,
+                self._region,
+                api_key or "",
+                (
+                    (resolved.bearer,)
+                    if creds is None
+                    else (creds.access_key, creds.secret_key, creds.token)
+                ),
+            )
+            aws_runtime = f"https://bedrock-runtime.{self._region}.amazonaws.com/"
+            if evidence_binding.expected is not None and (
+                identity != evidence_binding.expected or not url.startswith(aws_runtime)
+            ):
+                # Before opening the HTTP stream: even a working alternative
+                # credential or endpoint is not authorized for this evidence.
+                raise berrors.no_credentials_error()
+            evidence_binding.selected = identity if url.startswith(aws_runtime) else None
         content = _encode_json_body(transform_body(body, headers))
         # Exactly the headers botocore's own client sends for
         # ``invoke_model_with_response_stream(contentType=..., accept=...)``:

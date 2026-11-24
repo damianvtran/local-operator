@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "a92f5ae01c005574a385a3dc19d20873c01a5102635b6af91e6961a2a9a56064",
+  "history_sha256": "1636f973f5efab3273eeb4902d41b30ea5ee0eeb8fa4a890eddcbc4298f7466c",
   "entries": [
     {
       "locale": "zh-CN",
@@ -7422,6 +7422,131 @@
       },
       "status": "passed",
       "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings (origin/main: 30 keys added since the merge-base; branch: 10 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 10 added/changed keys; origin/main's 895 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "7163a940aaa7e6c7c3df54e8efa44a6b99bc45a89b2330a4d61f2d7976652c2c",
+      "keys_audited": 1,
+      "round": "i18n-wave-A",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent fda0f7e67273)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "7163a940aaa7e6c7c3df54e8efa44a6b99bc45a89b2330a4d61f2d7976652c2c",
+      "keys_audited": 1,
+      "round": "i18n-wave-B",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent 466731e890b3)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits. Auditor B shares the translator model but is a different agent session."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "7eaf3e95c31cf444f26de59ba8c5c253de0c6b770c48a0588aee1692861e33c8",
+      "context_sha256": "1946205a2ef39fdff2704ce40007a6325bdfe2349eca4e483e0d6ec8c55e57be",
+      "target_sha256": "e86f1f9074a31958e5eb96e0efe9f903aa82a225d2edce5be57db1d01f3e0950",
+      "keys_audited": 8,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4514 implementer, commit 3dc289d5a384)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session cd2d2ff84424 (independent of the translator; did not write PR #4514)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent semantic audit of PR #4514 (branch feat/mcp-result-normalization, head 3dc289d5a384 + this commit), 2026-11-23: the 8 NEW keys wire.settings.mcp_result_normalization.{label,help,choice.off.label,choice.off.description,choice.prose_links.label,choice.prose_links.description,choice.strip_links.label,choice.strip_links.description}, judged against en source + context sidecar, i18n/glossary.md and i18n/style-guides/zh-CN.md (accuracy, glossary terms, neighbouring-key terminology, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; 'prose-links'/'strip-links' labels byte-identical to en per the sidecar; rich.cells.cell_len within every maxCells (label 29, help 188, descriptions 48, off label 12); key parity 8/8. Every other key in this namespace is byte-identical to merge-base 989351cd16c0's file, whose last receipt here passed against that base's en hash b3753dde0a01… (scripted diff: 8 added, 0 changed, 0 removed; context sidecar 8 added, 0 changed). 0 findings. 智能体/工具 per glossary; 关闭 matches the three neighbouring off labels; no sentence-final 。 on labels/descriptions, kept on the two-sentence help; 引用标记 reads as citation marks (quotation marks are 引号)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "4ce6048a2a6fdda1a7e6623d0ffef3202ca684628739a3877d200e48c917d756",
+      "context_sha256": "b0c1332306474a5293f2c69e438208e229f81501806321b15d5512d4558e0873",
+      "target_sha256": "f5dad71012f8c8177d151df5ca83e2059065829c2e10ed94da9a063eb4d2627c",
+      "keys_audited": 9,
+      "round": "convergence-r1",
+      "translator": {
+        "agent": "not re-translated here: the 8 wire.settings.mcp_result_normalization.* keys from PR #4514 (row above, source 7eaf3e95c31c), wire.settings.tool_approval_mode.choice.auto.description from origin/main (rows above, source 2ffdcc0c9444)",
+        "model": "see the rows above",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 09b1208daf93 (independent of both translators; did not write PR #4514 or the origin/main change)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Convergence audit of PR #4514 merge commit 724de4b1dae8 (parents f246cbc6 PR head + 0fa001da origin/main; merge-base 989351cd16c0), 2026-11-24. Scripted merge proof (flattened JSON, every key): en and this locale's wire.settings.json == merge-base + origin/main's only change (wire.settings.tool_approval_mode.choice.auto.description) + the PR's 8 added mcp_result_normalization keys, values byte-identical to their audited sides; 913 keys, 0 overlap, 0 lost, 0 other changes; en context sidecar likewise (origin/main's note/role/tone for the auto description + the PR's 8 entries). Semantic re-read of the 9 changed keys against the en source, context sidecar, i18n/glossary.md and i18n/style-guides/zh-CN.md: auto description keeps both the rule and both exempt gates (profile save, community post); 'prose-links'/'strip-links' byte-identical; rich.cells.cell_len within every maxCells; no ICU arguments. Audit-history merge: origin/main's rows are a byte-identical prefix and every PR row is present, 0 extra rows. 0 findings."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "f5c6f8cc389af42fdfccfa5ad6cd2bdadbd06181d7d954d60cbede1a9f83483d",
+      "context_sha256": "83926b0cacb43c28cc1cba831e08651b374942b310ba9e581ba761305d3bb832",
+      "target_sha256": "e8a482eefe636a2f6a91f0f71ca3ce43d6932a256558b80be99046de9d256e33",
+      "keys_audited": 2,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4525 implementer, commit 903751aca151)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 22e1dfd5a736 (independent of the translator; did not write PR #4525)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #4525 (branch feat/mcp-search-snippet-clip, stacked on #4514), 2026-11-24: the 2 NEW keys wire.settings.mcp_search_snippet_chars.{label,help}, judged against the en source + context sidecar (claims: per-snippet character cap for MCP search tools; titles and URLs never cut; 0 = whole), i18n/glossary.md, i18n/style-guides/zh-CN.md and neighbouring wire.settings keys (accuracy, glossary terms, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; rich.cells.cell_len label 16/29, help 89/188; key parity 2/2. Merge proof: this branch was merged with origin/feat/mcp-result-normalization 197d442a8214; scripted flattened-JSON diff shows this locale's file (and en, and the en context sidecar) == 197d442a's file + exactly the 2 new keys, 0 removed, 0 changed, new values byte-identical to PR head 903751aca151; 197d442a's file matches its last passed receipt (target and source hashes verified). 1 finding, NIT, deferred in the PR thread: both values put a space between Chinese and Latin/digit runs ('MCP 搜索', '和 URL 从', '。0 表示'), against i18n/style-guides/zh-CN.md 'No space inserted between Chinese text and Latin/digit runs' (namespace: 220 values without, 7 with, 3 of those from #4514's MCP keys). Suggested: 'MCP搜索摘要长度' / 'MCP搜索工具返回的每条结果摘要最多保留的字符数；标题和URL从不截断。0表示保留完整摘要。'. Meaning, terminology (工具, 摘要) and width are correct."
     }
   ]
 }

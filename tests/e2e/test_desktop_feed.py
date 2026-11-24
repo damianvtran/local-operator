@@ -398,6 +398,102 @@ def _publish_record(root: Path, session_id: str, **fields: Any) -> Path:
 
 
 @pytest.mark.asyncio
+async def test_workspace_rest_uses_existing_catalogue_and_feed_authority(
+    desktop_server, record_property
+):
+    from local_operator.asks import store as asks
+    from local_operator.session_lease import acquire_session_lease
+
+    root, client = desktop_server
+    sid = "dede" * 3
+    directory = root / "sessions" / sid
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    token = _publish(root, sid)
+    AttentionStore(root / "attention.db").acknowledge(f"session/{sid}", token)
+    path = "/v1/desktop/sessions"
+    targeted = {"workspace_rest_id": sid}
+
+    def local(response):
+        assert response.status_code == 200, response.text
+        return next(row for row in response.json()["result"]["sessions"] if row["id"] == sid)
+
+    unauth = await client.get(path, params=targeted, headers={"Authorization": "Bearer wrong"})
+    assert unauth.status_code == 401
+    origin = await client.get(path, params=targeted, headers={"Origin": "https://foreign.invalid"})
+    assert origin.status_code == 403
+    malformed = await client.get(path, params={"workspace_rest_id": "not-a-session"})
+    assert malformed.status_code == 422
+    assert "workspace_rest" not in local(await client.get(path, params=targeted))
+
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        assert response.status_code == 200
+        lines = response.aiter_lines()
+        opened = await _next_frame(lines, lambda frame: frame["type"] == "open")
+        assert opened["payload"]["attention_status"][f"session/{sid}"] == {
+            "code": "complete",
+            "revision": 0,
+        }
+        ordinary = local(await client.get(path))
+        assert "workspace_rest" not in ordinary and ordinary["jobs_running"] is None
+        candidate = local(await client.get(path, params=targeted))
+        assert "workspace_rest" in candidate, json.dumps(candidate, sort_keys=True)
+        arm = candidate["workspace_rest"]
+        assert arm["epoch"] == opened["epoch"] and arm["version"] == 1
+        assert local(await client.get(path, params=targeted))["workspace_rest"] == arm
+        outside = await client.get(
+            path, params={**targeted, "scope_kind": "team", "scope_name": "Other team"}
+        )
+        assert outside.status_code == 200
+        assert all(row["id"] != sid for row in outside.json()["result"]["sessions"])
+
+        lease = acquire_session_lease(directory)
+        try:
+            held = local(await client.get(path, params=targeted))
+            assert held["status"]["code"] == "complete" and "workspace_rest" not in held
+        finally:
+            lease.release()
+        refreshed = local(await client.get(path, params=targeted))["workspace_rest"]
+        assert refreshed["revision"] != arm["revision"]
+
+        now = asks.now_ms()
+        assert asks.append_event(
+            directory,
+            {
+                "v": asks.EVENT_SCHEMA,
+                "kind": asks.EVENT_QUEUED,
+                "ask_id": "fixture-ask",
+                "at": now,
+                "expires_at": now + 60_000,
+            },
+        )
+        assert not asks.entry_path(root, sid).exists()
+        queued = local(await client.get(path, params=targeted))
+        assert queued["status"]["code"] == "complete" and "workspace_rest" not in queued
+        record_property(
+            "workspace_rest_wire",
+            json.dumps(
+                {
+                    "wrong_bearer": unauth.status_code,
+                    "foreign_origin": origin.status_code,
+                    "malformed_id": malformed.status_code,
+                    "wrong_scope": outside.status_code,
+                    "wrong_scope_rows": len(outside.json()["result"]["sessions"]),
+                    "open": opened["payload"]["attention_status"][f"session/{sid}"],
+                    "ordinary": {
+                        "workspace_rest": ordinary.get("workspace_rest"),
+                        "jobs_running": ordinary["jobs_running"],
+                    },
+                    "arm": arm,
+                    "refreshed_after_lease": refreshed,
+                    "while_owned": held.get("workspace_rest"),
+                    "with_queued_ask": queued.get("workspace_rest"),
+                }
+            ),
+        )
+
+
+@pytest.mark.asyncio
 async def test_an_answered_gate_reaches_the_feed_and_the_lists_stamp_agrees(
     desktop_server, workspace: Path
 ):

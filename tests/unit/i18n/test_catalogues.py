@@ -139,6 +139,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # The OpenRouter host-speed settings row (English-only, own namespace so
         # the audited wire.settings hash is untouched).
         "wire.host_speed",
+        # The per-runtime memory guard's settings rows and the sessions tool's
+        # force-stop copy (runtime memory-runaway incident, 2026-11-24): own
+        # namespace so the audited wire.settings and wire.sessions hashes stay put;
+        # carried by the seven locales, each needing its own passed ledger row.
+        "wire.runtime_memory",
         # Radient Saver's settings row and fail-open notices (own namespace so the
         # audited wire.settings hash is untouched).
         "wire.radient_saver",

@@ -94,6 +94,7 @@
   "tui.projects.start.filter_placeholder": "gõ để lọc",
   "tui.projects.start.legend": "gõ để lọc · ↑↓ di chuyển · ↵ chọn · esc đóng",
   "tui.projects.start.more": "+{count} nữa",
+  "tui.projects.start.team_detail": "{manager} · {count, plural, other {{shown} vai trò}}",
   "tui.projects.notice_read_only": "Chỉ đọc: runtime của cuộc trò chuyện này nằm trên thiết bị khác, nên không thể thay đổi dự án ở đây.",
   "tui.projects.refusal_done_gate": "không thể đánh dấu xong khi các mốc này còn mở: {names}"
 }

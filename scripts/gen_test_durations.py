@@ -409,6 +409,13 @@ def ci_run(
     Artifact names historically omitted attempts. Bind each immutable artifact
     ID to its job's execution interval instead of letting gh download merge
     identically named artifacts from retries. Ambiguity is a fatal data error.
+
+    A failed-only rerun (`gh run rerun --failed`, what `make merge-gate` does
+    for a red gate, GH #4074) lists its CARRIED shards under the new attempt
+    with their original execution interval, while their junit artifact keeps
+    the attempt they really ran in (run 45325871121 attempt 2: shard 1 is
+    `...-1-attempt-1`). So any `-attempt-K` with K <= attempt is a candidate;
+    the job interval, not the name, picks the one that job uploaded.
     The cache is output only: metadata and immutable archives are fetched afresh.
     """
     endpoint = f"repos/damianvtran/local-operator/actions/runs/{run_id}"
@@ -445,7 +452,7 @@ def ci_run(
         matches = [
             a
             for a in artifacts["artifacts"]
-            if a["name"] in (name, f"{name}-attempt-{attempt}")
+            if a["name"] in {name, *(f"{name}-attempt-{k}" for k in range(1, attempt + 1))}
             and not a["expired"]
             and job["started_at"] <= a["created_at"] <= job["completed_at"]
         ]

@@ -431,6 +431,7 @@ def pytest_configure(config: pytest.Config) -> None:
         _install_thread_leak_report(config)
     except Exception:
         _thread_leak_stand_down()
+    _install_fd_growth_report(config)
     shard_memory_dump.install()
 
 
@@ -465,6 +466,7 @@ def _on_ci_host() -> bool:
 def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) -> None:
     shard_stall_watchdog.note_start(nodeid)
     _thread_leak_start(nodeid)
+    _fd_growth_start(nodeid)
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
@@ -474,6 +476,7 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
         # which is the "end of teardown" reading the guard reports on. The
         # setup/call reports are progress for the watchdog above, not a boundary.
         _thread_leak_finish(report.nodeid)
+        _fd_growth_finish(report.nodeid)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -2087,6 +2090,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     ``pytest.exit``, and the summary must not depend on either. Unconfigure also
     runs in an xdist WORKER, which is the process holding the numbers.
     """
+    _fd_growth_summary()
     report = _THREAD_LEAK
     if report is None or _THREAD_LEAK_FAILED:
         return
@@ -2101,3 +2105,187 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         except Exception:
             _thread_leak_stand_down()
             return
+
+
+# --------------------------------------------------------------------------
+# REPORT-ONLY descriptor-growth reporter ("[fd-leak]").
+#
+# Why: ``select.select`` raises ``ValueError: filedescriptor out of range`` for
+# any fd >= 1024, and an xdist worker reaches that height only because earlier
+# tests leave descriptors open (PR #4472, CI run 45338434283, job 138256298160:
+# seven ``test_linux_prepared_writer.py`` failures on gw0). The readiness checks
+# no longer care (``tests/fd_readiness.py``), but the leak itself still costs
+# RLIMIT_NOFILE headroom, so this names it: per-test growth of the process's
+# open-descriptor count, summed per test file, with the worst offenders printed
+# once per process at unconfigure.
+#
+# Constraints, mirroring the thread-leak reporter above:
+# * ADVISORY: it never fails, skips or slows a test; any internal error stands
+#   it down silently for the rest of the process.
+# * Deltas, never absolutes: a test that inherits 1,000 fds and opens none is
+#   not blamed for its predecessors.
+# * Cheap: two directory listings per test (``/proc/self/fd`` on Linux,
+#   ``/dev/fd`` on macOS); no per-fd identification, which would cost a
+#   readlink per descriptor per test. The listing's own descriptor is counted in
+#   both readings, so it cancels out of the delta.
+# * A delta is an upper bound on a leak: a test whose descriptors close later
+#   (a gc-collected socket, a pool that winds down) shows here too, and the
+#   next test then shows the matching negative delta. Read the per-file totals
+#   as "where to look first", not as a verdict.
+# Off switch: LOCAL_OPERATOR_FD_LEAK_REPORT=0.
+# --------------------------------------------------------------------------
+
+_FD_LEAK_ENV = "LOCAL_OPERATOR_FD_LEAK_REPORT"
+#: Worst tests and worst files printed in the one summary block per process.
+_FD_WORST_CAP = 15
+
+
+def _fd_directory() -> str | None:
+    """Where this platform lists the process's open descriptors, if anywhere."""
+    for candidate in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+class _FdGrowthReport:
+    """Per-process accumulator of per-test descriptor growth.
+
+    Not thread-safe on purpose: every call comes from the thread running tests.
+    """
+
+    def __init__(
+        self,
+        worker: str,
+        count: Callable[[], int],
+        sink: Callable[[str], None] | None = None,
+        worst_cap: int = _FD_WORST_CAP,
+    ) -> None:
+        self.worker = worker
+        self._count = count
+        self._sink = sink if sink is not None else _thread_leak_sink
+        self._worst_cap = worst_cap
+        self._start: dict[str, int] = {}
+        #: nodeid -> positive delta, pruned to the worst ``worst_cap`` as it grows.
+        self._worst: dict[str, int] = {}
+        #: test file -> net delta summed over its tests (negatives included, so a
+        #: file whose fds close in a later test of the same file nets out).
+        self.per_file: dict[str, int] = {}
+        self.first: int | None = None
+        self.last: int | None = None
+        self.peak = 0
+        self.tests = 0
+        self.growing_tests = 0
+
+    def start(self, nodeid: str) -> None:
+        current = self._count()
+        if self.first is None:
+            self.first = current
+        self._start[nodeid] = current
+
+    def finish(self, nodeid: str) -> None:
+        before = self._start.pop(nodeid, None)
+        if before is None:
+            return
+        after = self._count()
+        self.tests += 1
+        self.last = after
+        self.peak = max(self.peak, before, after)
+        delta = after - before
+        test_file = nodeid.split("::", 1)[0]
+        self.per_file[test_file] = self.per_file.get(test_file, 0) + delta
+        if delta <= 0:
+            return
+        self.growing_tests += 1
+        self._worst[nodeid] = delta
+        if len(self._worst) > self._worst_cap * 4:
+            # Bounded memory on a 15k-test shard: keep the leaders only.
+            keep = sorted(self._worst.items(), key=lambda item: -item[1])[: self._worst_cap]
+            self._worst = dict(keep)
+
+    def summary(self) -> list[str]:
+        # Silent when nothing grew: a clean local run should not gain a log line.
+        if not self.tests or not self.growing_tests:
+            return []
+        prefix = f"[fd-leak] {self.worker}:"
+        lines = [
+            f"{prefix} {self.tests} test(s); open fds first={self.first} last={self.last} "
+            f"peak={self.peak} net={(self.last or 0) - (self.first or 0):+d}; "
+            f"{self.growing_tests} test(s) ended with more fds than they started with "
+            "(advisory: select.select fails at fd >= 1024)"
+        ]
+        worst_files = sorted(
+            ((path, delta) for path, delta in self.per_file.items() if delta > 0),
+            key=lambda item: -item[1],
+        )[: self._worst_cap]
+        for path, delta in worst_files:
+            lines.append(f"{prefix} file {path} net={delta:+d}")
+        worst_tests = sorted(self._worst.items(), key=lambda item: -item[1])[: self._worst_cap]
+        for nodeid, delta in worst_tests:
+            lines.append(f"{prefix} test {nodeid} +{delta}")
+        return lines
+
+
+_FD_GROWTH: _FdGrowthReport | None = None
+
+
+def _count_open_fds() -> int:
+    directory = _fd_directory()
+    if directory is None:
+        raise OSError("no fd directory on this platform")
+    return len(os.listdir(directory))
+
+
+def _install_fd_growth_report(config: pytest.Config) -> None:
+    """Arm only where tests run, by the same rule as the thread-leak reporter."""
+    global _FD_GROWTH
+    try:
+        if os.environ.get(_FD_LEAK_ENV, "").strip().lower() in _FALSY_ENV_VALUES:
+            return
+        if _fd_directory() is None:
+            return
+        worker_input = getattr(config, "workerinput", None)
+        if isinstance(worker_input, dict):
+            worker = str(worker_input.get("workerid") or "worker")
+        elif getattr(getattr(config, "option", None), "numprocesses", 0) not in (
+            None,
+            0,
+            "0",
+        ):
+            return
+        else:
+            worker = "main"
+        _FD_GROWTH = _FdGrowthReport(worker, _count_open_fds)
+    except Exception:
+        _FD_GROWTH = None
+
+
+def _fd_growth_start(nodeid: str) -> None:
+    global _FD_GROWTH
+    if _FD_GROWTH is None:
+        return
+    try:
+        _FD_GROWTH.start(nodeid)
+    except Exception:
+        _FD_GROWTH = None  # advisory: stand down silently, never touch the test
+
+
+def _fd_growth_finish(nodeid: str) -> None:
+    global _FD_GROWTH
+    if _FD_GROWTH is None:
+        return
+    try:
+        _FD_GROWTH.finish(nodeid)
+    except Exception:
+        _FD_GROWTH = None
+
+
+def _fd_growth_summary() -> None:
+    report = _FD_GROWTH
+    if report is None:
+        return
+    try:
+        for line in report.summary():
+            report._sink(line)
+    except Exception:
+        pass

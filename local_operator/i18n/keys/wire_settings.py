@@ -1485,6 +1485,46 @@ def max_learnings_history_label() -> Msg:
     return Msg("wire.settings.max_learnings_history.label", {})
 
 
+def mcp_result_normalization_choice_off_description() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.off.description", {})
+
+
+def mcp_result_normalization_choice_off_label() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.off.label", {})
+
+
+def mcp_result_normalization_choice_prose_links_description() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.prose_links.description", {})
+
+
+def mcp_result_normalization_choice_prose_links_label() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.prose_links.label", {})
+
+
+def mcp_result_normalization_choice_strip_links_description() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.strip_links.description", {})
+
+
+def mcp_result_normalization_choice_strip_links_label() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.strip_links.label", {})
+
+
+def mcp_result_normalization_help() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.help", {})
+
+
+def mcp_result_normalization_label() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.label", {})
+
+
+def mcp_search_snippet_chars_help() -> Msg:
+    return Msg("wire.settings.mcp_search_snippet_chars.help", {})
+
+
+def mcp_search_snippet_chars_label() -> Msg:
+    return Msg("wire.settings.mcp_search_snippet_chars.label", {})
+
+
 def memory_guard_description() -> Msg:
     return Msg("wire.settings.memory_guard.description", {})
 

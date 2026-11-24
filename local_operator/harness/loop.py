@@ -1390,6 +1390,14 @@ class LoopContext:
     # Sticky until the run boundary even if every lease expires earlier: the raw
     # executor-argument map must not become a subsequent-turn back channel.
     one_turn_secret_run_active: bool = False
+    # SDK-owned; never checkpointed, replayed or copied to a delegated child.
+    condition_public_evidence: (
+        Callable[
+            [ToolResult, list[Content], dict[str, Any], Callable[[str], str], AbortSignal | None],
+            Awaitable[list[Content]],
+        ]
+        | None
+    ) = None
     # Invocation-local dispatch evidence, NEVER reconstructed from eval repr,
     # persisted details or peer display certificates. Session owns acceptance.
     quiet_request_roots: set[str] = field(default_factory=set)
@@ -4009,6 +4017,8 @@ class AgentLoop:
                             new_messages,
                             redact=config.redact_tool_result,
                             file_provenance=config.file_provenance,
+                            evidence_signal=signal,
+                            condition_evidence=True,
                         )
                     elif (
                         config.recover_wordless_stop
@@ -4521,6 +4531,14 @@ class AgentLoop:
     # (``_abortable_stream`` is a module-level helper; see below the class.)
 
     @staticmethod
+    def _host_system_blocks_frozen(config: LoopConfig) -> bool:
+        """Whether the host reports its resolved system blocks as epoch-frozen."""
+        reader = config.get_system_blocks_frozen
+        if reader is None:
+            return False
+        return bool(reader())
+
+    @staticmethod
     def _host_context_tokens_hint(config: LoopConfig) -> int | None:
         """The host's cross-turn context-size seed, or ``None`` when it has
         none — a zero is treated as "nothing reported" because a provider
@@ -4931,6 +4949,7 @@ class AgentLoop:
             request = ChatRequest(
                 model=model,
                 system_blocks=system_blocks,
+                system_blocks_frozen=self._host_system_blocks_frozen(config),
                 messages=list(converted),
                 tools=(
                     list(config.get_tools())
@@ -7953,6 +7972,9 @@ class AgentLoop:
         new_messages: list[AgentMessage],
         redact: Callable[[str], str] | None = None,
         file_provenance: Callable[[str, Any, Any], Awaitable[None]] | None = None,
+        *,
+        evidence_signal: AbortSignal | None = None,
+        condition_evidence: bool = False,
     ) -> None:
         for result in results:
             # Idempotent backstop for a path that skipped the runner's step:
@@ -7964,11 +7986,12 @@ class AgentLoop:
             # still text, so an image-only result is untouched and a genuinely
             # empty one still gets the placeholder it needs to serialize.
             if redact is not None:
+                args = _call_arguments(context, result.tool_call_id)
                 content = await self._redact_content(
                     content,
                     redact,
                     result.tool_name,
-                    _call_arguments(context, result.tool_call_id),
+                    args,
                     _session_cwd(context),
                     _exempt_source_verdict(context, result.tool_call_id),
                 )
@@ -7986,6 +8009,24 @@ class AgentLoop:
                     _session_cwd(context),
                     _exempt_source_verdict(context, result.tool_call_id),
                 )
+                if (
+                    condition_evidence
+                    and context.condition_public_evidence is not None
+                    and not context.one_turn_secret_run_active
+                    and not context.one_turn_secret_leases
+                    and not result.is_error
+                    # A result containing any newly masked value does not
+                    # belong to a public evidence scope, even after masking.
+                    and content == result.content
+                    and details == result.details
+                ):
+                    content = await context.condition_public_evidence(
+                        result.model_copy(update={"content": content, "details": details}),
+                        content,
+                        args,
+                        redact,
+                        evidence_signal,
+                    )
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
             # with a 400 — backfill one placeholder block. Image-only results

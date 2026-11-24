@@ -1,0 +1,44 @@
+{
+ "auditor": {
+  "agent": "i18n-auditor (lopdev team, audit-fr)",
+  "session": "877b8e089118",
+  "model": "anthropic/claude-opus-5-5 (no fallback observed)",
+  "date": "2026-11-23",
+  "independent_from_translator": true
+ },
+ "repo": {
+  "worktree": "~/local-operator/.worktrees/i18n-model-persist-notice",
+  "head": "c3ba6a516c6a"
+ },
+ "audited_input": "~/.local-operator/sessions/17b81fee8ed1/scratchpad/i18n-settings-residual/translations/fr.json (sha256 0593719b684d5b1c1b1174b5004d07ea9bf4e3e2b6e03488dab7e60af074483a; briefed path under eac1855834c5 did not exist, located via ls -d glob)",
+ "source_sha256": {
+  "local_operator/i18n/catalogues/en/tui.app.json": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+  "local_operator/i18n/catalogues/en/tui.projects.json": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2"
+ },
+ "validator": "scripts/i18n/check.py::check_catalogues() run in-memory (load_catalogue patched to merge fr.json; no repo writes). Control (unpatched): 5 fr 'missing key' lines for exactly these keys. Merged: 0 fr problems.",
+ "per_namespace": {
+  "tui.app": {
+   "result": "clean",
+   "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+   },
+   "findings": [],
+   "notes": "member_count: placeholders {count:plural,shown} = EN; arms one/many/other = CLDR fr; arms byte-identical to existing fr tui.app.skills.led_by tail ('{shown} de membres' many arm matches the 34 existing fr 'many {{shown} de …}' arms). Rendered cells: 0→'0 membre' 8, 1→8, 2→9, 5→9, 21→10, 100→11 (≤ maxCells 14); 10^6 multiples → '1000000 de membres' 18 (EN 15 also over; unreachable roster size, not a fit finding). '0 membre' singular correct per glossary plurals row. team_aliases 'alias\\u202f: {aliases}': U+202F before colon per style guide (782 fr values use NNBSP-colon vs 35 ASCII space); 'alias' matches fr tui.team_authoring.aliases; invariant in plural. team_no_description 'aucune description' 18/30 cells, lowercase, no punctuation; consistent with tui.projects.detail.no_description minus 'pour l’instant' (EN also drops 'yet'). team_fallback_facts 'équipe' = glossary 'team'."
+  },
+  "tui.projects": {
+   "result": "clean",
+   "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+   },
+   "findings": [],
+   "notes": "start.team_detail: placeholders {manager,count:plural,shown} = EN; ' · ' separator kept; {manager} untranslated. 'rôle(s)' = fr tui.authoring.role. Rendered with manager='manager': 0→16, 1→16, 2→17, 5→17, 21→18, 100→19 cells (EN 16–19); no maxCells declared, picker drops column at narrow widths. many arm '{shown} de rôles' per repo convention."
+  }
+ },
+ "render_log": "scratchpad://fr-render.txt (actual runtime.render_message + rich cell_len output)"
+}

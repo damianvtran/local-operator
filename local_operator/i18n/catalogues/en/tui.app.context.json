@@ -29,6 +29,28 @@
     "tone": "dim",
     "note": "Team row: manager then roster size. The plural moves the word into the message; the manager name is data and the count is shown raw."
   },
+  "tui.app.skills.member_count": {
+    "role": "row",
+    "tone": "dim",
+    "note": "Roster size on a team's facts line (settings pane, /team list and picker, follower wire twin). Counts member copies, manager excluded — say 'members', never 'roles'. {shown} is the count already formatted as a raw number; {count} only selects the plural arm. Joined to other facts with ' · ' in code, so no punctuation.",
+    "maxCells": 14
+  },
+  "tui.app.skills.team_aliases": {
+    "role": "row",
+    "tone": "dim",
+    "note": "Fact naming the extra names a team answers to, on the settings pane's team facts line. {aliases} is a comma-separated list of team identifiers typed by the user — never translate or reorder it. Joined after the member count with ' · ' in code."
+  },
+  "tui.app.skills.team_no_description": {
+    "role": "empty",
+    "tone": "faint",
+    "note": "Summary line under a team on the settings pane when the team has no description. A short statement of absence, lowercase, no punctuation; the pane is ~30 cells wide.",
+    "maxCells": 30
+  },
+  "tui.app.skills.team_fallback_facts": {
+    "role": "row",
+    "tone": "dim",
+    "note": "Facts line under a team name when no roster facts could be read (defensive fallback). Just the noun 'team', lowercase."
+  },
   "tui.app.skills.send_agent": {
     "role": "affordance",
     "tone": "plain",

@@ -1953,7 +1953,17 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # isolated HOME, one host: 89,080 -> 89,325 chars = ~32,043 -> ~32,131 billed
 # (+88), so the ceiling moves by exactly that and keeps its 4 of headroom.
 # Net wave 2 is still -14,824 chars = ~-5,333 billed against origin/main.
-BUDGET_BILLED_TOKENS = 32_135
+# RAISED 32,135 -> 32,160, +24: `sessions` tool `force` field (operator-safety
+# stop, PR #4519, runtime memory-runaway incident 2026-11-24) — the escalation
+# that lets an agent stop a runaway "busy" session that is driving the host into
+# swap. Its `peer`/`include_stored` descriptions were already tightened to pay
+# part of it; no further trim of that PR's text fits without losing meaning (the
+# shortest wording measured 9 over). Same script, isolated HOME and config dir
+# (CI's arm), one host:
+#   origin/main 7fe9250a   89,331 chars = ~32,133 billed (2 of headroom)
+#   merged head d40af99    89,397 chars = ~32,157 billed
+#     = +66 chars = ~+24 billed; the ceiling moves by that plus 1.
+BUDGET_BILLED_TOKENS = 32_160
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's

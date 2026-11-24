@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "tui.app",
-  "history_sha256": "2d816206d8c2c90cd7300c55e184b3f8e8ad7a90270abedf18f0e273ce9be694",
+  "history_sha256": "457452da171983fb0c1984d34d79bfdea5ffd84d1bb278aa8edc5523fe825323",
   "entries": [
     {
       "locale": "vi",
@@ -74,6 +74,120 @@
       },
       "status": "passed",
       "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source 3ffea9a3761c7d4d4f384819700bafbbe0c9aefb223fccee8d5336843a73bf2e and target bb2a5f0635c661456ab5374bedbfa7bbd670246b57d0209471c7ddbd8c58c7c6 recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/vi/tui.app/temporary-r3-5c6cf4252f37/record.json"
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.app",
+      "source_sha256": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+      "context_sha256": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+      "target_sha256": "cc60ab827f7d5dadc4d9b60cf146bff904cfd83b2b3b8b5e02db62f011d40cd9",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "session": "17b81fee8ed1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "provenance": "translator's own files (translations/<locale>.json + notes.md in session 17b81fee8ed1 scratchpad, notes.md states no fallback); values applied byte-exact by the integrating coder"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team, task audit-vi), not the translator; did not edit values",
+        "session": "512639ecdf78",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "result": "findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 1
+        },
+        "finding_ids": [
+          "VI-1",
+          "VI-2"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own record (auditor.model field)"
+      },
+      "status": "passed",
+      "note": "tr1: independent i18n-auditor 512639ecdf78 (anthropic/claude-opus-5-5, no fallback observed) of translator 17b81fee8ed1 input sha256 85ac5ce9958feab01fd506d07191c0292452523193d6f1e21dd37415b0fc39ba: findings for tui.app (0 blocker, 0 major, 1 minor, 1 nit; VI-1, VI-2). Keys: settings team facts / start-picker team detail added at c3ba6a516c6a. Value later changed per the finding and re-audited in tr2; this row is kept as history. Record i18n/audits/evidence/vi/tui.app/tr1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/vi/tui.app/tr1/record.json",
+      "round": "tr1"
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.app",
+      "source_sha256": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+      "context_sha256": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+      "target_sha256": "76f95f540df706944f8789fb53eb6be3f1a603d867cea7a7f74f9400c0c9dec9",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "session": "17b81fee8ed1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "provenance": "translator's own files (translations/<locale>.json + notes.md in session 17b81fee8ed1 scratchpad, notes.md states no fallback); values applied byte-exact by the integrating coder"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team, task audit-vi-r2), not the translator; did not edit values",
+        "session": "4fd509aa4aca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own record (auditor.model field)"
+      },
+      "status": "passed",
+      "note": "tr2: independent i18n-auditor 4fd509aa4aca (anthropic/claude-opus-5-5, no fallback observed) of translator 17b81fee8ed1 input sha256 c2bb94103ef8bd84ef1c10ba10f9fc0a67d57a51d622fe37245a09b16fb5dc79: clean for tui.app (0 blocker, 0 major, 0 minor, 0 nit). Keys: settings team facts / start-picker team detail added at c3ba6a516c6a. Round-2 delta audit by a different auditor session than round 1. Record i18n/audits/evidence/vi/tui.app/tr2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/vi/tui.app/tr2/record.json",
+      "round": "tr2"
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.app",
+      "source_sha256": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+      "context_sha256": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+      "target_sha256": "76f95f540df706944f8789fb53eb6be3f1a603d867cea7a7f74f9400c0c9dec9",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "session": "17b81fee8ed1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "provenance": "translator's own files (translations/<locale>.json + notes.md in session 17b81fee8ed1 scratchpad, notes.md states no fallback); values applied byte-exact by the integrating coder"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team, task audit-vi-r2), not the translator; did not edit values",
+        "session": "4fd509aa4aca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own record (auditor.model field)"
+      },
+      "status": "passed",
+      "round": "tr2-binding",
+      "evidence": "i18n/audits/evidence/vi/tui.app/tr2-binding/record.json",
+      "note": "tr2-binding: evidence binding of the passed PR #4508 audit row(s) tr1, tr2 (auditor session(s) 512639ecdf78, 4fd509aa4aca); same audit, same verdict, re-appended so the cg1 byte pin moves to a committed record. Source 44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584 and target 76f95f540df706944f8789fb53eb6be3f1a603d867cea7a7f74f9400c0c9dec9 recomputed from the shipped files at fc8bbf20939f. Evidence: i18n/audits/evidence/vi/tui.app/tr2-binding/record.json"
     }
   ]
 }

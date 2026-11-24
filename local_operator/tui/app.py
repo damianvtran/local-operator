@@ -97,6 +97,7 @@ from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 # cannot drift on which writes may loosen a live gate (issue #1282). Pure and
 # import-cheap: `harness.approval` pulls in `inspect` and nothing else.
 from local_operator.harness.approval import (
+    AUTO_MODE_EFFECT,
     LOOSENING_KEPT_BY_ASK_NOTICE,
     LOOSENING_REFUSED_NOTICE,
     REARM_KEPT_BY_AUTO_NOTICE,
@@ -22019,7 +22020,10 @@ class OperatorApp(App[None]):
         else:
             # "MEMBERS", never "roles" (R6): the count comes from member_count(),
             # which excludes the manager, and every sibling surface says members.
-            parts.append(f"{slots} {'member' if slots == 1 else 'members'}")
+            # Keyed with an ICU plural (not a hand-rolled `s`) so every locale
+            # picks its own plural arm; `shown` stays the raw count, matching
+            # `skills_led_by` beside it.
+            parts.append(_t(_x.skills_member_count(count=slots, shown=str(slots))))
         if registry is None:
             registry = self._team_registry()
         # Only a CONVERSATION row is marked: the account is the default a reader
@@ -32206,7 +32210,7 @@ class OperatorApp(App[None]):
                 else " — /approvals default auto saves it for new sessions"
             )
             notice(
-                "tool approvals: auto — every tool runs without asking (this session)" + save_hint,
+                f"tool approvals: auto — {AUTO_MODE_EFFECT} (this session)" + save_hint,
                 "warning",
             )
         else:
@@ -32276,7 +32280,7 @@ class OperatorApp(App[None]):
         on_disk = self._configured_approvals_mode()
         saved = on_disk if on_disk is not None else mode_word(self._approvals_default_auto)
         effect = (
-            "every tool runs without asking"
+            AUTO_MODE_EFFECT
             if self._approve_all
             else "write and command tools prompt before running"
         )
@@ -41665,8 +41669,19 @@ class OperatorApp(App[None]):
                         aliases = tuple(str(alias) for alias in (getattr(row, "aliases", ()) or ()))
                         details[name.casefold()] = (
                             display_form(name, str(getattr(row, "label", "") or "")),
-                            (getattr(row, "description", "") or "").strip() or "no description",
-                            f"alias: {', '.join(aliases)}" if aliases else "",
+                            # Resolved to finished strings here, so the page
+                            # cannot re-translate them itself: `_apply_language`
+                            # re-runs this method and hands the rows back via
+                            # `SettingsView.set_teams` on a live switch. Aliases
+                            # are user-typed identifiers, so only the label is
+                            # copy — the joined names pass through untouched.
+                            (getattr(row, "description", "") or "").strip()
+                            or _t(_x.skills_team_no_description()),
+                            (
+                                _t(_x.skills_team_aliases(aliases=", ".join(aliases)))
+                                if aliases
+                                else ""
+                            ),
                         )
                 except Exception:  # noqa: BLE001 — labels are optional, rows are not
                     logger.debug("settings: team labels unavailable", exc_info=True)
@@ -41674,7 +41689,7 @@ class OperatorApp(App[None]):
                 display, summary, alias_fact = details.get(
                     team.name.casefold(), (team.name, team.description or "", "")
                 )
-                facts = team.detail or "team"
+                facts = team.detail or _t(_x.skills_team_fallback_facts())
                 if alias_fact:
                     facts = f"{facts} · {alias_fact}"
                 rows.append((display, facts, summary))
@@ -44688,7 +44703,7 @@ class OperatorApp(App[None]):
         if not announce or self._gate_is_owned_elsewhere():
             return _ApprovalsFollow("", False)
         return (
-            _ApprovalsFollow("tool approvals now auto — every tool runs without asking", False)
+            _ApprovalsFollow(f"tool approvals now auto — {AUTO_MODE_EFFECT}", False)
             if wanted_auto
             else _ApprovalsFollow("tool approvals now ask — tools prompt before running", False)
         )
@@ -49224,9 +49239,17 @@ class OperatorApp(App[None]):
         # watcher path reaches here with no keypress to follow it. `_rows_key`
         # and `_paint_token` carry the active locale, so this repaint recomposes
         # the whole list in the new language rather than reusing the old strips.
+        #
+        # Team rows are the exception the locale-keyed caches cannot cover: the
+        # app resolves them to finished strings (member count, alias label, the
+        # "no description" fallback) when the page opens, so a repaint alone
+        # re-inks the OLD language (PR #4508 R1/Q1). Re-resolve them here and
+        # hand them over through the narrow setter, which repaints once and
+        # keeps cursor/pane/expansion state — `load` would also re-read the
+        # credential store and catalogues for rows that need no re-resolving.
         settings_view = self._settings_view
         if settings_view is not None:
-            settings_view._repaint()
+            settings_view.set_teams(self._settings_team_rows())
         # /info owns painted Statics, not render-time lookups. Repaint the
         # existing presentation through this shared command/config-watch hook:
         # re-opening it would lose its snapshot/scroll and re-run costly probes.
@@ -61604,7 +61627,7 @@ class OperatorApp(App[None]):
             on_disk = self._configured_approvals_mode()
             saved = on_disk if on_disk is not None else mode_word(self._approvals_default_auto)
             effect = (
-                "every tool runs without asking"
+                AUTO_MODE_EFFECT
                 if self._approve_all
                 else "write and command tools prompt before running"
             )
@@ -61667,7 +61690,7 @@ class OperatorApp(App[None]):
             )
             return SlashResult(
                 kind="notice",
-                text="tool approvals: auto — every tool runs without asking (this session)"
+                text=f"tool approvals: auto — {AUTO_MODE_EFFECT} (this session)"
                 + save_hint
                 + not_saved,
                 style="warning",

@@ -474,6 +474,11 @@
     "tone": "muted",
     "note": "Row-count overflow when the card cannot show every row."
   },
+  "tui.projects.start.team_detail": {
+    "role": "detail",
+    "tone": "muted",
+    "note": "Detail column of a team row in the start-session picker: the team's manager, then how many role slots its roster has. {manager} is a role identifier (e.g. 'manager') — never translate it. {shown} is the raw count; {count} selects the plural arm. The picker drops the whole column at narrow widths, so keep it short."
+  },
   "tui.projects.notice_read_only": {
     "role": "read-only notice",
     "tone": "plain",

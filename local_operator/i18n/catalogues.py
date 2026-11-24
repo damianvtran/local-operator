@@ -138,6 +138,11 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.console": "console section title/description and row labels rendered by settings_io._t",
     "wire.memory": "memory section rows rendered by settings_io._t as plain label/help strings",
     "wire.host_speed": "host-speed threshold label/help rendered by settings_io._t",
+    "wire.runtime_memory": (
+        "per-runtime memory guard settings rows rendered by settings_io._t, and the "
+        "sessions tool's force-stop hint and approval prompt rendered in-process as "
+        "plain strings"
+    ),
     "wire.guardrails": (
         "guardrails section title/description and row label/help rendered by settings_io._t"
     ),
