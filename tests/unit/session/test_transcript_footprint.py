@@ -492,3 +492,282 @@ async def test_construction_keeps_order_tolerance_and_a_torn_tail(tmp_path):
     transcript = Transcript(directory)
     assert [entry.id for entry in transcript.entries()] == ["a" * 32, "b" * 32]
     assert transcript.entries()[-1].payload["content"][0]["text"] == "torn tail"
+
+
+# -- superseded collapsible rows are never materialised on open (incident
+#    2026-11-24, session 96cf57e7acb7: a 974 MB journal that never pruned, so
+#    ``compact_file`` never ran, cost 2,392 MiB of footprint per cold open)
+
+
+async def _journal_with_superseded_checkpoints(
+    directory: Path, *, copies: int, size: int
+) -> tuple[list[str], dict[str, Any]]:
+    """A closed journal: messages interleaved with ``copies`` checkpoints of ``size`` bytes."""
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+
+    transcript = Transcript(directory)
+    for index in range(copies):
+        await transcript.append_message(Message.user(f"turn {index}"))
+        await transcript.append_custom(
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"state": {"n": index, "pad": "x" * size}}
+        )
+    newest = transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+    texts = [m.text for m in transcript.build_llm_history() if isinstance(m, Message)]
+    transcript.close()
+    return texts, newest
+
+
+def _checkpoint_rows(transcript: Transcript) -> list[Any]:
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+
+    return [
+        entry
+        for entry in transcript.entries()
+        if entry.payload.get("custom_type") == FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    ]
+
+
+@pytest.mark.asyncio
+async def test_owning_open_folds_superseded_rows_off_disk_without_loading_them(
+    tmp_path, monkeypatch
+):
+    """An owning writer folds the dead rows on open; survivors stay byte-identical.
+
+    Mechanism, not just outcome: ``TranscriptEntry.from_json`` is counted, so a
+    revert that parses the superseded rows (the incident's 2.45x-the-file
+    residency) fails here even though the end state would look the same.
+    """
+    from local_operator.session import transcript as transcript_module
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+
+    directory = tmp_path / "sess"
+    texts, newest = await _journal_with_superseded_checkpoints(directory, copies=4, size=120 * 1024)
+    path = directory / "transcript.jsonl"
+    lines = path.read_text().splitlines(keepends=True)
+    survivors = [line for line in lines if '"pad"' not in line or '"n":3' in line]
+    assert len(lines) == 8 and len(survivors) == 5
+
+    parsed: list[str] = []
+    real = transcript_module.TranscriptEntry.from_json
+
+    def counting(line: str):
+        parsed.append(line)
+        return real(line)
+
+    monkeypatch.setattr(transcript_module.TranscriptEntry, "from_json", staticmethod(counting))
+    reopened = Transcript(directory)
+
+    assert not any('"pad"' in line and '"n":3' not in line for line in parsed)
+    assert path.read_text() == "".join(survivors), "fold must copy survivors verbatim"
+    assert not path.with_suffix(".jsonl.compact").exists()
+    assert len(_checkpoint_rows(reopened)) == 1
+    assert reopened.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE) == newest
+    assert [m.text for m in reopened.build_llm_history() if isinstance(m, Message)] == texts
+    assert reopened.reclaimable_bytes() == 0
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_unowned_open_skips_in_memory_and_compact_file_reclaims_exactly(tmp_path):
+    """Below the rewrite threshold the rows stay on disk, are skipped, and are priced.
+
+    ``reclaimable_bytes`` is compared for EQUALITY with what ``compact_file``
+    frees, so bytes the open skipped must be in both — and must make
+    ``compact_file`` run even with no prune and no in-memory superseded row.
+    """
+    directory = tmp_path / "sess"
+    texts, newest = await _journal_with_superseded_checkpoints(directory, copies=3, size=64)
+    path = directory / "transcript.jsonl"
+    size_before = path.stat().st_size
+
+    reopened = Transcript(directory)
+    assert path.stat().st_size == size_before, "below the threshold the open must not rewrite"
+    assert len(_checkpoint_rows(reopened)) == 1
+    assert [m.text for m in reopened.build_llm_history() if isinstance(m, Message)] == texts
+    expected = reopened.reclaimable_bytes()
+    assert expected > 0
+    assert await reopened.compact_file(min_reclaim_bytes=0) == expected
+    assert path.stat().st_size == size_before - expected
+    assert reopened.reclaimable_bytes() == 0
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_open_skips_superseded_rows_and_never_writes(tmp_path):
+    directory = tmp_path / "sess"
+    texts, newest = await _journal_with_superseded_checkpoints(directory, copies=4, size=120 * 1024)
+    path = directory / "transcript.jsonl"
+    before = path.read_bytes()
+    viewer = Transcript(directory, read_only=True)
+    assert path.read_bytes() == before
+    assert len(_checkpoint_rows(viewer)) == 1
+    assert [m.text for m in viewer.build_llm_history() if isinstance(m, Message)] == texts
+
+
+@pytest.mark.asyncio
+async def test_failed_fold_on_open_leaves_the_journal_intact(tmp_path, monkeypatch):
+    """ENOSPC mid-fold (the incident's disk was at 0.65 GiB) must cost nothing.
+
+    The original journal is untouched, the partial temp file is removed, and
+    the open still loads bounded by skipping the rows in memory.
+    """
+    import errno
+
+    from local_operator.session import transcript as transcript_module
+
+    directory = tmp_path / "sess"
+    texts, _ = await _journal_with_superseded_checkpoints(directory, copies=4, size=120 * 1024)
+    path = directory / "transcript.jsonl"
+    before = path.read_bytes()
+
+    def full_disk(_fd: int) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(transcript_module.os, "fsync", full_disk)
+    reopened = Transcript(directory)
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".jsonl.compact").exists()
+    assert len(_checkpoint_rows(reopened)) == 1
+    assert [m.text for m in reopened.build_llm_history() if isinstance(m, Message)] == texts
+    assert reopened.reclaimable_bytes() > 0
+    reopened.close()
+
+
+def test_superseded_scan_is_sound_against_lookalike_rows(tmp_path):
+    """Only a real custom row of a collapsible type can be dropped.
+
+    A message whose TEXT spells the checkpoint prefix is escaped in JSON and
+    never matches; a checkpoint row in a shape the prefix does not recognise
+    (payload key order) is a miss — kept, never dropped. The scan is allowed
+    to be incomplete, never unsound.
+    """
+    from local_operator.session.transcript import _superseded_collapsible_lines
+
+    lookalike_text = '{"custom_type":"frontend_state_checkpoint_v1"}'
+    rows = [
+        {
+            "id": "a",
+            "ts": 1.0,
+            "type": "custom",
+            "payload": {"custom_type": "frontend_state_checkpoint_v1", "details": 1},
+        },
+        {
+            "id": "b",
+            "ts": 2.0,
+            "type": "message",
+            "payload": {"role": "user", "content": [{"type": "text", "text": lookalike_text}]},
+        },
+        {
+            "id": "c",
+            "ts": 3.0,
+            "type": "custom",
+            "payload": {"details": 2, "custom_type": "frontend_state_checkpoint_v1"},
+        },
+        {
+            "id": "d",
+            "ts": 4.0,
+            "type": "custom",
+            "payload": {"custom_type": "hub_communication", "details": 3},
+        },
+        {
+            "id": "e",
+            "ts": 5.0,
+            "type": "custom",
+            "payload": {"custom_type": "hub_communication", "details": 4},
+        },
+        {
+            "id": "f",
+            "ts": 6.0,
+            "type": "custom",
+            "payload": {"custom_type": "frontend_state_checkpoint_v1", "details": 5},
+        },
+    ]
+    path = tmp_path / "transcript.jsonl"
+    path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
+    skip, dead = _superseded_collapsible_lines(path)
+    # Only row "a" is superseded-and-recognised: "c" is a miss (kept), "b" is a
+    # message, "d"/"e" accumulate (not collapsible), "f" is the newest.
+    assert skip == frozenset({0})
+    assert dead == len(path.read_text().splitlines(keepends=True)[0].encode())
+
+
+@pytest.mark.asyncio
+async def test_fold_on_open_keeps_duplicate_id_rows_where_and_as_they_were(tmp_path):
+    """Duplicate ids: the fold matches the loader exactly — every occurrence, in place.
+
+    Real journals carry them (a stopped 428 MB session held four duplicate-id
+    ``peer_message`` rows with different ``ts``). The loader keeps EVERY
+    occurrence, in file order, and the id index simply holds the id. The fold
+    on open must not pick a winner, move or re-stamp one: it drops only
+    superseded collapsible rows, by POSITION (newest line of the type wins, as
+    ``_superseded_custom_indices`` decides by index), and copies every other line
+    verbatim — so a duplicate-id pair reads back byte-identical and in its slot,
+    including a duplicate id on a collapsible row, where the later LINE wins.
+    """
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+
+    pad = "x" * (100 * 1024)
+    rows = [
+        {
+            "id": "peer-1",
+            "ts": 1.0,
+            "type": "custom",
+            "payload": {"custom_type": "peer_message", "details": {"v": "first"}},
+        },
+        {
+            "id": "ck",
+            "ts": 2.0,
+            "type": "custom",
+            "payload": {
+                "custom_type": FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+                "details": {"n": 0, "p": pad},
+            },
+        },
+        {
+            "id": "peer-1",
+            "ts": 3.0,
+            "type": "custom",
+            "payload": {"custom_type": "peer_message", "details": {"v": "second"}},
+        },
+        {
+            "id": "ck",
+            "ts": 4.0,
+            "type": "custom",
+            "payload": {
+                "custom_type": FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+                "details": {"n": 1, "p": pad},
+            },
+        },
+        {
+            "id": "ck2",
+            "ts": 5.0,
+            "type": "custom",
+            "payload": {
+                "custom_type": FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+                "details": {"n": 2, "p": pad},
+            },
+        },
+        {
+            "id": "ck",
+            "ts": 6.0,
+            "type": "custom",
+            "payload": {"custom_type": FRONTEND_CHECKPOINT_CUSTOM_TYPE, "details": {"n": 3}},
+        },
+    ]
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    path = directory / "transcript.jsonl"
+    lines = [json.dumps(row, separators=(",", ":")) + "\n" for row in rows]
+    path.write_text("".join(lines))
+
+    reopened = Transcript(directory)
+    # Superseded checkpoints (lines 1, 3, 4) are gone; both peer-1 rows survive
+    # byte-identical and in their original relative order.
+    assert path.read_text() == lines[0] + lines[2] + lines[5]
+    assert [(e.id, e.ts) for e in reopened.entries()] == [
+        ("peer-1", 1.0),
+        ("peer-1", 3.0),
+        ("ck", 6.0),
+    ]
+    assert reopened.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE) == {"n": 3}
+    reopened.close()

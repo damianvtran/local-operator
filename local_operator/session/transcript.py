@@ -481,6 +481,71 @@ _COLLAPSIBLE_CUSTOM_TYPES = frozenset(
     {"subagent_roster", SESSION_SPEND_CUSTOM_TYPE, "frontend_state_checkpoint_v1"}
 )
 
+#: The prefix every :meth:`TranscriptEntry.to_json` CUSTOM row opens with, up to
+#: and including its ``custom_type`` — read WITHOUT parsing the row so the open
+#: path can find superseded collapsible rows before materialising any of them
+#: (see :func:`_superseded_collapsible_lines`).
+#:
+#: SOUND, NOT COMPLETE, and only the first property is load-bearing. A line that
+#: matches IS a custom row of the captured type: the anchors are top-level keys of
+#: one JSON object, and an id or type value cannot hide an unescaped quote (the
+#: classes refuse ``"`` and ``\\``). A row this misses — a different key order,
+#: an escaped id, a payload whose first key is not ``custom_type`` — is simply
+#: loaded as before, so the cost of a miss is memory, never a dropped row.
+#: Whitespace after separators is tolerated so rows from a build that wrote
+#: ``json.dumps`` defaults still match.
+_CUSTOM_ROW_PREFIX = re.compile(
+    r'\{"id":\s*"[^"\\]*",\s*"ts":\s*[-+0-9.eE]+,\s*"type":\s*"custom",\s*'
+    r'"payload":\s*\{"custom_type":\s*"([^"\\]+)"'
+)
+
+
+def _superseded_collapsible_lines(path: Path) -> tuple[frozenset[int], int]:
+    """Line numbers (0-based, physical) of superseded collapsible rows, and their bytes.
+
+    WHY THIS EXISTS (incident 2026-11-24, session ``96cf57e7acb7``): a 974 MB
+    journal whose 922 ``frontend_state_checkpoint_v1`` rows (670 MiB) were all
+    but one superseded. :meth:`Transcript.compact_file` drops exactly those rows,
+    but its only caller is the prune pass, and a session that never prunes a
+    tool output never folds — so every cold open parsed all 73,053 rows into
+    resident objects: 2,392 MiB of footprint from one ``Transcript(...)``
+    (measured on an APFS clone), re-paid by every wake that engaged the session
+    until swap filled the disk.
+
+    One streaming pass holding one line at a time and parsing nothing: a row is
+    classified by :data:`_CUSTOM_ROW_PREFIX` alone. The file is opened EXACTLY as
+    the loader opens it (text, utf-8, default newline handling) because the
+    returned numbers index the loader's own line iteration — a binary read
+    splits only on ``\\n`` and would number a stray ``\\r`` differently, skipping
+    the wrong row; a byte-corrupt journal raises here as it would there. For each
+    collapsible type the NEWEST matching line is kept and every older matching
+    line is returned — the same newest-wins rule
+    :meth:`Transcript._superseded_custom_indices` applies, so dropping these
+    yields exactly the list a prune-free ``compact_file`` would leave. A newer
+    row of the same type the prefix MISSED only makes the dropped ones more
+    superseded, never less. The byte total counts newlines: it is what a
+    rewrite frees on disk.
+    """
+    newest: dict[str, tuple[int, int]] = {}
+    superseded: set[int] = set()
+    dead_bytes = 0
+    with path.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle):
+            match = _CUSTOM_ROW_PREFIX.match(line)
+            if match is None:
+                continue
+            custom_type = match.group(1)
+            if custom_type not in _COLLAPSIBLE_CUSTOM_TYPES:
+                continue
+            previous = newest.get(custom_type)
+            if previous is not None:
+                superseded.add(previous[0])
+                dead_bytes += previous[1]
+            # Bytes, not characters: this total is compared with what a rewrite
+            # frees on disk (``reclaimable_bytes`` vs ``compact_file``).
+            newest[custom_type] = (number, len(line.encode("utf-8")))
+    return frozenset(superseded), dead_bytes
+
 
 @dataclass
 class TranscriptEntry:
@@ -2763,6 +2828,12 @@ class Transcript:
         #: always has. Owned by the transcript rather than passed per call
         #: because both paths need the SAME store.
         self._attachments = AttachmentStore()
+        #: Bytes of superseded collapsible rows still ON DISK that this open
+        #: skipped in memory (see :meth:`_collapse_superseded_on_open`): the
+        #: rewrite was not ours to do (no writer lock, read-only, below the
+        #: threshold) or failed. Priced into :meth:`reclaimable_bytes`, and
+        #: reason enough for :meth:`compact_file` to run, which zeroes it.
+        self._load_collapsed_bytes = 0
         if self.path.exists():
             # STREAM the file rather than ``read_text().splitlines()``. The eager
             # form materialises the whole journal twice before the first row is
@@ -2783,8 +2854,20 @@ class Transcript:
             # raw newline or any other character ``splitlines`` would break on,
             # and both forms decode strictly (a byte-corrupt journal still
             # raises, which ``read_latest_custom_entry`` documents and pins).
+            #
+            # SUPERSEDED COLLAPSIBLE ROWS ARE NEVER MATERIALISED. Streaming bounds
+            # the copy of the file, not the rows: a journal that never ran
+            # ``compact_file`` (it runs only after a prune) kept every
+            # superseded checkpoint, and resident rows were 2.45x the file — see
+            # :func:`_superseded_collapsible_lines` for the incident. Those rows
+            # are skipped here (the list is then exactly what a prune-free
+            # ``compact_file`` leaves), and an owning writer also folds them off
+            # disk so the NEXT open does not pay the scan or the bytes again.
+            skip = self._collapse_superseded_on_open()
             with self.path.open(encoding="utf-8") as handle:
-                for line in handle:
+                for number, line in enumerate(handle):
+                    if number in skip:
+                        continue
                     if line.strip():
                         entry = TranscriptEntry.from_json(line)
                         if entry is not None:
@@ -3649,6 +3732,84 @@ class Transcript:
                 exc_info=True,
             )
 
+    def _collapse_superseded_on_open(self) -> frozenset[int]:
+        """Find superseded collapsible rows before loading; fold them off disk when ours.
+
+        Returns the loader's line numbers to skip. Two outcomes, both bounded:
+
+        * an OWNING writer (not read-only, writer lock held) with at least
+          :data:`COMPACT_FILE_THRESHOLD_BYTES` to free streams a copy without
+          those lines and moves it over the journal with ``os.replace`` — the same
+          crash-safe dance as :meth:`_replace_file`, the same amortisation rule
+          as :meth:`compact_file` — and returns nothing to skip, because the
+          file now holds exactly the rows the loader should read;
+        * otherwise (a viewer, a second writer without the lock, a small
+          reclaim, or a rewrite that failed — ENOSPC is the realistic one, on
+          the full disk this incident produced) the rows stay on disk and are
+          only skipped in memory. That list is the one a prune-free
+          ``compact_file`` would leave, and the same method later takes the
+          bytes off disk (``_load_collapsed_bytes`` makes it run).
+
+        Never weaker than before: a scan or decode error propagates exactly as
+        the loader's own read would have raised it.
+        """
+        skip, dead_bytes = _superseded_collapsible_lines(self.path)
+        if not skip:
+            return frozenset()
+        if (
+            not self._read_only
+            and self._writer_lock_held
+            and dead_bytes >= COMPACT_FILE_THRESHOLD_BYTES
+        ):
+            try:
+                self._rewrite_without_lines(skip)
+            except OSError as exc:
+                logger.warning(
+                    "transcript: could not fold %d superseded rows (%d bytes) out of %s "
+                    "on open (%s); skipping them in memory instead",
+                    len(skip),
+                    dead_bytes,
+                    self.path,
+                    exc,
+                )
+            else:
+                logger.info(
+                    "transcript: folded %d superseded rows (%d bytes) out of %s on open",
+                    len(skip),
+                    dead_bytes,
+                    self.path,
+                )
+                return frozenset()
+        self._load_collapsed_bytes = dead_bytes
+        return skip
+
+    def _rewrite_without_lines(self, skip: frozenset[int]) -> None:
+        """Stream the journal to ``<name>.compact`` minus ``skip``, then replace it.
+
+        Line-for-line VERBATIM: kept rows are copied as read, never re-serialized,
+        so the fold cannot change a byte of a surviving row. Read with the
+        loader's own open arguments so ``skip`` numbers the same lines. fsync
+        before ``os.replace``: the replaced file is the whole conversation, and a
+        crash must leave either the old journal or a complete new one. A partial
+        temp file is removed on any failure; the original is never touched.
+        """
+        tmp = self.path.with_suffix(self.path.suffix + ".compact")
+        try:
+            with (
+                self.path.open(encoding="utf-8") as source,
+                tmp.open("w", encoding="utf-8", newline="") as sink,
+            ):
+                _keep_private(sink.fileno())
+                for number, line in enumerate(source):
+                    if number not in skip:
+                        sink.write(line)
+                sink.flush()
+                os.fsync(sink.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
     def _index_entry(self, entry: TranscriptEntry) -> None:
         if entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE):
             self._history_generation += 1
@@ -4057,9 +4218,10 @@ class Transcript:
         """
         prunes = self.pending_prunes()
         superseded = self._superseded_custom_indices()
-        if not prunes and not superseded:
+        if not prunes and not superseded and not self._load_collapsed_bytes:
             return 0
-        total = 0
+        # Rows the open skipped in memory but left on disk: a fold frees them too.
+        total = self._load_collapsed_bytes
         boundary: TranscriptEntry | None = None
         newest_prune = max(
             (index for index, entry in enumerate(self._entries) if entry.type == ENTRY_PRUNE),
@@ -4114,7 +4276,7 @@ class Transcript:
         async with self._lock:
             prunes = self.pending_prunes()
             superseded = self._superseded_custom_indices()
-            if not prunes and not superseded:
+            if not prunes and not superseded and not self._load_collapsed_bytes:
                 return 0
             before = self.path.stat().st_size if self.path.exists() else 0
             # WHERE the newest prune sat, before the entries carrying that fact
@@ -4178,6 +4340,9 @@ class Transcript:
                         worker.result()
                         break
             self._entries = folded
+            # The rewrite came from ``_entries``, which never held the rows the
+            # open skipped, so they are off disk now too.
+            self._load_collapsed_bytes = 0
             self._history_generation += 1
             self._display_window_cache = None
             self._entry_ids.clear()
