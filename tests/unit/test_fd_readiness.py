@@ -3,13 +3,14 @@
 Regression for PR #4472's CI run 45338434283 (job 138256298160): deep in an
 xdist worker a fresh socketpair lands above fd 1024 and ``select.select`` raises
 ``ValueError: filedescriptor out of range in select()``. Each test here moves
-its socket above that ceiling with ``os.dup2`` and proves the raw call still
+its socket above that ceiling with ``fcntl(F_DUPFD)`` and proves the raw call still
 fails there (the control: without it a low-fd run would pass vacuously) while
 the replacements give the same answers ``select.select`` gives at a low fd.
 """
 
 from __future__ import annotations
 
+import fcntl
 import os
 import resource
 import select
@@ -40,15 +41,22 @@ def _require_low(fd: int) -> None:
 def high_socketpair() -> Iterator[tuple[socket.socket, socket.socket]]:
     """A connected pair whose first end sits at fd ``_HIGH_FD``."""
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    needed = _HIGH_FD + 16
-    if hard != resource.RLIM_INFINITY and hard < needed:
+    if hard != resource.RLIM_INFINITY and hard < _HIGH_FD + 16:
         pytest.skip(f"RLIMIT_NOFILE hard limit {hard} cannot reach fd {_HIGH_FD}")
+    # Headroom above _HIGH_FD: F_DUPFD may land past it in a leaky worker
+    # (peaks of ~1,900 fds measured in CI).
+    needed = _HIGH_FD + 4096
+    if hard != resource.RLIM_INFINITY:
+        needed = min(needed, hard)
     if soft != resource.RLIM_INFINITY and soft < needed:
         resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
     low, peer = socket.socketpair()
     try:
-        os.dup2(low.fileno(), _HIGH_FD)
-        high = socket.socket(fileno=_HIGH_FD)
+        # F_DUPFD takes the lowest FREE descriptor >= _HIGH_FD. ``os.dup2`` onto
+        # a fixed number silently closed whatever a leaky xdist worker already
+        # held there (another test's live socket): "readable" when it should
+        # not be, EBADF, BrokenPipe (merge gate 45379052937, shard 3.13/3).
+        high = socket.socket(fileno=fcntl.fcntl(low.fileno(), fcntl.F_DUPFD, _HIGH_FD))
         low.close()
         try:
             yield high, peer
