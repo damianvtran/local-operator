@@ -1235,6 +1235,11 @@ def _removed_worktree_remnant(path: str) -> bool:
 
     try:
         for root, dirs, names in os.walk(real, onerror=_fail):
+            # ``--stdin-paths`` is line-based and Git strips a trailing CR, so
+            # ``kept.txt\r`` would hash as its committed sibling ``kept.txt``
+            # (#4536 R2-M1). Any name with a line break holds.
+            if any("\n" in n or "\r" in n for n in (*dirs, *names)):
+                return False
             for name in dirs:
                 if not stat.S_ISDIR(os.lstat(os.path.join(root, name)).st_mode):
                     return False  # a symlinked directory

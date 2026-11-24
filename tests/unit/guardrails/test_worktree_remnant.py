@@ -66,13 +66,18 @@ def test_admin_dir_gone_with_committed_files_and_ds_store_is_a_remnant(repo: Pat
     assert _removed_worktree_remnant(str(wt))
 
 
-@pytest.mark.parametrize("extra", ["untracked", "symlink", "ds-store-dir"])
+@pytest.mark.parametrize("extra", ["untracked", "symlink", "ds-store-dir", "cr-twin", "lf-name"])
 def test_any_content_git_does_not_hold_keeps_the_rank(repo: Path, extra: str) -> None:
     wt = _committed_tree(repo, f"extra-{extra}")
     if extra == "untracked":
         (wt / "notes.md").write_text("never committed\n")
     elif extra == "symlink":
         (wt / "link").symlink_to(wt / "kept.txt")
+    elif extra == "cr-twin":
+        # #4536 R2-M1: Git strips the CR, so this would hash as ``kept.txt``.
+        (wt / "kept.txt\r").write_text("never committed\n")
+    elif extra == "lf-name":
+        (wt / "a\nb").write_text("never committed\n")
     else:
         (wt / ".DS_Store").mkdir()
         (wt / ".DS_Store" / "data").write_text("not Finder's\n")
