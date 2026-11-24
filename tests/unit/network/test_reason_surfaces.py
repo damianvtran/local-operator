@@ -894,6 +894,19 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # prefixed ``refused:`` into the ``why`` of a COMPACTION_IDLE_DECLINED_TYPE
     # transcript record. That record is anti-thrash bookkeeping no surface reads
     # back or renders, and the token never came from a peer.
+    # Lost-owner recovery's "was this a build refresh?" test: ``record.reason`` is
+    # this device's OWN ``runtime-exit.json`` reason (``journal.write_exit_record``,
+    # written by the refresh exits in ``process.py``), read only for local
+    # placements. The ``str()`` coercion feeds ``.startswith("retiring")`` and the
+    # function returns a bool; the raw value never reaches text or a peer.
+    (
+        "local_operator/session/attached.py",
+        "AttachedSession._lost_owner_retired_for_refresh",
+        "reason",
+    ): (
+        1,
+        "the local exit record's own reason, prefix-tested into a bool, never rendered",
+    ),
     ("local_operator/session/session.py", "Session._run_idle_compaction", "reason"): (
         1,
         "the session's own compaction refusal token, journalled as bookkeeping, never rendered",
