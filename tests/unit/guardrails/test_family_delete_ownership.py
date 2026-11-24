@@ -518,13 +518,14 @@ def test_child_removes_parents_tree_with_open_mr_is_critical(
 
 
 def test_rm_rf_of_parents_tree_with_ignored_env_is_judged(home: Path, infra: Path) -> None:
-    """Exact plain cleanup holds ignored payloads; raw deletion keeps its legacy ranks."""
+    """Raw deletion keeps its legacy ranks. Exact plain cleanup by the creator
+    family sheds the ignored payload (operator directive 2026-11-23, PR #4493:
+    agents clean up after themselves with no approval)."""
     wt = _add_tree(home, infra / "services", P)
     _ignore_only(wt)
     assert _rank(home, f"rm -rf {wt}", C).risk is Risk.HIGH
     plain = _rank(home, _remove(wt), C)
-    assert plain.risk is Risk.HIGH and plain.targets[0].cleanup_hold, plain.reasons
-    assert "the guard cannot prove regenerable" in plain.targets[0].reason
+    assert plain.risk is Risk.LOW and not plain.targets[0].cleanup_hold, plain.reasons
     assert _rank(home, f"rm -rf {wt}", P).risk is Risk.LOW
 
 
