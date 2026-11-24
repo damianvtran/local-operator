@@ -15,7 +15,7 @@
 #
 
 # Declare all targets as phony (not representing files)
-.PHONY: server dev-server cli openapi test test-affected merge-gate fast-gate coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
+.PHONY: server dev-server cli openapi test test-affected merge-gate fast-gate release-check coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
 
 # Default target when running 'make' without arguments
 .DEFAULT_GOAL := help
@@ -239,6 +239,22 @@ fast-gate: ## Check fast CI is green for PR=<number>'s head (no waiting)
 	repo="$$(gh repo view --json nameWithOwner --jq .nameWithOwner)"; \
 	python3 "$(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/fast_gate_check.py" --local \
 	  --event pull_request --repo "$$repo" --pr "$(PR)" --head-sha "$$1" --head-repo "$$2"
+
+# THE RELEASE PRE-CUT CHECK (GH #4074 cut 1). Ordinary main pushes are batched
+# (the hourly schedule tests the newest tip), so "main was green recently" no
+# longer proves the commit you tag was tested. Run this with the EXACT SHA you
+# pass to `gh release create --target`; it exits 0 only when a full-suite run
+# on that SHA concluded success with the full matrix (both Python legs, linux
+# and macOS tui-e2e, coverage, a green aggregate). A batched/skipped run is a
+# run-level "success" with nothing run, which is why the jobs are read.
+# Deliberately NOT a step in publish.yml: that runs after the tag and Release
+# exist, so a refusal there would strand a half-made release.
+release-check: ## Refuse a release cut unless SHA=<40-hex> has a green full-matrix full-suite run
+	@set -e; \
+	if [ -z "$(SHA)" ]; then echo "usage: make release-check SHA=<40-hex main SHA>" >&2; exit 2; fi; \
+	repo="$$(gh repo view --json nameWithOwner --jq .nameWithOwner)"; \
+	python3 "$(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/fast_gate_check.py" --local \
+	  --event release-check --release-check --repo "$$repo" --sha "$(SHA)"
 
 # RERUN-FAILED FIRST (GH #4074, cut 2). When the newest full-suite
 # pull_request run for the PR's CURRENT head completed failure/cancelled/

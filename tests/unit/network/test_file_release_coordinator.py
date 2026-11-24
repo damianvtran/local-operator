@@ -13,7 +13,6 @@ import dataclasses
 import hashlib
 import json
 import os
-import select
 import socket
 import subprocess
 import sys
@@ -35,6 +34,7 @@ from local_operator.network.file_release_coordinator import (
     MutationReceipt,
     VerifiedOutcome,
 )
+from tests import fd_readiness
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux-only coordinator mechanics")
 
@@ -1042,7 +1042,7 @@ def test_real_nonblocking_tcp_one_emission_then_process_mutation_cancels_continu
         assert_child(owner, "mutate", "COMMITTED")
         with pytest.raises(CoordinatorRefusal), c.guard(receipt):
             sender.send(b"forbidden-continuation", socket.MSG_DONTWAIT)
-        assert not select.select([receiver], [], [], 0)[0]
+        assert not fd_readiness.is_readable(receiver, 0)
 
 
 def _consumer_references(source):
@@ -1107,4 +1107,4 @@ def test_reverse_process_mutation_before_guard_denies_all_tcp_bytes(owner):
     with tcp_pair() as (sender, receiver):
         with pytest.raises(CoordinatorRefusal), c.guard(receipt):
             sender.send(b"forbidden-first-byte", socket.MSG_DONTWAIT)
-        assert not select.select([receiver], [], [], 0)[0]
+        assert not fd_readiness.is_readable(receiver, 0)

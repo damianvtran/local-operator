@@ -205,6 +205,7 @@ def _consumer_defaults() -> dict[str, object]:
         QUERY_BUDGET_SECONDS_DEFAULT,
         QUERY_BUDGET_STOP_DEFAULT,
     )
+    from local_operator.tools.result_normalize import RESULT_NORMALIZATION_DEFAULT
     from local_operator.tui import settings as tui_settings
     from local_operator.tui import status_command
     from local_operator.tui.busy_delivery import DEFAULT_BUSY_DELIVERY
@@ -300,6 +301,9 @@ def _consumer_defaults() -> dict[str, object]:
         # registry default and the code default drifting.
         "tools.search_interception.enabled": SEARCH_INTERCEPTION_ENABLED_DEFAULT,
         "tools.defer": DEFAULT_TOOL_DEFERRAL,
+        # Read by mcp.manager.read_result_normalization_mode; the constant
+        # lives beside the pure normalizer it configures.
+        "mcp.result_normalization": RESULT_NORMALIZATION_DEFAULT,
         "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
         "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
         # The guardrail keys; consumer constants live beside the reader in

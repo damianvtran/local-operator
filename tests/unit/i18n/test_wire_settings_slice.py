@@ -18,6 +18,9 @@ The per-runtime memory guard (``session.runtime_memory.*``, runtime memory-runaw
 incident 2026-11-24) adds ten slots the same way: its section, its switch (with the
 shared on/off labels) and its ceiling, copied from the new ``wire.runtime_memory``
 en catalogue.
+The ``mcp.result_normalization`` row (PR #4514) adds eight slots (label, help
+and three choices' label + description), copied byte-for-byte from the en
+catalogue; no existing slot changes.
 
 The second test pins the resolution PATH: the registry's strings must come
 through the `wire.settings` catalogue (not from leftovers), and an unknown

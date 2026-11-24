@@ -28,6 +28,7 @@
   "wire.errors.desktop.claim_origin_outside_configured": "دعوے کے ذریعے ترتیب دیے گئے ڈیسکٹاپ اوریجنز سے باہر کوئی اوریجن نصب نہیں کیا جا سکتا۔",
   "wire.errors.desktop.claim_origin_wildcard": "وائلڈ کارڈ اوریجن کا دعویٰ نہیں کیا جا سکتا۔",
   "wire.errors.desktop.claim_origins_not_list": "دعوے کی باڈی کا 'origins' فہرست ہونا چاہیے۔",
+  "wire.errors.desktop.conversation_deleted": "یہ گفتگو حذف ہو چکی ہے، اس لیے اب اس سوال کا جواب نہیں دیا جا سکتا۔ اس کے بجائے ہٹائیں یا انکار کریں۔",
   "wire.errors.desktop.conversations_unreadable": "گفتگوئیں ابھی پڑھی نہیں جا سکیں۔ یہ خود ٹھیک ہو جاتا ہے؛ تھوڑی دیر بعد دوبارہ کوشش کریں۔",
   "wire.errors.desktop.credential_operation_failed": "کریڈینشل کا عمل مکمل نہیں ہوا",
   "wire.errors.desktop.cwd_marker_read_failed": "سیشن کا ورکنگ ڈائریکٹری مارکر پڑھا نہیں جا سکتا: {error}",
