@@ -19,7 +19,10 @@ from pathlib import Path
 import pytest
 
 from local_operator.session import session as session_module
-from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR, _write_roster_sidecar
+from local_operator.session.session import (
+    SUBAGENT_ROSTER_SIDECAR,
+    _write_roster_sidecar,
+)
 
 PAYLOAD = {"version": 1, "generation": 3, "jobs": [], "accounting": [], "records": []}
 
