@@ -603,6 +603,14 @@ export interface SessionProjection {
 	queued_count: number;
 	/** Process gone; history still resumable. */
 	ended: boolean;
+	/** Set ONLY on the terminal frame the relay publishes when a cold prompt's
+	    wake failed after it was answered `waking` (`daemon._publish_failed_wake`):
+	    the failed command's id. The composer's ONE failure signal for that
+	    pending send (agent review round 2, R2-1) — a cold session's health reads
+	    `ended` from its pid-0 disk rebuild before, during and after a wake, so
+	    health cannot say which boot failed. Absent on every other frame and from
+	    an older relay. */
+	wake_failed?: string;
 	/** Record fresh but socket unreachable. */
 	degraded: boolean;
 	/** The relay's "owner has gone quiet" verdict (`SessionProjection.
@@ -1064,6 +1072,11 @@ export type CommandOp =
 			    exists. Part of the retry envelope's bytes: a replay asks for the
 			    same expansion the first attempt asked for. */
 			expand_skills?: boolean;
+			/** The prompt-wake opt-in (capability `prompt_wake.request_flag`):
+			    "answer a cold prompt `waking` once a runtime is booting; I keep
+			    my retry envelope until the stream carries this id or `ended`".
+			    A transport flag the relay pops, NOT part of the envelope. */
+			accept_waking?: boolean;
 		}
 	| { op: "abort" }
 	/* `defer_ok` + `request_id` (both optional): a busy session answers

@@ -1,7 +1,11 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sendCommand } from "./api";
-import { getPendingContinuation, submitContinuation } from "./continuation-command";
+import {
+	getPendingContinuation,
+	settleWakingContinuation,
+	submitContinuation,
+} from "./continuation-command";
 import { clearHeldContinuations } from "./continuation-memory";
 import { clearPrivateSessionStorage } from "./private-storage";
 
@@ -64,11 +68,15 @@ describe("submitContinuation", () => {
 		await submitContinuation("root", "prompt", "Edited draft", [
 			{ data_b64: "edited-image", mime_type: "image/png" },
 		]);
+		/* A fresh prompt's wire body is its envelope plus the transport-only
+		   `accept_waking` opt-in (the relay pops it before validation); the
+		   replayed steer above stays byte-identical to its stored envelope. */
 		expect(mockedSendCommand.mock.calls[2]?.[1]).toEqual({
 			op: "prompt",
 			command_id: "12345678-1234-4678-9234-567812345678",
 			text: "Edited draft",
 			images: [{ data_b64: "edited-image", mime_type: "image/png" }],
+			accept_waking: true,
 		});
 		expect(mockedSendCommand.mock.calls[2]?.[1]).not.toBe(mockedSendCommand.mock.calls[1]?.[1]);
 		expect(localStorage.getItem("lo-mobile-command:root")).toBeNull();
@@ -184,7 +192,8 @@ describe("submitContinuation", () => {
 
 			mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
 			const retry = await submitContinuation("rotom", "prompt", "edited draft");
-			expect(retry.envelope).toEqual(mockedSendCommand.mock.calls[0]?.[1]);
+			/* The wire body is the envelope plus the transport-only opt-in. */
+			expect({ ...retry.envelope, accept_waking: true }).toEqual(mockedSendCommand.mock.calls[0]?.[1]);
 			expect(getPendingContinuation("rotom")).toBeNull();
 		});
 
@@ -266,7 +275,7 @@ describe("the input-mode annotation (input-mode-v1)", () => {
 			input_mode: "dictated",
 			input_path: "provider_stt_radient",
 		});
-		expect(mockedSendCommand).toHaveBeenCalledWith("root", receipt.envelope);
+		expect(mockedSendCommand).toHaveBeenCalledWith("root", { ...receipt.envelope, accept_waking: true });
 	});
 
 	it("is replayed from the STORED envelope, never re-derived from a later draft", async () => {
@@ -297,17 +306,14 @@ describe("the input-mode annotation (input-mode-v1)", () => {
 		/* Exactly what the build before this change wrote: a v1 wrapper whose
 		   envelope has no annotation keys. It must stay valid (absent = legacy)
 		   and the retry must send those bytes. */
+		const stored = {
+			op: "prompt",
+			command_id: "12345678-1234-4678-9234-567812345678",
+			text: "stored before annotations",
+		};
 		localStorage.setItem(
 			"lo-mobile-command:root",
-			JSON.stringify({
-				version: 1,
-				saved_at: Date.now(),
-				envelope: {
-					op: "prompt",
-					command_id: "12345678-1234-4678-9234-567812345678",
-					text: "stored before annotations",
-				},
-			}),
+			JSON.stringify({ version: 1, saved_at: Date.now(), envelope: stored }),
 		);
 		mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
 
@@ -320,7 +326,13 @@ describe("the input-mode annotation (input-mode-v1)", () => {
 		expect(sent.text).toBe("stored before annotations");
 		expect(sent.input_mode).toBeUndefined();
 		expect(sent.input_path).toBeUndefined();
-		expect(retry.envelope).toEqual(sent);
+		/* The retained envelope is exactly the stored bytes (strict: no key
+		   invented, not even as `undefined`). The wire body adds only the
+		   transport-only `accept_waking` opt-in, which the relay pops before
+		   validating or forwarding, so what reaches the session is still the
+		   stored envelope byte for byte. */
+		expect(retry.envelope).toStrictEqual(stored);
+		expect(sent).toStrictEqual({ ...stored, accept_waking: true });
 	});
 
 	it("retires a stored envelope whose annotation is malformed", async () => {
@@ -368,7 +380,7 @@ describe("the skill-expansion request (`expand_skills`)", () => {
 			images: undefined,
 			expand_skills: true,
 		});
-		expect(mockedSendCommand).toHaveBeenCalledWith("root", receipt.envelope);
+		expect(mockedSendCommand).toHaveBeenCalledWith("root", { ...receipt.envelope, accept_waking: true });
 	});
 
 	it("is absent when the caller does not ask, so an older relay sees the old body", async () => {
@@ -452,5 +464,59 @@ describe("the skill-expansion request (`expand_skills`)", () => {
 		const fresh = await submitContinuation("root", "prompt", "fresh", undefined, undefined, undefined, true);
 		expect(fresh.envelope.text).toBe("fresh");
 		expect(fresh.envelope.expand_skills).toBe(true);
+	});
+});
+
+describe("the prompt-wake opt-in (`accept_waking`, capability `prompt_wake`)", () => {
+	const ID = "12345678-1234-4678-9234-567812345678";
+
+	it("rides every prompt on the wire but never joins the retained envelope", async () => {
+		mockedSendCommand.mockRejectedValueOnce(Object.assign(new Error("lost"), { status: 504 }));
+		await expect(submitContinuation("root", "prompt", "wake up")).rejects.toThrow("lost");
+		expect(mockedSendCommand.mock.calls[0]?.[1]).toMatchObject({ op: "prompt", accept_waking: true });
+		/* Transport, not identity: the stored bytes a retry replays lack it. */
+		expect(getPendingContinuation("root")).not.toHaveProperty("accept_waking");
+	});
+
+	it("is never sent with a steer, which keeps the legacy frame byte-identical", async () => {
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "steering queued" });
+		await submitContinuation("root", "steer", "nudge");
+		expect(mockedSendCommand.mock.calls[0]?.[1]).not.toHaveProperty("accept_waking");
+	});
+
+	it("keeps the envelope on a `waking` 2xx: the prompt is not admitted yet", async () => {
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "session is waking", waking: true });
+		const receipt = await submitContinuation("root", "prompt", "wake up");
+		expect(receipt.waking).toBe(true);
+		/* The relay holds this prompt only in memory until the runtime admits it;
+		   dropping the copy here is what lost it on a failed boot (R1-1). */
+		expect(getPendingContinuation("root")?.command_id).toBe(ID);
+
+		/* A same-id resend joins the relay's in-flight wake. */
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "prompt admitted" });
+		const retry = await submitContinuation("root", "prompt", "a newer draft");
+		expect(retry.envelope.command_id).toBe(ID);
+		expect(retry.envelope.text).toBe("wake up");
+		expect(getPendingContinuation("root")).toBeNull();
+	});
+
+	it("is settled by the stream: the row clears it, `ended` without it fails it", async () => {
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "session is waking", waking: true });
+		await submitContinuation("root", "prompt", "wake up");
+		const none = () => false;
+
+		expect(settleWakingContinuation("root", none, false, ID)).toBe("pending");
+		/* An envelope no `waking` answer left (an ambiguous 504, a reload) keeps
+		   its own retry affordance: neither the row nor `ended` settles it here. */
+		expect(settleWakingContinuation("root", none, true, null)).toBe("pending");
+		expect(settleWakingContinuation("root", () => true, false, null)).toBe("pending");
+		expect(getPendingContinuation("root")?.command_id).toBe(ID);
+		expect(settleWakingContinuation("root", none, true, ID)).toBe("failed");
+		/* Failed keeps the envelope: it is the retry's body. */
+		expect(getPendingContinuation("root")?.command_id).toBe(ID);
+
+		expect(settleWakingContinuation("root", (id) => id === ID, true, ID)).toBe("delivered");
+		expect(getPendingContinuation("root")).toBeNull();
+		expect(settleWakingContinuation("root", none, true, ID)).toBeNull();
 	});
 });

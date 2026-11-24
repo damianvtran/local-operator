@@ -65,6 +65,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, cast
@@ -1407,6 +1408,7 @@ async def engage_runtime(
     deadline_s: float = DEFAULT_DEADLINE_S,
     preempt: asyncio.Event | None = None,
     preempt_budget_s: float = 0.0,
+    on_constructing: Callable[[], None] | None = None,
 ) -> EngageOutcome:
     """Ensure a runtime exists for ``session_id`` and give it ``work``.
 
@@ -1432,6 +1434,16 @@ async def engage_runtime(
     only shorten the wait and never extend it. The cut is latched on first
     observation rather than recomputed per pass, so repeated passes cannot
     keep pushing the shortened deadline forward while the event stays set.
+
+    ``on_constructing`` is called ONCE, the first time this loop observes a
+    construction in flight (no record yet, and either the candidate it spawned
+    is alive or a contender holds the lease). It exists for callers that must
+    answer someone before the runtime is reachable: the phone relay's prompt
+    wake acknowledges "waking" at this moment instead of holding an HTTP request
+    open for a cold boot measured at p50 10.1 s / p99 106.8 s (wake supervisor,
+    Nov 21-23 2026). It is a notification only: it never changes arbitration,
+    and an exception it raises is logged and swallowed so a buggy observer
+    cannot fail the engage it is observing.
 
     Giving up this way is not the same as discarding the work. A candidate
     this engage spawned keeps constructing and publishes its record as usual;
@@ -1783,6 +1795,12 @@ async def engage_runtime(
         if constructing:
             if constructing_since is None:
                 constructing_since = now
+            if on_constructing is not None:
+                notify, on_constructing = on_constructing, None
+                try:
+                    notify()
+                except Exception:  # noqa: BLE001 - an observer must not fail the engage
+                    logger.exception("engage: on_constructing observer raised")
         else:
             constructing_since = None
 

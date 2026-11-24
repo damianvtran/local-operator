@@ -3857,7 +3857,7 @@ def test_a_cold_prompt_expands_against_the_durable_cwd(tmp_path, monkeypatch) ->
     (cfg / "sessions" / "cold-skills" / "desktop.json").write_text(json.dumps({"cwd": str(work)}))
     _write_skill(work / ".local-operator" / "skills", "zz-probe", body="Read primary sources.")
 
-    async def capture(config_root, command, *, origin=""):  # noqa: ANN001, ANN202
+    async def capture(config_root, command, *, origin="", **_kw):  # noqa: ANN001, ANN003, ANN202
         seen.append(command.text)
         origins.append(origin)
         return SimpleNamespace(close=lambda: None), "woke it"

@@ -23,6 +23,16 @@ import type { DeliveryMode, InputMode, PromptImage, SkillExpansionReceipt } from
  *     (daemon.py `request`), so a 504 ack-timeout / 502 transport error can
  *     occur after the command was durably admitted.
  *   - page reload and SSE reconnect (persistence + TTL revalidation on read).
+ *   - a `waking: true` acknowledgement of a cold prompt (capability
+ *     `prompt_wake`, which this module opts into with `accept_waking: true`).
+ *     That 2xx means "a runtime is booting", NOT "admitted": until the runtime
+ *     admits it, the prompt lives only in the relay's memory, so a relay
+ *     restart or a failed boot would lose it if this were the only other copy
+ *     that was dropped. The envelope is kept until the session's stream
+ *     carries a row under its `command_id` (clear — that IS the definitive
+ *     acknowledgement) or the stream reports the session `ended` without it
+ *     (the composer turns it back into the failed-send retry). See
+ *     `settleWakingContinuation`.
  *   - switching to another of MY OWN conversations and back. The envelope is
  *     scoped per session/route, so navigating away must NOT delete it —
  *     returning restores the recovery affordance. (This is U1: the prior build
@@ -95,6 +105,10 @@ export interface ContinuationReceipt {
 	skills?: SkillExpansionReceipt;
 	/** Carried through from `CommandReceipt.delivered_as` (api.ts). */
 	delivered_as?: "prompt" | "steer";
+	/** The relay accepted a cold prompt and a runtime is booting, but the
+	    prompt is NOT admitted yet: the envelope is still retained (see the
+	    lifecycle contract) and the caller must not treat this as delivery. */
+	waking?: boolean;
 }
 
 interface StoredContinuation {
@@ -234,6 +248,37 @@ export function hasPendingContinuation(sessionId: string): boolean {
 	return getPendingContinuation(sessionId) !== null;
 }
 
+/** Settle the envelope a `waking` answer left retained, against what the
+ * session's stream now shows. Only the envelope `wakingCommandId` names is
+ * settled here; any other retained envelope (an ambiguous 504, a reload) keeps
+ * its existing retry affordance, whose same-id replay is already safe.
+ *
+ * `"delivered"`: the projection carries a row under the envelope's id — the
+ * session wrote the message, the definitive acknowledgement of this UUID — so
+ * the envelope is cleared.
+ * `"failed"`: the caller's `failed` — the stream reported THIS wake failed
+ * (the relay's `wake_failed` marker, or `ended` after a live owner's frame;
+ * the composer decides, see its settle effect) — without the row, so the
+ * envelope stays and the caller offers it as the failed send's retry.
+ * `"pending"`: neither yet (or not a waking envelope). `null`: nothing
+ * retained. Pure apart from the clear, so the composer's effect and the tests
+ * share one rule. */
+export function settleWakingContinuation(
+	sessionId: string,
+	carried: (commandId: string) => boolean,
+	failed: boolean,
+	wakingCommandId: string | null,
+): "delivered" | "failed" | "pending" | null {
+	const pending = getPendingContinuation(sessionId);
+	if (pending === null) return null;
+	if (wakingCommandId !== pending.command_id) return "pending";
+	if (carried(pending.command_id)) {
+		clearPendingContinuation(sessionId);
+		return "delivered";
+	}
+	return failed ? "failed" : "pending";
+}
+
 export function clearPendingContinuation(sessionId: string): void {
 	const key = commandStorageKey(sessionId);
 	localStorage.removeItem(key);
@@ -363,7 +408,22 @@ export async function submitContinuation(
 	   spends wondering whether their message went. */
 	onEnvelope?.(envelope);
 	try {
-		const reply = await sendCommand(sessionId, envelope);
+		/* `accept_waking` is a TRANSPORT flag, not part of the envelope's identity:
+		   the relay pops it before the frame is validated or forwarded, so the
+		   retained bytes stay what they were. Only a cold prompt can be answered
+		   `waking`, so a steer stays byte-identical to the legacy frame. This SPA
+		   is served by the relay it talks to, so the relay always understands the
+		   flag; no capability gate is needed (an older relay would never serve
+		   this bundle). */
+		const reply = await sendCommand(
+			sessionId,
+			envelope.op === "prompt" ? { ...envelope, accept_waking: true } : envelope,
+		);
+		if (reply.waking === true) {
+			/* Not an acknowledgement of THIS UUID yet: keep the envelope until the
+			   stream settles it (`settleWakingContinuation`). */
+			return { ...reply, envelope, waking: true };
+		}
 		clearPendingContinuation(sessionId);
 		return { ...reply, envelope };
 	} catch (error) {
