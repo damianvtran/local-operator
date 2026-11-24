@@ -1334,6 +1334,16 @@ def _git_env() -> dict[str, str]:
     return env
 
 
+#: Reason for a LOW whose deletion loses nothing Git does not already hold
+#: (:func:`_removed_worktree_remnant`). ``check`` keys on this prefix: an
+#: ask about such a path that timed out, was withdrawn, or was answered from
+#: an unverified surface does not lift it out of LOW (field case 2026-11-24,
+#: disk recovery: a-58df timed out, so the very session that asked could not
+#: finish deleting two leftovers every other session could). An ask protects
+#: the operator's data; here there is none left to protect.
+REMNANT_REASON = "a dropped worktree's leftovers, every byte already in Git"
+
+
 def _former_worktree_repo(real: str) -> str | None:
     """The repository a folder was a linked worktree of, if Git has DROPPED it.
 
@@ -2111,6 +2121,11 @@ def _rank(
     if worktree_note:
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
+    if target.op in _DESTROYING_OPS and os.path.isdir(path) and _removed_worktree_remnant(path):
+        # Named, so ``check`` can tell a LOSSLESS LOW from an ordinary one:
+        # an unanswered ask about this path protects nothing (see
+        # ``REMNANT_REASON``).
+        return RankedTarget(target, Risk.LOW, REMNANT_REASON)
     return RankedTarget(target, Risk.LOW, "ordinary path")
 
 
