@@ -50,6 +50,7 @@ a parent cleaning up after its subagents needs no lineage lookup at read time.
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import functools
 import glob as _glob
@@ -197,6 +198,41 @@ def lineage_path(state_root: str | os.PathLike[str] | None = None) -> Path:
     return root / LEDGER_DIRNAME / LINEAGE_FILENAME
 
 
+def _open_lineage_nofollow(path: str | os.PathLike[str], flags: int, mode: int = 0o600) -> int:
+    """``os.open`` that refuses a symlinked final component on every platform.
+
+    WHY. The registry must never be written or read THROUGH a link: a link
+    planted at ``lineage.jsonl`` would let an append land in, or rows be read
+    from, a file the harness does not own. POSIX enforces that atomically
+    with ``O_NOFOLLOW``. Windows has no ``os.O_NOFOLLOW`` at all, and touching
+    the bare attribute raised ``AttributeError`` — which escaped
+    ``record_lineage``'s ``OSError`` handler and failed every subagent launch
+    there (observed on a windows-latest runner).
+
+    CONSTRAINTS. Where the flag exists this is exactly the old call, so POSIX
+    semantics are unchanged. Where it is absent we ``lstat`` first and refuse a
+    symlink with ``ELOOP`` — the same ``OSError`` the flag produces, so every
+    caller's existing failure path (skip the row / no registry / no rows) is
+    taken unchanged. That fallback is check-then-open: a link swapped in
+    between the ``lstat`` and the ``open`` is followed (TOCTOU). Accepted
+    because the registry lives under ``<state>/guardrails/``, which the shell
+    and file tools cannot write (CRITICAL), so the race needs a writer that
+    already has the state root; and Windows symlink creation itself needs
+    elevation or Developer Mode. It is strictly better than following links
+    unconditionally, and better than crashing the spawn.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISLNK(st.st_mode):
+                raise OSError(errno.ELOOP, "lineage registry is a symlink", os.fspath(path))
+    return os.open(path, flags | nofollow, mode)
+
+
 def record_lineage(
     child: str,
     *,
@@ -214,7 +250,7 @@ def record_lineage(
     try:
         path = lineage_path(state_root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fd = _open_lineage_nofollow(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
         try:
             os.write(fd, (json.dumps(row) + "\n").encode("utf-8"))
         finally:
@@ -234,7 +270,7 @@ def ensure_lineage_registry(state_root: str | os.PathLike[str] | None = None) ->
     try:
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            os.close(os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600))
+            os.close(_open_lineage_nofollow(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT))
         st = os.lstat(path)
     except OSError:
         return None
@@ -314,7 +350,7 @@ def read_lineage(state_root: str | os.PathLike[str] | None = None) -> dict[str, 
     """``child → row``; the FIRST row for a child wins (a later row cannot re-parent it)."""
     out: dict[str, dict[str, Any]] = {}
     try:
-        fd = os.open(lineage_path(state_root), os.O_RDONLY | os.O_NOFOLLOW)
+        fd = _open_lineage_nofollow(lineage_path(state_root), os.O_RDONLY)
         with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 try:
