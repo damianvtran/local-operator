@@ -11,7 +11,7 @@ relative wiki links, ``#cite_note`` anchors, tracking pixels and icon images.
 Every token of them is written to the cache once and then re-read on every
 later turn, so the cost grows with session length. An offline replay of the
 real run through this transform re-priced the candidate arm from 0.939x to
-0.843x Claude Code (0.807x in ``strip-links``) with no cited fact lost: every
+0.864x Claude Code (0.806x in ``strip-links``) with no cited fact lost: every
 fact the raw page states outside a URL (44 of 45, and 58 of 58 in the second
 arm) is still in the normalized text of the page it was cited from.
 
@@ -24,22 +24,27 @@ output -- is returned byte for byte, because ``handlers[name](arg)`` is code,
 not a link, and its line numbers and spacing are evidence.
 
 * ``![alt](src)`` becomes ``alt``; an image with empty alt is dropped.
-* A list item that is exactly one *on-site* link (relative or fragment target,
-  anchor of at most ``NAV_ANCHOR_MAX_CHARS``) is site navigation and is
-  dropped -- unless such items are most of the text's non-blank lines, in
-  which case they are the content (a docs index) and stay as text. A one-link
-  item with an absolute target (a search result, a reading list) is never
-  dropped; it follows the link rules below like any other line, which keep
-  its URL in ``prose-links`` mode.
+* A list item that is exactly one *on-site* link (root-path ``/x``, fragment
+  ``#x`` or ``javascript:`` target, anchor of at most
+  ``NAV_ANCHOR_MAX_CHARS``) is site navigation and is dropped -- unless such
+  items are most of the text's non-blank lines, in which case they are the
+  content (a docs index) and stay as text. A one-link item with an absolute
+  or file-relative target (a search result, a reading list, a README's
+  ``docs/install.md``) is never dropped; it follows the link rules below like
+  any other line.
 * Wikipedia ``[[24]](#cite_note-24)`` markers are dropped. A bare ``[24]`` is
   never touched: it collides with code (``list[0]``) and footnote syntax.
 * Link hover titles (``[a](url "title")``) are dropped.
-* A link is only ``[text](target)`` whose ``[`` is not glued to an identifier,
-  ``]`` or ``)`` and whose target is URL-shaped. Relative, fragment and
-  protocol-relative targets (leading ``/``, ``#``, ``?``, ``./``, ``../``, or a
-  scheme-less string containing ``/``) and ``javascript:`` pseudo-links become
-  their anchor text.
-* Absolute ``http(s)`` targets with non-empty anchor text survive, in
+* A link is only ``[text](target)`` whose ``[`` is not glued to an identifier
+  or ``]`` (nor to a ``)`` that did not close a link) and whose target is
+  URL-shaped. On-site targets (leading ``/``, ``#``, ``?``) and
+  ``javascript:`` pseudo-links become their anchor text.
+* File-relative targets (``./a.md``, ``../b.md``, or a scheme-less string
+  containing ``/`` such as ``docs/c.md``) name the file holding the content,
+  so the path always survives: ``prose-links`` keeps ``[text](path)``,
+  ``strip-links`` writes ``text (path)``.
+* Absolute ``http(s)`` and protocol-relative ``//`` targets with non-empty
+  anchor text survive, in
   ``prose-links`` mode, on *prose* lines (>= 80 visible characters) and on any
   line whose only link is that absolute one (a search result, a README
   reference); in ``strip-links`` mode every such target becomes its anchor
@@ -100,6 +105,7 @@ import decimal
 import json
 import math
 import re
+from collections.abc import Callable
 from typing import Any, Final, Literal
 
 NormalizationMode = Literal["prose-links", "strip-links", "off"]
@@ -134,8 +140,10 @@ NAV_ANCHOR_MAX_CHARS: Final = 40
 
 #: ``normalize_tool_text`` repeats the transform until it stops changing the
 #: text (that is what makes ``f(f(x)) == f(x)`` hold); real inputs settle on
-#: the second pass. A text still changing after this many passes is returned
-#: exactly as the server sent it -- also a fixed point, so idempotence holds.
+#: the second pass. The count INCLUDES the final pass that confirms nothing
+#: changed, so at most ``MAX_PASSES - 1`` passes may change the text. A text
+#: still changing after that is returned exactly as the server sent it --
+#: also a fixed point, so idempotence holds.
 MAX_PASSES: Final = 4
 
 # A link destination: no whitespace or parens, except one balanced level of
@@ -152,7 +160,11 @@ _ANCHOR = r"([^\[\]\n]{0,1000})"
 # ``handlers[name](arg)``, ``callbacks[0](fn)``, ``f(x)[i](y)`` -- never a
 # link. Costs a converter's rare ``word[link](/x)`` with no space; that line
 # keeps its markup, which only costs savings.
-_NOT_GLUED = r"(?<![\w\])])"
+# A ``[`` right after ``)`` is a call result being indexed (``f(x)[i](y)``)
+# UNLESS that ``)`` closed a link the same scan just matched: converters emit
+# adjacent ``<a>`` tags with no space (``[a](/x)[b](/y)``). A lookbehind
+# cannot tell the two apart, so ``_sub_links`` makes that call.
+_NOT_GLUED = r"(?<![\w\]])"
 _IMAGE = re.compile(r"!\[" + _ANCHOR + r"\]\(\s*" + _DEST + _TITLE + r"\s*\)")
 _LINK = re.compile(_NOT_GLUED + r"\[" + _ANCHOR + r"\]\(\s*(" + _DEST + ")" + _TITLE + r"\s*\)")
 _CITE = re.compile(r"\[\[[^\]\s]{1,12}\]\]\(#cite_note[^)\s]*\)")
@@ -161,9 +173,18 @@ _ONE_LINK_ITEM = re.compile(r"^\s*(?:[*+-]|\d{1,9}[.)])\s+" + _LINK.pattern + r"
 _MARKER_ONLY = re.compile(r"^\s*(?:[*+-]|\d{1,9}[.)])\s*$")
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _BACKTICKS = re.compile(r"`+")
-_ABSOLUTE = re.compile(r"^https?://", re.IGNORECASE)
+# Absolute: ``http(s)://`` or protocol-relative ``//host/...`` (another host
+# as surely as an ``https://`` link, so it is treated like one).
+_ABSOLUTE = re.compile(r"^(?:https?:)?//", re.IGNORECASE)
 _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
-_SITE_PREFIX = re.compile(r"^(?:/|#|\?|\./|\.\./|javascript:)", re.IGNORECASE)
+# On-site: resolves against the fetched page's own origin -- a root path, a
+# fragment, a query or a ``javascript:`` pseudo-link. These are the targets
+# of site chrome (menus, TOCs, edit links) and carry no evidence on their own.
+_ON_SITE = re.compile(r"^(?:/(?!/)|#|\?|javascript:)", re.IGNORECASE)
+# Nav-droppable: exactly the on-site classes the replay corpus's 395 dropped
+# one-link items used (199 root ``/...``, 189 ``#...``, 7 ``javascript:``;
+# QA round 2, PR #4514). ``?`` never occurred, so it is not dropped.
+_NAV_TARGET = re.compile(r"^(?:/(?!/)|#|javascript:)", re.IGNORECASE)
 _URLISH_KEY = re.compile(r"(?:^|_)(?:url|uri|href|link)s?$", re.IGNORECASE)
 # What makes a text web/markdown content rather than code, a log or a table:
 # an absolute or protocol-relative link, an image, or a Wikipedia cite marker.
@@ -298,17 +319,56 @@ def _outside_inline_code(line: str, transform: Any) -> str:
     return "".join(out)
 
 
-def _is_site_target(target: str) -> bool:
-    """A relative, fragment, protocol-relative or ``javascript:`` target.
+def _is_file_relative(target: str) -> bool:
+    """A path relative to the DOCUMENT: ``./a.md``, ``../b.md``, ``docs/c.md``.
 
-    Only URL-shaped strings qualify: a leading ``/``, ``#``, ``?``, ``./`` or
-    ``../``, or a scheme-less string containing ``/`` (``docs/a.md``). A bare
-    word or expression (``arg``, ``*args``, ``\\d+``, ``foo|bar``) is not a
-    target, so code that merely looks like ``[x](y)`` is never rewritten.
+    Unlike an on-site target, the path itself is evidence: in a README or a
+    docs index it is the only record of which file holds the content (QA Q4,
+    PR #4514: ``- [Install guide](docs/install.md)`` must not vanish). Only
+    URL-shaped strings qualify -- a leading ``./``/``../`` or a scheme-less
+    string containing ``/``. A bare word or expression (``arg``, ``*args``,
+    ``\\d+``, ``foo|bar``) is not a target, so code that merely looks like
+    ``[x](y)`` is never rewritten.
     """
-    if _SITE_PREFIX.match(target):
+    if target.startswith(("./", "../")):
         return True
-    return "/" in target and not _SCHEME.match(target)
+    return (
+        "/" in target
+        and not _SCHEME.match(target)
+        and not _ON_SITE.match(target)
+        and not _ABSOLUTE.match(target)
+    )
+
+
+def _is_link_target(target: str) -> bool:
+    """URL-shaped: what makes ``[x](y)`` a link rather than code."""
+    return bool(
+        _ABSOLUTE.match(target)
+        or _ON_SITE.match(target)
+        or _SCHEME.match(target)
+        or _is_file_relative(target)
+    )
+
+
+def _sub_links(seg: str, repl: Callable[[re.Match[str]], str]) -> str:
+    """``_LINK.sub(repl, seg)``, plus adjacent links (``[a](/x)[b](/y)``).
+
+    A match right after ``)`` is taken only when that ``)`` ended a link this
+    scan already accepted; otherwise it is code (``f(x)[i](y)``) and is left
+    exactly as written. See ``_NOT_GLUED``.
+    """
+    last_end = -1
+
+    def guarded(match: re.Match[str]) -> str:
+        nonlocal last_end
+        start = match.start()
+        if start and seg[start - 1] == ")" and start != last_end:
+            return match.group(0)
+        if _is_link_target(match.group(2)):
+            last_end = match.end()
+        return repl(match)
+
+    return _LINK.sub(guarded, seg)
 
 
 def _strip_media(line: str) -> str:
@@ -332,7 +392,7 @@ def _nav_item(line: str) -> bool:
     match = _ONE_LINK_ITEM.match(line)
     return (
         match is not None
-        and _is_site_target(match.group(2))
+        and _NAV_TARGET.match(match.group(2)) is not None
         and len(match.group(1).strip()) <= NAV_ANCHOR_MAX_CHARS
     )
 
@@ -350,12 +410,12 @@ def _normalize_line(original: str, line: str, keep_prose_links: bool, drop_nav: 
 
     def as_text(match: re.Match[str]) -> str:
         target = match.group(2)
-        if _ABSOLUTE.match(target) or _is_site_target(target):
+        if _ABSOLUTE.match(target) or _ON_SITE.match(target) or _is_file_relative(target):
             targets.append(target)
             return match.group(1)
         return match.group(0)
 
-    visible = _outside_inline_code(line, lambda seg: _LINK.sub(as_text, seg))
+    visible = _outside_inline_code(line, lambda seg: _sub_links(seg, as_text))
     # A short line whose ONLY link is absolute -- a search result, a reading
     # list entry, a README reference -- is often the one place the model learns
     # which URL to fetch or cite, so ``prose-links`` keeps it like prose. A nav
@@ -372,13 +432,20 @@ def _normalize_line(original: str, line: str, keep_prose_links: bool, drop_nav: 
             if prose and anchor.strip():
                 return f"[{anchor}]({target})"
             return anchor
-        if _is_site_target(target):
+        if _ON_SITE.match(target):
             return anchor
+        if _is_file_relative(target):
+            # The path names the file holding the content, so it survives in
+            # both modes; ``strip-links`` only drops the markup around it.
+            if keep_prose_links:
+                return f"[{anchor}]({target})"
+            text = anchor.strip()
+            return f"{anchor} ({target})" if text and text != target else target
         # mailto:, tel: and other schemes (the target may be the datum), and
         # anything not URL-shaped (code), stay exactly as written.
         return match.group(0)
 
-    line = _outside_inline_code(line, lambda seg: _LINK.sub(relink, seg))
+    line = _outside_inline_code(line, lambda seg: _sub_links(seg, relink))
     if line == original:
         return line
     line = line.rstrip(" \t")
@@ -419,6 +486,10 @@ def normalize_markdown(text: str, *, keep_prose_links: bool = True) -> str:
             normalized = _normalize_line(original, line, keep_prose_links, drop_nav)
             if normalized is None:
                 dropped = True
+                continue
+            if _is_blank(normalized) and not out and dropped:
+                # Removed leading chrome must not leave the text opening on a
+                # blank line; a blank line the server sent first still stays.
                 continue
             if _is_blank(normalized) and out and _is_blank(out[-1]):
                 # Removing lines must not open a gap; elsewhere only runs of 3+

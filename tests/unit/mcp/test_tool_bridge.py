@@ -734,7 +734,7 @@ class TestFormatMcpResultNormalization:
         raw = _FORGE_WIKI_FETCH.read_text(encoding="utf-8")
         result = _text_result(raw)
         formatted = format_mcp_result(result, "c1", "mcp__forge_tools_fetch")
-        # Measured on this payload: 12,389 -> 7,826 chars (0.632) under
+        # Measured on this payload: 12,389 -> 7,899 chars (0.638) under
         # prose-links, which keeps a short line's only absolute link (the
         # page's reference/external-link entries are what a task cites).
         assert len(formatted.text) <= 0.65 * len(raw)
@@ -769,6 +769,40 @@ class TestFormatMcpResultNormalization:
             "content": [{"type": "text", "text": raw}, {"type": "text", "text": _POSTMEDIA_HEAD}]
         }
         assert format_mcp_result(result, normalization="off").text == f"{raw}\n\n{_POSTMEDIA_HEAD}"
+
+    @pytest.mark.parametrize("mode", ["prose-links", "strip-links"])
+    def test_embedded_resource_file_is_never_normalized(self, mode: str) -> None:
+        """M1 (review round 2): a GitHub-style file read is exact file contents.
+
+        A model may write it back, so a badge, a docs list and a relative link
+        inside an embedded ``resource`` block survive byte for byte."""
+        readme = (
+            "# widget\n\n![CI](https://ci.example/badge.svg)\n\n## Docs\n\n"
+            "- [Install](docs/install.md)\n- [Home](/)\n\n"
+            "See [CONTRIBUTING](./CONTRIBUTING.md) and [site](https://e.example/x).\n"
+        )
+        result = {
+            "content": [
+                {
+                    "type": "resource",
+                    "resource": {"uri": "repo://o/r/README.md", "text": readme},
+                }
+            ]
+        }
+        assert format_mcp_result(result, normalization=mode).text == (
+            f"[Resource: repo://o/r/README.md]\n{readme}"
+        )
+
+    def test_each_text_block_is_normalized_on_its_own(self) -> None:
+        """M1: a fetched page's link must not pull a sibling code block through
+        the markdown gate -- each block is gated and normalized separately."""
+        code = 'pattern = re.compile(r"[a-z](/foo)")\n'
+        result = {
+            "content": [{"type": "text", "text": _POSTMEDIA_HEAD}, {"type": "text", "text": code}]
+        }
+        text = format_mcp_result(result).text
+        assert text.endswith(f"\n\n{code}")
+        assert "postmedia.digital" not in text
 
     def test_error_results_are_never_normalized(self) -> None:
         formatted = format_mcp_result(_text_result(_POSTMEDIA_HEAD, is_error=True))

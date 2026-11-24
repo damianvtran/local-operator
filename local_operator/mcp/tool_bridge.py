@@ -561,24 +561,31 @@ def format_mcp_result(
                 parts.append(placeholder)
             continue
         rendered = _dict_block_text(block) if isinstance(block, dict) else _model_block_text(block)
-        if rendered is not None:
-            parts.append(rendered)
+        if rendered is None:
+            continue
+        block_type = block.get("type") if isinstance(block, dict) else block.type
+        if not is_error and block_type != "resource":
+            # Normalize HERE, once, at creation: the persisted ToolResult
+            # carries the normalized bytes, so resume/replay re-send them
+            # unchanged and no cached prefix moves. It runs before the spill
+            # cut so an oversized result's inline head carries more content
+            # per byte. Per block, so one fetched page's link cannot pull a
+            # sibling block through the markdown gate. Skipped: errors
+            # (diagnostics, not payload) and an embedded ``resource`` (exact
+            # file contents keyed by a URI, e.g. a GitHub-style file read --
+            # a model may write it back). ``server_result`` below keeps the
+            # raw text -- except when the result spills: then the spill holds
+            # the normalized text and the raw copy is dropped as before,
+            # because keeping it would persist every large result twice in
+            # the transcript (the de-duplication below exists to stop exactly
+            # that). Rationale and measurement:
+            # ``local_operator.tools.result_normalize``.
+            rendered = normalize_tool_text(rendered, normalization)
+        parts.append(rendered)
 
     text = "\n\n".join(parts)
     if is_error:
         text = f"Error: {text}" if text else "Error"
-    else:
-        # Normalize HERE, once, at creation: the persisted ToolResult carries
-        # the normalized bytes, so resume/replay re-send them unchanged and no
-        # cached prefix moves. It runs before the spill cut so an oversized
-        # result's inline head carries more content per byte. Errors stay
-        # verbatim (diagnostics, not payload). ``server_result`` below keeps
-        # the raw text -- except when the result spills: then the spill holds
-        # the normalized text and the raw copy is dropped as before, because
-        # keeping it would persist every large result twice in the transcript
-        # (the de-duplication below exists to stop exactly that). Rationale
-        # and the measurement: ``local_operator.tools.result_normalize``.
-        text = normalize_tool_text(text, normalization)
 
     details: dict[str, Any] = {"server_result": server_result}
     if context is not None:

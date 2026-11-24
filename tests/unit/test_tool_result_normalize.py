@@ -313,10 +313,92 @@ def test_single_absolute_link_on_a_short_line_is_kept_but_nav_bars_are_not() -> 
 def test_nav_bullets_that_are_most_of_the_result_are_kept_as_text() -> None:
     # 3 of the 8 non-blank lines are on-site one-link bullets: a minority, so
     # they go. Add more and they become the content, so they stay as text.
-    out = normalize_tool_text(README)
+    site_nav = README.replace("](docs/", "](/docs/")
+    out = normalize_tool_text(site_nav)
     assert "Install" not in out and "Changelog" in out
     docs_index = "".join(f"- [Page {i}](/docs/{i})\n" for i in range(6)) + "![](https://p/x.gif)\n"
     assert normalize_tool_text(docs_index) == "".join(f"- Page {i}\n" for i in range(6))
+
+
+# Q4 (QA round 2): file-relative targets name the file that holds the content.
+# QA's fixture, and the ``## Docs`` list of the real openai/codex README.
+QA_README_DOCS = (
+    "# widget\n\n"
+    "![build](https://img.shields.io/badge/build-passing-green.svg)\n\n"
+    "A tiny widget library for parsing config files.\n\n"
+    "## Docs\n\n"
+    "- [Install guide](docs/install.md)\n"
+    "- [Configuration](docs/config.md)\n"
+    "- [API reference](docs/api.md)\n"
+    "- [FAQ](docs/faq.md)\n"
+    "- [Changelog](https://github.com/acme/widget/blob/main/CHANGELOG.md)\n\n"
+    "## License\n\nMIT\n"
+)
+CODEX_README_DOCS = (
+    "## Docs\n\n"
+    "- [**Codex Documentation**](https://developers.openai.com/codex)\n"
+    "- [**Contributing**](./docs/contributing.md)\n"
+    "- [**Installing & building**](./docs/install.md)\n"
+    "- [**Open source fund**](./docs/open-source-fund.md)\n\n"
+    "This repository is licensed under the [Apache-2.0 License](LICENSE).\n"
+)
+
+
+def test_file_relative_link_items_keep_title_and_path_in_prose_links() -> None:
+    out = normalize_tool_text(QA_README_DOCS, "prose-links")
+    for title, path in (
+        ("Install guide", "docs/install.md"),
+        ("Configuration", "docs/config.md"),
+        ("API reference", "docs/api.md"),
+        ("FAQ", "docs/faq.md"),
+    ):
+        assert f"- [{title}]({path})\n" in out
+    assert out == QA_README_DOCS.replace(
+        "![build](https://img.shields.io/badge/build-passing-green.svg)", "build"
+    )
+    # No image or cite marker: the codex snippet passes through byte for byte.
+    assert normalize_tool_text(CODEX_README_DOCS, "prose-links") == CODEX_README_DOCS
+
+
+def test_file_relative_link_items_keep_their_path_as_text_in_strip_links() -> None:
+    out = normalize_tool_text(QA_README_DOCS, "strip-links")
+    assert "- Install guide (docs/install.md)\n- Configuration (docs/config.md)\n" in out
+    assert "- FAQ (docs/faq.md)\n- Changelog\n" in out
+    codex = normalize_tool_text(CODEX_README_DOCS, "strip-links")
+    assert codex == (
+        "## Docs\n\n"
+        "- **Codex Documentation**\n"
+        "- **Contributing** (./docs/contributing.md)\n"
+        "- **Installing & building** (./docs/install.md)\n"
+        "- **Open source fund** (./docs/open-source-fund.md)\n\n"
+        "This repository is licensed under the [Apache-2.0 License](LICENSE).\n"
+    )
+
+
+def test_only_root_fragment_and_js_one_link_items_are_nav() -> None:
+    signal = "![](https://p/x.gif)\n" + "Body paragraph.\n" * 12
+    items = (
+        "- [Home](/)\n- [Top](#top)\n- [Menu](javascript:void(0))\n"
+        "- [Up](../CONTRIBUTING.md)\n- [Guide](guide/intro.md)\n"
+        "- [Upload](//commons.example.org/upload)\n- [Next](?page=2)\n"
+    )
+    out = normalize_tool_text(signal + items, "prose-links")
+    assert "Home" not in out and "Top" not in out and "Menu" not in out
+    assert "- [Up](../CONTRIBUTING.md)\n- [Guide](guide/intro.md)\n" in out
+    assert "- [Upload](//commons.example.org/upload)\n" in out  # another host: absolute
+    assert "- Next\n" in out  # on-site query: never dropped, but its target goes
+
+
+def test_adjacent_links_both_convert_but_call_syntax_stays() -> None:
+    text = "![](https://p/x.gif)\nSee [a](/x)[b](/y) and f(x)[i](y/z) here."
+    assert normalize_tool_text(text) == "See ab and f(x)[i](y/z) here."
+
+
+def test_dropped_leading_chrome_leaves_no_leading_blank_line() -> None:
+    text = "* [Home](/)\n\nText and [x](https://e.com/) here"
+    assert normalize_markdown(text) == "Text and [x](https://e.com/) here"
+    # A blank line the server itself sent first is content and stays.
+    assert normalize_markdown("\n" + text) == "\nText and [x](https://e.com/) here"
 
 
 def test_long_on_site_anchor_is_content_not_nav() -> None:
@@ -381,6 +463,9 @@ _FIXTURES = [
     SEARCH_RESULTS,
     BOARD_DECKS,
     README,
+    QA_README_DOCS,
+    CODEX_README_DOCS,
+    "![](https://p/x.gif)\n[a](/x)[b](/y)[c](docs/c.md)",
     *CODE_AND_PLAIN,
     *IDEMPOTENCE_EDGE_CASES,
 ]
