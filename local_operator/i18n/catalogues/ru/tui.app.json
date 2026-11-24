@@ -6,7 +6,7 @@
   "tui.app.skills.agents_heading": "агенты",
   "tui.app.skills.led_by": "Руководитель: {manager} · {count, plural, one {{shown} участник} few {{shown} участника} many {{shown} участников} other {{shown} участника}}",
   "tui.app.skills.member_count": "{count, plural, one {{shown} участник} few {{shown} участника} many {{shown} участников} other {{shown} участника}}",
-  "tui.app.skills.team_aliases": "псевдонимы: {aliases}",
+  "tui.app.skills.team_aliases": "псевд.: {aliases}",
   "tui.app.skills.team_no_description": "без описания",
   "tui.app.skills.team_fallback_facts": "команда",
   "tui.app.skills.send_agent": "Отправить: /agent <name> <message>",

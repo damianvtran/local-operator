@@ -143,11 +143,16 @@ def test_team_detail_is_one_icu_plural_message(monkeypatch: pytest.MonkeyPatch) 
     """
     from local_operator.tui.widgets import projects_start
 
-    one, many = start_targets(teams=[_team("a", counts=(1,)), _team("b", manager="lead")], agents=[])[1:]
+    one, many = start_targets(
+        teams=[_team("a", counts=(1,)), _team("b", manager="lead")], agents=[]
+    )[1:]
     assert (one.detail, many.detail) == ("manager · 1 role", "lead · 2 roles")
     monkeypatch.setattr(projects_start, "_t", lambda msg: f"<{msg.code}:{dict(msg.params)}>")
     keyed = start_targets(teams=[_team("b", manager="lead")], agents=[])[1]
-    assert keyed.detail == "<tui.projects.start.team_detail:{'manager': 'lead', 'count': 2, 'shown': '2'}>"
+    assert (
+        keyed.detail
+        == "<tui.projects.start.team_detail:{'manager': 'lead', 'count': 2, 'shown': '2'}>"
+    )
 
 
 @pytest.mark.parametrize(
@@ -160,7 +165,9 @@ def test_team_detail_is_one_icu_plural_message(monkeypatch: pytest.MonkeyPatch) 
         ("ru", (3, 2), "manager · 5 ролей"),
     ],
 )
-def test_team_detail_renders_each_locales_plural(locale: str, counts: tuple[int, ...], detail: str) -> None:
+def test_team_detail_renders_each_locales_plural(
+    locale: str, counts: tuple[int, ...], detail: str
+) -> None:
     """The start picker's team row carries the shipped translation and plural arm.
 
     The echo-resolver test above proves the message is keyed; this proves the

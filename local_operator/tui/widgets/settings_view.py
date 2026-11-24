@@ -1651,6 +1651,23 @@ class SettingsView(Vertical):
         self._model_catalogue = list(model_catalogue)
         self._repaint()
 
+    def set_teams(self, teams: Sequence[tuple[str, str, str]]) -> None:
+        """Replace ONLY the team rows and repaint.
+
+        Why a narrow setter rather than calling :meth:`load` again: team rows
+        are handed over already resolved to display strings (member count,
+        alias label, "no description" fallback), so a live language switch
+        must re-hand them or the Teams pane keeps the old language (PR #4508
+        R1/Q1). ``load`` would also replace agents, provider state and both
+        catalogues, which means re-resolving the credential store and model
+        catalogue on every language change for rows that do not need it —
+        agent facts are rendered at paint time, so they already follow the
+        locale. Cursor, pane and expansion state are untouched; ``_repaint``
+        clamps the selection exactly as it does for any other rebuild.
+        """
+        self._teams = list(teams)
+        self._repaint()
+
     # -- rows ---------------------------------------------------------------
     def _rows_key(self) -> tuple[Any, ...] | None:
         """Everything :meth:`_build_rows` reads, as one comparable value.

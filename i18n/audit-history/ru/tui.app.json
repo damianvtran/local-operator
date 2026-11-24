@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "tui.app",
-  "history_sha256": "7de243b30d3759c235537f21d1e5099a0f2b7e9c02921e99431e7ed7ce9fd73b",
+  "history_sha256": "3092989beee39ba6b3aa4279e3b221f1d26a2f0d6b981521c6b2e327a7d006b6",
   "entries": [
     {
       "locale": "ru",
@@ -111,6 +111,45 @@
       "note": "tr1: independent i18n-auditor 30a0ce64e122 (anthropic/claude-opus-5-5, no fallback observed) of translator 17b81fee8ed1 input sha256 e5ec4d20f0585a1628e818f9e663333539a93c2daf6b23c303fdc8fa8f3a358e: clean for tui.app (0 blocker, 0 major, 0 minor, 0 nit). Keys: settings team facts / start-picker team detail added at c3ba6a516c6a. Record i18n/audits/evidence/ru/tui.app/tr1/record.json. Native-speaker review and rendered-frame certification not claimed.",
       "evidence": "i18n/audits/evidence/ru/tui.app/tr1/record.json",
       "round": "tr1"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.app",
+      "source_sha256": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+      "context_sha256": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+      "target_sha256": "c133f63da7baa290fc2a07ed78a8c2921c1cd6f0a110e31ada0463c2aae24131",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "session": "56f0822a10dd",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "provenance": "translator's own files (translations/ru.json sha256 f966fcfe6d0af6ce2d8a005ea76d601ce791ec4787808149c99e34ada70f965b + notes.md in session 56f0822a10dd scratchpad, no fallback); value applied byte-exact by the integrating coder"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), round 2 delta, not the translator; did not edit values",
+        "session": "4d9bfc799017",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "result": "clean",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "finding_ids": [
+          "N1"
+        ],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own record (auditor.model field)"
+      },
+      "status": "passed",
+      "note": "tr2: independent i18n-auditor 4d9bfc799017 (anthropic/claude-opus-5-5, no fallback observed) of translator 56f0822a10dd input sha256 f966fcfe6d0af6ce2d8a005ea76d601ce791ec4787808149c99e34ada70f965b: clean for tui.app (0 blocker, 0 major, 0 minor, 1 nit N1 non-gating: 'псевд.' abbreviation not yet listed in the ru style guide). Key: tui.app.skills.team_aliases shortened to fit the 27-cell team pane (PR #4508 design D1). Record i18n/audits/evidence/ru/tui.app/tr2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/ru/tui.app/tr2/record.json",
+      "round": "tr2"
     }
   ]
 }

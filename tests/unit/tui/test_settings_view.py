@@ -5991,14 +5991,18 @@ async def test_settings_team_rows_route_every_word_through_keys(
 
     session = FakeSession()
     registry = TeamRegistry(tmp_path)
-    registry.create_team(TeamEditFields(name="solo", description="", manager="manager", aliases=["s1", "s2"]))
+    registry.create_team(
+        TeamEditFields(name="solo", description="", manager="manager", aliases=["s1", "s2"])
+    )
     session.team_registry = registry
 
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 32)) as pilot:
         assert await _settle(pilot, lambda: app._session is session), "session never bound"
         english = app._settings_team_rows()
-        monkeypatch.setattr(app_module, "_t", lambda msg: f"<{msg.code}:{msg.params.get('aliases', '')}>")
+        monkeypatch.setattr(
+            app_module, "_t", lambda msg: f"<{msg.code}:{msg.params.get('aliases', '')}>"
+        )
         keyed = app._settings_team_rows()
 
     assert english == [("solo", "0 members · alias: s1, s2", "no description")]
@@ -6065,6 +6069,64 @@ async def test_settings_team_rows_render_translated_facts(
         text.set_active_locale(previous)
 
     assert rows == [("solo", facts, summary)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["apply_language", "settings_row"])
+async def test_open_settings_team_rows_follow_a_live_language_switch(
+    tmp_path: Path, route: str
+) -> None:
+    """An OPEN /settings page re-resolves its team rows on a language switch.
+
+    Regression for PR #4508 R1/Q1: team rows are resolved to finished strings
+    when the page opens, and `_apply_language` only repainted them, so the
+    Teams pane kept `6 members · alias: s1, s2` / `no description` after a
+    switch to zh-CN. Driven through the product paths — the shared apply hook,
+    and the page's own language row (`write_setting` through the page's
+    manager, whose change notice reaches the app's local-config handler) —
+    and asserted on the rows the open view holds, not on a fresh resolve.
+    """
+    from local_operator.i18n import text
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(
+        TeamEditFields(
+            name="solo",
+            description="",
+            manager="manager",
+            aliases=["s1", "s2"],
+            members=[TeamMember(role="r0", count=3), TeamMember(role="r1", count=3)],
+        )
+    )
+    session.team_registry = registry
+
+    previous = text.active_locale()
+    app = OperatorApp(lambda: _factory(session))
+    try:
+        async with app.run_test(size=(120, 32)) as pilot:
+            assert await _settle(pilot, lambda: app._session is session), "session never bound"
+            app._open_settings_view()
+            await pilot.pause()
+            view = app._settings_view
+            assert view is not None
+            english = list(view._teams)
+            if route == "apply_language":
+                app._apply_language("zh-CN")
+            else:
+                settings_io.write_setting(view._manager, settings_io.BY_KEY["language"], "zh-CN")
+            assert await _settle(pilot, lambda: text.active_locale() == "zh-CN"), "no switch"
+            await pilot.pause()
+            # Same widget: the switch must update the open page, not rely on
+            # a reopen to rebuild it.
+            assert app._settings_view is view
+            switched = list(view._teams)
+    finally:
+        text.set_active_locale(previous)
+
+    assert english == [("solo", "6 members · alias: s1, s2", "no description")]
+    assert switched == [("solo", "6名成员 · 别名：s1, s2", "暂无描述")]
 
 
 @pytest.mark.asyncio

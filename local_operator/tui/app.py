@@ -41663,13 +41663,19 @@ class OperatorApp(App[None]):
                         aliases = tuple(str(alias) for alias in (getattr(row, "aliases", ()) or ()))
                         details[name.casefold()] = (
                             display_form(name, str(getattr(row, "label", "") or "")),
-                            # Resolved here, at pane-open time; a language change
-                            # reopens the page and rebuilds these rows. Aliases
+                            # Resolved to finished strings here, so the page
+                            # cannot re-translate them itself: `_apply_language`
+                            # re-runs this method and hands the rows back via
+                            # `SettingsView.set_teams` on a live switch. Aliases
                             # are user-typed identifiers, so only the label is
                             # copy — the joined names pass through untouched.
                             (getattr(row, "description", "") or "").strip()
                             or _t(_x.skills_team_no_description()),
-                            _t(_x.skills_team_aliases(aliases=", ".join(aliases))) if aliases else "",
+                            (
+                                _t(_x.skills_team_aliases(aliases=", ".join(aliases)))
+                                if aliases
+                                else ""
+                            ),
                         )
                 except Exception:  # noqa: BLE001 — labels are optional, rows are not
                     logger.debug("settings: team labels unavailable", exc_info=True)
@@ -49227,9 +49233,17 @@ class OperatorApp(App[None]):
         # watcher path reaches here with no keypress to follow it. `_rows_key`
         # and `_paint_token` carry the active locale, so this repaint recomposes
         # the whole list in the new language rather than reusing the old strips.
+        #
+        # Team rows are the exception the locale-keyed caches cannot cover: the
+        # app resolves them to finished strings (member count, alias label, the
+        # "no description" fallback) when the page opens, so a repaint alone
+        # re-inks the OLD language (PR #4508 R1/Q1). Re-resolve them here and
+        # hand them over through the narrow setter, which repaints once and
+        # keeps cursor/pane/expansion state — `load` would also re-read the
+        # credential store and catalogues for rows that need no re-resolving.
         settings_view = self._settings_view
         if settings_view is not None:
-            settings_view._repaint()
+            settings_view.set_teams(self._settings_team_rows())
         # /info owns painted Statics, not render-time lookups. Repaint the
         # existing presentation through this shared command/config-watch hook:
         # re-opening it would lose its snapshot/scroll and re-run costly probes.
