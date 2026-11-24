@@ -5234,8 +5234,9 @@ class Session:
 
         # Before the consume below erases the only marker that this unbound
         # session arrived (fork/recovery), so legacy grandfathering refuses it.
-        seal_unbound_arrival(transcript.directory)
-        fork_boundary = consume_fork_boundary(transcript.directory)
+        # A failed seal keeps the boundary: it is then the only refusal left.
+        sealed = seal_unbound_arrival(transcript.directory)
+        fork_boundary = consume_fork_boundary(transcript.directory) if sealed else ""
         if fork_boundary:
             replayed_messages.append(
                 CustomMessage(

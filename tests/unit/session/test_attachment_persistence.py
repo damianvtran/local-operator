@@ -955,6 +955,197 @@ def test_fork_of_unresolvable_legacy_parent_stays_refused(tmp_path, registries):
     assert "recorded authority is unavailable" in reopened.attachment_restore_notice
 
 
+def _write_origin(directory: Path, **payload: Any) -> None:
+    # Written directly, not via mark_session_origin: these fixtures model what
+    # OLD builds left on disk, and the marker writer also touches lineage state.
+    from local_operator.resume import ORIGIN_NAME
+
+    (directory / ORIGIN_NAME).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_keep_copy_stamp_with_team_identity_survives_its_fork_boundary(tmp_path, registries):
+    # R1: a mesh keep-copy carries authority in mesh.json, not a binding file,
+    # beside a fork boundary. The seal must not turn it into a refusal.
+    from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.network.move_team import (
+        KEY,
+        LOCAL_BINDING_NAME,
+        check_arrival,
+        source_offer,
+    )
+    from local_operator.session.placement import MeshStamp, write_stamp_into
+
+    source = _session(tmp_path, registries)
+    source.attach_team(registries[1].get_team_by_name("lopdev"))
+    directory = _legacy_session_dir(tmp_path, sid="0000000000cc")
+    offer = source_offer(tmp_path, tmp_path / "sess", supported=True)
+    binding = check_arrival(tmp_path, directory, offer)
+    assert binding is not None
+    write_stamp_into(
+        directory, MeshStamp(session_id=directory.name, origin={"kind": "fork", KEY: binding})
+    )
+    (directory / FORK_BOUNDARY_NAME).write_text("{}", encoding="utf-8")
+
+    first = _session(tmp_path, registries, directory=directory)
+    assert first.active_team_name == "lopdev"
+    assert first.attachment_restore_notice == ""
+    record = json.loads((directory / LOCAL_BINDING_NAME).read_text("utf-8"))
+    assert "reauthorize" not in record[KEY]
+    assert _session(tmp_path, registries, directory=directory).active_team_name == "lopdev"
+
+
+def test_failed_seal_keeps_the_fork_boundary(tmp_path, registries, monkeypatch):
+    # S2: a transient seal failure must not consume the only arrival marker.
+    from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.network import move_team
+
+    directory = _legacy_session_dir(tmp_path)
+    (directory / FORK_BOUNDARY_NAME).write_text("{}", encoding="utf-8")
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(move_team, "_write_local_binding", fail)
+        assert _session(tmp_path, registries, directory=directory).active_team is None
+    assert (directory / FORK_BOUNDARY_NAME).exists(), "the boundary is the only refusal left"
+    # The failure cleared: the next load seals instead of grandfathering.
+    assert _session(tmp_path, registries, directory=directory).active_team is None
+    _assert_refused(tmp_path, registries, directory)
+
+
+def test_old_build_fork_of_a_moved_parent_is_refused(tmp_path, registries):
+    # S1: forks from de83a610ac47..v0.112.10 dropped mesh.json and wrote no
+    # binding; origin.json naming the moved parent is the only evidence.
+    from local_operator.session.placement import MeshStamp, write_stamp_into
+
+    parent = _legacy_session_dir(tmp_path, sid="0000000000a1")
+    write_stamp_into(parent, MeshStamp(session_id=parent.name, origin={"kind": "moved"}))
+    child = _legacy_session_dir(tmp_path, sid="0000000000a2")
+    _write_origin(child, origin="fork", parent=parent.name)
+    _assert_refused(tmp_path, registries, child)
+
+
+def test_fork_chain_reaching_a_moved_ancestor_is_refused(tmp_path, registries):
+    from local_operator.fork import FORK_BOUNDARY_NAME
+
+    grandparent = _legacy_session_dir(tmp_path, sid="0000000000b1")
+    (grandparent / FORK_BOUNDARY_NAME).write_text("{}", encoding="utf-8")
+    parent = _legacy_session_dir(tmp_path, sid="0000000000b2")
+    _write_origin(parent, origin="fork", parent=grandparent.name)
+    child = _legacy_session_dir(tmp_path, sid="0000000000b3")
+    _write_origin(child, origin="fork", parent=parent.name)
+    _assert_refused(tmp_path, registries, child)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        {"origin": "fork", "parent": "0000000000c0", "source_device": "peer"},
+        "malformed",
+        {"origin": "fork", "parent": "../escape"},
+        "cycle",
+    ],
+)
+def test_arrival_or_unreadable_origin_is_refused(tmp_path, registries, origin):
+    from local_operator.resume import ORIGIN_NAME
+
+    child = _legacy_session_dir(tmp_path, sid="0000000000c1")
+    if origin == "malformed":
+        (child / ORIGIN_NAME).write_text("{", encoding="utf-8")
+    elif origin == "cycle":
+        other = _legacy_session_dir(tmp_path, sid="0000000000c2")
+        _write_origin(other, origin="fork", parent=child.name)
+        _write_origin(child, origin="fork", parent=other.name)
+    else:
+        _write_origin(child, **origin)
+    _assert_refused(tmp_path, registries, child)
+
+
+def test_legacy_local_fork_chain_still_grandfathers(tmp_path, registries):
+    # A local chain, including a fork whose original was deleted (an ordinary
+    # gesture), carries no arrival evidence and must keep working.
+    grandparent = _legacy_session_dir(tmp_path, sid="0000000000d1")
+    parent = _legacy_session_dir(tmp_path, sid="0000000000d2")
+    _write_origin(parent, origin="fork", parent=grandparent.name)
+    child = _legacy_session_dir(tmp_path, sid="0000000000d3")
+    _write_origin(child, origin="fork", parent=parent.name)
+    orphan = _legacy_session_dir(tmp_path, sid="0000000000d4")
+    _write_origin(orphan, origin="fork", parent="0000000000ff")  # parent deleted
+    for directory in (child, orphan):
+        assert _cold_team(tmp_path, directory) == "lopdev"
+        assert _session(tmp_path, registries, directory=directory).active_team_name == "lopdev"
+
+
+def test_incomplete_registry_previews_no_legacy_team_cold(tmp_path, registries, monkeypatch):
+    # S4/R2: the cold preview must refuse where the warm grandfather refuses.
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    directory = _legacy_session_dir(tmp_path)
+    assert _cold_team(tmp_path, directory) == "lopdev"
+
+    def incomplete(_self: Any) -> None:
+        raise ProfileRegistryUnavailable()
+
+    monkeypatch.setattr(AgentRegistry, "require_complete_metadata", incomplete)
+    assert _cold_team(tmp_path, directory) == ""
+
+
+def test_fork_of_legacy_parent_on_incomplete_registry_is_not_grandfathered(
+    tmp_path, registries, monkeypatch
+):
+    # R3: the fork grandfather runs the same completeness guard.
+    from local_operator.fork import fork_session
+    from local_operator.network.move_team import KEY, LOCAL_BINDING_NAME
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    def incomplete(_self: Any) -> None:
+        raise ProfileRegistryUnavailable()
+
+    from local_operator.network import move_team
+
+    authorized: list[str] = []
+    real_authorize = move_team.authorize_named_team
+
+    def spy(*args: Any, **kwargs: Any) -> str:
+        authorized.append(args[-1])
+        return real_authorize(*args, **kwargs)
+
+    parent = _legacy_session_dir(tmp_path)
+    monkeypatch.setattr(AgentRegistry, "require_complete_metadata", incomplete)
+    monkeypatch.setattr(move_team, "authorize_named_team", spy)
+    child = parent.parent / fork_session(tmp_path, parent.name)
+    record = json.loads((child / LOCAL_BINDING_NAME).read_text("utf-8"))
+    assert record == {KEY: {"reauthorize": True}}
+    # The guard refuses BEFORE any authorization is attempted, not by a
+    # downstream resolution failure that happens to look the same.
+    assert authorized == []
+
+
+def test_undecodable_transcript_is_judged_only_against_held_replicas(tmp_path):
+    # Q1: with nothing held there is nothing to be a copy of, so a transcript
+    # this runtime cannot decode (zstd on 3.12/3.13) is not refused for it.
+    # Once a replica IS held, an undecodable head fails closed.
+    from local_operator.network.move_team import is_legacy_local_attachment
+    from local_operator.network.sync import (
+        NETWORK_DIRNAME,
+        REPLICA_DIRNAME,
+        replica_dir,
+    )
+    from local_operator.resume import TRANSCRIPT_NAME
+
+    directory = _legacy_session_dir(tmp_path)
+    (directory / TRANSCRIPT_NAME).unlink()
+    (directory / (TRANSCRIPT_NAME + ".zst")).write_bytes(b"not zstd")
+    assert is_legacy_local_attachment(directory)
+    (tmp_path / NETWORK_DIRNAME / REPLICA_DIRNAME).mkdir(parents=True)
+    assert is_legacy_local_attachment(directory), "an empty replica store holds nothing"
+    replica = replica_dir(tmp_path, "0000000000aa")
+    replica.mkdir()
+    (replica / TRANSCRIPT_NAME).write_text('{"id":"r"}\n', encoding="utf-8")
+    assert not is_legacy_local_attachment(directory)
+
+
 @pytest.mark.asyncio
 async def test_generic_child_of_moved_team_cannot_gain_tools_or_pins(tmp_path, registries):
     from local_operator.harness.subagent import (
