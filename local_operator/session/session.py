@@ -25657,11 +25657,14 @@ class Session:
 
             if not model_may_choose_tier():
                 raise ValueError("specific task models require subagents.model_choice=model")
+        held_back: list[str] = []
         model_spec, selection_source = self._resolve_subagent_selection(
             target.role,
             effort,
             strict=True,
             model=model,
+            authority=target.authority,
+            notes=held_back,
             roster=target.roster,
             slot_kind="team" if target.is_team_launch else "agent",
             # For a ``team:pod`` launch the resolved ROLE is pod's manager while
@@ -25680,6 +25683,9 @@ class Session:
             # delegating model reads back. Derived here, where the roster is in
             # hand, because ``run_subagent`` cannot see one from the arguments.
             selection_source=selection_source,
+            # A live tier edit the provider ceiling held back is shown on the
+            # receipt, not only logged (the operator's requirement).
+            selection_notes=held_back,
             target=target,
             agent=agent,
             # Recorded on the job for the title/band to name the tier. The spec
@@ -26436,8 +26442,17 @@ class Session:
         roster: Any = None,
         slot_kind: str = "agent",
         slot_role: str | None = None,
+        authority: Any = None,
+        notes: list[str] | None = None,
     ) -> tuple[ModelSpec | None, str]:
         """``(spec, model_selection_source)`` for one delegated role.
+
+        ``authority`` is the LAUNCHING session's ``/team`` snapshot
+        (``LaunchTarget.authority``; a resume's launch parent need not be this
+        session), defaulting to this session's own. When bound, the role's own
+        ``effort:`` tag is read from that snapshot and a live edit only passes
+        the provider ceiling (``resolve_member_model``). ``notes`` collects why
+        an edit was held back, for the receipt the operator reads.
 
         The SPEC half is what :meth:`_resolve_subagent_model` hands its naming and
         resume callers. The SOURCE half names WHICH layer decided it, and is the
@@ -26463,19 +26478,27 @@ class Session:
         """
         from local_operator.harness.subagent import (
             SubagentModelUnavailable,
+            _bound_team_authority,
             local_missing_tier_remedy,
             resolve_member_model,
         )
+        from local_operator.network.move_team import TeamAuthority
+
+        bound = authority if isinstance(authority, TeamAuthority) else _bound_team_authority(self)
 
         def _resolved(registry: Any) -> Any:
-            return resolve_member_model(
+            resolution = resolve_member_model(
                 agent,
                 roster=roster,
                 slot_kind=slot_kind,
                 slot_role=slot_role,
                 launch_tier=effort,
                 agent_registry=registry,
+                bound_authority=bound,
             )
+            if notes is not None:
+                notes.extend(resolution.held_back)
+            return resolution
 
         def _role_resolution() -> Any:
             """The launch resolution WITH the registry, or the lenient fallback.

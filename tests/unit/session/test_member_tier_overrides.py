@@ -726,12 +726,16 @@ async def test_split_a_tier_edit_that_crosses_providers_is_refused_with_a_reason
             text = await hub_resume(session, row.id)
             await wait_for(lambda: completed(session, resumed_id(session, text)))
         assert stream.model_for(RESUME_PROMPT) == LO
-        messages = [r.getMessage() for r in caplog.records]
-        assert (
-            "live tier edit not applied: team 'teamwork' slot 'worker': kept the attached "
+        reason = (
+            "team 'teamwork' slot 'worker': kept the attached "
             "tier 'lo' (provider test); the edited tier 'hi' routes to provider elsewhere, "
             "which this binding did not authorize; re-attach via /team to use it"
-        ) in messages, messages
+        )
+        messages = [r.getMessage() for r in caplog.records]
+        assert f"live tier edit not applied: {reason}" in messages, messages
+        # SURFACED, not only logged: the hub receipt the operator reads names
+        # the refusal inside the selection tag (product-owner ruling, MAJOR 2).
+        assert f"[selection: team; not applied: {reason}]" in text, text
     finally:
         await session.dispose()
 
@@ -759,6 +763,196 @@ def test_split_a_mesh_replica_keeps_the_snapshot_tier_until_a_local_team(tmp_pat
     ]
     local, held = live_member_roster(replace(authority, explicit_local=True), authority.team, live)
     assert local is not None and local.members[0].tier == "hi" and held == []
+
+
+def _same_count_row_edit(team: Any, **member: Any) -> Any:
+    """``team`` with its ONE slot's tier/effort changed AND a non-tier field
+    (the description) changed: same slot count, so only the whole-row gate can
+    hold the tier back (an extra slot would instead trip ``zip(strict=True)``)."""
+    (slot,) = team.members
+    return team.model_copy(
+        update={
+            "description": "edited beside the tier",
+            "members": [slot.model_copy(update=member)],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("member", "label"),
+    [({"tier": "hi"}, "tier"), ({"effort": "high"}, "effort-only (no tier change)")],
+)
+def test_split_whole_row_gate_holds_a_same_count_edit(tmp_path, monkeypatch, caplog, member, label):
+    """m3 + m5. A tier (or effort-only) edit that rides beside a non-tier field
+    change of the SAME row shape is not taken, and the held-back edit is LOGGED
+    with the reason. The tier arm is a same-provider edit on a locally bound
+    session, so every OTHER rule would admit it: if the whole-row gate were
+    bypassed, the returned roster would carry ``hi`` (or ``high``) and this
+    fails on the value, not on a crash. The effort-only arm covers the branch
+    that skips the provider ceiling entirely."""
+    import logging
+    from dataclasses import replace
+
+    from local_operator.network.move_team import _snapshot, live_member_roster
+
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "hi": HI})
+    registry = TeamRegistry(config)
+    team = make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+    authority = replace(
+        _snapshot(team, registry, AgentRegistry(tmp_path / "agents"), max_depth=3),
+        explicit_local=True,
+    )
+    live = _same_count_row_edit(authority.team, **member)
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.network.move_team"):
+        roster, reasons = live_member_roster(authority, authority.team, live)
+    # The VALUE first, so a bypassed gate fails here: the edit was taken.
+    assert roster is not None, label
+    assert (roster.members[0].tier, roster.members[0].effort) == ("lo", None), label
+    assert roster is authority.team, label
+    assert reasons == [], label
+    assert [r.getMessage() for r in caplog.records] == [
+        "team 'teamwork': tier/effort edit on slot(s) 'worker' not applied; the registry "
+        "row also changed beyond tier/effort since /team attached it, so the attached "
+        "roster is used whole; re-attach via /team to take the edit"
+    ], label
+
+
+def _repin_role(agents: AgentRegistry, name: str, effort: str) -> None:
+    write_profile(
+        agents,
+        AgentParams(
+            op="update",
+            name=name,
+            description=f"{name} role",
+            instructions=f"You are {name}.",
+            effort=effort,
+        ),
+        creating=False,
+        scope="global",
+    )
+
+
+async def _task_receipt(session: Session, agent: str, prompt: str) -> str:
+    result = await execute_task(
+        "call-1",
+        {"context": "goal", "tasks": [{"label": "again", "prompt": prompt, "agent": agent}]},
+        None,
+        None,
+        session._build_tool_context(),
+    )
+    return "".join(block.text for block in result.content if isinstance(block, TextContent))
+
+
+@pytest.mark.asyncio
+async def test_split_a_role_effort_tag_edit_that_crosses_providers_is_refused_with_a_reason(
+    tmp_path, monkeypatch
+):
+    """MAJOR 1 + 2 (product-owner ruling). The role's OWN ``effort:`` tag is a
+    tier layer too, so on a bound session a role-pin edit to a tier on another
+    provider must not move the child: the SNAPSHOTTED tag is kept and the reason
+    shows on both receipts the operator reads (``task`` and ``hub`` resume).
+
+    Negative control: with the ceiling bypassed on this path (the live tag used
+    as read), the child runs on ``elsewhere/far-model`` and both the model and
+    the receipt assertions fail."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "hi": "elsewhere/far-model"})
+    agents = AgentRegistry(tmp_path / "agents")
+    pin_role(agents, "worker", "lo")
+    registry = TeamRegistry(config)
+    make_team(registry, "teamwork", [TeamMember(role="worker")])
+
+    stream = RecordingStream()
+    session = make_session(tmp_path, registry, stream, team="teamwork", agents=agents)
+    try:
+        assert session._team_authority is not None and session._team_authority.explicit_local
+        row = await launch(session, stream, "do the work", agent="worker")
+        assert row.model_label == LO
+
+        _repin_role(agents, "worker", "hi")
+        reason = (
+            "role 'worker': kept the attached effort tag 'lo' (provider test); the edited "
+            "tag 'hi' routes to provider elsewhere, which this binding did not authorize; "
+            "re-attach via /team to use it"
+        )
+        text = await hub_resume(session, row.id)
+        await wait_for(lambda: completed(session, resumed_id(session, text)))
+        assert stream.model_for(RESUME_PROMPT) == LO
+        assert f"[selection: role; not applied: {reason}]" in text, text
+
+        fresh = await _task_receipt(session, "worker", "fresh launch after the repin")
+        assert f"[selection: role; not applied: {reason}]" in fresh, fresh
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_split_a_same_provider_role_effort_tag_edit_is_taken(tmp_path, monkeypatch):
+    """The other arm of the ceiling, so it is not a blanket freeze: a role-pin
+    edit to a tier on the SAME provider reaches the resumed child, with no
+    refusal on the receipt."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "hi": HI})
+    agents = AgentRegistry(tmp_path / "agents")
+    pin_role(agents, "worker", "lo")
+    registry = TeamRegistry(config)
+    make_team(registry, "teamwork", [TeamMember(role="worker")])
+
+    stream = RecordingStream()
+    session = make_session(tmp_path, registry, stream, team="teamwork", agents=agents)
+    try:
+        row = await launch(session, stream, "do the work", agent="worker")
+        _repin_role(agents, "worker", "hi")
+        text = await hub_resume(session, row.id)
+        await wait_for(lambda: completed(session, resumed_id(session, text)))
+        assert stream.model_for(RESUME_PROMPT) == HI
+        assert "[selection: role]" in text and "not applied" not in text, text
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_split_a_resumed_team_child_on_a_bound_session_passes_the_ceiling(
+    tmp_path, monkeypatch
+):
+    """m2. The bound branch of ``_carried_roster`` for a ``team:`` child (the
+    override sits on the ``team:pod`` slot of the PARENT's snapshotted roster).
+    The slot is re-pointed to a tier on another provider after the launch: the
+    resumed pod manager keeps ``lo`` and the receipt says why. With that branch
+    replaced by an ungated live read, the resume would take ``hi`` (far) and
+    this fails."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "hi": "elsewhere/far-model"})
+    registry = TeamRegistry(config)
+    make_team(registry, "pod", [TeamMember(role="worker")], manager="manager")
+    org = make_team(registry, "org", [TeamMember(role="pod", kind="team", tier="lo")])
+
+    stream = RecordingStream()
+    root = make_session(tmp_path, registry, stream, team="org")
+    try:
+        assert root._team_authority is not None and root._team_authority.explicit_local
+        row = await launch(root, stream, "launch-the-pod", agent="team:pod")
+        assert row.model_label == LO
+
+        registry.update_team(
+            org.id, TeamEditFields(members=[TeamMember(role="pod", kind="team", tier="hi")])
+        )
+        text = await hub_resume(root, row.id)
+        await wait_for(lambda: completed(root, resumed_id(root, text)))
+        assert stream.model_for(RESUME_PROMPT) == LO
+        assert (
+            "[selection: team; not applied: team 'org' slot 'pod': kept the attached tier "
+            "'lo' (provider test); the edited tier 'hi' routes to provider elsewhere, which "
+            "this binding did not authorize; re-attach via /team to use it]"
+        ) in text, text
+    finally:
+        await root.dispose()
 
 
 @pytest.mark.asyncio

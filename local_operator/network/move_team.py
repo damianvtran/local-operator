@@ -839,6 +839,27 @@ def live_member_roster(
     if _authority_shape(live) != _authority_shape(snapshot):
         # Not a tier-only edit: the row now says something the binding never
         # authorized. Nothing is taken; the remedy is the usual re-attach.
+        # Logged (not returned as a reason) when a tier/effort edit is among
+        # what was held back, so an operator reading the log can tell "my tier
+        # edit was ignored because the row changed in other ways too" from "no
+        # edit was seen". Slots are paired by (role, kind), first match, only to
+        # word the log line: the gate itself never pairs anything.
+        before = {(m.role.casefold(), m.kind): (m.tier, m.effort) for m in snapshot.members[::-1]}
+        held = sorted(
+            m.role
+            for m in live.members
+            if (m.role.casefold(), m.kind) in before
+            and before[(m.role.casefold(), m.kind)] != (m.tier, m.effort)
+        )
+        if held:
+            logger.warning(
+                # i18n: ignore technical diagnostic logged for the operator, English-only
+                "team %r: tier/effort edit on slot(s) %s not applied; the registry row also "
+                "changed beyond tier/effort since /team attached it, so the attached roster "
+                "is used whole; re-attach via /team to take the edit",
+                snapshot.name,
+                ", ".join(repr(role) for role in held),
+            )
         return snapshot, []
     edited = [
         (old, new)
@@ -887,3 +908,72 @@ def live_member_roster(
         return snapshot, reasons
     members = [accepted.get(index, member) for index, member in enumerate(snapshot.members)]
     return snapshot.model_copy(update={"members": members}), reasons
+
+
+def _snapshot_role_tier(authority: TeamAuthority, role: str) -> str | None:
+    """The ``effort:`` tag ``role``'s profile carried when ``/team`` attached.
+
+    ``None`` both for a role whose snapshotted profile pins no tier (or that had
+    no profile: a plain role) and for a role outside the bound graph. The second
+    is deliberately not told apart: a bound launch of a role outside the graph is
+    refused before any model is resolved (``_require_roster_slot``), so only
+    non-launch reads (naming, display) get here, and "no tier was attested" is
+    the fail-closed answer for them too.
+    """
+    entries = [
+        *authority.roles.items(),
+        (str(authority.manager[0].get("name", "")), authority.manager),
+    ]
+    # Exact spelling first, then casefolded, the order the launch resolver uses.
+    match = next((data for name, data in entries if name == role), None) or next(
+        (data for name, data in entries if str(name).casefold() == role.casefold()), None
+    )
+    effort = getattr(match[1], "effort", None) if match is not None else None
+    return str(effort) if effort else None
+
+
+def live_role_tier(
+    authority: TeamAuthority, role: str, live: str | None, targets: Any
+) -> tuple[str | None, str]:
+    """The role ``effort:`` tag a bound launch may use, plus why a live edit was
+    held back (``""`` when nothing was).
+
+    WHY. The role's own ``effort:`` tag is the third tier layer (launch tier ->
+    roster slot -> role tag) and, like the slot ``tier``, it resolves to a model
+    and the model to a PROVIDER. Reading it live from the agent registry let a
+    role-pin edit move a bound child to a provider/account the binding never
+    authorized, around the ceiling :func:`live_member_roster` enforces for the
+    slot. So the snapshot's tag is the authority, and a live edit passes through
+    the SAME three rules (section comment above):
+
+    * mesh replica (``explicit_local`` False): the snapshotted tag stands;
+    * provider ceiling: taken only when both tags resolve to the same provider
+      in ``targets``; "cannot tell" -- no tag on either side, the inherit
+      sentinel ("the launching session's model" is not a provider this check
+      can compare), unconfigured or malformed -- counts as crossing;
+    * the decision is made against the snapshot; ``live`` only supplies a value.
+
+    ``targets`` is ``read_effort_tier_targets()``'s mapping; the caller reads it
+    (and fails closed on an unreadable config by passing ``{}``).
+    """
+    snapshot = _snapshot_role_tier(authority, role)
+    if (live or None) == snapshot:
+        return snapshot, ""
+    if not authority.explicit_local:
+        return snapshot, (
+            # i18n: ignore technical diagnostic surfaced on the launch receipt, English-only
+            f"role {role!r}: kept the attached effort tag {snapshot or 'none'!r}; a synced "
+            f"edit ({live or 'none'!r}) on a mesh replica is a choice of provider and waits "
+            "for a local /team"
+        )
+    before = _tier_provider(snapshot, targets)
+    after = _tier_provider(live, targets)
+    if before is not None and before == after:
+        return live, ""
+    return snapshot, (
+        # i18n: ignore technical diagnostic surfaced on the launch receipt, English-only
+        f"role {role!r}: kept the attached effort tag {snapshot or 'none'!r} (provider "
+        f"{before or 'unresolved'}); the edited tag {live or 'none'!r} routes to provider "
+        f"{after or 'unresolved'}, which this binding did not authorize; re-attach via "
+        "/team to use it"
+    )

@@ -35163,6 +35163,22 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     return f"- {label} ({agent}) {_model_clause(model, owns, session_model)}: job {job_id}"
 
 
+def _selection_tag(source: str, note: str = "") -> str:
+    """The `` [selection: <layer>]`` tag on a launch/resume receipt line.
+
+    ``note`` is why a live tier/effort edit was NOT applied on a bound session
+    (``AsyncJob.model_selection_note``: provider ceiling, mesh replica). It sits
+    INSIDE the tag because the tag is where the operator -- and the delegating
+    model -- read which layer chose the child's model; a held-back edit is part
+    of that answer, and a reason only in the log reads here as though the edit
+    took effect.
+    """
+    if not source:
+        return ""
+    # i18n: ignore model-facing tool output, English-only
+    return f" [selection: {source}; not applied: {note}]" if note else f" [selection: {source}]"
+
+
 def _not_applied_note(entry: Mapping[str, Any]) -> str:
     """Say so when a tier or model this call passed was NOT applied.
 
@@ -35398,6 +35414,11 @@ async def execute_task(
                     if context and context.jobs
                     else ""
                 ),
+                "model_selection_note": (
+                    str(getattr(context.jobs.get(job_id), "model_selection_note", "") or "")
+                    if context and context.jobs
+                    else ""
+                ),
                 # WHAT THIS CALL ASKED FOR, kept beside what the launch
                 # decided: the two can differ now, and only the pair says
                 # whether the caller's pick was applied (see
@@ -35415,10 +35436,9 @@ async def execute_task(
         return _error(tool_call_id, "task", f"could not launch subagent(s): {detail}")
     lines = [
         _launched_line(entry, context)
-        + (
-            f" [selection: {entry['model_selection_source']}]"
-            if entry.get("model_selection_source")
-            else ""
+        + _selection_tag(
+            str(entry.get("model_selection_source") or ""),
+            str(entry.get("model_selection_note") or ""),
         )
         + _not_applied_note(entry)
         + (f"\n  {entry['brief_notice']}" if entry.get("brief_notice") else "")
@@ -37388,6 +37408,7 @@ async def _execute_hub_parent(
                 # surface where a dropped pick reads as honoured, and a resume
                 # is a launch that costs money.
                 source = str(getattr(comms.job(new_job_id), "model_selection_source", "") or "")
+                note = str(getattr(comms.job(new_job_id), "model_selection_note", "") or "")
                 lines.append(
                     _resumed_line(
                         comms,
@@ -37397,7 +37418,7 @@ async def _execute_hub_parent(
                         previous_models.get(from_id, ""),
                         session_model,
                     )
-                    + (f" [selection: {source}]" if source else "")
+                    + _selection_tag(source, note)
                     + _not_applied_note(
                         {"model_selection_source": source, "model_pick": params.model}
                     )

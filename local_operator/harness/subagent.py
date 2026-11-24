@@ -504,6 +504,11 @@ class MemberModelResolution:
     #: Presentation classification only: shared launch/model diagnostics above
     #: stay English. The desktop wire boundary localizes without parsing prose.
     unavailable_kind: MemberModelUnavailableKind | None = None
+    #: Why a live edit of the role's own ``effort:`` tag was NOT applied on a
+    #: bound session (provider ceiling / mesh replica), worded for the operator.
+    #: The launch receipt shows it (``[selection: ...]``): a refusal the operator
+    #: cannot see reads as the edit having taken effect.
+    held_back: tuple[str, ...] = ()
 
     @property
     def decided_by_team(self) -> bool:
@@ -523,8 +528,15 @@ def resolve_member_model(
     launch_tier: str | None = None,
     agent_registry: Any = None,
     tier_targets: Mapping[str, tuple[Any, str | None]] | None = None,
+    bound_authority: Any = None,
 ) -> MemberModelResolution:
     """Resolve ``role``'s model tier and reasoning effort from every layer.
+
+    ``bound_authority`` is the launching session's ``/team`` snapshot
+    (``TeamAuthority``) when it is bound. Then the role's own ``effort:`` tag is
+    the SNAPSHOTTED one, and a live edit of it is taken only through the
+    provider ceiling (:func:`move_team.live_role_tier`); a held-back edit is
+    reported in ``held_back`` for the launch receipt.
 
     Precedence, and the two fields fall through INDEPENDENTLY (an ``effort``
     override alone keeps whatever model the tier below it chose):
@@ -586,6 +598,36 @@ def resolve_member_model(
     # between two spawns is obeyed by the next one) -- what changed is that a
     # launch which NAMES a tier now pays for it too.
     row_tier = _row_effort_tier(role, agent_registry)
+    held_back: tuple[str, ...] = ()
+    if bound_authority is not None and role and role != "task":
+        # A BOUND session: the live read above only supplies a candidate. A tag
+        # names a tier, a tier a model, a model a provider (= where the data
+        # goes), so taking it unchecked would let a role-pin edit move a bound
+        # child onto a provider/account the binding never authorized -- around
+        # the ceiling the roster slot's ``tier`` already passes. The snapshot is
+        # the authority; ``live_role_tier`` owns the rule, shared with the slot.
+        from local_operator.network.move_team import live_role_tier
+
+        try:
+            ceiling_targets: Any = (
+                read_effort_tier_targets() if tier_targets is None else tier_targets
+            )
+        except Exception as error:  # noqa: BLE001 — unreadable config fails closed
+            logger.debug("tier map unreadable for a role-tag ceiling: %s", error)
+            ceiling_targets = {}
+        live_tag = row_tier
+        row_tier, reason = live_role_tier(bound_authority, role, live_tag, ceiling_targets)
+        # Surfaced only when the tag could have DECIDED the model: either side
+        # is the absolute inherit pin, or no launch/slot tier outranks the tag.
+        # A held-back tag that a higher layer overrode anyway changed nothing.
+        decides = (
+            is_inherit_tier_sentinel(row_tier)
+            or is_inherit_tier_sentinel(live_tag)
+            or not (launch_tier or member_tier)
+        )
+        if reason and decides:
+            logger.warning("live role effort edit not applied: %s", reason)
+            held_back = (reason,)
     role_pins_inherit = is_inherit_tier_sentinel(row_tier)
 
     if role_pins_inherit:
@@ -642,6 +684,7 @@ def resolve_member_model(
                 effort_source=effort_source,
                 unavailable=f"config could not be read ({exc})",
                 unavailable_kind="config_unreadable",
+                held_back=held_back,
             )
         raw_selector, tier_effort = targets.get(tier, (None, None))
         if raw_selector is not None and not isinstance(raw_selector, str):
@@ -678,6 +721,7 @@ def resolve_member_model(
         unavailable_quiet=unavailable_quiet,
         role_pins_inherit=role_pins_inherit,
         unavailable_kind=unavailable_kind,
+        held_back=held_back,
     )
 
 
@@ -1550,6 +1594,10 @@ class LaunchTarget:
     #: ``None`` when the launch has no roster at all (no active team).
     roster: Any = None
     authority: Any = None
+    #: Why a live tier/effort edit for THIS slot was held back on a bound
+    #: session (``move_team.live_member_roster``). ``run_subagent`` puts it on
+    #: the job so the launch/resume receipt shows it beside ``[selection: ...]``.
+    selection_notes: tuple[str, ...] = ()
 
 
 def inherits_bound_team_authority(agent: str, target: LaunchTarget) -> bool:
@@ -1745,7 +1793,8 @@ def resolve_launch_target(
                     f"team {carried.team_name!r} this subagent ran under no longer exists"
                 )
         role = str(team.manager) if sub_name and team is not None else agent
-        roster = _carried_roster(parent_session, carried, bool(sub_name), team)
+        held: list[str] = []
+        roster = _carried_roster(parent_session, carried, bool(sub_name), team, notes=held)
         if authority is not None:
             # An orphan generic child cannot reconstruct the narrower
             # inventory of its missing real parent from the root session.
@@ -1774,6 +1823,7 @@ def resolve_launch_target(
             is_team_launch=bool(sub_name),
             roster=roster,
             authority=authority,
+            selection_notes=_slot_notes(held, sub_name or role),
         )
 
     if authority is not None:
@@ -1812,6 +1862,7 @@ def resolve_launch_target(
                 f"depth cap: this launch would be depth {depth}; "
                 f"subagents.max_team_depth is {cap}"
             )
+    held_fresh: list[str] = []
     return LaunchTarget(
         role=role,
         team=team,
@@ -1824,13 +1875,33 @@ def resolve_launch_target(
         # launch is not ``team`` (pod). Read FRESH, not from the attached object:
         # see :func:`_reread_roster`.
         roster=_reread_roster(
-            parent_session, str(getattr(parent_team, "name", "") or ""), parent_team
+            parent_session,
+            str(getattr(parent_team, "name", "") or ""),
+            parent_team,
+            notes=held_fresh,
         ),
         authority=authority,
+        # Evaluated after ``roster=`` above filled ``held_fresh`` (keyword
+        # arguments are evaluated left to right).
+        selection_notes=_slot_notes(held_fresh, sub_name or role),
     )
 
 
-def _reread_roster(parent_session: "Session", name: str, fallback: Any) -> Any:
+def _slot_notes(reasons: list[str], slot: str) -> tuple[str, ...]:
+    """The held-back reasons that concern THIS launch's slot.
+
+    ``live_member_roster`` reports every edited slot of the roster (each reason
+    reads ``team '<t>' slot '<role>': ...``), while a launch receipt should name
+    only what moved -- or failed to move -- the child it launched. Casefolded,
+    the same rule the roster lookup uses.
+    """
+    marker = f" slot {slot.casefold()!r}:"
+    return tuple(reason for reason in reasons if marker in reason.casefold())
+
+
+def _reread_roster(
+    parent_session: "Session", name: str, fallback: Any, *, notes: list[str] | None = None
+) -> Any:
     """The registry's CURRENT copy of the roster named ``name``, else ``fallback``.
 
     WHY this is not just ``session.active_team``: that object is assigned once,
@@ -1859,7 +1930,7 @@ def _reread_roster(parent_session: "Session", name: str, fallback: Any) -> Any:
         # only a tier/effort edit the binding already authorizes is read live
         # (``move_team.live_member_roster`` owns the rules and the ceiling).
         snapshot = authority.teams.get(name.casefold(), fallback)
-        return _live_tiers_over(parent_session, authority, snapshot, name=name)
+        return _live_tiers_over(parent_session, authority, snapshot, name=name, notes=notes)
     try:
         found = lookup_team(parent_session, name)
     except Exception:  # noqa: BLE001 — an unreadable registry falls back
@@ -1875,8 +1946,14 @@ def _live_tiers_over(
     *,
     name: str = "",
     team_id: str = "",
+    notes: list[str] | None = None,
 ) -> Any:
     """``snapshot`` with any AUTHORIZED live tier/effort edit applied.
+
+    ``notes`` collects the held-back reasons for the caller to SURFACE (the
+    launch receipt's ``[selection: ...]``): a log line alone is not where the
+    operator sees which model a child got.
+
 
     The registry read only supplies candidate values; whether any is taken is
     decided against the snapshot by :func:`move_team.live_member_roster`. A
@@ -1896,11 +1973,18 @@ def _live_tiers_over(
     roster, reasons = live_member_roster(authority, snapshot, live)
     for reason in reasons:
         logger.warning("live tier edit not applied: %s", reason)
+    if notes is not None:
+        notes.extend(reasons)
     return roster
 
 
 def _carried_roster(
-    parent_session: "Session", carried: CarriedLaunch, is_team_launch: bool, team: Any
+    parent_session: "Session",
+    carried: CarriedLaunch,
+    is_team_launch: bool,
+    team: Any,
+    *,
+    notes: list[str] | None = None,
 ) -> Any:
     """The roster a RESUMED launch reads its member override from.
 
@@ -1921,7 +2005,7 @@ def _carried_roster(
         # same reason the fresh-launch branch re-reads it: a resume is documented
         # to follow an override edited since the child last ran, and the session's
         # attached ``active_team`` object is a snapshot from ``attach_team`` time.
-        return _reread_roster(parent_session, carried.team_name, team)
+        return _reread_roster(parent_session, carried.team_name, team, notes=notes)
     lineage = tuple(carried.team_lineage)
     if len(lineage) < 2:
         return None
@@ -1931,7 +2015,9 @@ def _carried_roster(
         bound = _bound_team_authority(parent_session)
         if bound is None or snapshot is None:
             return snapshot
-        return _live_tiers_over(parent_session, bound, snapshot, team_id=str(lineage[-2]))
+        return _live_tiers_over(
+            parent_session, bound, snapshot, team_id=str(lineage[-2]), notes=notes
+        )
     registry = getattr(parent_session, "team_registry", None)
     if registry is None:
         return None
@@ -2026,6 +2112,7 @@ def run_subagent(
     profile_override: "AgentProfile | None" = None,
     surface: ChildSurface | None = None,
     announce: bool = True,
+    selection_notes: Iterable[str] = (),
 ) -> str:
     """Register one child-session run as a background job; return the job id.
 
@@ -2174,6 +2261,13 @@ def run_subagent(
                 "explicit_model"
                 if model_selector is not None
                 else "effort" if effort else "role" if model_spec is not None else "parent"
+            )
+        )
+        # Roster-slot reasons ride the target (resolved before any model was
+        # priced); role-tag reasons come from the model resolution itself.
+        job.model_selection_note = "; ".join(
+            dict.fromkeys(
+                [*(target.selection_notes if target is not None else ()), *selection_notes]
             )
         )
         # And WHICH model the pin asked for, on the same registration-time rule
