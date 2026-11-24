@@ -207,8 +207,18 @@ def _segments(text: str) -> list[tuple[int, int]]:
     segments: list[tuple[int, int]] = []
     start: int | None = None
     offset = 0
+    # THE FENCE LIST IS WALKED, not re-scanned per line (review R6-1): a file
+    # with many fences used to cost one pass over every span for every line —
+    # 2,000 fences measured 214 ms, growing ~4x per doubling. ``_fenced_spans``
+    # returns its spans in text order and no two overlap, so one moving cursor
+    # is exact and the walk is amortised O(lines + fences).
+    fence_index = 0
     for line in text.splitlines(keepends=True):
-        inside_fence = any(low <= offset < high for low, high in fences)
+        while fence_index < len(fences) and fences[fence_index][1] <= offset:
+            fence_index += 1
+        inside_fence = (
+            fence_index < len(fences) and fences[fence_index][0] <= offset < fences[fence_index][1]
+        )
         blank = _BLANK_LINE_RE.match(line) is not None
         if inside_fence or blank:
             if start is not None:

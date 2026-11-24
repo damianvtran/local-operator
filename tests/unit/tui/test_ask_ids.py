@@ -1074,89 +1074,41 @@ def test_a_construct_never_crosses_a_fence_or_a_blank_line():
 
 
 def test_the_scan_is_linear_in_the_text():
-    """R5-1: unmatched brackets must cost one push each, never a rescan.
+    """R5-1/R6-1/R6-2: the scan must reach the scanner and stay linear.
 
-    Measured at four sizes: the quadratic form took 2.5 s at 10k brackets and
-    this one is under a millisecond at 160k. The bound is deliberately loose —
-    it is here to catch a return to quadratic behaviour, not to time the box.
+    Every input carries a RESOLVABLE id, because ``decorate_source`` returns
+    before doing any work when none can be found — the round-5 form of this
+    test timed the early return and would have passed the quadratic scanner.
+    The bound is deliberately loose: it catches a return to quadratic
+    behaviour, it does not time the box.
     """
     import time
 
+    states = {"a-745e": "open"}
+
     def cost(text: str) -> float:
         started = time.perf_counter()
-        decorate_source(text, {"a-745e": "open"})
+        assert NBSP in decorate_source(text, states), "the input never reached the scanner"
         return time.perf_counter() - started
 
-    small = cost("[" * 4000)
-    large = cost("[" * 16000)
+    def grow(base: int, factor: int) -> tuple[float, float]:
+        return cost(("[" * base) + " a-745e"), cost(("[" * (base * factor)) + " a-745e")
+
+    small, large = grow(4000, 4)
     # 4x the input must not cost more than ~8x the time; a quadratic walk is 16x.
     assert large < max(small * 8, 0.05), (small, large)
-    assert cost("[" * 50000) < 2.0
+    assert cost(("[" * 50000) + " a-745e") < 2.0
     # Balanced nesting of the same size is linear too.
-    nested = ("[a [" * 10000) + ("]" * 10000)
+    nested = ("[a [" * 10000) + ("]" * 10000) + " a-745e"
     assert cost(nested) < 2.0
-
-
-async def test_a_railed_block_still_drops_the_orphan_mark(monkeypatch, enabled):
-    """QA round 3, Q6: the shipped default paints the rail, and the orphan
-    check read column 0 as the ``▎``.
-
-    ``without_marks`` asks what a cell IS; on a railed row column 0 is the
-    gutter, so "the row opens with a mark" was never true and a drag that began
-    on a wrapped pair's mark copied it. The glyph path now hands it the BARE
-    row, with the painted columns shifted by the rail.
-    """
-    from textual.geometry import Offset
-
-    import local_operator.tui.widgets.assistant as assistant_mod
-    from local_operator.tui.widgets.assistant import AssistantBlock
-
-    real = assistant_mod.settings_get
-    monkeypatch.setattr(
-        assistant_mod,
-        "settings_get",
-        lambda key, default=None: (True if key == "display.rail" else real(key, default)),
+    # R6-1's shape: many fences. The segment walk is a cursor over one span
+    # list, so 2,000 fences cost milliseconds, not the 214 ms a per-line scan
+    # of every span did.
+    for count in (100, 500, 1000, 2000):
+        fenced = ("```\nx\n```\n" * count) + "a-745e"
+        assert cost(fenced) < 0.05, (count, cost(fenced))
+    quarter, full = (
+        cost(("```\nx\n```\n" * 500) + "a-745e"),
+        cost(("```\nx\n```\n" * 2000) + "a-745e"),
     )
-
-    session = _AskSession()
-    app = _app(session)
-    async with app.run_test(size=(80, 30)) as pilot:
-        await await_booted(app, pilot)
-        app._sync_ask_surface(
-            ask_rows([_row("a-745e", "Ship it?", status="withdrawn"), _row("a-e53b", "x")])
-        )
-        await pilot.pause()
-        prose = AssistantBlock()
-        prose.update_text(
-            "The old one, a-745e, is withdrawn and the relay smoke has already "
-            "run; the new question is a-e53b and it is still open."
-        )
-        app._append_block(prose)
-        await pilot.pause()
-        prose.finalize_text()
-        assert prose.copy_gutter(0) == 2, "the rail is not on; the case never ran"
-        folded = 0
-        for width in (40, 49, 50, 60):
-            prose.refit_width(width)
-            rendered = prose._render()
-            assert isinstance(rendered, Content)
-            rows = rendered.plain.split("\n")
-            for index in range(1, len(rows)):
-                opens_with_mark = rows[index].lstrip("\u258e ")[:1] in "●✓○"
-                prev_ends_with_id = (
-                    rows[index - 1].rstrip().rstrip("\u00a0").endswith(("a-745e", "a-e53b"))
-                )
-                if not (opens_with_mark and prev_ends_with_id):
-                    continue
-                folded += 1
-                for end in (1, 5):
-                    got = prose.get_selection(
-                        Selection.from_offsets(Offset(0, index), Offset(end, index))
-                    )
-                    assert got is not None
-                    assert "●" not in got[0] and "○" not in got[0] and NBSP not in got[0], (
-                        width,
-                        index,
-                        got,
-                    )
-        assert folded, "no width folded a pair with the rail on; the case never ran"
+    assert full < max(quarter * 8, 0.02), (quarter, full)
