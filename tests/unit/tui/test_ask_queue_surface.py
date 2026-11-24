@@ -2341,6 +2341,39 @@ async def test_the_cursor_id_outbids_the_counts_in_the_header():
             assert "All" in header, (size, header)
 
 
+async def test_the_lowest_rung_keeps_only_the_active_chip_and_the_cue():
+    """The third grade, pinned: below the floor only the ACTIVE chip survives.
+
+    At 36 cells the labels-only grade cannot fit, so the header drops the
+    halves the reader is not on and keeps the one that says which half this is
+    — a filtered view whose filter cannot be seen is a view that lies.
+    """
+    from local_operator.tui.widgets.ask_queue import COLLAPSED_ID_CUE
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(36, 20)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a-e53b", "Ship it?"),
+                    _row("a-9f20", "Rotate it?"),
+                    _row("a-745e", "Ship tonight?", status="withdrawn"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        header = listing.render().plain.splitlines()[0]
+        assert f"{COLLAPSED_ID_CUE}a-e53b" in header, header
+        assert "All" in header, header
+        assert "Pending" not in header, header
+        assert "Settled" not in header, header
+
+
 async def test_the_id_column_comes_back_when_every_row_can_afford_it():
     """The other half of D-2: at 60 cols every id paints and the header does not."""
     from local_operator.tui.widgets.ask_queue import COLLAPSED_ID_CUE

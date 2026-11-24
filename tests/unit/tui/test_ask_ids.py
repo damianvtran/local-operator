@@ -832,3 +832,77 @@ async def test_an_id_leaving_the_map_clears_its_mark(enabled):
         app._sync_ask_surface(ask_rows([]))
         await pilot.pause()
         assert NBSP not in citing._flat_whole(120).plain
+
+
+# -- round 3 remediation -----------------------------------------------------
+
+
+def test_link_text_is_never_decorated():
+    """N-4: an id inside link text is link text, and links stay plain.
+
+    Masking only the URL let ``[a-745e](url)`` be rewritten: its cells carried
+    both a ``@click`` action and the link style, and a real click runs the
+    broker AND ``TranscriptBlock.on_click`` — so one click navigated and jumped
+    the TUI to the ask. All four shapes the lexer knows are masked.
+    """
+    states = {"a-745e": "open"}
+    assert decorate_source("[a-745e](https://x.test)", states) == "[a-745e](https://x.test)"
+    assert decorate_source("[a-745e][1] and [1]: https://x.test", states) == (
+        "[a-745e][1] and [1]: https://x.test"
+    )
+    assert decorate_source("<https://x.test/a-745e>", states) == "<https://x.test/a-745e>"
+    assert decorate_source("![a-745e](p.png)", states) == "![a-745e](p.png)"
+    # An id OUTSIDE the link, in the same paragraph, is still a citation.
+    assert decorate_source("[a-745e](https://x.test) and a-745e", states) == (
+        f"[a-745e](https://x.test) and a-745e{NBSP}●"
+    )
+
+
+async def test_a_click_on_an_id_in_link_text_opens_only_the_url(enabled):
+    """The click half of N-4, through a real Click dispatch."""
+    from local_operator.tui.widgets.ask_queue import AskQueueList
+    from local_operator.tui.widgets.assistant import AssistantBlock
+
+    session = _AskSession()
+    app = _app(session)
+    opened: list[str] = []
+    app.open_transcript_link = lambda url: opened.append(url)  # type: ignore[method-assign]
+    async with app.run_test(size=(120, 40)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(ask_rows([_row("a-745e", "Ship it?"), _row("a-e53b", "x")]))
+        await pilot.pause()
+        prose = AssistantBlock()
+        prose.update_text("see [a-745e](https://x.test/doc) and also a-745e outside")
+        app._append_block(prose)
+        await pilot.pause()
+        rendered = prose._render()
+        assert isinstance(rendered, Content)
+        plain = rendered.plain.split("\n")[0]
+        inside = plain.index("a-745e")
+        outside = plain.index("a-745e", inside + 6)
+        # The link's cells are the URL's and nothing else.
+        assert "@click" not in (
+            app.screen.get_style_at(prose.region.x + inside, prose.region.y).meta or {}
+        )
+        assert (app.screen.get_style_at(prose.region.x + outside, prose.region.y).meta or {}).get(
+            "@click"
+        ) == "app.open_ask_id('a-745e')"
+        # One click on the link's id: the URL, and no ask list.
+        await pilot.click(prose, offset=(inside, 0))
+        await pilot.pause()
+        assert opened == ["https://x.test/doc"]
+        assert len(app.query(AskQueueList)) == 0
+        # The id outside the link still routes to the ask.
+        await pilot.click(prose, offset=(outside, 0))
+        await pilot.pause()
+        assert len(app.query(AskQueueList)) == 1
+
+
+def test_the_orphan_rule_needs_an_id_before_the_no_break_space():
+    """Round 3, minor: an NBSP from prose (French ``fait\\u00a0✓``) is not an orphan."""
+    from local_operator.tui.ask_ink import without_marks
+
+    assert without_marks("✓ ok", start=0, end=-1, previous_row="c'est fait\u00a0") == "✓ ok"
+    assert without_marks("● ok", start=0, end=-1, previous_row="word\u00a0") == "● ok"
+    # The decorator's own shape still goes.
+    assert without_marks("○ tail", start=0, end=-1, previous_row="x a-745e\u00a0") == " tail"

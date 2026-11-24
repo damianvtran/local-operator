@@ -51,7 +51,7 @@ from rich.text import Text
 
 from local_operator.asks import store
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.link_markup import _fenced_spans
+from local_operator.tui.link_markup import _AUTOLINK_RE, _MD_LINK_RE, _fenced_spans
 from local_operator.tui.link_targets import _URL_START_RE, _body_end
 
 __all__ = [
@@ -102,6 +102,11 @@ NBSP = "\u00a0"
 #: the id sits inside.
 _TICKS_RE = re.compile(r"`+")
 
+#: The tail an ORPHAN mark must follow: the id and the no-break space at the
+#: end of the previous row, which is the only shape the decorator can leave
+#: behind when a fold splits a pair.
+_ORPHAN_TAIL_RE = re.compile(rf"{ASK_ID_PATTERN}{re.escape(NBSP)}$")
+
 #: ``id`` + no-break space + mark, as it appears in the flattened rows.
 _MARKED_RE = re.compile(rf"({ASK_ID_PATTERN}){NBSP}([●✓○])")
 
@@ -148,9 +153,27 @@ def mark_for_status(status: str) -> str:
     return MARKS[state_for_status(status)]
 
 
+#: ``[text][ref]`` — a reference-style link's USE. Not in ``link_markup``
+#: because the bare-URL pass never needs it: a reference use carries no URL of
+#: its own, so there is nothing there to wrap. Here it decides whether a cited
+#: id sits inside link text, which is the one thing this surface must leave
+#: alone (review N-4).
+_REF_USE_RE = re.compile(r"\[[^\]]*\]\[[^\]]*\]")
+
+
 def _masked_spans(text: str) -> list[tuple[int, int]]:
-    """Ranges a cited id must NOT be decorated inside: fences and URLs."""
+    """Ranges a cited id must NOT be decorated inside: fences, links and URLs.
+
+    LINK TEXT IS MASKED, not just its target (review N-4). An id inside
+    ``[a-745e](url)`` used to be decorated, which gave its cells BOTH a
+    ``@click`` action and the link style — and a real click dispatches
+    ``Widget._on_click`` (the action) and ``TranscriptBlock.on_click`` (the
+    URL) on the same widget, so one click both navigated and jumped the TUI to
+    the ask. The rule is the module docstring's: links stay plain.
+    """
     spans = list(_fenced_spans(text))
+    for pattern in (_MD_LINK_RE, _REF_USE_RE, _AUTOLINK_RE):
+        spans.extend(match.span() for match in pattern.finditer(text))
     scan = 0
     while True:
         match = _URL_START_RE.search(text, scan)
@@ -292,10 +315,16 @@ def without_marks(row: str, *, start: int, end: int, previous_row: str | None = 
     # ``rstrip(" ")`` and not a bare ``rstrip()``: NBSP IS whitespace to
     # ``str.rstrip``, so the bare form ate the very cell it was looking for and
     # a wrapped pair was never recognised (review N-1).
+    #
+    # AND the row has to end in an ID before the no-break space: a mark after
+    # ANY NBSP was dropped, so a drag over a fold that landed after French
+    # ``fait\u00a0✓`` lost a glyph the model wrote (review round 3, minor).
+    # The decoration only ever inserts ``id + NBSP + mark``, so an id is the
+    # only tail that can have produced an orphan.
     if (
         previous_row is not None
         and row[:1] in MARKS.values()
-        and previous_row.rstrip(" ").endswith(NBSP)
+        and _ORPHAN_TAIL_RE.search(previous_row.rstrip(" ")) is not None
     ):
         removed.append((0, 1))
     # A row that ENDS in the no-break space is the other half of a folded pair:
