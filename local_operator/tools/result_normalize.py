@@ -982,8 +982,9 @@ def elide_boilerplate_sections(text: str) -> str:
 # * SLOT ``slot(v)``: ``enc(v)``, but a raw string that looks like a field
 #   line (``key: ...``) is JSON-encoded instead, so slots and fields cannot
 #   be confused.
-# * Search hit list (search tools only; ``_is_hit_list``, every hit carrying
-#   ``title`` and ``url``):
+# * Search hit list (search tools only; ``_is_rendered_hit_list``: every item
+#   a hit, with or without a snippet left, and every hit carrying ``title``
+#   and ``url``):
 #       <key>: enc(value)        each top-level field, in order
 #       <hit-key>:               the ONE top-level hit list, at its position
 #       N. enc(title)            hit N (1-based)
@@ -1070,13 +1071,21 @@ def _render_hits(hits: list[dict[str, Any]]) -> list[str] | None:
     return lines
 
 
+def _is_rendered_hit_list(value: Any) -> bool:
+    # ``_is_hit_list`` minus its "some hit carries a snippet" clause: once
+    # seen-URL elision has dropped every snippet (a repeated search), the list
+    # is still the search's ranked hits and renders the same way (found on the
+    # real-path run: an all-seen repeat search fell back to JSON).
+    return isinstance(value, list) and bool(value) and all(_is_hit(item) for item in value)
+
+
 def _render_search(parsed: Any) -> str | None:
     if isinstance(parsed, list):
-        hits = _render_hits(parsed) if _is_hit_list(parsed) else None
+        hits = _render_hits(parsed) if _is_rendered_hit_list(parsed) else None
         return None if hits is None else "\n".join(hits)
     if not isinstance(parsed, dict) or not all(_FIELD_KEY.match(k) for k in parsed):
         return None
-    hit_keys = [k for k, v in parsed.items() if isinstance(v, list) and _is_hit_list(v)]
+    hit_keys = [k for k, v in parsed.items() if _is_rendered_hit_list(v)]
     if len(hit_keys) != 1:
         return None
     lines: list[str] = []

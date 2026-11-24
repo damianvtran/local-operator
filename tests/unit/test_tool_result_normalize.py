@@ -1043,6 +1043,23 @@ def test_rendered_text_that_markdown_would_rewrite_falls_back_to_json() -> None:
     assert json.loads(out)["results"][0]["title"] == hit["title"]
 
 
+def test_all_seen_search_still_renders_as_text() -> None:
+    """Regression (real-path run): a repeat search whose every hit was seen
+    lost every snippet and then fell back to JSON instead of rendering."""
+    from local_operator.tools.result_normalize import seen_url_key
+
+    seen = frozenset(seen_url_key(h["url"]) for h in json.loads(_TAVILY_SHAPE)["results"])
+    out = _render(_TAVILY_SHAPE, seen_urls=seen)
+    assert out.split("\n")[:4] == [
+        "query: Mark Sutcliffe Ottawa",
+        "results:",
+        "1. Mark Sutcliffe - result 1",
+        "   https://example.com/sutcliffe/1?utm_source=x&id=1",
+    ]
+    assert _decode_search(out) == json.loads(_elide(_TAVILY_SHAPE, seen))
+    assert _render(out, seen_urls=seen) == out
+
+
 @pytest.mark.parametrize("mode", ["prose-links", "strip-links"])
 def test_rendering_is_idempotent(mode: str) -> None:
     page = json.dumps({"url": "https://x.example/p", "content": PAGE, "offset": 0})
