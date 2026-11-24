@@ -1781,3 +1781,80 @@ def test_m1_a_hidden_pid_keeps_force_and_rm_rf_of_a_finished_tree_with_the_judge
     assert _rank(home, f"rm -rf {wt}").risk is not Risk.LOW
     plain = _rank(home, f"git -C {repo} worktree remove {wt}")
     assert plain.risk is Risk.LOW, plain.reasons
+
+
+_CACHEDIR_SIG = b"Signature: 8a477f597d28d172789f06886806bc55"
+
+
+def _cache_payload(wt: Path, payload: str) -> None:
+    """Lay one ignored cache shape into ``wt`` (field case 2026-11-24)."""
+    pyc = wt / "pkg" / "__pycache__"
+    if payload in {"pycache", "pycache-with-source", "pycache-link"}:
+        pyc.mkdir(parents=True)
+        (pyc / "mod.cpython-313.pyc").write_bytes(b"\x00bytecode")
+    if payload == "pycache-with-source":
+        (pyc / "notes.py").write_text("hand-written\n")
+    if payload == "pycache-link":
+        (pyc / "evil.pyc").symlink_to(wt / "a.txt")
+    tagged = wt / ".pytest_cache"
+    if payload in {"pytest-cache", "bad-tag", "tagged-repo", "tagged-venv", "tagged-unreadable"}:
+        (tagged / "v" / "cache").mkdir(parents=True)
+        (tagged / "v" / "cache" / "nodeids").write_text("[]\n")
+        sig = b"Signature: not-a-cache" if payload == "bad-tag" else _CACHEDIR_SIG
+        (tagged / "CACHEDIR.TAG").write_bytes(sig + b"\n# pytest\n")
+    if payload == "tagged-repo":
+        subprocess.run(["git", "init", "-q", str(tagged / "v")], check=True)
+    if payload == "tagged-venv":
+        # uv tags every venv it creates (#4528 R1-M1): still held.
+        (tagged / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    if payload == "tagged-unreadable":
+        # A repository behind an unlistable directory (#4528 R1-B1): held.
+        subprocess.run(["git", "init", "-q", str(tagged / "v" / "hidden")], check=True)
+        (tagged / "v" / "hidden").chmod(0)
+
+
+@pytest.mark.parametrize(
+    ("payload", "shed"),
+    [
+        ("pycache", True),
+        ("pytest-cache", True),
+        ("pycache-with-source", False),
+        ("pycache-link", False),
+        ("bad-tag", False),
+        ("tagged-repo", False),
+        ("tagged-venv", False),
+        ("tagged-unreadable", False),
+    ],
+)
+def test_content_verified_caches_shed_from_a_foreign_merged_tree(
+    home: Path, repo: Path, payload: str, shed: bool, request: pytest.FixtureRequest
+) -> None:
+    """Field case 2026-11-24 (disk recovery, guard 0.112.7): another session's
+    merged, clean worktree was held for ``__pycache__``/``.pytest_cache`` alone.
+
+    A NAME is no witness for someone else's bytes (#4240), but CONTENTS are:
+    a ``__pycache__`` holding only regular ``*.pyc`` files, or a directory
+    carrying the cachedir.org ``CACHEDIR.TAG`` signature with no nested
+    repository, is regenerable cache whoever made it. Anything else stays held.
+    """
+    wt = _branch_tree(home, repo, f"cache-{payload}")
+    _git("merge", "--ff-only", f"fix/cache-{payload}", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("__pycache__/\n.pytest_cache/\n")
+    _cache_payload(wt, payload)
+    _record(home, wt, creator=DONE)
+    if payload == "tagged-unreadable":
+        hidden = wt / ".pytest_cache" / "v" / "hidden"
+        request.addfinalizer(lambda: hidden.chmod(0o755))
+        if os.access(hidden, os.R_OK):  # root ignores modes: nothing to prove
+            pytest.skip("directory modes are not enforced for this user")
+    inventory = prov.plain_cleanup_ignored_inventory(str(wt))
+    assert inventory is not None
+    assert (inventory.unverified_ignored == 0) is shed, inventory
+    plain = _rank(home, f"git -C {repo} worktree remove -- {wt}")
+    if shed:
+        assert plain.risk is Risk.LOW, plain.reasons
+    else:
+        assert plain.risk is not Risk.LOW and plain.targets[0].cleanup_hold, plain.reasons
