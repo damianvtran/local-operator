@@ -103,11 +103,13 @@ def fake_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path
     config = home / ".local-operator"
     run_home = config / "sessions" / "me" / "responder-home"
     other_session = config / "sessions" / "other"
+    # The run home itself is NOT created: prepare_home refuses an existing
+    # one (review R1-2, one fresh home per run).
     for directory in (
         home / "workspace",
         home / "radient-ml" / "secret-repo",
         other_session,
-        run_home,
+        run_home.parent,
     ):
         directory.mkdir(parents=True)
     (home / "workspace" / "export.csv").write_text("customer,row\n")
@@ -154,9 +156,9 @@ class TestProfileShape:
     def test_library_is_granted_by_children_with_keychains_omitted(
         self, fake_host: dict[str, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            jail_module.os, "listdir", lambda path: ["Developer", "Keychains", "Preferences"]
-        )
+        # Path-aware: ``read_subpaths`` also lists /opt/homebrew and /usr/local.
+        listings = {"/Library": ["Developer", "Keychains", "Preferences"]}
+        monkeypatch.setattr(jail_module.os, "listdir", lambda path: listings.get(path, []))
         reads = _jail(fake_host["run_home"]).read_subpaths()
         assert "/Library" not in reads
         assert "/Library/Developer" in reads and "/Library/Preferences" in reads
@@ -265,6 +267,59 @@ class TestReadRootRefusal:
         with pytest.raises(JailUnavailable):
             ResponderJail.at(fake_host["home"], machinery=())
 
+    def test_an_interpreter_under_home_outside_uv_refuses(self, fake_host: dict[str, Path]) -> None:
+        """S-21: ``~/workspace/x/.venv`` would grant ``~/workspace/x``."""
+
+        venv = fake_host["home"] / "workspace" / "x" / ".venv"
+        venv.mkdir(parents=True)
+        with pytest.raises(JailUnavailable, match="outside uv"):
+            ResponderJail.at(fake_host["run_home"], machinery=[venv])
+        uv_python = fake_host["home"] / ".local" / "share" / "uv" / "python" / "cpython-3.12"
+        uv_python.mkdir(parents=True)
+        ResponderJail.at(fake_host["run_home"], machinery=[uv_python])  # control
+
+    def test_a_symlinked_run_home_refuses(self, fake_host: dict[str, Path]) -> None:
+        """R1-3: the leaf is never resolved through a link to another tree."""
+
+        fake_host["run_home"].symlink_to(fake_host["home"] / "workspace")
+        with pytest.raises(JailUnavailable, match="symlink"):
+            ResponderJail.at(fake_host["run_home"], machinery=())
+
+    def test_a_reused_run_home_refuses_to_prepare(self, fake_host: dict[str, Path]) -> None:
+        """R1-2: a planted ``ca-bundle.crt -> ~/.zshrc`` is never written through."""
+
+        jail = _jail(fake_host["run_home"])
+        with pytest.raises(JailUnavailable, match="not fresh"):
+            jail.prepare_home()
+        zshrc = fake_host["home"] / ".zshrc"
+        before = zshrc.read_bytes()
+        planted = ResponderJail.at(fake_host["run_home"].parent / "second-home", machinery=())
+        planted.home.mkdir()
+        (planted.home / jail_module.CA_BUNDLE_NAME).symlink_to(zshrc)
+        with pytest.raises(JailUnavailable, match="not fresh"):
+            planted.prepare_home()
+        assert zshrc.read_bytes() == before
+
+
+class TestPackagePrefixes:
+    """S-16: Homebrew/usr-local prefixes are granted child by child, minus state."""
+
+    def test_var_and_etc_are_omitted_and_the_whole_prefix_is_not_granted(
+        self, fake_host: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        listings = {
+            "/Library": ["Developer", "Keychains", "Logs"],
+            "/opt/homebrew": ["Cellar", "bin", "etc", "lib", "opt", "share", "var"],
+            "/usr/local": ["bin", "etc", "lib", "var"],
+        }
+        monkeypatch.setattr(jail_module.os, "listdir", lambda path: listings[path])
+        reads = _jail(fake_host["run_home"]).read_subpaths()
+        for prefix in ("/opt/homebrew", "/usr/local"):
+            assert prefix not in reads
+            assert f"{prefix}/bin" in reads and f"{prefix}/lib" in reads
+            assert f"{prefix}/var" not in reads and f"{prefix}/etc" not in reads
+        assert "/Library/Logs" not in reads and "/Library/Keychains" not in reads
+
 
 class TestChildEnvironment:
     def test_the_environment_is_rebuilt_not_inherited(
@@ -283,6 +338,22 @@ class TestChildEnvironment:
     ) -> None:
         with pytest.raises(ValueError, match="AWS_PROFILE"):
             _jail(fake_host["run_home"]).child_env({"AWS_PROFILE": "radient-prod-admin"})
+
+    @pytest.mark.parametrize(
+        "key", ["HOME", "PATH", "TMPDIR", "AWS_CA_BUNDLE", "SSL_CERT_FILE", "KUBECONFIG"]
+    )
+    def test_extra_cannot_override_the_keys_the_jail_sets(
+        self, fake_host: dict[str, Path], key: str
+    ) -> None:
+        """S-23: ``extra`` is the credential keys and LC_ALL only."""
+
+        with pytest.raises(ValueError, match=key):
+            _jail(fake_host["run_home"]).child_env({key: "/planted"})
+
+    def test_extra_accepts_the_pinned_credential_keys(self, fake_host: dict[str, Path]) -> None:
+        creds = PinnedCredentials("ASIA" + "X" * 16, "s", "t", "", _GOOD_ARN)
+        env = _jail(fake_host["run_home"]).child_env(creds.env())
+        assert env["AWS_SESSION_TOKEN"] == "t" and env["HOME"] == str(fake_host["run_home"])
 
     def test_the_ca_bundle_is_copied_under_a_name_the_pem_denial_does_not_match(
         self, fake_host: dict[str, Path]
@@ -394,11 +465,15 @@ def tampered_aws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = tmp_path / "aws-config"
     config.write_text(
         "[profile radient-prod-admin]\n"
-        "aws_access_key_id = AKIAOWNERFIXTURE0000\n"
-        "aws_secret_access_key = fixture\n"
+        "sso_session = radient\n"
+        "sso_account_id = 951603962783\n"
+        "sso_role_name = AdministratorAccess\n"
         "region = us-east-1\n"
         "endpoint_url = https://evil.example.invalid\n"
         "ca_bundle = /nonexistent/evil-ca.crt\n"
+        "[sso-session radient]\n"
+        "sso_start_url = https://example.invalid/start\n"
+        "sso_region = ca-central-1\n"
     )
     monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", os.devnull)
@@ -407,7 +482,60 @@ def tampered_aws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
 
 
+def _aws_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile_body: str) -> None:
+    config = tmp_path / "aws-config-variant"
+    config.write_text(profile_body)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", os.devnull)
+
+
 class TestPinnedCredentials:
+    @pytest.mark.parametrize(
+        "planted",
+        [
+            "credential_process = /usr/bin/touch {canary}\n",
+            "source_profile = other\nrole_arn = arn:aws:iam::951603962783:role/admin\n",
+            "credential_source = Environment\nrole_arn = arn:aws:iam::951603962783:role/x\n",
+        ],
+    )
+    def test_a_source_profile_that_would_run_or_chain_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str
+    ) -> None:
+        """S-19: the profile is refused BEFORE botocore could execute it."""
+
+        canary = tmp_path / "CRED-PROCESS-CANARY"
+        _aws_config(
+            tmp_path,
+            monkeypatch,
+            "[profile radient-prod-admin]\nsso_session = radient\n"
+            + planted.format(canary=canary)
+            + "[sso-session radient]\nsso_start_url = https://example.invalid/start\n",
+        )
+        call, calls = _recorder({"Account": "951603962783", "Arn": _GOOD_ARN})
+        with pytest.raises(CredentialPinError, match="not a plain SSO profile"):
+            resolve_responder_credentials(session_name="alert-1", call=call)
+        assert calls == [] and not canary.exists()
+
+    def test_a_static_key_profile_is_not_an_sso_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _aws_config(tmp_path, monkeypatch, "[profile radient-prod-admin]\nregion = ca-central-1\n")
+        call, calls = _recorder({"Account": "951603962783", "Arn": _GOOD_ARN})
+        with pytest.raises(CredentialPinError, match="not an SSO profile"):
+            resolve_responder_credentials(session_name="alert-1", call=call)
+        assert calls == []
+
+    def test_a_missing_profile_is_a_pin_error_not_a_raw_botocore_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R1-1: every failure reaches the spawner as CredentialPinError."""
+
+        _aws_config(tmp_path, monkeypatch, "[profile someone-else]\nregion = ca-central-1\n")
+        call, calls = _recorder({"Account": "951603962783", "Arn": _GOOD_ARN})
+        with pytest.raises(CredentialPinError):
+            resolve_responder_credentials(session_name="alert-1", call=call)
+        assert calls == []
+
     def test_endpoint_overrides_in_config_and_env_do_not_move_sts(self, tampered_aws: None) -> None:
         call, calls = _recorder({"Account": "951603962783", "Arn": _GOOD_ARN})
         result = resolve_responder_credentials(session_name="alert-1", call=call)
@@ -507,6 +635,28 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def _promisor_clone(clone_root: Path, canary: Path) -> Path:
+    """A clone whose config makes a missing blob trigger a planted transport (S-18)."""
+
+    repo = clone_root / "agent-server"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "README.md").write_text("readme\n")
+    (repo / "missing.txt").write_text("this blob is removed after commit\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    missing = _git(repo, "rev-parse", "HEAD:missing.txt")
+    (repo / ".git" / "objects" / missing[:2] / missing[2:]).unlink()
+    # The plant: a promisor remote whose transport is an ext:: command.
+    _git(repo, "config", "core.repositoryformatversion", "1")
+    _git(repo, "config", "extensions.partialClone", "origin")
+    _git(repo, "config", "remote.origin.promisor", "true")
+    _git(repo, "config", "remote.origin.url", f"ext::sh -c touch% {canary}")
+    _git(repo, "config", "protocol.ext.allow", "always")
+    return repo
+
+
 def _planted_clone(clone_root: Path, canary: Path) -> Path:
     repo = clone_root / "agent-server"
     repo.mkdir(parents=True)
@@ -569,6 +719,56 @@ class TestMaterialize:
     def test_a_missing_clone_refuses(self, tmp_path: Path) -> None:
         with pytest.raises(MaterializeError, match="no local clone"):
             materialize_repo("radient-ml/absent", tmp_path, clone_root=tmp_path)
+
+    def test_a_promisor_transport_never_runs(self, tmp_path: Path) -> None:
+        """S-18: a planted lazy-fetch transport fails closed, canary absent."""
+
+        canary = tmp_path / "LAZY-CANARY"
+        clone_root = tmp_path / "radient-ml"
+        repo = _promisor_clone(clone_root, canary)
+        missing = _git(repo, "rev-parse", "HEAD:missing.txt")
+
+        # Negative control: with the owner's ordinary git, reading the absent
+        # blob DOES run the planted transport.
+        subprocess.run(
+            ["git", "-C", str(repo), "cat-file", "-p", missing],
+            capture_output=True,
+            env=_GIT_ENV,
+            timeout=60,
+            check=False,
+        )
+        assert canary.exists(), "fixture broken: the lazy fetch did not run the transport"
+        canary.unlink()
+
+        dest_root = tmp_path / "run-home" / "repos"
+        dest_root.mkdir(parents=True)
+        with pytest.raises(MaterializeError):
+            materialize_repo("radient-ml/agent-server", dest_root, clone_root=clone_root)
+        assert not canary.exists()
+
+    def test_a_symlinked_clone_is_refused(self, tmp_path: Path) -> None:
+        """R1-4: ``~/radient-ml/<name>`` -> another tree is not materialized."""
+
+        elsewhere = tmp_path / "minervaai"
+        _planted_clone(elsewhere, tmp_path / "unused-canary")
+        clone_root = tmp_path / "radient-ml"
+        clone_root.mkdir()
+        (clone_root / "agent-server").symlink_to(elsewhere / "agent-server")
+        with pytest.raises(MaterializeError, match="symlink"):
+            materialize_repo("radient-ml/agent-server", tmp_path / "dest", clone_root=clone_root)
+
+    def test_a_gitfile_clone_is_refused(self, tmp_path: Path) -> None:
+        """R1-4: a ``.git`` FILE redirecting to another repository is not followed."""
+
+        elsewhere = tmp_path / "minervaai"
+        real = _planted_clone(elsewhere, tmp_path / "unused-canary")
+        clone = tmp_path / "radient-ml" / "agent-server"
+        clone.mkdir(parents=True)
+        (clone / ".git").write_text(f"gitdir: {real / '.git'}\n")
+        with pytest.raises(MaterializeError, match="no .git directory"):
+            materialize_repo(
+                "radient-ml/agent-server", tmp_path / "dest", clone_root=tmp_path / "radient-ml"
+            )
 
 
 # --------------------------------------------------------------------------
@@ -760,3 +960,47 @@ class TestKernelBoundary:
             cwd=jail.home,
         )
         assert b"keychain" not in jailed.stdout.lower()
+
+    def test_homebrew_state_is_eperm_with_an_unjailed_control(
+        self, fake_host: dict[str, Path]
+    ) -> None:
+        """S-16: the owner's local data stores under ``/opt/homebrew/var``."""
+
+        var = Path("/opt/homebrew/var")
+        target = (
+            next((p for p in sorted(var.rglob("*")) if p.is_file()), None) if var.is_dir() else None
+        )
+        if target is None or not os.access(target, os.R_OK):
+            pytest.skip("no readable file under /opt/homebrew/var on this host")
+        jail = _jail(fake_host["run_home"])
+        probe = ["/usr/bin/head", "-c", "1", str(target)]
+        control = _run(probe, env=os.environ, cwd=jail.home)
+        assert control.returncode == 0
+        jailed = _run(jail.wrap(probe), env=jail.child_env(), cwd=jail.home)
+        assert jailed.returncode != 0 and not jailed.stdout
+
+    def test_a_hardlink_to_host_data_cannot_be_made(self, fake_host: dict[str, Path]) -> None:
+        """S-20a: a link(2) into the home would pass the in-process path check."""
+
+        jail = _jail(fake_host["run_home"])
+        source = fake_host["home"] / "workspace" / "export.csv"
+        link = jail.home / "h"
+        jailed = _run(
+            jail.wrap(["/bin/ln", str(source), str(link)]), env=jail.child_env(), cwd=jail.home
+        )
+        assert jailed.returncode != 0 and not link.exists()
+
+    def test_udp_is_refused(self, fake_host: dict[str, Path]) -> None:
+        """S-20d: only filtered TCP :443 and the DNS socket leave the jail."""
+
+        jail = _jail(fake_host["run_home"])
+        probe = [
+            "/usr/bin/python3",
+            "-c",
+            "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+            "s.sendto(b'x',('192.0.2.1',9));print('SENT')",
+        ]
+        control = _run(probe, env=os.environ, cwd=jail.home)
+        assert b"SENT" in control.stdout
+        jailed = _run(jail.wrap(probe), env=jail.child_env(), cwd=jail.home)
+        assert jailed.returncode != 0 and b"SENT" not in jailed.stdout

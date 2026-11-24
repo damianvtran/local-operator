@@ -58,11 +58,35 @@ local listener on 443 (a dev proxy, a tunnel client) is reachable; the deny is
 what the C1 probes measure. AF_UNIX connects match no ``remote tcp`` allow and
 are refused, except the one DNS socket.
 
-RESIDUAL, stated rather than hidden: seatbelt's network filter knows only
-``*`` and ``localhost`` as hosts, so a listener bound to ``0.0.0.0:443`` on the
-host's own LAN address, or another LAN host's :443, is reachable. lop's own
-listeners (serve, control socket, desktop bridge) are loopback or AF_UNIX and
-are refused; see the PR for the measurement.
+RESIDUALS, stated rather than hidden (security round 1, S-22). The port
+filter is NOT an exfiltration bound; the confidentiality control is the read
+allowlist plus a read-only, at-most-one-hour STS triple. Specifically:
+
+* any public host on :443 is reachable, and so are other machines on the LAN,
+  VPN or tailnet on :443 -- seatbelt's network filter names only ``*`` and
+  ``localhost``. This host's own LAN address was measured REFUSED (EPERM) on
+  macOS 27.2.1, so lop's listeners are not reachable that way either;
+* in-process ``web_fetch`` runs outside seatbelt and reaches any public host
+  on any port (only its SSRF guard applies, forced on below);
+* DNS through mDNSResponder is a covert channel to any authoritative server;
+* everything readable is exfiltrable by design: materialized radient-ml
+  source, the STS triple itself, and whatever pod logs/specs the role reads.
+
+A host-allowlisting egress proxy (allow only ``localhost:<proxy>``; the proxy
+admits ``*.amazonaws.com`` and the EKS endpoint) is the real fix and is a
+follow-up slice, not this one.
+
+PROCESS ARGUMENTS (security round 1, S-17), MEASURED, NOT CLOSED HERE. A
+jailed child can read another same-uid process's argv AND environment through
+the numeric ``sysctl({CTL_KERN, KERN_PROCARGS2, pid})``. Six profile variants
+were measured on macOS 27.2.1 and none blocks it: removing ``sysctl-read``
+entirely, a ``sysctl-name`` allowlist, a trailing ``(deny sysctl-read
+(sysctl-name "kern.procargs2"))``, and three ``process-info*`` target filters
+(a bare ``(deny process-info*)`` kills the child itself). The name-based
+sysctl filter is consulted on the by-name path only. ``(allow sysctl-read)``
+therefore stays as it is (narrowing it buys nothing measurable), and the
+exposure is escalated as a design decision for C2 (a dedicated uid for
+responder runs is the candidate), recorded on the PR.
 
 MACH. The two opendirectory names every confined child needs plus the DNS
 resolver. No securityd, so the keychain CLIs fail; no pasteboard.
@@ -103,11 +127,32 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 #: ``/Library`` children never granted. Omitted from the allowlist, never
 #: denied after it (module docstring, READS).
-_LIBRARY_OMITTED: frozenset[str] = frozenset({"Keychains"})
+_LIBRARY_OMITTED: frozenset[str] = frozenset({"Keychains", "Logs"})
+
+#: Package-manager prefixes granted CHILD BY CHILD, with their mutable state
+#: omitted (security round 1, S-16). ``var`` holds the owner's local data
+#: stores -- measured on the build host: ``/opt/homebrew/var/mongodb`` (live
+#: WiredTiger files), ``postgresql@16`` (mode 0700, owner = the run's uid) and
+#: ``var/log`` -- and ``etc`` holds service configs (``mongod.conf``,
+#: ``redis.conf``, ``gnupg``). The toolchain needs neither: git, python3,
+#: aws, kubectl and curl were measured working without them; TLS uses the
+#: run home's own bundle (``CA_BUNDLE_NAME``), not ``etc/openssl@3``.
+_PREFIX_OMITTED: Mapping[str, frozenset[str]] = {
+    "/opt/homebrew": frozenset({"var", "etc"}),
+    "/usr/local": frozenset({"var", "etc"}),
+}
 
 #: System read roots the jail replaces: ``/Library`` by its children minus
 #: Keychains, ``/private/var/folders`` by the run's own TMPDIR.
-_REPLACED_SYSTEM_ROOTS: frozenset[str] = frozenset({"/Library", "/private/var/folders"})
+_REPLACED_SYSTEM_ROOTS: frozenset[str] = frozenset(
+    {"/Library", "/private/var/folders", *_PREFIX_OMITTED}
+)
+
+#: The one tree under ``$HOME`` an interpreter root may sit in (S-21): uv's
+#: managed Pythons, which is where both the ``lop`` tool install and the dev
+#: venvs resolve ``sys.executable`` on this fleet. Anything else under HOME
+#: (``~/workspace/x/.venv``) would grant that tree to the run.
+_UV_PYTHON_SUBDIR = Path(".local") / "share" / "uv" / "python"
 
 #: The resolver's mach service. ``getaddrinfo`` on macOS asks mDNSResponder;
 #: without it a jailed ``curl https://…`` fails at name resolution. Measured
@@ -147,6 +192,7 @@ ENV_ALLOWLIST: tuple[str, ...] = (
     "SSL_CERT_FILE",
     "CURL_CA_BUNDLE",
     "REQUESTS_CA_BUNDLE",
+    "GIT_CONFIG_NOSYSTEM",
 )
 
 #: The system CA bundle the home copy is made from (public trust anchors).
@@ -161,6 +207,19 @@ _SYSTEM_CA_BUNDLE = Path("/private/etc/ssl/cert.pem")
 #: bundle in under a ``.crt`` name keeps the denial intact and TLS working.
 CA_BUNDLE_NAME = "ca-bundle.crt"
 
+#: The subset of :data:`ENV_ALLOWLIST` a caller may supply to ``child_env``:
+#: exactly what ``PinnedCredentials.env()`` emits, plus ``LC_ALL`` (S-23).
+_EXTRA_KEYS: frozenset[str] = frozenset(
+    {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "LC_ALL",
+    }
+)
+
 #: ``PATH`` for the child: system and Homebrew binaries only. Never the
 #: owner's ``PATH``, which can name ``~/.local/bin`` launchers (``lop`` itself).
 CHILD_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -171,22 +230,29 @@ class JailUnavailable(RuntimeError):
 
 
 def _library_children() -> tuple[str, ...]:
-    """``/Library``'s children minus :data:`_LIBRARY_OMITTED`, resolved, sorted.
+    """``/Library``'s children minus :data:`_LIBRARY_OMITTED`."""
 
-    Enumerated at build time. A child whose name the profile cannot carry is
-    skipped (fail narrow, the same choice ``ToolConfinement.at`` makes for a
+    return _children("/Library", _LIBRARY_OMITTED)
+
+
+def _children(root: str, omitted: frozenset[str]) -> tuple[str, ...]:
+    """``root``'s children minus ``omitted``, sorted; ``()`` if ``root`` is absent.
+
+    Enumerated at build time, so a child created later is simply not granted
+    (fails closed). A child whose name the profile cannot carry is skipped
+    (fail narrow, the same choice ``ToolConfinement.at`` makes for a
     scratchpad), never escaped.
     """
 
     try:
-        entries = sorted(os.listdir("/Library"))
+        entries = sorted(os.listdir(root))
     except OSError:
         return ()
     children: list[str] = []
     for name in entries:
-        if name in _LIBRARY_OMITTED:
+        if name in omitted:
             continue
-        path = f"/Library/{name}"
+        path = f"{root}/{name}"
         if _confinement.profile_path_refusal(path) is not None:
             continue
         children.append(path)
@@ -221,6 +287,23 @@ def read_root_refusal(path: Path, *, home: Path, config: Path) -> str | None:
     return None
 
 
+def machinery_root_refusal(path: Path, *, home: Path, config: Path) -> str | None:
+    """:func:`read_root_refusal` plus S-21 for an INTERPRETER root.
+
+    An interpreter tree under ``$HOME`` that is not an ancestor still widens
+    the jail: a copied-interpreter venv at ``~/workspace/x/.venv`` would grant
+    ``~/workspace/x``. Only uv's managed-Python tree is accepted under HOME.
+    (The run home is under HOME by design, so this rule is for machinery only.)
+    """
+
+    refusal = read_root_refusal(path, home=home, config=config)
+    if refusal is not None:
+        return refusal
+    if path.is_relative_to(home) and not path.is_relative_to(home / _UV_PYTHON_SUBDIR):
+        return f"interpreter root {path} is under HOME outside uv's managed Pythons"
+    return None
+
+
 @dataclass(frozen=True)
 class ResponderJail:
     """The seatbelt boundary for one responder run, rooted at its own home.
@@ -245,7 +328,15 @@ class ResponderJail:
         meaning a path could change; the spawner turns that into "no spawn".
         """
 
-        resolved = Path(home).expanduser().resolve()
+        raw = Path(home).expanduser()
+        # The LEAF must not be a symlink (review R1-3): resolving one would
+        # make whatever it points at (``~/workspace``, ``~/.ssh``) the run's
+        # read+write root. Only the parent is resolved; the leaf is kept.
+        if raw.is_symlink():
+            raise JailUnavailable(f"run home {raw} is a symlink")
+        if raw.exists() and not raw.is_dir():
+            raise JailUnavailable(f"run home {raw} is not a directory")
+        resolved = raw.parent.resolve() / raw.name
         if machinery is None:
             subtree = _confinement._interpreter_subtree()
             machinery = () if subtree is None else (subtree,)
@@ -275,8 +366,10 @@ class ResponderJail:
         """
 
         home, config = _protected_roots()
-        for root in (self.home, *self.machinery):
-            refusal = read_root_refusal(root, home=home, config=config)
+        checks = [(self.home, read_root_refusal)]
+        checks += [(root, machinery_root_refusal) for root in self.machinery]
+        for root, check in checks:
+            refusal = check(root, home=home, config=config)
             refusal = refusal or _confinement.profile_path_refusal(root)
             if refusal is not None:
                 return refusal
@@ -307,6 +400,11 @@ class ResponderJail:
             *(str(path) for path in self.machinery),
             *system,
             *_library_children(),
+            *(
+                child
+                for prefix, omit in _PREFIX_OMITTED.items()
+                for child in _children(prefix, omit)
+            ),
         )
 
     def profile(self) -> str:
@@ -388,22 +486,38 @@ class ResponderJail:
         Run by the (unjailed) host before the first spawn. Everything written
         here is public or empty; credentials are added by the spawner from the
         pinned resolver, never copied from the owner's ``~/.aws``.
+
+        INVARIANT: ONE FRESH HOME PER RUN (review R1-2). The jailed child may
+        write anywhere under the home, so a reused home could hold a planted
+        ``ca-bundle.crt -> ~/.zshrc`` that this unjailed host would then
+        overwrite. Every create here therefore refuses an existing entry
+        (``exist_ok=False``, ``O_EXCL|O_NOFOLLOW``); C2 must allocate a new
+        home per alert.
         """
 
         if not _SYSTEM_CA_BUNDLE.is_file():
             # No trust anchors means every HTTPS call fails inside the run;
             # refuse here rather than spawn a run that can only error.
             raise JailUnavailable(f"no system CA bundle at {_SYSTEM_CA_BUNDLE}")
-        self.tmpdir.mkdir(parents=True, exist_ok=True)
-        self.repos_dir.mkdir(parents=True, exist_ok=True)
-        self.ca_bundle.write_bytes(_SYSTEM_CA_BUNDLE.read_bytes())
+        try:
+            self.home.mkdir(exist_ok=False)
+            self.tmpdir.mkdir(exist_ok=False)
+            self.repos_dir.mkdir(exist_ok=False)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(self.ca_bundle, flags, 0o444)
+        except FileExistsError as exc:
+            raise JailUnavailable(f"run home is not fresh ({exc.filename} exists)") from None
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(_SYSTEM_CA_BUNDLE.read_bytes())
 
     def child_env(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
         """The child's environment, rebuilt from :data:`ENV_ALLOWLIST` only.
 
-        ``extra`` is the spawner's contribution (the STS triple, region); a key
-        outside the allowlist there is a programming error and raises, so a
-        future caller cannot quietly hand a run ``AWS_PROFILE`` or a bearer.
+        ``extra`` is the spawner's contribution: ONLY the keys in
+        :data:`_EXTRA_KEYS` (the STS triple, the region, ``LC_ALL``). Anything
+        else raises -- including the keys this method sets itself (security
+        round 1, S-23), so a caller can neither hand a run ``AWS_PROFILE`` or
+        a bearer nor replace ``HOME``, ``PATH``, ``TMPDIR`` or a CA bundle.
         """
 
         env = {
@@ -411,6 +525,12 @@ class ResponderJail:
             "HOME": str(self.home),
             "TMPDIR": str(self.tmpdir),
             "LANG": "en_US.UTF-8",
+            # Homebrew git reads ``/opt/homebrew/etc/gitconfig``, which S-16
+            # no longer grants -- measured: jailed ``git --version`` died with
+            # "unable to access '/opt/homebrew/etc/gitconfig': Operation not
+            # permitted". Skipping system config is also what keeps the host's
+            # ``credential.helper=osxkeychain`` out of the run.
+            "GIT_CONFIG_NOSYSTEM": "1",
             "KUBECONFIG": str(self.home / ".kube" / "config"),
             "AWS_CONFIG_FILE": str(self.home / ".aws" / "config"),
             "AWS_SHARED_CREDENTIALS_FILE": str(self.home / ".aws" / "credentials"),
@@ -427,8 +547,8 @@ class ResponderJail:
             },
         }
         for key, value in (extra or {}).items():
-            if key not in ENV_ALLOWLIST:
-                raise ValueError(f"{key} is not a responder environment key")
+            if key not in _EXTRA_KEYS:
+                raise ValueError(f"{key} is not a responder environment key a caller may set")
             env[key] = value
         return env
 
@@ -451,6 +571,7 @@ __all__ = [
     "ENV_ALLOWLIST",
     "JailUnavailable",
     "ResponderJail",
+    "machinery_root_refusal",
     "read_root_refusal",
     "responder_web_fetch_settings",
 ]

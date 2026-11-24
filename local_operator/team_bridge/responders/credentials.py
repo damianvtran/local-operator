@@ -141,12 +141,52 @@ def _client_config() -> Any:
     return Config(proxies={})
 
 
+#: Profile keys that make botocore RUN something or chain to another principal
+#: when it resolves the source credentials (security round 1, S-19). The owner's
+#: ``~/.aws/config`` is same-uid writable, so a planted ``credential_process``
+#: on the source profile would execute unjailed on every alert wake. Static
+#: keys are refused too: the source must be the operator's SSO session.
+_FORBIDDEN_SOURCE_KEYS: frozenset[str] = frozenset(
+    {
+        "credential_process",
+        "credential_source",
+        "source_profile",
+        "role_arn",
+        "web_identity_token_file",
+        "aws_access_key_id",
+        "aws_secret_access_key",
+        "aws_session_token",
+    }
+)
+
+
+def _require_pure_sso_profile(session: Any) -> None:
+    """Refuse a source profile that is not a plain SSO profile (S-19).
+
+    Read from the SAME parse botocore will use (``full_config``), before any
+    client or credential provider exists, so nothing in the profile has run.
+    """
+
+    profiles = session.full_config.get("profiles", {})
+    profile = profiles.get(SOURCE_PROFILE)
+    if not isinstance(profile, Mapping):
+        raise CredentialPinError(f"no AWS profile {SOURCE_PROFILE!r} is configured")
+    planted = sorted(_FORBIDDEN_SOURCE_KEYS & set(profile))
+    if planted:
+        raise CredentialPinError(
+            f"AWS profile {SOURCE_PROFILE!r} is not a plain SSO profile ({', '.join(planted)})"
+        )
+    if not ({"sso_session", "sso_start_url"} & set(profile)):
+        raise CredentialPinError(f"AWS profile {SOURCE_PROFILE!r} is not an SSO profile")
+
+
 def _source_client() -> Any:
     """STS on the owner's SSO profile, endpoint pinned regardless of config."""
 
     import botocore.session
 
     session = botocore.session.Session(profile=SOURCE_PROFILE)
+    _require_pure_sso_profile(session)
     return session.create_client(
         "sts",
         region_name=STS_REGION,
@@ -194,9 +234,13 @@ def resolve_responder_credentials(*, session_name: str, call: Caller = _call) ->
 
     if _SESSION_NAME.fullmatch(session_name) is None:
         raise CredentialPinError("role session name is not a valid STS session name")
-    source = _source_client()
-    _require_pinned_endpoint(source)
     try:
+        # Client construction is INSIDE the guard (review R1-1): botocore
+        # resolves the profile while building the client, so a member machine
+        # without it raises ProfileNotFound -- which must reach the spawner as
+        # CredentialPinError (``spawn_failed``), like every other failure here.
+        source = _source_client()
+        _require_pinned_endpoint(source)
         assumed = call(
             source,
             "assume_role",
@@ -217,10 +261,12 @@ def resolve_responder_credentials(*, session_name: str, call: Caller = _call) ->
     if not isinstance(key, str) or _TEMPORARY_KEY.fullmatch(key) is None:
         raise CredentialPinError("AssumeRole returned a non-temporary access key")
 
-    identity_client = _identity_client(key, secret, token)
-    _require_pinned_endpoint(identity_client)
     try:
+        identity_client = _identity_client(key, secret, token)
+        _require_pinned_endpoint(identity_client)
         identity = call(identity_client, "get_caller_identity", {})
+    except CredentialPinError:
+        raise
     except Exception as exc:
         raise CredentialPinError(f"GetCallerIdentity failed ({type(exc).__name__})") from None
     arn = identity.get("Arn")

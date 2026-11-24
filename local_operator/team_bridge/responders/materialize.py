@@ -54,7 +54,18 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 _SHA = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 #: ``-c`` overrides on every git call: no hooks, no fsmonitor daemon.
-_GIT_OVERRIDES: tuple[str, ...] = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
+#: ``protocol.allow=never`` (security round 1, S-18): no transport may start,
+#: even if the clone's config enables a promisor remote with an ``ext::`` URL
+#: or a ``core.sshCommand`` -- a lazy fetch of an absent object would
+#: otherwise run that transport unjailed on every alert wake.
+_GIT_OVERRIDES: tuple[str, ...] = (
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "protocol.allow=never",
+)
 
 #: The git environment: rebuilt, never the owner's. No system or global
 #: config (Apple Git reads a second system file that ``GIT_CONFIG_SYSTEM``
@@ -70,6 +81,12 @@ _GIT_ENV: dict[str, str] = {
     "GIT_ASKPASS": "/bin/false",
     "GIT_OPTIONAL_LOCKS": "0",
     "LC_ALL": "C",
+    # S-18, belt and braces to ``protocol.allow=never`` (which a repo-level
+    # ``protocol.<name>.allow=always`` outranks): lazy fetch off (git >= 2.45),
+    # and GIT_ALLOW_PROTOCOL, which OVERRIDES all protocol config, set to a
+    # name no transport has -- so every protocol is refused.
+    "GIT_NO_LAZY_FETCH": "1",
+    "GIT_ALLOW_PROTOCOL": "lop-responder-none",
 }
 
 
@@ -109,7 +126,10 @@ def default_clone_root() -> Path:
 
 def _git(clone: Path, *args: str, stdin: bytes | None = None) -> bytes:
     completed = subprocess.run(
-        ["git", "-C", str(clone), *_GIT_OVERRIDES, *args],
+        # ``--git-dir`` names the repository explicitly (review R1-4): no
+        # discovery, and a ``.git`` FILE (gitfile) redirect is never followed --
+        # ``materialize_repo`` refuses anything but a real ``.git`` directory.
+        ["git", f"--git-dir={clone / '.git'}", *_GIT_OVERRIDES, *args],
         input=stdin,
         capture_output=True,
         env=_GIT_ENV,
@@ -153,9 +173,20 @@ def materialize_repo(
     """
 
     name = pinned_repo_name(entry)
-    clone = (clone_root or default_clone_root()) / name
+    root = clone_root or default_clone_root()
+    clone = root / name
+    # The clone must BE ``<root>/<name>`` (review R1-4): a symlinked clone, or
+    # a gitfile pointing elsewhere, would put a non-radient tree (say
+    # ``~/minervaai/core``) into the run under a radient name, and the
+    # attestation records only (entry, commit).
+    if clone.is_symlink() or (clone / ".git").is_symlink():
+        raise MaterializeError(f"{clone} is a symlink; only a real clone is materialized")
     if not clone.is_dir():
         raise MaterializeError(f"no local clone of {entry} at {clone}")
+    if clone.resolve().parent != root.resolve():
+        raise MaterializeError(f"{clone} does not resolve inside {root}")
+    if not (clone / ".git").is_dir():
+        raise MaterializeError(f"{clone} has no .git directory (gitfiles are not followed)")
     dest = dest_root / name
     if dest.exists() or dest.is_symlink():
         raise MaterializeError(f"{dest} already exists")
