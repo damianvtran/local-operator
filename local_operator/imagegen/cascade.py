@@ -159,12 +159,15 @@ RUNG_SPECS: dict[str, RungSpec] = {
         capabilities=frozenset({"t2i", "i2i"}),
         cancel_support=CancelSupport.SIGNAL,
         cost="rate_table",
-        # Multi rides ``blackforestlabs/flux-3/edit-image`` (``image_urls``,
-        # 1..10 refs) in ``rungs.run_fal``; single keeps the flux-class
-        # ``image_url``. The flip lands in the same change as the wire (D4 —
-        # declaration and wiring move together; the drift tests enforce it).
+        # Single AND multi ride the default model's editor,
+        # ``openai/gpt-image-2.6/sunburst/edit`` (``image_urls``, 1..16 refs,
+        # since 2026-11-19) in ``rungs.run_fal``; 16 is that app's documented
+        # ceiling and the highest of the registered editors (FLUX 3 edit takes
+        # 10, the flux-class i2i app 1 — pins on those skip above their own
+        # ceilings). The value moves with the wire (D4 — declaration and
+        # wiring move together; the drift tests enforce it).
         sources=SourceSupport.MULTI,
-        max_sources=10,
+        max_sources=16,
     ),
     ImageRoute.OPENAI: RungSpec(
         route=ImageRoute.OPENAI,
