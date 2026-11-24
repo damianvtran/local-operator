@@ -1202,3 +1202,130 @@ def test_a_damaged_archive_is_reported_as_unavailable_not_as_the_end(
     warnings = [record.getMessage() for record in caplog.records]
     assert any("unavailable rather than empty" in line for line in warnings), warnings
     assert any("could not be decoded" in line for line in warnings), warnings
+
+
+def _build_many_preserved(config: Path, *, turns: int = 100, kept_turns: int = 2) -> dict[str, Any]:
+    """The operator's shape (2026-11-23): MANY real turns behind one compaction.
+
+    Each summarised turn is a real one — a user prompt, an assistant row that
+    calls a tool, the tool's result and a final answer — and the newest
+    compaction carries every user prompt as a preserved turn (built with the
+    core's own ``extract_preserved_user_turns`` + ``cap_preserved_user_turns``,
+    the payload a real journal holds; the reported session carried 126). The
+    kept window is short, so the render's head of carried copies is longer than
+    the phone's 80-row seed — the condition the report came from.
+    """
+    from local_operator.compaction.cutpoint import (
+        cap_preserved_user_turns,
+        extract_preserved_user_turns,
+    )
+
+    directory = config / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    summarised: list[Any] = []
+
+    async def run() -> None:
+        for i in range(turns):
+            call = ToolCall(id=f"turn-call-{i}", name="bash", arguments={"command": "ls"})
+            turn = [
+                Message.user(f"operator request {i}", id=f"req-{i}"),
+                Message(
+                    role="assistant",
+                    content=[TextContent(text=f"looking {i}")],
+                    tool_calls=[call],
+                    stop_reason="toolUse",
+                    id=f"work-{i}",
+                ),
+                Message(
+                    role="tool",
+                    content=[TextContent(text=f"listing {i}")],
+                    tool_call_id=call.id,
+                    tool_name="bash",
+                    id=f"result-{i}",
+                ),
+                Message.assistant(f"final answer {i}", id=f"final-{i}"),
+            ]
+            for message in turn:
+                await transcript.append_message(message)
+            summarised.extend(turn)
+        cut = Message.user("kept request 0", id="kept-req-0")
+        await transcript.append_message(cut)
+        genuine = {str(m.id) for m in summarised if m.role == "user"}
+        preserved = [dict(t) for t in extract_preserved_user_turns(list(summarised), genuine)]
+        capped = cap_preserved_user_turns(preserved, cap=1_000_000)
+        await transcript.append_compaction(
+            "summary of the summarised turns",
+            cut.id,
+            180_000,
+            preserved_user_turns=[
+                {"id": str(turn["id"]), "text": str(turn["text"])} for turn in capped.turns
+            ],
+            preserved_turns_cap=1_000_000,
+        )
+        await transcript.append_message(Message.assistant("kept answer 0", id="kept-ans-0"))
+        for i in range(1, kept_turns):
+            await transcript.append_message(Message.user(f"kept request {i}", id=f"kept-req-{i}"))
+            await transcript.append_message(
+                Message.assistant(f"kept answer {i}", id=f"kept-ans-{i}")
+            )
+
+    asyncio.run(run())
+    transcript.close()
+    return {"preserved_user_ids": [f"req-{i}" for i in range(turns)]}
+
+
+def test_the_seed_does_not_paint_the_compactions_carried_user_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator report 2026-11-23: scrolled up, the phone showed a wall of the
+    operator's own messages with no agent work or final answers between them.
+
+    Those bubbles were the newest compaction's ``preserved_user_turns`` — model
+    context re-injected at the render's head under the ORIGINAL row ids — not
+    transcript rows. The desktop never paints them (its pages are journal rows,
+    and the journal holds each prompt once, at its own position, between the
+    work that answered it), and on the phone they were both the wall and the
+    cursor that stranded everything newer than the oldest copy the seed held.
+    """
+    config = tmp_path / "config"
+    built = _build_many_preserved(config)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    projection = _durable_projection(SESSION_ID)
+    assert projection is not None
+    seed = projection.transcript
+    copies = [row.id for row in seed if row.id in set(built["preserved_user_ids"])]
+    assert copies == [], f"the seed paints {len(copies)} carried user copies"
+    kinds = [row.kind for row in seed]
+    walls = [i for i in range(1, len(kinds)) if kinds[i] == kinds[i - 1] == "user"]
+    assert walls == [], "the seed shows consecutive user rows with no agent row between"
+
+    first_page, _ = _history_page(SESSION_ID, None, 50)
+    assert [row.id for row in first_page if row.id in set(built["preserved_user_ids"])] == []
+
+
+def test_paging_a_heavily_compacted_session_reaches_every_turns_answer_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same report: "I don't see any of the final responses".
+
+    With the carried copies in the seed, the phone's cursor was the oldest copy
+    it held, so ``?before=`` answered the rows older than THAT prompt's journal
+    position — and every assistant row, tool row and final answer between it and
+    the compaction was newer than the cursor and never served. The walk must
+    reproduce the whole-journal fold exactly: every row, once, in journal order,
+    ending with ``has_more`` false.
+    """
+    config = tmp_path / "config"
+    _build_many_preserved(config)
+    walk = _walk(config, monkeypatch, page=50)
+    observed = _observed(walk)
+    expected = [row.id for row in _journal_rows(walk["directory"])]
+
+    assert walk["exhausted"], "the walk never reached the beginning of history"
+    missing = [row for row in expected if row not in set(observed)]
+    assert missing == [], f"{len(missing)} rows unreachable, e.g. {missing[:6]}"
+    assert len(observed) == len(set(observed)), "a row was served twice"
+    assert observed == expected, "the merged rows are not in journal order"
+    finals = [row for row in observed if row.startswith("final-")]
+    assert len(finals) == 100

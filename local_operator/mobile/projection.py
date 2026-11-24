@@ -30,6 +30,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
+from local_operator.compaction.cutpoint import is_preserved_replay
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
@@ -1770,6 +1771,25 @@ def fold_messages_to_entries(
     # so the call it issues opens expanded exactly as the TUI's does.
     bang_pending = False
     for message in history:
+        if is_preserved_replay(message):
+            # A COMPACTION'S CARRIED COPY, not a transcript row (operator report
+            # 2026-11-23). The newest marker's ``preserved_user_turns`` — and the
+            # elision notice standing in for the ones its cap dropped — are
+            # re-injected after the marker so the MODEL keeps the operator's
+            # words; they reuse the ORIGINAL row ids, and the original rows sit
+            # in the journal below the cut, between the work that answered them.
+            # Painting the copies did two things on the phone: a wall of
+            # consecutive user bubbles with no agent rows or final answers (the
+            # reported session carried 126), and — because the seed's oldest row
+            # was then a copy — a ``?before=`` cursor at THAT prompt's journal
+            # position, so every row between it and the compaction was newer
+            # than the cursor and never served. The desktop pages the journal and
+            # never paints them, so neither does the phone: each prompt is served
+            # once, at its journal position, by the cursor pages
+            # (``durable.journal_rows_older_than``). Shed by PROVENANCE (the
+            # ``provider_payload`` stamp / elision id ``cutpoint`` mints), never
+            # by wording, so a genuine user row cannot match.
+            continue
         if isinstance(message, CustomMessage):
             # Session-state snapshots are agent context, not conversation. Drop
             # the typed metadata before row budgets/grouping; never match text,
