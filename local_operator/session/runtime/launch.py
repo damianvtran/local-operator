@@ -601,8 +601,14 @@ def _spawn_runtime(
     # HOME request, which must supersede the move. Empty string is the sentinel.
     # Exec constructs an in-process Session and the legacy daemon resume forks
     # separately; those two bypass this boundary and retain their own resolver.
-    cwd = _engage_cwd_for_recorded_move(config_dir or runtime_config_dir(), session_id, cwd)
-    cwd = cwd or str(Path.home())
+    store = config_dir or runtime_config_dir()
+    cwd = _engage_cwd_for_recorded_move(store, session_id, cwd)
+    # THE SENTINEL IS THE ONLY CASE THE DURABLE RECORD ANSWERS. A caller that
+    # named a directory (HOME included) still wins, and a recorded move has
+    # already replaced the omission above; what is left is a respawn that has
+    # no opinion at all, which must not land in HOME when the session has a
+    # directory of its own.
+    cwd = cwd or _durable_cwd_for_restart(store, session_id) or str(Path.home())
     if session_host.spawn_authority() == session_host.AUTHORITY_HOST:
         return _spawn_runtime_hosted(
             session_id,
@@ -1379,6 +1385,46 @@ def _live_relay_instance(config_dir: Path) -> str:
 
     record = store.find_own_relay(config_dir)
     return str(getattr(record, "instance_id", "") or "")
+
+
+def _durable_cwd_for_restart(config_dir: Path, session_id: str) -> str:
+    """The directory this session last recorded for ITSELF, or ``""`` if none.
+
+    WHY A RESPAWN MUST NOT DEFAULT TO HOME: a wake, a bridge delivery and a peer
+    note all reach the fork boundary with the empty sentinel. Starting there
+    puts the session in a directory it has never worked in — and that is not
+    cosmetic: block 0 carries the repository guidance of the cwd's ancestors,
+    so a session that lives in ``~/workspace`` and restarts in ``~`` renders a
+    different system prompt, appends a new ``system_prefix`` epoch and rewrites
+    its entire cached prompt (measured on this fleet: roughly USD 50 a week for
+    one chief-of-staff session, purely from this flip).
+
+    ORDERING: a recorded move is applied by the caller BEFORE this, so a move
+    still outranks the record; only the empty sentinel reaches here; HOME stays
+    the last resort, and an explicit HOME never reaches this function at all.
+
+    The record is the one the mobile door already trusts
+    (``session_files.service.session_cwd``): the ``desktop.json`` marker written
+    at create — rewritten by a move — else the code-request ledger. A recorded
+    directory that is gone is skipped rather than forked into, so a deleted
+    tree degrades to HOME instead of a runtime that cannot start. Cost on the
+    ordinary path is one file read and one ``stat``.
+    """
+    name = str(session_id or "")
+    # Public identifier, not a path: the join below must not be able to escape
+    # ``sessions/`` (the mobile door applies the same check before it reads).
+    if not name or Path(name).name != name:
+        return ""
+    from local_operator.session_files.service import session_cwd
+
+    try:
+        recorded = session_cwd(config_dir, name, Path(config_dir) / "sessions" / name)
+    except Exception:  # noqa: BLE001 — an unknown cwd only costs the HOME fallback
+        return ""
+    recorded = str(recorded or "")
+    if not recorded or not os.path.isabs(recorded) or not os.path.isdir(recorded):
+        return ""
+    return recorded
 
 
 def _engage_cwd_for_recorded_move(config_dir: Path, session_id: str, cwd: str) -> str:
