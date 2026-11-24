@@ -984,19 +984,32 @@ async def test_a_pasted_path_with_a_nul_byte_is_a_text_paste_not_a_crash(tmp_pat
 
 
 @pytest.fixture
-def no_full_reads(monkeypatch):
-    """Record every path whose CONTENTS the composer pulled into memory.
+def no_full_reads(monkeypatch, tmp_path):
+    """Record every path under ``tmp_path`` whose CONTENTS the composer pulled
+    into memory.
 
     Instruments ``pathlib.Path.read_bytes`` specifically. An earlier version
     counted bytes through ``builtins.open`` and was vacuous: ``read_bytes``
     goes through ``io.open``, so removing the size gate changed nothing the
     test could see, and both mutations passed.
+
+    Scoped to ``tmp_path`` because the property is "the refused file is never
+    read", and every file under test lives there. Recording every path made the
+    assertion order-dependent: the refusal renders a ``tui.composer`` message,
+    and ``i18n.text._sources`` (an ``lru_cache(maxsize=64)``) re-reads that
+    catalogue with ``read_bytes`` whenever an earlier test in the same worker
+    cleared or evicted it — CI runs 45329106169 and 45321196780 failed on
+    ``.../i18n/catalogues/en/tui.composer.json``, not on the pasted file. The
+    scope keeps the anti-vacuity point above: dropping the size gate still
+    reads the pasted file, which is under ``tmp_path``, and still fails.
     """
     read: list[str] = []
     real = Path.read_bytes
+    root = tmp_path.resolve()
 
     def recording(self):  # noqa: ANN001 - patching a bound method
-        read.append(str(self))
+        if Path(self).resolve().is_relative_to(root):
+            read.append(str(self))
         return real(self)
 
     monkeypatch.setattr(Path, "read_bytes", recording)
