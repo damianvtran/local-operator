@@ -135,6 +135,18 @@ def test_a_tool_message_is_named_as_a_tool() -> None:
 # --------------------------------------------------------------------------
 
 
+def test_a_duck_typed_role_is_not_a_role() -> None:
+    """R3-4: an arbitrary object's ``role`` attribute is data, not a claim."""
+    assert message_kind(SimpleNamespace(role="SecretPassword123")) == "message"
+    assert message_kind(SimpleNamespace(role="user", provider_payload=None, content=[])) == "user"
+
+
+def test_the_injection_marker_is_only_read_on_a_user_turn() -> None:
+    """The renderer marks USER turns; a tool object wearing it is not an injection."""
+    tool = SimpleNamespace(role="tool", content=[], provider_payload={"harness_injected": True})
+    assert message_kind(tool) == "tool"
+
+
 def test_a_kind_is_the_role_only() -> None:
     """No value from any data source names a message: role, or role_injected."""
     message = _message("user", "an ordinary sent message")
@@ -334,6 +346,60 @@ def test_a_turn_that_did_not_opt_in_costs_nothing() -> None:
     assert stub._cache_first_divergence == ""
 
 
+def test_a_changed_image_mime_is_named_before_a_later_text_change() -> None:
+    """R3-1: the provider serialises the MIME, so a PNG->JPEG swap is a change."""
+    one = _message("user", "look")
+    one.content.append(SimpleNamespace(type="image", data=b"same-bytes", mime_type="image/png"))
+    two = _message("assistant", "answer two")
+    jpeg = _message("user", "look")
+    jpeg.content.append(SimpleNamespace(type="image", data=b"same-bytes", mime_type="image/jpeg"))
+    assert (
+        first_prefix_divergence(
+            prefix_sections(_request(one)), prefix_sections(_request(jpeg, two))
+        )
+        == "messages[0]:user"
+    )
+
+
+def test_hashing_a_large_attachment_does_not_copy_it_whole() -> None:
+    """R3-2: a 10 MB attachment cost a 20 MB peak when it was JSON-encoded.
+
+    The payload is already in memory; the comparison may hash it but must not
+    make an encoded copy of it on the event loop.
+    """
+    import tracemalloc
+
+    message = _message("user", "look")
+    message.content.append(SimpleNamespace(type="image", data="A" * (10 * 1024 * 1024)))
+    tracemalloc.start()
+    try:
+        prefix_sections(_request(message))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 4 * 1024 * 1024, f"peak {peak} bytes is an encoded copy, not a chunk"
+
+
+def test_a_document_filename_is_part_of_the_comparison() -> None:
+    """A renamed document is a different request to a provider that sends it."""
+    one = _message("user", "see file")
+    one.content.append(
+        SimpleNamespace(
+            type="document", data=b"same", mime_type="application/pdf", filename="a.pdf"
+        )
+    )
+    two = _message("user", "see file")
+    two.content.append(
+        SimpleNamespace(
+            type="document", data=b"same", mime_type="application/pdf", filename="b.pdf"
+        )
+    )
+    assert (
+        first_prefix_divergence(prefix_sections(_request(one)), prefix_sections(_request(two)))
+        == "messages[0]:user"
+    )
+
+
 def test_a_changed_image_is_named_before_a_later_text_change() -> None:
     """R2-2: inherited kind-only media coverage would have blamed message 1.
 
@@ -376,3 +442,66 @@ def test_a_media_payload_is_never_written_anywhere_readable() -> None:
     assert "secret" not in label.lower()
     snapshot = prefix_sections(_request(message))
     assert b"SECRET-PIXELS" not in snapshot.messages[0]
+
+
+def test_a_google_style_start_without_a_response_id_commits_the_baseline() -> None:
+    """R3-3 / QA round 2: Google's start carries `cache_miss_type` and NO id.
+
+    This is the real ``StreamStartEvent`` shape, not a duck type: gating the
+    commit on ``response_id`` left every Google chain uncommitted and every
+    Google break reading ``-``.
+    """
+    from local_operator.harness.types import StreamStartEvent
+
+    stub = _stream_stub()
+    stub._note_cache_prefix(_request(_message("user", "one")))
+    google_start = StreamStartEvent(
+        response_id=None, cache_miss_type="baseline", cache_missed_tokens=0
+    )
+    stub._note_cache_start(google_start)
+    assert stub._cache_prefix_last is not None, "a diagnosed Google start IS an accept"
+
+    # A changed first message is the comparison the baseline exists to make
+    # (an APPENDED turn is not a divergence, by design — see the cell above).
+    stub._note_cache_prefix(_request(_message("user", "one EDITED")))
+    assert stub._cache_first_divergence == "messages[0]:user"
+
+    # NEGATIVE CONTROL: an UNDIAGNOSED start on the same chain commits nothing.
+    before = stub._cache_prefix_last
+    stub._note_cache_prefix(_request(_message("user", "three")))
+    stub._note_cache_start(StreamStartEvent(response_id=None, cache_miss_type=None))
+    assert stub._cache_prefix_last is before
+
+
+def test_the_stream_loop_gates_the_commit_on_the_diagnosis_not_a_response_id() -> None:
+    """R3-3: the wiring itself, pinned — the old gate cannot come back silently.
+
+    A cell that only drives ``_note_cache_start`` would keep passing if the loop
+    went back to ``and event.response_id``, which is exactly the regression QA
+    found. So the call site is read for what it does NOT contain.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from local_operator.model import configure as configure_module
+
+    source = textwrap.dedent(inspect.getsource(configure_module.SessionStreamFn))
+    tree = ast.parse(source)
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_note_cache_start"
+    ]
+    assert len(calls) == 1, "the stream loop calls the commit step exactly once"
+    enclosing = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and any(inner is calls[0] for inner in ast.walk(node))
+    ]
+    assert enclosing, "the commit step is guarded, not run on every event"
+    gate = ast.unparse(enclosing[0].test)
+    assert "cache_diagnostics" in gate
+    assert "response_id" not in gate, f"the Google-shaped regression is back: {gate}"

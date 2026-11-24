@@ -484,37 +484,52 @@ def _prefix_digest(value: Any) -> bytes:
     return hashlib.sha256(encoded).digest()
 
 
+#: The roles ``Message.role`` allows. A value outside this set is not a role —
+#: it is data wearing the attribute name, and it becomes the neutral label.
+_KNOWN_ROLES = frozenset({"user", "assistant", "tool", "system"})
+
+#: Chunk used when hashing an attachment payload. The payload is already in
+#: memory (a base64 string or bytes) and hashing is O(n); the chunk keeps the
+#: TEMPORARY cost bounded to this many bytes instead of one encoded copy of the
+#: whole attachment on the event loop (review round 3 measured a 20 MB peak on a
+#: 10 MB image from JSON-encoding it).
+_MEDIA_CHUNK_BYTES = 1 << 20
+
+#: Wire-relevant metadata beside an attachment's bytes. The provider encodes
+#: these into the part it sends, so a part whose bytes match but whose MIME
+#: differs is a different request (``providers/clients.py`` image parts).
+_MEDIA_WIRE_FIELDS = ("type", "mime_type", "filename")
+
+
 def message_kind(message: Any) -> str:
-    """A short, content-blind label for one rendered message: ``role[_name]``.
+    """A short, content-blind label for one rendered message: ``role[_injected]``.
 
-    WHAT MAY NAME A MESSAGE, and nothing else may:
+    WHAT MAY NAME A MESSAGE, and nothing else may: the model's own `Literal`
+    role from :data:`_KNOWN_ROLES`, and — for a USER turn only — the renderer's
+    BOOLEAN marker that the row came from a host-authored injection
+    (``compaction.cutpoint.RENDERED_INJECTION_KEY``), accepted only as ``is
+    True``.
 
-    * ``role`` — the model's own vocabulary (``user``/``assistant``/``tool``,
-      a ``Literal`` on ``Message``), or the neutral ``message`` when there is
-      none;
-    * ``injected`` — the renderer's own BOOLEAN marker that this user turn came
-      from a host-authored injection rather than from the operator
-      (``compaction.cutpoint.RENDERED_INJECTION_KEY``); accepted only as
-      ``is True``.
+    NOTHING FOUND IN DATA BECOMES A NAME, which took three review rounds to
+    settle and is now enforced structurally rather than by convention:
 
-    TWO PRIVACY ROUNDS, BOTH SETTLED THE SAME WAY: nothing found in DATA may
-    become a name. Round 1 reproduced ``tool_secretpassword123`` from
-    ``provider_payload['details']['custom_type']``, which is tool metadata on
-    some rows. Round 2 pointed out that ``CustomMessage.custom_type`` is an
-    unrestricted ``str`` too, so "the harness type owns it" was never the same
-    claim as "the value is trusted" — a caller can construct one carrying any
-    word. That branch is gone as well. The wire path always renders to
-    ``Message`` and never carries a custom type, so the cost of dropping it is
-    a slightly less specific label, and the gain is that no value from any data
-    source can reach a log line here.
+    * ``provider_payload['details']['custom_type']`` — tool metadata on some
+      rows; a synthetic secret came out as ``tool_secretpassword123`` (round 1).
+    * ``CustomMessage.custom_type`` — an unrestricted ``str``, so "the harness
+      type owns it" was never "the value is trusted" (round 2).
+    * Any duck-typed ``role`` or marker an arbitrary object happens to carry —
+      ``SimpleNamespace(role="SecretPassword123")`` echoed the secret, and a
+      TOOL object wearing the injection marker read ``tool_injected`` (round 3).
+
+    A role outside the set is not a claim this label repeats, and the marker is
+    consulted only where the renderer actually sets it.
     """
-    role = _text_or_empty(getattr(message, "role", "")) or "message"
-    custom = "injected" if _rendered_injection(message) else ""
-    # Lower-cased BEFORE the substitution: ``_KIND_SAFE`` only keeps
-    # ``[a-z0-9_]``, so an upper-case byte would otherwise survive as a
-    # separator and turn ``Wake`` into ``_ake``.
-    label = _KIND_SAFE.sub("_", (f"{role}_{custom}" if custom else role).lower()).strip("_")
-    return label[:_MAX_KIND_CHARS] or "message"
+    role = _text_or_empty(getattr(message, "role", "")).strip().lower()
+    if role not in _KNOWN_ROLES:
+        role = "message"
+    if role == "user" and _rendered_injection(message):
+        return "user_injected"
+    return role
 
 
 def _rendered_injection(message: Any) -> bool:
@@ -531,37 +546,79 @@ def _rendered_injection(message: Any) -> bool:
     return payload.get(RENDERED_INJECTION_KEY) is True
 
 
+def _payload_digest(payload: Any) -> bytes:
+    """Digest one attachment payload WITHOUT copying it whole.
+
+    ``bytes``/``bytearray``/``memoryview`` are hashed through a memoryview in
+    chunks, and a base64 ``str`` is encoded chunk by chunk, so the peak
+    temporary is one chunk rather than one encoded copy of the attachment. An
+    attachment on a 300k-token context is routine, and this runs on the event
+    loop.
+
+    ``surrogatepass`` because a payload is opaque data: a lone surrogate must
+    contribute to the digest, not raise into the caller and cost the whole
+    diagnostic. A non-buffer, non-string payload falls back to the canonical
+    JSON digest — the same collision-over-instability trade the prompt hash
+    makes.
+    """
+    if isinstance(payload, str):
+        digest = hashlib.sha256()
+        for offset in range(0, len(payload), _MEDIA_CHUNK_BYTES):
+            digest.update(
+                payload[offset : offset + _MEDIA_CHUNK_BYTES].encode("utf-8", "surrogatepass")
+            )
+        return digest.digest()
+    if isinstance(payload, (bytes, bytearray, memoryview)):
+        view = memoryview(payload)
+        digest = hashlib.sha256()
+        for offset in range(0, len(view), _MEDIA_CHUNK_BYTES):
+            digest.update(view[offset : offset + _MEDIA_CHUNK_BYTES])
+        return digest.digest()
+    return _prefix_digest(payload)
+
+
 def _media_digests(message: Any) -> list[str]:
-    """Hex digests of every NON-TEXT content part, in order.
+    """Hex digests of every NON-TEXT content part, metadata and payload together.
 
-    WHY THIS EXISTS HERE AND NOT IN THE PROMPT HASH. ``_fingerprint_message``
-    covers a non-text part by its KIND alone, which is the right trade for a
-    digest that is also an analytics column: media bytes are large and that
-    digest is stored forever. This comparison is different — it is asked "which
-    message first differed", and a kind-only answer can blame a LATER message
-    for an image that changed earlier (review round 2 reproduced exactly that).
-    So the media is digested here, once per diagnosed turn, and never stored: a
-    hash is O(n) over bytes already held in memory and copies nothing.
+    WHY THIS EXISTS AT ALL. ``_fingerprint_message`` covers a non-text part by
+    its KIND alone, which is the right trade for the prompt hash (a stored
+    column over data that can be large). This comparison answers "which message
+    first differed", and a kind-only answer blames a LATER message for an image
+    that changed earlier — reproduced twice in review (round 2 for the bytes,
+    round 3 for the MIME type).
 
-    A part whose payload cannot be hashed contributes its type name, the same
-    collision-over-instability trade ``_non_json_placeholder`` makes. The result
-    is one-way and content-blind, so it is safe to compare and useless to
-    reconstruct.
+    WHAT IT COVERS: the part's type, its wire MIME and, for a document, its
+    filename — the metadata the provider serializer actually emits — plus a
+    digest of the payload. Provenance-only fields (an origin path, a composer
+    marker) are excluded for the same reason the wire excludes them: they are
+    not request context.
+
+    A part whose payload cannot be digested contributes its type name, so a
+    malformed attachment costs precision, never a turn.
     """
     digests: list[str] = []
     for part in getattr(message, "content", None) or []:
         if isinstance(getattr(part, "text", None), str):
             continue
+        digest = hashlib.sha256()
+        for wire_field in _MEDIA_WIRE_FIELDS:
+            value = getattr(part, wire_field, None)
+            if isinstance(value, str):
+                digest.update(wire_field.encode("ascii"))
+                digest.update(b"=")
+                digest.update(value.encode("utf-8", "surrogatepass"))
+                digest.update(b"\0")
         payload = getattr(part, "data", None)
         if payload is None:
             payload = getattr(part, "value", None)
-        if payload is None:
-            digests.append(_prefix_digest(getattr(part, "type", "") or "").hex())
-            continue
-        if isinstance(payload, (bytes, bytearray, memoryview)):
-            digests.append(hashlib.sha256(bytes(payload)).hexdigest())
-            continue
-        digests.append(_prefix_digest(payload).hex())
+        try:
+            digest.update(_payload_digest(payload) if payload is not None else b"")
+        except Exception:  # noqa: BLE001 — a diagnostic must never break a turn
+            # Deterministic, content-blind: the type name is stable across two
+            # calls over the same undigestable part, which is what a comparison
+            # needs, and it reveals nothing about the payload.
+            digest.update(type(payload).__name__.encode("ascii"))
+        digests.append(digest.hexdigest())
     return digests
 
 
