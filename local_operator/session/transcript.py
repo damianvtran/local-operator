@@ -45,7 +45,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence, TextIO
 
 from local_operator.harness.message_types import (
     SESSION_BINDING_NOTICE_MESSAGE_TYPE,
@@ -500,7 +500,7 @@ _CUSTOM_ROW_PREFIX = re.compile(
 )
 
 
-def _superseded_collapsible_lines(path: Path) -> tuple[frozenset[int], int]:
+def _superseded_collapsible_lines(handle: TextIO) -> tuple[frozenset[int], int]:
     """Line numbers (0-based, physical) of superseded collapsible rows, and their bytes.
 
     WHY THIS EXISTS (incident 2026-11-24, session ``96cf57e7acb7``): a 974 MB
@@ -512,12 +512,23 @@ def _superseded_collapsible_lines(path: Path) -> tuple[frozenset[int], int]:
     (measured on an APFS clone), re-paid by every wake that engaged the session
     until swap filled the disk.
 
-    One streaming pass holding one line at a time and parsing nothing: a row is
-    classified by :data:`_CUSTOM_ROW_PREFIX` alone. The file is opened EXACTLY as
-    the loader opens it (text, utf-8, default newline handling) because the
-    returned numbers index the loader's own line iteration — a binary read
-    splits only on ``\\n`` and would number a stray ``\\r`` differently, skipping
-    the wrong row; a byte-corrupt journal raises here as it would there. For each
+    One streaming pass holding one line at a time. A row is a CANDIDATE when
+    :data:`_CUSTOM_ROW_PREFIX` matches, and only a candidate that also PARSES as
+    a custom row of that type may become "the newest" (PR #4513 R1): a crash
+    that tears the newest checkpoint mid-row, followed by an append that runs
+    onto it, leaves a line that still opens with the prefix — counting it would
+    make the fold delete the last valid copy, which the loader then drops as
+    malformed. The one line is parsed and discarded, so residency stays one row.
+
+    The caller passes the SAME handle the loader then reads (after ``seek(0)``,
+    PR #4513 R2): the returned numbers index that handle's line iteration, and a
+    journal replaced between two separate opens would have its rows skipped by
+    another file's numbers. The handle is text, utf-8, ``newline=""`` — the
+    loader's line splitting (universal newlines, so a stray ``\\r`` numbers the
+    same either way) with line endings left untranslated, so the byte counts
+    below and the fold's copy are exact; a binary read splits only on ``\\n``
+    and would number a stray ``\\r`` differently. A byte-corrupt journal raises
+    here as it would in the loader. For each
     collapsible type the NEWEST matching line is kept and every older matching
     line is returned — the same newest-wins rule
     :meth:`Transcript._superseded_custom_indices` applies, so dropping these
@@ -529,22 +540,43 @@ def _superseded_collapsible_lines(path: Path) -> tuple[frozenset[int], int]:
     newest: dict[str, tuple[int, int]] = {}
     superseded: set[int] = set()
     dead_bytes = 0
-    with path.open(encoding="utf-8") as handle:
-        for number, line in enumerate(handle):
-            match = _CUSTOM_ROW_PREFIX.match(line)
-            if match is None:
-                continue
-            custom_type = match.group(1)
-            if custom_type not in _COLLAPSIBLE_CUSTOM_TYPES:
-                continue
-            previous = newest.get(custom_type)
-            if previous is not None:
-                superseded.add(previous[0])
-                dead_bytes += previous[1]
-            # Bytes, not characters: this total is compared with what a rewrite
-            # frees on disk (``reclaimable_bytes`` vs ``compact_file``).
-            newest[custom_type] = (number, len(line.encode("utf-8")))
+    for number, line in enumerate(handle):
+        match = _CUSTOM_ROW_PREFIX.match(line)
+        if match is None:
+            continue
+        custom_type = match.group(1)
+        if custom_type not in _COLLAPSIBLE_CUSTOM_TYPES:
+            continue
+        if not _is_loadable_custom_row(line, custom_type):
+            # Left for the loader to keep or drop exactly as before; it neither
+            # supersedes an earlier row nor can be superseded (R1).
+            continue
+        previous = newest.get(custom_type)
+        if previous is not None:
+            superseded.add(previous[0])
+            dead_bytes += previous[1]
+        # Bytes, not characters: this total is compared with what a rewrite
+        # frees on disk (``reclaimable_bytes`` vs ``compact_file``).
+        newest[custom_type] = (number, len(line.encode("utf-8")))
     return frozenset(superseded), dead_bytes
+
+
+def _is_loadable_custom_row(line: str, custom_type: str) -> bool:
+    """Whether ``line`` loads as a custom row of ``custom_type`` (see R1 above).
+
+    Mirrors what :meth:`TranscriptEntry.from_json` needs (an object with an
+    ``id`` and a ``type``) plus the payload's ``custom_type`` that
+    ``latest_custom`` matches on. ``from_json`` itself is not called: it logs
+    every malformed row, and the loader already does that once.
+    """
+    try:
+        raw = json.loads(line)
+    except ValueError:
+        return False
+    if not isinstance(raw, dict) or "id" not in raw or raw.get("type") != ENTRY_CUSTOM:
+        return False
+    payload = raw.get("payload")
+    return isinstance(payload, dict) and payload.get("custom_type") == custom_type
 
 
 @dataclass
@@ -2863,8 +2895,19 @@ class Transcript:
             # are skipped here (the list is then exactly what a prune-free
             # ``compact_file`` leaves), and an owning writer also folds them off
             # disk so the NEXT open does not pay the scan or the bytes again.
-            skip = self._collapse_superseded_on_open()
-            with self.path.open(encoding="utf-8") as handle:
+            #
+            # ONE HANDLE for the scan, the fold's copy and the load (PR #4513
+            # R2): the skip list is line numbers, valid only for the file they
+            # were counted in. Opening the path twice let a journal replaced in
+            # between have its rows skipped by another file's numbers. After a
+            # fold the rows still come from this handle — the pre-fold inode,
+            # whose content minus ``skip`` is byte-for-byte the new file — so no
+            # number is ever applied to a file it was not counted in.
+            # ``newline=""``: same line splitting as the default, endings left
+            # untranslated so the fold copies bytes exactly (``json.loads``
+            # ignores the trailing ``\r\n`` either way).
+            with self.path.open(encoding="utf-8", newline="") as handle:
+                skip = self._collapse_superseded_on_open(handle)
                 for number, line in enumerate(handle):
                     if number in skip:
                         continue
@@ -3732,7 +3775,7 @@ class Transcript:
                 exc_info=True,
             )
 
-    def _collapse_superseded_on_open(self) -> frozenset[int]:
+    def _collapse_superseded_on_open(self, handle: TextIO) -> frozenset[int]:
         """Find superseded collapsible rows before loading; fold them off disk when ours.
 
         Returns the loader's line numbers to skip. Two outcomes, both bounded:
@@ -3752,18 +3795,37 @@ class Transcript:
 
         Never weaker than before: a scan or decode error propagates exactly as
         the loader's own read would have raised it.
+
+        Returns with ``handle`` rewound to the start, and the returned numbers
+        index THAT handle's lines (the caller loads from it): see R2 in
+        ``__init__``. Even after a successful fold the skip list is returned,
+        because the caller still reads the pre-fold inode.
+
+        SOLE OWNERSHIP, not a share of the lock (PR #4513 Q1): the writer lock
+        is refcounted per process, so a second in-process ``Transcript`` on the
+        same directory — the parent's peek of a running in-process subagent —
+        also "holds" it while the child is appending. A fold there copied the
+        file, then replaced it over rows the child appended meanwhile (QA lost
+        2 and 7 of 20). So the fold needs this open to be the ONLY holder in the
+        process, checked here and again right before the rename
+        (:meth:`_rewrite_without_lines`); any other open takes the lockless
+        path and skips in memory.
         """
-        skip, dead_bytes = _superseded_collapsible_lines(self.path)
+        skip, dead_bytes = _superseded_collapsible_lines(handle)
+        handle.seek(0)
         if not skip:
             return frozenset()
         if (
             not self._read_only
             and self._writer_lock_held
             and dead_bytes >= COMPACT_FILE_THRESHOLD_BYTES
+            and self._sole_writer()
         ):
             try:
-                self._rewrite_without_lines(skip)
+                folded = self._rewrite_without_lines(handle, skip)
             except OSError as exc:
+                handle.seek(0)
+                folded = False
                 logger.warning(
                     "transcript: could not fold %d superseded rows (%d bytes) out of %s "
                     "on open (%s); skipping them in memory instead",
@@ -3773,42 +3835,83 @@ class Transcript:
                     exc,
                 )
             else:
-                logger.info(
-                    "transcript: folded %d superseded rows (%d bytes) out of %s on open",
-                    len(skip),
-                    dead_bytes,
-                    self.path,
-                )
-                return frozenset()
+                handle.seek(0)
+                if not folded:
+                    logger.info(
+                        "transcript: another holder of %s appeared mid-fold; "
+                        "skipping superseded rows in memory instead",
+                        self.path,
+                    )
+                else:
+                    logger.info(
+                        "transcript: folded %d superseded rows (%d bytes) out of %s on open",
+                        len(skip),
+                        dead_bytes,
+                        self.path,
+                    )
+                    # The rows are off disk; the skip list still applies to the
+                    # handle the caller loads from (the pre-fold inode).
+                    return skip
         self._load_collapsed_bytes = dead_bytes
         return skip
 
-    def _rewrite_without_lines(self, skip: frozenset[int]) -> None:
-        """Stream the journal to ``<name>.compact`` minus ``skip``, then replace it.
+    def _sole_writer(self) -> bool:
+        """Whether this object is the process's only holder of the writer lock (Q1)."""
+        return compression.writer_holders(self.directory) == 1
 
-        Line-for-line VERBATIM: kept rows are copied as read, never re-serialized,
-        so the fold cannot change a byte of a surviving row. Read with the
-        loader's own open arguments so ``skip`` numbers the same lines. fsync
-        before ``os.replace``: the replaced file is the whole conversation, and a
-        crash must leave either the old journal or a complete new one. A partial
-        temp file is removed on any failure; the original is never touched.
+    def _rewrite_without_lines(self, source: TextIO, skip: frozenset[int]) -> bool:
+        """Copy ``source`` minus ``skip`` to a temp file and replace the journal.
+
+        ``True`` when the journal was replaced; ``False`` when another in-process
+        holder of the writer lock appeared during the copy, in which case the
+        journal is untouched and the caller skips in memory (Q1: its appends
+        since the copy began would be lost by the rename).
+
+        Line-for-line VERBATIM, BYTES included: ``source`` is the loader's own
+        handle opened with ``newline=""`` and the sink is written the same way,
+        so a ``\r\n`` journal stays ``\r\n`` and no surviving row changes by a
+        byte. fsync before ``os.replace``: the replaced file is the whole
+        conversation, and a crash must leave either the old journal or a
+        complete new one; the directory is fsynced after it (best-effort) so the
+        rename itself survives a power loss (R4). The original atime/mtime are
+        carried over (R3): mtime reads as "last activity" (session lists sort
+        by it), and a fold on an idle boot is not activity. A partial temp file
+        is removed on any failure; the original is never touched.
+
+        The temp name is ``transcript.jsonl.fold``, NOT ``compact_file``'s
+        ``.compact`` (Q1: a fold would truncate and rename a file a compaction
+        was writing). It is fixed rather than ``mkstemp``-unique on purpose:
+        only the process's sole lock holder folds (the flock excludes other
+        processes, :meth:`_sole_writer` other objects), so it has exactly one
+        possible writer, and a fixed name means a crash mid-fold leaves at most
+        one orphan, overwritten by the next fold — a unique name would strand a
+        journal-sized file per crash on the very disk this incident filled.
         """
-        tmp = self.path.with_suffix(self.path.suffix + ".compact")
+        stat = os.fstat(source.fileno())
+        tmp = self.path.with_suffix(self.path.suffix + ".fold")
+        replaced = False
         try:
-            with (
-                self.path.open(encoding="utf-8") as source,
-                tmp.open("w", encoding="utf-8", newline="") as sink,
-            ):
+            with tmp.open("w", encoding="utf-8", newline="") as sink:
                 _keep_private(sink.fileno())
                 for number, line in enumerate(source):
                     if number not in skip:
                         sink.write(line)
                 sink.flush()
                 os.fsync(sink.fileno())
-            os.replace(tmp, self.path)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+            os.utime(tmp, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            # Re-checked as late as possible: a holder that arrived during the
+            # copy may already have appended rows the temp file does not have.
+            if self._sole_writer():
+                os.replace(tmp, self.path)
+                replaced = True
+        finally:
+            # One cleanup for every way out: a failure, an interrupt, or a
+            # holder that appeared mid-copy all leave the journal untouched.
+            if not replaced:
+                tmp.unlink(missing_ok=True)
+        if replaced:
+            compression._fsync_dir(self.directory)
+        return replaced
 
     def _index_entry(self, entry: TranscriptEntry) -> None:
         if entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE):

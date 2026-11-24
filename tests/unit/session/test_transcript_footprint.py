@@ -8,8 +8,11 @@ still be the conversation, and ``first_kept_entry_id`` must still resolve.
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import json
+import os
+import threading
 import tracemalloc
 from pathlib import Path
 from typing import Any
@@ -501,7 +504,7 @@ async def test_construction_keeps_order_tolerance_and_a_torn_tail(tmp_path):
 
 async def _journal_with_superseded_checkpoints(
     directory: Path, *, copies: int, size: int
-) -> tuple[list[str], dict[str, Any]]:
+) -> tuple[list[str], dict[str, Any] | None]:
     """A closed journal: messages interleaved with ``copies`` checkpoints of ``size`` bytes."""
     from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 
@@ -559,7 +562,7 @@ async def test_owning_open_folds_superseded_rows_off_disk_without_loading_them(
 
     assert not any('"pad"' in line and '"n":3' not in line for line in parsed)
     assert path.read_text() == "".join(survivors), "fold must copy survivors verbatim"
-    assert not path.with_suffix(".jsonl.compact").exists()
+    assert not path.with_suffix(".jsonl.fold").exists()
     assert len(_checkpoint_rows(reopened)) == 1
     assert reopened.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE) == newest
     assert [m.text for m in reopened.build_llm_history() if isinstance(m, Message)] == texts
@@ -626,7 +629,7 @@ async def test_failed_fold_on_open_leaves_the_journal_intact(tmp_path, monkeypat
     monkeypatch.setattr(transcript_module.os, "fsync", full_disk)
     reopened = Transcript(directory)
     assert path.read_bytes() == before
-    assert not path.with_suffix(".jsonl.compact").exists()
+    assert not path.with_suffix(".jsonl.fold").exists()
     assert len(_checkpoint_rows(reopened)) == 1
     assert [m.text for m in reopened.build_llm_history() if isinstance(m, Message)] == texts
     assert reopened.reclaimable_bytes() > 0
@@ -684,7 +687,8 @@ def test_superseded_scan_is_sound_against_lookalike_rows(tmp_path):
     ]
     path = tmp_path / "transcript.jsonl"
     path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
-    skip, dead = _superseded_collapsible_lines(path)
+    with path.open(encoding="utf-8", newline="") as handle:
+        skip, dead = _superseded_collapsible_lines(handle)
     # Only row "a" is superseded-and-recognised: "c" is a miss (kept), "b" is a
     # message, "d"/"e" accumulate (not collapsible), "f" is the newest.
     assert skip == frozenset({0})
@@ -770,4 +774,209 @@ async def test_fold_on_open_keeps_duplicate_id_rows_where_and_as_they_were(tmp_p
         ("ck", 6.0),
     ]
     assert reopened.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE) == {"n": 3}
+    reopened.close()
+
+
+# ---------------------------------------------------------------------------
+# PR #4513 round-1 remediation: each test below fails on 1b9211a3 (the
+# reviewed head) and pins one ledger item.
+# ---------------------------------------------------------------------------
+
+
+def _journal_lines(path: Path) -> list[str]:
+    return path.read_text().splitlines(keepends=True)
+
+
+@pytest.mark.asyncio
+async def test_torn_newest_checkpoint_never_supersedes_the_last_valid_copy(tmp_path):
+    """R1: a prefix-matching row that does not parse is not "the newest" of its type.
+
+    A crash tears the newest checkpoint mid-row and the next append runs onto it,
+    so the line still OPENS with the checkpoint prefix. Counting it as the newest
+    made the fold delete the last valid checkpoint, which ``latest_custom`` then
+    could not return — on disk or in memory.
+    """
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+
+    directory = tmp_path / "sess"
+    texts, newest = await _journal_with_superseded_checkpoints(directory, copies=4, size=120 * 1024)
+    path = directory / "transcript.jsonl"
+    lines = _journal_lines(path)
+    newest_line = lines[-1]
+    assert '"n":3' in newest_line
+    torn = newest_line[: len(newest_line) // 2]  # crash mid-row, no newline
+    survivor = Message.user("after the crash")
+    from local_operator.session.transcript import TranscriptEntry
+
+    after = TranscriptEntry(
+        id="after-crash",
+        ts=99.0,
+        type="message",
+        payload=encode_message_payload(survivor),
+    ).to_json()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(torn + after + "\n")
+
+    reopened = Transcript(directory)
+    assert reopened.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE) == newest
+    assert any(
+        '"n":3' in line and line == newest_line for line in _journal_lines(path)
+    ), "the last VALID checkpoint must survive on disk"
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_journal_replaced_between_scan_and_load_never_misapplies_skips(tmp_path, monkeypatch):
+    """R2: the skip list indexes the handle it was computed from, never a successor.
+
+    The scan and the load used to open the path separately, so a journal replaced
+    in between had journal A's line numbers applied to journal B: a viewer
+    silently lost B's rows at those positions. A read-only open is used so no
+    fold muddies the picture.
+    """
+    from local_operator.session import transcript as transcript_module
+
+    directory = tmp_path / "sess"
+    texts, _ = await _journal_with_superseded_checkpoints(directory, copies=4, size=64)
+    path = directory / "transcript.jsonl"
+
+    other = tmp_path / "other"
+    other_transcript = Transcript(other)
+    for index in range(8):
+        await other_transcript.append_message(Message.user(f"other {index}"))
+    other_transcript.close()
+
+    real = transcript_module._superseded_collapsible_lines
+
+    def scan_then_replace(source):
+        result = real(source)
+        os.replace(other / "transcript.jsonl", path)
+        return result
+
+    monkeypatch.setattr(transcript_module, "_superseded_collapsible_lines", scan_then_replace)
+    viewer = Transcript(directory, read_only=True)
+    loaded = [m.text for m in viewer.build_llm_history() if isinstance(m, Message)]
+    # Either whole journal is acceptable; a splice of B minus A's skips is not.
+    assert loaded in (texts, [f"other {index}" for index in range(8)])
+
+
+@pytest.mark.asyncio
+async def test_second_in_process_open_never_folds_under_a_live_appender(tmp_path):
+    """Q1: a refcounted share of the writer lock is not ownership of the file.
+
+    The parent's peek of a running in-process subagent opens a second
+    ``Transcript`` on the child's directory; the per-process refcount made it
+    "hold" the lock, and it folded the journal under the child's appends
+    (QA measured 2 and 7 of 20 rows lost). The second open must skip in memory
+    and leave the file — same inode — alone, and no appended row may go missing.
+    """
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+
+    directory = tmp_path / "sess"
+    writer = Transcript(directory)
+    pad = "x" * (120 * 1024)
+    for index in range(4):
+        await writer.append_custom(
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"state": {"n": index, "p": pad}}
+        )
+    path = directory / "transcript.jsonl"
+    inode = path.stat().st_ino
+
+    appended = 200
+    stop_error: list[BaseException] = []
+
+    def append_loop() -> None:
+        async def run() -> None:
+            for index in range(appended):
+                await writer.append_message(Message.user(f"live {index}"))
+
+        try:
+            asyncio.run(run())
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            stop_error.append(exc)
+
+    thread = threading.Thread(target=append_loop)
+    thread.start()
+    peeks = 0
+    while thread.is_alive() or peeks == 0:
+        peek = Transcript(directory)
+        assert len(_checkpoint_rows(peek)) == 1
+        peek.close()
+        peeks += 1
+    thread.join()
+    assert not stop_error
+    assert path.stat().st_ino == inode, "a shared hold must never rewrite the journal"
+    on_disk = [line for line in _journal_lines(path) if '"live ' in line]
+    assert len(on_disk) == appended
+    writer.close()
+
+
+@pytest.mark.asyncio
+async def test_fold_on_open_leaves_compact_file_temp_alone(tmp_path):
+    """Q1 (temp name): the fold must not share ``compact_file``'s temp path.
+
+    Both used ``transcript.jsonl.compact``; a fold would truncate and rename a
+    file a compaction was writing.
+    """
+    directory = tmp_path / "sess"
+    await _journal_with_superseded_checkpoints(directory, copies=4, size=120 * 1024)
+    path = directory / "transcript.jsonl"
+    sentinel = path.with_suffix(".jsonl.compact")
+    sentinel.write_text("compaction in flight\n")
+    size_before = path.stat().st_size
+
+    reopened = Transcript(directory)
+    assert path.stat().st_size < size_before, "the fold must still run"
+    assert sentinel.read_text() == "compaction in flight\n"
+    assert sorted(p.name for p in directory.iterdir() if p.name.startswith("transcript.jsonl")) == [
+        "transcript.jsonl",
+        "transcript.jsonl.compact",
+    ], "the fold's own temp file must be gone"
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_fold_on_open_keeps_the_journals_timestamps(tmp_path):
+    """R3: an idle boot's fold must not make the session look recently active."""
+    directory = tmp_path / "sess"
+    await _journal_with_superseded_checkpoints(directory, copies=4, size=120 * 1024)
+    path = directory / "transcript.jsonl"
+    old = 1_600_000_000_000_000_000
+    os.utime(path, ns=(old, old + 7))
+    size_before = path.stat().st_size
+
+    reopened = Transcript(directory)
+    stat = path.stat()
+    assert stat.st_size < size_before, "the fold must still run"
+    assert stat.st_mtime_ns == old + 7
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_fold_on_open_fsyncs_the_directory_after_the_rename(tmp_path, monkeypatch):
+    """R4: the rename is durable only once the directory entry is synced."""
+    from local_operator.session import compression
+
+    directory = tmp_path / "sess"
+    await _journal_with_superseded_checkpoints(directory, copies=4, size=120 * 1024)
+    synced: list[Path] = []
+    monkeypatch.setattr(compression, "_fsync_dir", lambda p: synced.append(Path(p)))
+    reopened = Transcript(directory)
+    assert directory in synced
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_fold_on_open_preserves_crlf_bytes(tmp_path):
+    """Bot minor: "verbatim" means bytes — a CRLF journal must not be normalised."""
+    directory = tmp_path / "sess"
+    await _journal_with_superseded_checkpoints(directory, copies=4, size=120 * 1024)
+    path = directory / "transcript.jsonl"
+    crlf = [line.rstrip("\n") + "\r\n" for line in _journal_lines(path)]
+    path.write_bytes("".join(crlf).encode())
+    survivors = [line for line in crlf if '"pad"' not in line or '"n":3' in line]
+
+    reopened = Transcript(directory)
+    assert path.read_bytes() == "".join(survivors).encode()
+    assert len(_checkpoint_rows(reopened)) == 1
     reopened.close()
