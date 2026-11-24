@@ -284,6 +284,14 @@ SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE = "session_mcp_unavailable"
 #:   (``session/transcript_index.py``'s visibility rule), and not the desktop
 #:   transcript rows (``harness/rows.py`` ``is_binding_notice_row``). A peer
 #:   replica sees exactly the row the operator already sees and nothing more.
+#: * NOT THE PHONE either — the mobile app and the relay SPA, live and on
+#:   history pages, deliberately do not show it (operator ruling 2026-11-23:
+#:   not relevant on the device the tunnel reaches, and hidden on a remote
+#:   session too). Two drops in ``mobile/projection.py`` enforce it: the attach
+#:   seed and every history page come through ``fold_messages_to_entries``,
+#:   which drops the type before any notice arm, and the live fold's one
+#:   custom-delivery entry, ``ProjectionFold.note_nonpeer_delivery``, refuses
+#:   it too.
 #:
 #: A new reader that wants this row's text must add itself here and say why in
 #: review; the label is the reason the list exists, and it is also why the row

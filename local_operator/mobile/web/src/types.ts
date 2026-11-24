@@ -627,6 +627,12 @@ export interface SessionProjection {
 	    projection, both of which mean false. Length is not a proxy — the frame
 	    cap can publish a pinned tail of 16 rows. */
 	transcript_head_pinned?: boolean;
+	/** Rows OLDER than this transcript's oldest row exist in the journal
+	    (`SessionProjection.transcript_has_older`): the render opens at a
+	    compaction marker, or a cap trimmed its head. Independent of the pin —
+	    a short compacted seed has older rows and no opener. OPTIONAL and
+	    sparse: absent on an older daemon and on a complete transcript. */
+	transcript_has_older?: boolean;
 	transcript: TranscriptEntry[];
 	/** Todos grouped into phases. One implicit `"Todos"` phase carries a flat
 	    list and renders without a header. */

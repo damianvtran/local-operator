@@ -173,12 +173,16 @@ def test_after_a_compaction_prefix_row_resets(config: Path) -> None:
 
     asyncio.run(run())
     client = _client()
-    # Negative control: the preserved row IS in the render, so only the prefix
-    # rule (not a plain lookup miss) can produce the reset below.
+    # The carried copy is no longer PAINTED at the render's head (the phone folds
+    # shed preserved replays, operator report 2026-11-23), but the fold still
+    # records it in the prefix: a phone holding ``old-u2`` — from an older relay's
+    # seed, or from a journal page below the cut — must still get a reset, never
+    # a splice of kept-window rows as "newer".
     from local_operator.mobile.daemon import _durable_fold_cache
 
-    render_ids = [row.id for row in _durable_fold_cache().load(directory).render]
-    assert "old-u2" in render_ids
+    state = _durable_fold_cache().load(directory)
+    assert "old-u2" in state.prefix_ids
+    assert "old-u2" not in [row.id for row in state.render]
     response = client.get(f"/api/sessions/{SESSION_ID}/history", params={"after": "old-u2"})
     assert response.status_code == 409 and response.json()["reset"] is True
     # A kept-window row still pages forward normally.

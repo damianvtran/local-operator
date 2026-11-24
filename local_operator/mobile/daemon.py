@@ -4330,12 +4330,14 @@ def _forward_page(state: Any, after: str, limit: int) -> tuple[list[Any], bool] 
     cursor is the newest row a phone holds, so the rows newer than it are the
     conversation's TAIL — exactly the stretch the render replays in journal
     order (the kept window after the newest compaction). The render's only
-    out-of-journal-order stretch is its HEAD: the compaction marker, the
-    preserved user turns re-injected under their original ids, and the carried
-    tier (``DurableFoldState.prefix_ids``). A cursor naming one of those means a
-    compaction landed after the phone's newest row; slicing after it would hand
-    back older kept-window rows as "newer", so it answers ``None`` (reset)
-    instead, and so does an id the render does not hold at all. ``None`` is
+    out-of-journal-order row is its HEAD, the compaction marker: the prefix's
+    preserved user turns and carried tier (``DurableFoldState.prefix_ids``) are
+    in ``history`` for the model but the fold paints neither (PR #4521). A
+    cursor naming the marker means a compaction landed after the phone's newest
+    row; slicing after it would hand back older kept-window rows as "newer", so
+    it answers ``None`` (reset) instead, and so does an id the render does not
+    hold at all — which now includes a preserved turn's id an older render
+    painted, so that cursor resets too. ``None`` is
     always safe: it costs the client one full read, never a lost row.
 
     ``has_more`` is true when rows beyond this page remain; the client pages on
@@ -4489,14 +4491,16 @@ def _history_page(
     reader at the last compaction — measured on the S6 fixture, 640 of 3,348
     journal rows were reachable and the rest were evidence of a conversation the
     phone could not show — and it also served rows twice. The render's order is
-    not the journal's: it opens with the compaction marker and re-injects the
-    latest compaction's ``preserved_user_turns`` UNDER THEIR ORIGINAL ROW IDS,
-    and those same rows sit in the journal below the cut. A cursor that lands on
-    one of them therefore answers a page around the render's head plus a refill
+    not the journal's: it opens with the compaction marker, and it used to
+    re-inject the latest compaction's ``preserved_user_turns`` UNDER THEIR
+    ORIGINAL ROW IDS, while those same rows sit in the journal below the cut. A
+    cursor on one of them answered a page around the render's head plus a refill
     from the compaction boundary — rows the client already holds — so
-    ``has_more`` stays true and the walk cycles (measured: 117,020 mounted rows
-    holding 408 distinct ids). 60 of the 60 largest journals on this host carry
-    preserved turns, so that is the ordinary shape, not a corner.
+    ``has_more`` stayed true and the walk cycled (measured: 117,020 mounted rows
+    holding 408 distinct ids; 60 of the 60 largest journals on this host carry
+    preserved turns). The fold no longer paints those copies (PR #4521), so the
+    render is now the marker plus the kept window; the journal is still the
+    only source that reaches below it.
 
     The desktop has always answered this question from the journal, and the rows
     agree because both surfaces fold them with the same fold

@@ -616,6 +616,7 @@ export function Transcript({
 	projectionPid = 0,
 	peerCycles = false,
 	headPinned,
+	hasOlder,
 	tailContent,
 	emptyContent,
 }: {
@@ -641,6 +642,12 @@ export function Transcript({
 	 *  must start below it. Absent on an older daemon — the length/kind fallback
 	 *  then applies. */
 	headPinned?: boolean;
+	/** The projection's `transcript_has_older`: rows older than the frame exist
+	 *  even though no opener is pinned (a compacted render opens at the marker,
+	 *  so a short kept window seeds a few rows with a whole past behind it).
+	 *  Makes the projection capped — slot and mount fetch — without pinning
+	 *  `entries[0]`. Absent on an older daemon: the pin/length test alone. */
+	hasOlder?: boolean;
 	/** Commands this device sent that the session has not written a row for yet.
 	 *  Rendered as the LAST rows of the conversation, which is where the real rows
 	 *  will land, and boxed like the row each op settles into (`PendingEchoRow`)
@@ -825,8 +832,16 @@ export function Transcript({
 	   projection is treated as pinned in that fallback: the opener is held either
 	   way, so the cost of a false positive is one row of overlap in the next
 	   page, which the merge's rowKey de-dup discards. */
-	const cappedProjection = headPinned ?? (entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user");
-	const pinnedOpener = cappedProjection && entries.length > 1 && entries[0]?.kind === "user" ? entries[0] : null;
+	const pinnedHead = headPinned ?? (entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user");
+	/* CAPPED IS WIDER THAN PINNED (PR #4521 QA Q3). A compacted render opens at
+	   the marker and pins no opener, so a short kept window arrived as ~14 rows
+	   with neither signal: no slot, no mount fetch, and nothing to scroll for
+	   `onScroll`'s near-top fetch — every turn before the compaction was
+	   unreachable. `hasOlder` turns on the paging half of "capped" only; the
+	   opener detach and the cursor skip stay on the pin, because a kept-window
+	   prompt at `entries[0]` is NOT the conversation's opener (QA Q1). */
+	const cappedProjection = pinnedHead || hasOlder === true;
+	const pinnedOpener = pinnedHead && entries.length > 1 && entries[0]?.kind === "user" ? entries[0] : null;
 	const liveTail = pinnedOpener ? entries.slice(1) : entries;
 	for (const entry of liveTail) heldMap.set(rowKey(entry), entry);
 	const openerJoined = pinnedOpener !== null && older.some((entry) => rowKey(entry) === rowKey(pinnedOpener));
@@ -873,7 +888,7 @@ export function Transcript({
 	   Skipping the head costs at most one already-held row on a projection that
 	   merely STARTS with a user turn, which the merge's rowKey de-dup discards.
 	   A DETACHED opener is not in `merged` at all, so nothing is skipped then. */
-	const cursorStart = cappedProjection && !detachedOpener ? 1 : 0;
+	const cursorStart = pinnedHead && !detachedOpener ? 1 : 0;
 	const oldestId =
 		older.length > 0
 			? older[0].id
