@@ -94,6 +94,7 @@
   "tui.projects.start.filter_placeholder": "введите для фильтра",
   "tui.projects.start.legend": "введите для фильтра · ↑↓ перейти · ↵ выбрать · esc закрыть",
   "tui.projects.start.more": "+{count} ещё",
+  "tui.projects.start.team_detail": "{manager} · {count, plural, one {{shown} роль} few {{shown} роли} many {{shown} ролей} other {{shown} роли}}",
   "tui.projects.notice_read_only": "Только чтение: рантайм этого разговора на другом устройстве, поэтому изменения проектов здесь недоступны.",
   "tui.projects.refusal_done_gate": "нельзя отметить выполненным, пока открыты вехи: {names}"
 }

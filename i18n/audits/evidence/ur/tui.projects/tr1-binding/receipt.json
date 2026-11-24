@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "audit_id": "tr1-binding",
+  "locale": "ur",
+  "namespace": "tui.projects",
+  "record": "i18n/audits/evidence/ur/tui.projects/tr1-binding/record.json",
+  "record_sha256": "cd040ecca724855b57337d11120446225fa247b8a208dbb54edd1e1a6f887564",
+  "source_sha256": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2",
+  "target_sha256": "2dde733ac19406a7f6370a02165e2dcbe94f5f2eca985d3aa2f2a2f3980cbf55",
+  "verdict": "passed",
+  "ledger_receipt": {
+    "locale": "ur",
+    "namespace": "tui.projects",
+    "source_sha256": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2",
+    "context_sha256": "411f134fa0a8defb711623ab65ec90946fd5d92612d23c941ba3149a3dd529b0",
+    "target_sha256": "2dde733ac19406a7f6370a02165e2dcbe94f5f2eca985d3aa2f2a2f3980cbf55",
+    "translator": {
+      "agent": "i18n-translator (lopdev team)",
+      "session": "17b81fee8ed1",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-23",
+      "provenance": "translator's own files (translations/<locale>.json + notes.md in session 17b81fee8ed1 scratchpad, notes.md states no fallback); values applied byte-exact by the integrating coder"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (lopdev team), not the translator; did not edit values",
+      "session": "e1ac85590ece",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-23",
+      "result": "clean",
+      "findings": 0,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "finding_ids": [],
+      "fallback_used": false,
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own record (auditor.model field)"
+    },
+    "status": "passed",
+    "round": "tr1-binding",
+    "evidence": "i18n/audits/evidence/ur/tui.projects/tr1-binding/record.json",
+    "note": "tr1-binding: evidence binding of the passed PR #4508 audit row(s) tr1 (auditor session(s) e1ac85590ece); same audit, same verdict, re-appended so the cg1 byte pin moves to a committed record. Source 67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2 and target 2dde733ac19406a7f6370a02165e2dcbe94f5f2eca985d3aa2f2a2f3980cbf55 recomputed from the shipped files at fc8bbf20939f. Evidence: i18n/audits/evidence/ur/tui.projects/tr1-binding/record.json"
+  }
+}
