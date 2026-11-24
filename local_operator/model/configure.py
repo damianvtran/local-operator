@@ -7467,7 +7467,10 @@ class SessionStreamFn:
         policy = getattr(root, "_request_admission", None)
         admission: tuple[str, AsyncExitStack] | None = None
         if policy is not None:
-            request_id = uuid.uuid4().hex
+            # An evidence companion pre-assigns its id and durably records it
+            # before dispatch; admission must reuse it rather than mint a second
+            # id, or the spend gate, the ledger row and that receipt disagree.
+            request_id = request._auxiliary_request_id or uuid.uuid4().hex
             finish = policy(request_id)
             exit_stack = AsyncExitStack()
             if finish is not None:
