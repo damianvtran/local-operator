@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import pathlib
