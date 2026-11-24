@@ -23,6 +23,8 @@ from __future__ import annotations
 import gc
 import re
 import sqlite3
+import sys
+import warnings
 from pathlib import Path
 
 from tests.fd_probe import open_fds_on
@@ -62,10 +64,31 @@ def test_the_bare_with_form_really_leaves_the_descriptor_open(tmp_path: Path) ->
         # other threads' fds and failed CI as ``assert 19 == 18`` (run
         # 45381339350; see tests/fd_probe.py).
         assert open_fds_on([database]) == 0
-        with sqlite3.connect(database) as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS t (x)")
-        del conn
-        assert open_fds_on([database]) == 1
+        # Why record warnings here: since CPython 3.13 an unclosed
+        # ``sqlite3.Connection`` emits ``ResourceWarning`` with
+        # ``source=<the connection>`` when it is finalized. pytest records
+        # warnings per test, and that recorded WarningMessage keeps the
+        # connection -- and its descriptor -- alive after ``gc.collect()``,
+        # so the final count read 1 on Python 3.13 (full-suite run
+        # 45394265593, ``test (3.13, 4)``). 3.12 emits no such warning, which
+        # is why it never reproduced locally. Recording locally lets us drop
+        # that reference ourselves before the final count.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            with sqlite3.connect(database) as conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS t (x)")
+            del conn
+            assert open_fds_on([database]) == 1
+            gc.collect()
+            if sys.version_info >= (3, 13):
+                # Extra proof the bare form leaks: the interpreter itself
+                # reports the connection was never closed.
+                assert any(
+                    issubclass(w.category, ResourceWarning)
+                    and isinstance(w.source, sqlite3.Connection)
+                    for w in caught
+                ), [str(w.message) for w in caught]
+            caught.clear()
         gc.collect()
         assert open_fds_on([database]) == 0
     finally:
