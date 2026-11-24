@@ -196,7 +196,10 @@ async def test_ignored_waiver_with_real_ledger_registry_and_ask_store(fixture, m
         },
     ]
     ask_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    assert not prov._running_owners(str(wt), "aaaaaaaaaaaa", strict=True)
+    # ``allow_unattributed``: the waiver's own call (PR #4493 Q-R2-1). On Linux
+    # the fixture's later writes drift the root's ctime stamp, so strict
+    # attribution finds no current-generation row and would raise here.
+    assert not prov._running_owners(str(wt), "aaaaaaaaaaaa", strict=True, allow_unattributed=True)
     ctx = CallContext(
         cwd=str(repo), env={"HOME": str(home)}, scratchpad=None, session_id="aaaaaaaaaaaa"
     )

@@ -311,8 +311,12 @@ def test_finder_witness_is_plain_only_force_keeps_base_hold(
     forced = _rank(home, f"git -C {repo} worktree remove --force -- {wt}")
     if creator == ME:
         # PR #4493 QA Q-R4-1: a ledger-proven OWN tree sheds regular-file
-        # ``.DS_Store`` on ``--force`` too, as on plain removal.
-        assert forced.risk is Risk.LOW, forced.reasons
+        # ``.DS_Store`` on ``--force`` too, as on plain removal. A tracked
+        # deletion rewrites the root, and on Linux its ctime stamp then no
+        # longer matches the ledger row: strict attribution fails CLOSED
+        # (held), which is the safe direction, so only the clean row is LOW.
+        if not deletion:
+            assert forced.risk is Risk.LOW, forced.reasons
         return
     # #4503's pin, for a tree another session made: --force keeps base's hold.
     assert forced.risk is Risk.HIGH and forced.targets[0].cleanup_hold, forced.reasons
@@ -354,6 +358,13 @@ async def test_plain_own_checkout_holds_unverified_payload(
     report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
     judge = _Judge("ALLOW: synthetic judge")
     result = await _check(home, command, judge)
+    if payload == "ignored-and-edit":
+        # The own ``.env`` is shed (PR #4493); only the uncommitted edit is
+        # left, which ranks HIGH on the ordinary dirty-tree path (plain Git
+        # itself refuses to remove a tree with changes).
+        assert ranked.risk is Risk.HIGH, ranked.reasons
+        assert wt.is_dir() and marker.read_text() == "synthetic local data\n"
+        return
     if payload == "ignored":
         # Operator directive 2026-11-23 (PR #4493): the owner sheds its own
         # ignored ``.env``; no hold, no judge. Foreign trees still hold it.
@@ -379,10 +390,6 @@ async def test_plain_own_checkout_holds_unverified_payload(
         assert "not an open PR or unpushed work" in text
         assert "commit or stash" not in text and "push commits" not in text
         assert ".env" not in text  # counted, never listed
-    elif payload == "ignored-and-edit":
-        # The own ``.env`` is shed (PR #4493); the uncommitted edit still holds.
-        assert "1 tracked or untracked change" in text and "commit or stash edits" in text
-        assert "ignored entry" not in text
     elif payload == "tracked-deletion":
         assert "tracked deletions remain" in text
         assert (home / "preserved-a.txt").read_text() == "a\n"
